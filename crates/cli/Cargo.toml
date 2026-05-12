@@ -1,0 +1,19 @@
+[package]
+name = "vvva_cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "3va"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+vvva_core = { path = "../core" }
+vvva_pm = { path = "../pm" }
+vvva_js = { path = "../js" }
+vvva_permissions = { path = "../permissions" }

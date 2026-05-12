@@ -1,0 +1,10 @@
+[package]
+name = "vvva_js"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rquickjs.workspace = true
+anyhow.workspace = true
+vvva_core = { path = "../core" }
+vvva_permissions = { path = "../permissions" }
