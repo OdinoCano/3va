@@ -28,13 +28,17 @@ enum Commands {
         #[arg(long = "allow-net")]
         allow_net: Option<Vec<String>>,
 
-        /// Explicitly deny environment variable access
-        #[arg(long = "deny-env")]
-        deny_env: bool,
+        /// Allow write access to specified paths
+        #[arg(long = "allow-write")]
+        allow_write: Option<Vec<PathBuf>>,
 
-        /// Explicitly deny spawning child processes
-        #[arg(long = "deny-child-process")]
-        deny_child_process: bool,
+        /// Allow environment variable access
+        #[arg(long = "allow-env")]
+        allow_env: bool,
+
+        /// Allow spawning child processes
+        #[arg(long = "allow-child-process")]
+        allow_child_process: bool,
     },
     /// Install dependencies from 3va registry
     Install {
@@ -69,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Run { file, allow_read, allow_net, deny_env, deny_child_process } => {
+        Commands::Run { file, allow_read, allow_net, allow_write, allow_env, allow_child_process } => {
             info!("Running {:?} (Sandboxed)", file);
             let mut permissions = vvva_permissions::PermissionState::new();
             if let Some(reads) = allow_read {
@@ -77,20 +81,27 @@ async fn main() -> anyhow::Result<()> {
                     permissions.grant(vvva_permissions::Capability::FileRead(path.clone()));
                 }
             }
+            if let Some(writes) = allow_write {
+                for path in writes {
+                    permissions.grant(vvva_permissions::Capability::FileWrite(path.clone()));
+                }
+            }
             if let Some(nets) = allow_net {
                 for host in nets {
                     permissions.grant(vvva_permissions::Capability::Network(host.clone()));
                 }
             }
-            if !deny_env {
+            if *allow_env {
                 permissions.grant(vvva_permissions::Capability::EnvAccess);
             }
-            if !deny_child_process {
+            if *allow_child_process {
                 permissions.grant(vvva_permissions::Capability::SpawnProcess);
             }
 
             let _engine = vvva_js::JsEngine::new(&permissions)?;
-            let _runtime = vvva_core::Runtime::new();
+            // TODO: In a real implementation we shouldn't clone the whole state or we'd share it differently,
+            // but for now we'll move a clone into Runtime
+            let _runtime = vvva_core::Runtime::new(permissions);
             info!("3va Runtime initialized securely.");
             // Execute file...
         }

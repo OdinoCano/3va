@@ -112,8 +112,8 @@ MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]
 
 *Las definiciones en esta sección son vinculantes para la implementación del proyecto.*
 
-4.1 Estándares Internacionales
-4.1.1 Estándares ISO/IEC
+## 4.1 Estándares Internacionales
+### 4.1.1 Estándares ISO/IEC
 Referencia	Título	Aplicación
 ISO/IEC 27001:2022	Sistemas de gestión de seguridad de la información	Requisitos de seguridad
 ISO/IEC 27002:2022	Controles de seguridad de la información	Implementación de controles
@@ -124,7 +124,7 @@ ISO/IEC 29148:2018	Ingeniería de requisitos	Documentación de requisitos
 ISO/IEC 12207:2008	Procesos del ciclo de vida del software	Metodología de desarrollo
 ISO/IEC 15289:2019	Documentación de software	Estructura documental
 ISO/IEC 15939:2007	Proceso de medición de software	Métricas
-4.1.2 Estándares IEEE
+### 4.1.2 Estándares IEEE
 Referencia	Título	Aplicación
 IEEE 829	Estándar para documentación de pruebas de software	Documentación de testing
 IEEE 1012	Estándar para verificación y validación de software	V&V
@@ -134,15 +134,15 @@ IEEE 1028	Estándar para inspecciones de software	Revisiones de código
 IEEE 1044	Clasificación de anomalías de software	Gestión de defectos
 IEEE 1059	Guía para técnicas de verificación de software	Técnicas de validación
 IEEE 1074	Estándar para procesos de desarrollo de software	Metodología
-4.1.3 Estándares Europeos
+### 4.1.3 Estándares Europeos
 Referencia	Título	Aplicación
 EN 55024:2010	Equipos de TI - Características de inmunidad	Compatibilidad electromagnética
 EN 301 549	Requisitos de accesibilidad para productos ICT	Accesibilidad
 GDPR	Reglamento (UE) 2016/679	Protección de datos
 eIDAS	Reglamento (UE) 910/2014	Firmas electrónicas
 NIS2	Directiva (UE) 2022/2555	Seguridad de redes
-4.2 Especificaciones Técnicas
-4.2.1 JavaScript y Node.js
+## 4.2 Especificaciones Técnicas
+### 4.2.1 JavaScript y Node.js
 Referencia	Título	Aplicación
 ECMAScript 2024	ECMA-262 15th edition	Especificación del lenguaje
 CommonJS Modules 1.1.1	CommonJS Module Specification	Sistema de módulos
@@ -150,20 +150,20 @@ Node.js API	Node.js Documentation	APIs compatibles
 WHATWG Fetch	Fetch Standard	API fetch
 WHATWG Streams	Streams Standard	Streams API
 W3C WebSocket	WebSocket API	API WebSocket
-4.2.2 WebAssembly
+### 4.2.2 WebAssembly
 Referencia	Título	Aplicación
 WASI	WebAssembly System Interface	Interface del sistema
 WASM Core	WebAssembly Core Specification	Especificación del núcleo
 WASM JS API	JavaScript API for WebAssembly	Integración JS
-4.3 Documentos de Proyecto
+## 4.3 Documentos de Proyecto
 Identificador	Título	Descripción
 3VA-SPEC-2026-001	Especificación técnica (este documento)	Especificación completa
 3VA-DESIGN-2026-001	Documento de diseño arquitectónico	Arquitectura detallada
 3VA-TEST-2026-001	Plan de pruebas	Estrategia de testing
 3VA-SEC-2026-001	Análisis de seguridad	Modelo de amenazas
 3VA-REQ-2026-001	Especificación de requisitos	Requisitos funcionales
-4.4 Recursos Externos
-4.4.1 Herramientas y Bibliotecas
+## 4.4 Recursos Externos
+### 4.4.1 Herramientas y Bibliotecas
 Recurso	URL	Propósito
 Rust	https://rustup.rs/ (https://rustup.rs/)	Lenguaje de implementación
 Tokio	https://tokio.rs/ (https://tokio.rs/)	Runtime asíncrono
@@ -171,7 +171,7 @@ QuickJS	https://bellard.org/quickjs/ (https://bellard.org/quickjs/)	Motor JavaSc
 rquickjs	https://github.com/Delakroa/rquickjs (https://github.com/Delakroa/rquickjs)	Bindings de QuickJS
 Clap	https://clap.rs/ (https://clap.rs/)	CLI parsing
 tracing	https://tokio.rs/recipes/tracing (https://tokio.rs/recipes/tracing)	Logging
-4.4.2 Referencias de Seguridad
+### 4.4.2 Referencias de Seguridad
 Recurso	URL	Propósito
 OWASP Top 10	https://owasp.org/www-project-top-ten/ (https://owasp.org/www-project-top-ten/)	Vulnerabilidades web
 CVE Database	https://cve.mitre.org/ (https://cve.mitre.org/)	Base de vulnerabilidades

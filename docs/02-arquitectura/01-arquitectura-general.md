@@ -42,7 +42,7 @@ Todos los componentes operan bajo el principio de "denegar por defecto". Ningún
 ### 1.2.2 Mínimo Privilegio
 Cada componente tiene exactamente los permisos necesarios para cumplir su función. El runtime de JavaScript no tiene acceso directo al sistema de archivos; cualquier operación debe pasar por el verificador de permisos.
 
-### 1.2.3 defensa en Profundidad
+### 1.2.3 Defensa en Profundidad
 Múltiples capas de seguridad protegen el sistema:
 - Capa 1: CLI (validación de argumentos)
 - Capa 2: Permissions (verificación de capabilities)

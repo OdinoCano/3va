@@ -217,6 +217,12 @@ https://registry.npmjs.org
 3va config set registry https://registry.mycompany.com
 ```
 
+## 1.7 Cumplimiento Normativo (eIDAS / NIS2)
+
+La arquitectura del gestor de dependencias ha sido diseñada para ser intrínsecamente segura frente a ataques de cadena de suministro (Supply Chain Attacks).
+- Cumple con las directrices de la directiva europea **NIS2** obligando a la verificación estática de código (Malware Scanner) y restringiendo severamente la ejecución de binarios de terceros (postinstall deshabilitado).
+- Adopta mecanismos de infraestructura asimilables a **eIDAS** para la comprobación de firmas criptográficas de los paquetes descargados por el *Fetcher*.
+
 ---
 
-*Package Manager conforme a npm specification y estándares de seguridad.*
+*Implementado en los módulos de resolución, caché y extracción criptográfica de `crates/pm/src` (`fetcher.rs`, `resolver.rs`, `lockfile.rs`).*

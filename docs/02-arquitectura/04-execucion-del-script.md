@@ -1,5 +1,7 @@
-4.1 Flujo Principal: Ejecución de Script
-4.1.1 Diagrama de Flujo
+# 04 - EJECUCIÓN DEL SCRIPT
+
+## 4.1 Flujo Principal: Ejecución de Script
+### 4.1.1 Diagrama de Flujo
 ┌──────────────┐
 │    Usuario   │
 │ invoca CLI   │
@@ -48,7 +50,7 @@
 │   Output    │
 │  al stdout  │
 └─────────────┘
-4.1.2 Descripción de Pasos
+### 4.1.2 Descripción de Pasos
 1. 
 Parseo de argumentos: CLI valida y normaliza los argumentos
 2. 
@@ -63,8 +65,8 @@ Verificar Permiso: Compara la operación contra capabilities granted
 Ejecutar Código: Ejecuta en QuickJS con polyfills
 7. 
 Output: Escribe resultado a stdout/stderr
-4.2 Flujo: Instalación de Paquete
-4.2.1 Diagrama de Flujo
+## 4.2 Flujo: Instalación de Paquete
+### 4.2.1 Diagrama de Flujo
 ┌──────────────┐
 │  3va install │
 │   <package>  │
@@ -117,8 +119,8 @@ Output: Escribe resultado a stdout/stderr
 │  Generar     │ ──► lockfile con versiones exactas
 │  Lockfile   │
 └─────────────┘
-4.3 Flujo: Verificación de Permisos
-4.3.1 Algoritmo de Verificación
+## 4.3 Flujo: Verificación de Permisos
+### 4.3.1 Algoritmo de Verificación
 fn verify_permission(
     operation: &Operation,
     resources: &[Resource],
@@ -140,7 +142,7 @@ fn verify_permission(
     // 3. Si no hay match, denegar (deny-by-default)
     Ok(Denied::NoCapability)
 }
-4.3.2 Matriz de Decisión
+### 4.3.2 Matriz de Decisión
 Operación	Recurso	Capability Match
 fs.read	/app/config	FileRead(/app/config)
 fs.read	/etc/passwd	FileRead(/app/config)
@@ -148,8 +150,8 @@ net.connect	api.example.com	Network(*.example.com)
 net.connect	evil.com	Network(*.example.com)
 spawn	ls	SpawnProcess
 spawn	(none)	(none)
-4.4 Flujo de Datos: Módulos
-4.4.1 Resolución de Módulos ESM
+## 4.4 Flujo de Datos: Módulos
+### 4.4.1 Resolución de Módulos ESM
 Archivo.ts
     │
     ▼
@@ -181,7 +183,7 @@ Archivo.ts
 │   Ejecutar      │ ──► Añadir al module graph
 │   en contexto  │
 └─────────────────┘
-4.4.2 Formato de Module Graph
+### 4.4.2 Formato de Module Graph
 pub struct ModuleGraph {
     pub modules: HashMap<ModuleId, Module>,
     pub edges: HashMap<ModuleId, Vec<ModuleId>>,

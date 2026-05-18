@@ -31,3 +31,50 @@ impl Default for PackagePermissions {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_package_manifest_parsing() {
+        let json = r#"{
+            "package": {
+                "name": "lodash",
+                "version": "4.17.21"
+            },
+            "permissions": {
+                "network": true
+            }
+        }"#;
+
+        let manifest: PackageManifest = serde_json::from_str(json).unwrap();
+        
+        assert_eq!(manifest.package.name, "lodash");
+        assert_eq!(manifest.package.version.as_deref(), Some("4.17.21"));
+        
+        // Provided by JSON
+        assert_eq!(manifest.permissions.network, true);
+        
+        // Defaults correctly assigned
+        assert_eq!(manifest.permissions.filesystem, false);
+        assert_eq!(manifest.permissions.process, false);
+    }
+
+    #[test]
+    fn test_package_permissions_default() {
+        let json = r#"{
+            "package": {
+                "name": "chalk"
+            },
+            "permissions": {}
+        }"#;
+
+        let manifest: PackageManifest = serde_json::from_str(json).unwrap();
+        
+        // All security permissions should be false by default if empty struct provided
+        assert_eq!(manifest.permissions.network, false);
+        assert_eq!(manifest.permissions.filesystem, false);
+        assert_eq!(manifest.permissions.process, false);
+    }
+}

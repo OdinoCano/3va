@@ -8,3 +8,4 @@ rquickjs.workspace = true
 anyhow.workspace = true
 vvva_core = { path = "../core" }
 vvva_permissions = { path = "../permissions" }
+base64.workspace = true

@@ -1,8 +1,8 @@
 # 03 - SANDBOXING DE PAQUETES
-3.1 Filosofía de Seguridad
+## 3.1 Filosofía de Seguridad
 El sistema de sandboxing de paquetes de 3va trata todas las dependencias como potencialmente no confiables, aplicando múltiples capas de protección.
-3.2 Modelo de Seguridad
-3.2.1 Niveles de Confianza
+## 3.2 Modelo de Seguridad
+### 3.2.1 Niveles de Confianza
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Nivel de Confianza                          │
 ├─────────────────────────────────────────────────────────────────┤
@@ -17,8 +17,8 @@ El sistema de sandboxing de paquetes de 3va trata todas las dependencias como po
 │          ▼                                                          │
 │  Instalación sandbox ──► Aislamiento Completo                   │
 └─────────────────────────────────────────────────────────────────┘
-3.2 Verificación de Firmas
-3.2.1 Proceso
+## 3.2 Verificación de Firmas
+### 3.2.1 Proceso
 pub struct SignatureVerifier {
     trusted_keys: HashSet<String>,
     registry_client: RegistryClient,
@@ -53,13 +53,13 @@ impl SignatureVerifier {
         })
     }
 }
-3.2.2 Configuración
+### 3.2.2 Configuración
 # Habilitar verificación de firmas
 3va install lodash --verify-signatures
 # Configuración por defecto
 3va config set pm.verifySignatures=true
-3.3 Escaneo de Malware
-3.3.1 Análisis Estático
+## 3.3 Escaneo de Malware
+### 3.3.1 Análisis Estático
 pub struct MalwareScanner {
     signatures: Vec<MalwareSignature>,
     heuristics: Vec<HeuristicRule>,
@@ -104,15 +104,15 @@ impl MalwareScanner {
         ScanResult { findings }
     }
 }
-3.3.2 Detecciones
+### 3.3.2 Detecciones
 Tipo	Descripción
 Malware conocido	Hash coincides con base de datos
 Script malicioso	Script ejecuta comandos del sistema
 Path traversal	Intento de escribir fuera del directorio
 Sobrescritura	Sobrescribe archivos del sistema
 Network exfiltration	Envía datos a servidores no relacionados
-3.4 Instalación Aislada
-3.4.1 Estructura de Directorios
+## 3.4 Instalación Aislada
+### 3.4.1 Estructura de Directorios
 project/
 ├── node_modules/
 │   ├── lodash/
@@ -123,7 +123,7 @@ project/
 │   │   └── ...
 │   └── .3va-lock
 └── package.json
-3.4.2 Restricciones de Acceso
+### 3.4.2 Restricciones de Acceso
 pub struct PackageSandbox {
     base_path: PathBuf,
     allowed_operations: HashSet<String>,
@@ -149,20 +149,20 @@ impl PackageSandbox {
         // - Verificar tipos de archivos
     }
 }
-3.5 Ejecución de Scripts
-3.5.1 Políticas
+## 3.5 Ejecución de Scripts
+### 3.5.1 Políticas
 Política	Descripción
 none (default)	No ejecutar ningún script
 whitelist	Solo scripts en lista permitida
 all	Ejecutar todos los scripts (peligroso)
-3.5.2 Configuración
+### 3.5.2 Configuración
 # Deshabilitar scripts (default)
 3va install lodash
 # Habilitar scripts específicos
 3va install lodash --allow-scripts=build,test
 # Habilitar todos los scripts (NO recomendado)
 3va install lodash --allow-scripts
-3.5.3 Implementación
+### 3.5.3 Implementación
 pub struct ScriptRunner {
     allowed_scripts: HashSet<String>,
     sandbox: bool,
@@ -197,8 +197,8 @@ impl ScriptRunner {
         }
     }
 }
-3.6 Auditoría de Paquetes
-3.6.1 Reporte de Auditoría
+## 3.6 Auditoría de Paquetes
+### 3.6.1 Reporte de Auditoría
 # Ejecutar auditoría
 3va audit
 # Salida:
@@ -212,7 +212,7 @@ impl ScriptRunner {
 # MEDIUM: Regular Expression Denial of Service
 #   Package: minimatch@3.0.4
 #   Fix: Upgrade to minimatch@3.0.5
-3.6.2 Integración con DB de Vulnerabilidades
+### 3.6.2 Integración con DB de Vulnerabilidades
 pub async fn check_vulnerabilities(pkg: &Package) -> Vec<Vulnerability> {
     // Consultar bases de datos de vulnerabilidades
     // - npm audit

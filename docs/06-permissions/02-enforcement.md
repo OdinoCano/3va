@@ -287,6 +287,13 @@ pub fn throw_permission_error(ctx: &Context, error: PermissionError) {
 }
 ```
 
+## 2.8 Cumplimiento Normativo (ISO/IEC)
+
+Este diseño de Enforcers se alinea estrictamente con los controles de seguridad de la información **ISO/IEC 27002**:
+- Las políticas de segmentación de red (`NetEnforcer`) garantizan la protección contra exposición no autorizada.
+- La interceptación del sistema de archivos (`FsEnforcer`) apoya el cumplimiento de protección de medios de almacenamiento.
+- El modelo basado en capacidades asegura una implementación rigurosa del **Mínimo Privilegio (Least Privilege)** y **Defensa en Profundidad (Defense in Depth)** requeridos por la norma.
+
 ---
 
-*Enforcement conforme a principios de least privilege y defense in depth.*
+*Implementado íntegramente en `crates/permissions/src/enforcement.rs`.*

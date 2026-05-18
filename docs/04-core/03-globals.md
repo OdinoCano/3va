@@ -76,10 +76,8 @@ Buffer.allocUnsafe(8)      // sin inicializar
 URL              // Constructor de URLs
 URLSearchParams // Parámetros de query
 // Utilidades
-setTimeout.setTimeout
-setTimeout.clearTimeout
 3.4 APIs Web Compatibles
-4.4.1 fetch API
+### 3.4.1 fetch API
 // fetch polyfill (implementado en QuickJS)
 const response = await fetch('https://api.example.com/data');
 const data = await response.json();
@@ -89,7 +87,7 @@ await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key: 'value' }),
 });
-4.4.2 Web APIs
+### 3.4.2 Web APIs
 API	Descripción
 AbortController	Control de abortos
 AbortSignal	Señal de abortado

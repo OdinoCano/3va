@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/*"
+    "crates/*",
+    "crates/bundler",
+    "crates/test"
 ]
 
 [workspace.dependencies]
@@ -15,6 +17,8 @@ serde_json = "1.0"
 toml = "0.8"
 anyhow = "1.0"
 thiserror = "1.0"
+url = "2.5"
+base64 = "0.22"
 
 [profile.release]
 opt-level = 3

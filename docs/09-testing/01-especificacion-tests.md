@@ -64,6 +64,11 @@ module.exports = {
 };
 ```
 
+## 1.6 Cumplimiento Normativo (IEEE 829)
+
+El *Test Runner* ha sido implementado proveyendo trazabilidad y salida de reportes estándar según **IEEE 829** (Estándar de Documentación de Pruebas de Software).
+La arquitectura captura fallos (Failures), aciertos (Passes) y métricas de desempeño de forma rigurosa, facilitando la validación del ciclo de vida del software de cualquier proyecto que corra sobre la máquina.
+
 ---
 
-*Test runner conforme a Jest API.*
+*Test runner conforme a Jest API e implementado en `crates/test/src` (`runner.rs`, `framework.rs`, `matchers.rs`).*

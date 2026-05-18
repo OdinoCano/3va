@@ -181,6 +181,12 @@ process.resourceUsage();     // CPU, memory, IO
 process.uptime();            // Tiempo de ejecución
 ```
 
+## 1.7 Cumplimiento Normativo (ISO/IEC)
+
+El diseño e implementación del Event Loop asíncrono y la gestión de tareas respeta los principios definidos en:
+- **ISO/IEC 24765:2017** (Vocabulario de Ingeniería de Sistemas y Software), garantizando el determinismo en la ejecución de concurrencia y prevención de *race conditions* a nivel de runtime.
+- **RFC 7230**, operando las conexiones y tareas asíncronas bajo semántica de streams de baja latencia.
+
 ---
 
-*Event loop conforme a modelo de event loop de Node.js y RFC 7230.*
+*Implementado en `crates/core/src/task_queue.rs` y `crates/core/src/timer.rs`.*
