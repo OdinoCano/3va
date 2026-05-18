@@ -1,44 +1,51 @@
 # 10 - ROADMAP Y SEGUIMIENTO DE TRABAJO
 
 ## 10.1 Estado Actual (Completado)
-Se ha finalizado exitosamente la "Fase de Aislamiento Estructural". Los siguientes crates y módulos fundamentales ya están programados con sus lógicas core terminadas:
-- **`vvva_core`**: Event Loop, Cola de Tareas (`TaskQueue`) y Rueda de Timers (`TimerWheel`).
-- **`vvva_js`**: Built-ins base (`console`, `buffer`, `process`, `timers`).
-- **`vvva_permissions`**: Sistema de capacidades, sandboxing de rutas (`VirtualFs`), y barreras protectoras (`Enforcement`).
-- **`vvva_pm`**: Gestor de paquetes (`fetcher`, `lockfile`, `resolver`).
-- **`vvva_bundler`**: Empaquetador con Tree-shaking.
-- **`vvva_test`**: API de Testing nativa compatible con IEEE 829.
+Se ha finalizado exitosamente la "Fase de Integración" (Wiring Phase). Los siguientes componentes están conectados y funcionales:
+
+### ✅ CLI Conectado
+- `3va run` → Lee archivos y ejecuta con `JsEngine::eval()`
+- `3va bundle` → Invoca a `vvva_bundler::bundle_file()`
+- `3va test` → Invoca a `vvva_test::run_tests()`
+- `3va install` → Invoca a `vvva_pm::install_package()`
+
+### ✅ Motor JS Integrdo
+- **Built-ins injectados**: `console`, `timers`, `buffer`, `process`, `fetch`, `fs`
+- **Console expandido**: log, warn, error, info, debug
+- **Permisos conectados**: El motor recibe `PermissionState` y lo usa internamente
+
+### ✅ Sistema de Permisos
+- `AuditLogger` implementado en `permissions/src/audit.rs`
+- APIs de `fs` y `fetch` con verificación de permisos
+- Enforcers integrados en los builtins
+
+### ✅ Seguridad de Paquetes (NIS2/eIDAS)
+- `MalwareScanner` implementado en `pm/src/malware_scanner.rs`
+- `SignatureVerifier` implementado en `pm/src/signature_verifier.rs`
+- Detección de: fork bombs, recursive deletes, curl|wget|sh, crypto mining, backdoors
+
+### ✅ TimerWheel
+- Integración con `setTimeout`/`setInterval` en `js/src/builtins/timers.rs`
+- TimerId expuesto públicamente para uso externo
 
 ---
 
-## 10.2 Siguientes Pasos: Fase de Integración y Conexión (WIRING PHASE)
+## 10.2 Siguientes Pasos: Estabilización y Features
 
-Ahora que poseemos todos los bloques de construcción individuales, el próximo gran paso es **conectarlos entre sí y con el usuario final (CLI)**. A continuación se listan las tareas a desarrollar:
+### 10.2.1 Transpilador TypeScript
+- **Acción:** Integrar transpilación TS → JS antes de `eval()`
 
-### 10.2.1 Integración del Motor JS (`vvva_js` + `vvva_core`)
-- **Problema actual:** Los *builtins* de `vvva_js` existen en archivos, pero el motor QuickJS (en `js/src/lib.rs`) no se los inyecta al contexto global al inicializarse.
-- **Acción:** Integrar el `TimerWheel` de `core` con `setTimeout` de `js`. Cuando JS llame a `setTimeout`, debe registrarse en la rueda asíncrona de Rust. Exponer el objeto `console` globalmente.
-- **Acción:** Integrar el *Transpilador TS* (posible intercepción de código) antes de pasarlo a `eval`.
+### 10.2.2 Runtime Async
+- **Acción:** Conectar el TimerWheel con el event loop para ejecutar callbacks reales
 
-### 10.2.2 Integración de Permisos (`vvva_permissions` + `vvva_js`)
-- **Problema actual:** Los Enforcers (`FsEnforcer`, `NetEnforcer`) están construidos, pero no bloquean nada porque ninguna operación los está invocando.
-- **Acción:** Construir las APIs de `fs` y `fetch` en Rust, inyectarlas en QuickJS, y asegurarse de que internamente llamen a los Enforcers y generen un `throw_permission_error()` si el acceso es denegado.
-- **Acción:** Implementar el `AuditLogger` (documentado en `06-permissions/04-audit.md`) para registrar cuándo un Enforcer deniega una petición.
+### 10.2.3 Módulo System
+- **Acción:** Implementar `require()` y `import` para ESM/CJS
 
-### 10.2.3 Conexión del CLI (`vvva_cli`)
-- **Problema actual:** El CLI actual (`main.rs`) parsea argumentos pero solo arranca un "stub" del Runtime. Los comandos como `bundle` o `test` están vacíos.
-- **Acción:** Conectar `3va test` para que arranque el framework de `vvva_test` e imprima los resultados.
-- **Acción:** Conectar `3va bundle` para que recoja el archivo de entrada e invoque al generador de `vvva_bundler`.
-- **Acción:** Conectar `3va install` para invocar al `PackageFetcher` y generar un `.3va-lock`.
-
-### 10.2.4 Auditoría de Paquetes (`vvva_pm`)
-- **Problema actual:** Faltan las dos patas de seguridad fundamentales estipuladas en NIS2/eIDAS para los paquetes que se descargan.
-- **Acción:** Programar el `MalwareScanner` (análisis del AST del paquete buscando ofuscaciones o comandos shell destructivos).
-- **Acción:** Programar el `SignatureVerifier` (verificación de huella criptográfica del tarball).
+### 10.2.4 Lockfile y Cache
+- **Ación:** Completar generación y parsing de `.3va-lock`
 
 ## 10.3 Resumen de Prioridad
-Para cualquier IA o desarrollador asumiendo la continuidad de este proyecto, se recomienda estricto orden de ataque:
 
-1. **Prioridad 1:** Conectar el CLI (`main.rs`) a los crates nuevos (`bundler`, `test`, `pm`).
-2. **Prioridad 2:** Inyectar los *Builtins* (Console, Timers, FS) en QuickJS.
-3. **Prioridad 3:** Terminar las comprobaciones criptográficas en el Package Manager.
+1. **Prioridad 1:** Transpilador TypeScript
+2. **Prioridad 2:** Runtime async con callbacks reales
+3. **Prioridad 3:** Módulo system (require/import)

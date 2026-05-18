@@ -291,3 +291,28 @@ impl AuditAggregator {
 ---
 
 *Auditoría conforme a ISO 27001, GDPR, y estándares de seguridad.*
+
+## 4.8 Estado de Implementación (Mayo 2026)
+
+### ✅ Implementado
+
+```rust
+// crates/permissions/src/audit.rs
+pub struct AuditLogger {
+    log: AuditLog,
+    enable_console: bool,
+}
+
+impl AuditLogger {
+    pub fn log_denied(&mut self, capability: &str, resource: &str, reason: &str);
+    pub fn log_file(&mut self, path: &PathBuf, operation: &str, allowed: bool);
+    pub fn log_network(&mut self, host: &str, port: u16, allowed: bool);
+    pub fn export(&self) -> String;  // Exporta a JSON
+}
+```
+
+### 📋 Pendiente
+- Rotación de logs
+- CLI de auditoría (`3va audit`)
+- Integración automática con PermissionState
+- GDPR/ISO 27001 configs
