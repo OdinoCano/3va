@@ -3,12 +3,18 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use std::path::PathBuf;
 
+pub mod accessibility;
+
 #[derive(Parser)]
 #[command(name = "3va")]
 #[command(author = "Satoshi")]
 #[command(version = "0.1.0")]
 #[command(about = "Modern, secure-by-default, WASM-first JS/TS runtime", long_about = None)]
 struct Cli {
+    /// Activa el modo de accesibilidad para lectores Braille/Screen readers (desactiva color y animaciones)
+    #[arg(global = true, long = "accessible", help = "Enable screen-reader/braille accessible output (disables colors and animations)")]
+    accessible: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -63,14 +69,21 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
+    let cli = Cli::parse();
+    
+    let is_accessible = accessibility::is_accessible_mode(cli.accessible);
+
+    // Initialize tracing with ANSI colors conditionally
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
+        .with_ansi(!is_accessible)
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("setting default subscriber failed");
 
-    let cli = Cli::parse();
+    if is_accessible {
+        info!("Accessible mode enabled: colors and complex terminal animations are turned off.");
+    }
 
     match &cli.command {
         Commands::Run { file, allow_read, allow_net, allow_write, allow_env, allow_child_process } => {
