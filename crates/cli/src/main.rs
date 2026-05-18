@@ -130,9 +130,10 @@ async fn main() -> anyhow::Result<()> {
             let _runtime = vvva_core::Runtime::new(permissions);
             info!("3va Runtime initialized securely.");
             
-            // Execute file
-            let code = std::fs::read_to_string(&file)?;
-            engine.eval(&code)?;
+            // Execute file (transpiles TypeScript automatically)
+            engine.eval_file(file)?;
+            // Run event loop to process any pending timers/callbacks
+            engine.run_event_loop()?;
             info!("Execution finished.");
         }
         Commands::Install { package, allow_net: _ } => {

@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod console;
 pub mod fetch;
 pub mod fs;
+pub mod modules;
 pub mod process;
 pub mod timers;
 
@@ -16,6 +17,7 @@ pub fn inject_all(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> rquic
     buffer::inject_buffer(ctx)?;
     process::inject_process(ctx)?;
     fetch::inject_fetch(ctx, permissions.clone())?;
-    fs::inject_fs(ctx, permissions)?;
+    fs::inject_fs(ctx, permissions.clone())?;
+    modules::inject_require(ctx, permissions)?;
     Ok(())
 }

@@ -1,111 +1,222 @@
-use rquickjs::{Ctx, Result, Function};
-use std::time::Duration;
+use rquickjs::{Ctx, Result, Function, Value, function::Rest};
+use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use vvva_core::timer::TimerWheel;
 
 type TimerId = u64;
 
+/// Entry in the timer manager: tracks when each timer fires.
+struct TimerEntry {
+    fires_at: Instant,
+    repeating: bool,
+    interval_ms: u64,
+    cancelled: bool,
+}
+
+/// Manages JS timers — registration and expiry polling.
+/// Stored in a thread-local so Rust-backed native functions can access it.
 pub struct TimerManager {
-    wheel: Mutex<TimerWheel>,
-    next_id: Mutex<TimerId>,
-    callbacks: Mutex<HashMap<TimerId, String>>,
+    timers: Mutex<HashMap<TimerId, TimerEntry>>,
 }
 
 impl TimerManager {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            wheel: Mutex::new(TimerWheel::new()),
-            next_id: Mutex::new(1),
-            callbacks: Mutex::new(HashMap::new()),
+            timers: Mutex::new(HashMap::new()),
         })
     }
 
-    pub fn set_timeout(&self, callback_code: String, ms: u64) -> TimerId {
-        let id = {
-            let mut next = self.next_id.lock().unwrap();
-            let id = *next;
-            *next += 1;
-            id
-        };
-        
-        {
-            let mut callbacks = self.callbacks.lock().unwrap();
-            callbacks.insert(id, callback_code);
+    /// Register a one-shot timer.
+    pub fn set_timeout(&self, id: TimerId, ms: u64) {
+        let fires_at = Instant::now() + Duration::from_millis(ms);
+        let mut timers = self.timers.lock().unwrap();
+        timers.insert(id, TimerEntry {
+            fires_at,
+            repeating: false,
+            interval_ms: 0,
+            cancelled: false,
+        });
+    }
+
+    /// Register a repeating interval timer.
+    pub fn set_interval(&self, id: TimerId, ms: u64) {
+        let fires_at = Instant::now() + Duration::from_millis(ms);
+        let mut timers = self.timers.lock().unwrap();
+        timers.insert(id, TimerEntry {
+            fires_at,
+            repeating: true,
+            interval_ms: ms,
+            cancelled: false,
+        });
+    }
+
+    /// Cancel a timer by ID.
+    pub fn cancel(&self, id: TimerId) {
+        let mut timers = self.timers.lock().unwrap();
+        if let Some(entry) = timers.get_mut(&id) {
+            entry.cancelled = true;
         }
-        
-        let delay = Duration::from_millis(ms);
-        self.wheel.lock().unwrap().schedule_with_callback(delay, move || {});
-        
-        id
     }
 
-    pub fn set_interval(&self, callback_code: String, ms: u64) -> TimerId {
-        let id = {
-            let mut next = self.next_id.lock().unwrap();
-            let id = *next;
-            *next += 1;
-            id
-        };
-        
-        {
-            let mut callbacks = self.callbacks.lock().unwrap();
-            callbacks.insert(id, callback_code);
-        }
-        
-        let delay = Duration::from_millis(ms);
-        self.wheel.lock().unwrap().schedule_interval_with_callback(delay, move || {});
-        
-        id
-    }
+    /// Return IDs of all expired (and not cancelled) timers, and reschedule intervals.
+    pub fn poll_expired_ids(&self) -> Vec<TimerId> {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        let mut timers = self.timers.lock().unwrap();
 
-    pub fn clear(&self, id: TimerId) {
-        self.wheel.lock().unwrap().cancel(vvva_core::timer::TimerId(id));
-        self.callbacks.lock().unwrap().remove(&id);
-    }
+        let mut to_remove = Vec::new();
+        let mut to_reschedule: Vec<(TimerId, u64)> = Vec::new();
 
-    pub fn poll(&self, ctx: &Ctx) {
-        let ready = self.wheel.lock().unwrap().poll();
-        let callbacks = self.callbacks.lock().unwrap();
-        
-        for timer in ready {
-            let id = timer.id.0;
-            if let Some(code) = callbacks.get(&id) {
-                let _ = ctx.eval::<(), _>(code.as_str());
+        for (&id, entry) in timers.iter() {
+            if entry.cancelled {
+                to_remove.push(id);
+                continue;
+            }
+            if entry.fires_at <= now {
+                expired.push(id);
+                if entry.repeating {
+                    to_reschedule.push((id, entry.interval_ms));
+                } else {
+                    to_remove.push(id);
+                }
             }
         }
+
+        for id in to_remove {
+            timers.remove(&id);
+        }
+        for (id, ms) in to_reschedule {
+            if let Some(entry) = timers.get_mut(&id) {
+                entry.fires_at = now + Duration::from_millis(ms);
+            }
+        }
+
+        expired
+    }
+
+    /// Return whether there are any pending (non-cancelled) timers.
+    pub fn has_pending(&self) -> bool {
+        let timers = self.timers.lock().unwrap();
+        timers.values().any(|e| !e.cancelled)
+    }
+
+    /// Next expiry duration (for sleep decisions).
+    pub fn next_expiry(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let timers = self.timers.lock().unwrap();
+        timers.values()
+            .filter(|e| !e.cancelled)
+            .map(|e| e.fires_at.saturating_duration_since(now))
+            .min()
+    }
+
+    /// Fire all expired timers by calling the JS `__fireTimer(id)` function.
+    pub fn fire_pending(ctx: &Ctx, manager: Arc<Self>) -> Result<()> {
+        let expired = manager.poll_expired_ids();
+        for id in expired {
+            let code = format!("if (typeof __fireTimer === 'function') {{ __fireTimer({}); }}", id);
+            let _ = ctx.eval::<Value, _>(code.as_str());
+        }
+        Ok(())
     }
 }
 
 impl Default for TimerManager {
     fn default() -> Self {
         Self {
-            wheel: Mutex::new(TimerWheel::new()),
-            next_id: Mutex::new(1),
-            callbacks: Mutex::new(HashMap::new()),
+            timers: Mutex::new(HashMap::new()),
         }
     }
 }
 
-pub fn inject_timers(ctx: &Ctx) -> rquickjs::Result<()> {
+// Thread-local storage for the timer manager so native functions can access it.
+thread_local! {
+    pub static TIMER_MANAGER: Arc<TimerManager> = TimerManager::new();
+}
+
+/// Helper to extract a u64 from a JS Value (Int or Float).
+fn value_to_u64(v: &Value) -> u64 {
+    match v.type_of() {
+        rquickjs::Type::Int => v.as_int().unwrap_or(0) as u64,
+        rquickjs::Type::Float => v.as_float().unwrap_or(0.0) as u64,
+        _ => 0,
+    }
+}
+
+/// Inject timer globals into the QuickJS context.
+pub fn inject_timers(ctx: &Ctx) -> Result<()> {
+    // __nativeSetTimeout(id, ms) — returns nothing (JS side stores the id)
+    let native_set_timeout = Function::new(ctx.clone(), |args: Rest<i32>| {
+        let mut iter = args.0.iter();
+        let id = iter.next().copied().unwrap_or(0) as u64;
+        let ms = iter.next().copied().unwrap_or(0) as u64;
+        TIMER_MANAGER.with(|m| m.set_timeout(id, ms));
+    })?;
+
+    // __nativeSetInterval(id, ms)
+    let native_set_interval = Function::new(ctx.clone(), |args: Rest<i32>| {
+        let mut iter = args.0.iter();
+        let id = iter.next().copied().unwrap_or(0) as u64;
+        let ms = iter.next().copied().unwrap_or(0) as u64;
+        TIMER_MANAGER.with(|m| m.set_interval(id, ms));
+    })?;
+
+    // __nativeClearTimer(id)
+    let native_clear_timer = Function::new(ctx.clone(), |args: Rest<i32>| {
+        let id = args.0.first().copied().unwrap_or(0) as u64;
+        TIMER_MANAGER.with(|m| m.cancel(id));
+    })?;
+
+    let globals = ctx.globals();
+    globals.set("__nativeSetTimeout", native_set_timeout)?;
+    globals.set("__nativeSetInterval", native_set_interval)?;
+    globals.set("__nativeClearTimer", native_clear_timer)?;
+
+    // Inject JS-level timer wrappers
     ctx.eval::<(), _>(r#"
-        global.__timerCallbacks = {};
-        global.setTimeout = function(fn, ms) {
-            var id = Math.floor(Math.random() * 1000000);
-            global.__timerCallbacks[id] = fn;
+        globalThis.__timerCallbacks = {};
+        globalThis.__timerNextId = 0;
+
+        globalThis.__fireTimer = function(id) {
+            var fn = globalThis.__timerCallbacks[id];
+            if (fn) {
+                delete globalThis.__timerCallbacks[id];
+                fn();
+            }
+        };
+
+        globalThis.setTimeout = function(fn, ms) {
+            globalThis.__timerNextId = (globalThis.__timerNextId || 0) + 1;
+            var id = globalThis.__timerNextId;
+            globalThis.__timerCallbacks[id] = fn;
+            __nativeSetTimeout(id, ms || 0);
             return id;
         };
-        global.clearTimeout = function(id) {
-            delete global.__timerCallbacks[id];
+
+        globalThis.clearTimeout = function(id) {
+            delete globalThis.__timerCallbacks[id];
+            __nativeClearTimer(id);
         };
-        global.setInterval = function(fn, ms) {
-            var id = Math.floor(Math.random() * 1000000);
-            global.__timerCallbacks[id] = fn;
+
+        globalThis.setInterval = function(fn, ms) {
+            globalThis.__timerNextId = (globalThis.__timerNextId || 0) + 1;
+            var id = globalThis.__timerNextId;
+            var intervalMs = ms || 0;
+            var wrapper = function() {
+                fn();
+                // Re-register callback for next interval tick
+                globalThis.__timerCallbacks[id] = wrapper;
+            };
+            globalThis.__timerCallbacks[id] = wrapper;
+            __nativeSetInterval(id, intervalMs);
             return id;
         };
-        global.clearInterval = function(id) {
-            delete global.__timerCallbacks[id];
+
+        globalThis.clearInterval = function(id) {
+            delete globalThis.__timerCallbacks[id];
+            __nativeClearTimer(id);
         };
     "#)?;
+
     Ok(())
 }
