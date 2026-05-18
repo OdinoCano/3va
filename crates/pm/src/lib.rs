@@ -1,13 +1,17 @@
 pub mod fetcher;
 pub mod lockfile;
 pub mod manifest;
+pub mod malware_scanner;
 pub mod resolver;
 pub mod semver;
+pub mod signature_verifier;
 
 pub use manifest::{PackageManifest, PackageInfo, PackagePermissions};
 pub use lockfile::Lockfile;
+pub use malware_scanner::{MalwareScanner, ScanResult, Threat, ThreatLevel};
 pub use resolver::{DependencyGraph, DependencyNode, Resolver};
 pub use semver::{Semver, SemverRange};
+pub use signature_verifier::{SignatureVerifier, VerificationStatus, HashAlgorithm, SignatureInfo};
 
 use std::collections::HashMap;
 use std::path::PathBuf;

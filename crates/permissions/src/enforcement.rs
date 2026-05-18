@@ -82,7 +82,8 @@ impl FsEnforcer {
     }
 
     pub fn check_read_recursive(&self, path: &std::path::Path) -> Result<(), PermissionError> {
-        for cap in &self.permission_state.granted {
+        let granted = self.permission_state.granted.read().unwrap();
+        for cap in granted.iter() {
             if let Capability::FileRead(allowed) = cap {
                 if path.starts_with(allowed) || allowed.starts_with(path) {
                     return Ok(());
@@ -222,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_fs_enforcer_read_allowed() {
-        let mut state = PermissionState::new();
+        let state = PermissionState::new();
         state.grant(Capability::FileRead(std::path::PathBuf::from("/app")));
 
         let enforcer = FsEnforcer::new(state);
@@ -242,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_net_enforcer_allowed() {
-        let mut state = PermissionState::new();
+        let state = PermissionState::new();
         state.grant(Capability::Network("api.example.com".to_string()));
 
         let enforcer = NetEnforcer::new(state);
@@ -262,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_env_enforcer_allowed() {
-        let mut state = PermissionState::new();
+        let state = PermissionState::new();
         state.grant(Capability::EnvAccess);
 
         let enforcer = EnvEnforcer::new(state);
@@ -282,7 +283,7 @@ mod tests {
 
     #[test]
     fn test_process_enforcer_allowed() {
-        let mut state = PermissionState::new();
+        let state = PermissionState::new();
         state.grant(Capability::SpawnProcess);
 
         let enforcer = ProcessEnforcer::new(state);

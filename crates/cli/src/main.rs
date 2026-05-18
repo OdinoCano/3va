@@ -58,7 +58,18 @@ enum Commands {
     /// Development server
     Dev,
     /// Bundle the application
-    Bundle,
+    Bundle {
+        /// The entry file to bundle
+        input: String,
+        /// The output file path
+        #[arg(short, long, default_value = "dist/bundle.js")]
+        output: String,
+    },
+    /// Run the test suite
+    Test {
+        /// Files or directories to test
+        paths: Vec<PathBuf>,
+    },
     /// Audit dependencies
     Audit,
     /// Check runtime health
@@ -89,6 +100,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::Run { file, allow_read, allow_net, allow_write, allow_env, allow_child_process } => {
             info!("Running {:?} (Sandboxed)", file);
             let mut permissions = vvva_permissions::PermissionState::new();
+            
+            // Habilitar prompts interactivos por defecto para mejorar la DX
+            permissions.set_interactive(true);
+
             if let Some(reads) = allow_read {
                 for path in reads {
                     permissions.grant(vvva_permissions::Capability::FileRead(path.clone()));
@@ -111,12 +126,14 @@ async fn main() -> anyhow::Result<()> {
                 permissions.grant(vvva_permissions::Capability::SpawnProcess);
             }
 
-            let _engine = vvva_js::JsEngine::new(&permissions)?;
-            // TODO: In a real implementation we shouldn't clone the whole state or we'd share it differently,
-            // but for now we'll move a clone into Runtime
+            let engine = vvva_js::JsEngine::new(&permissions)?;
             let _runtime = vvva_core::Runtime::new(permissions);
             info!("3va Runtime initialized securely.");
-            // Execute file...
+            
+            // Execute file
+            let code = std::fs::read_to_string(&file)?;
+            engine.eval(&code)?;
+            info!("Execution finished.");
         }
         Commands::Install { package, allow_net: _ } => {
             if let Some(pkg) = package {
@@ -128,7 +145,25 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Dev => info!("Starting dev server..."),
-        Commands::Bundle => info!("Bundling application..."),
+        Commands::Bundle { input, output } => {
+            info!("Bundling application from {} to {}...", input, output);
+            // Si el modo accesible está activo, podríamos pasar opciones sin source maps y output plain
+            vvva_bundler::bundle_file(input, output, None)?;
+            info!("Bundle completed successfully.");
+        }
+        Commands::Test { paths } => {
+            let target_paths = if paths.is_empty() {
+                vec![PathBuf::from(".")]
+            } else {
+                paths.clone()
+            };
+            info!("Running tests...");
+            let results = vvva_test::run_tests(target_paths, None)?;
+            let failed = results.iter().filter(|r| r.status == vvva_test::TestStatus::Failed).count();
+            if failed > 0 {
+                anyhow::bail!("{} tests failed.", failed);
+            }
+        }
         Commands::Audit => info!("Auditing dependencies..."),
         Commands::Doctor => info!("Checking 3va health..."),
         Commands::Sandbox => info!("Entering interactive sandbox..."),

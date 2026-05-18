@@ -152,6 +152,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -2121,10 +2122,12 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "vvva_bundler",
  "vvva_core",
  "vvva_js",
  "vvva_permissions",
  "vvva_pm",
+ "vvva_test",
 ]
 
 [[package]]
@@ -2152,7 +2155,9 @@ name = "vvva_permissions"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "serde",
+ "serde_json",
  "thiserror",
  "url",
 ]
@@ -2169,6 +2174,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

@@ -2,7 +2,13 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TimerId(u64);
+pub struct TimerId(pub u64);
+
+impl TimerId {
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
 
 pub struct Timer {
     pub id: TimerId,

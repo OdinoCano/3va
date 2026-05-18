@@ -18,19 +18,26 @@ pub enum Capability {
     FFI,
 }
 
+use std::sync::RwLock;
+use std::io::Write;
+
 /// Estado de permisos del proceso, conforme al modelo deny-by-default.
 ///
 /// Algoritmo de verificación:
 /// 1. Si `deny_all_<tipo>` es true → DENY
 /// 2. Si la capability está en `denied`  → DENY
 /// 3. Si la capability está en `granted` → ALLOW
-/// 4. Por defecto                        → DENY
-#[derive(Debug, Default, Clone)]
+/// 4. Si `interactive` es true → PROMPT AL USUARIO
+/// 5. Por defecto                        → DENY
+#[derive(Debug, Default)]
 pub struct PermissionState {
     /// Capabilities concedidas explícitamente por el usuario.
-    pub granted: Vec<Capability>,
+    pub granted: RwLock<Vec<Capability>>,
     /// Capabilities denegadas explícitamente (tienen precedencia sobre granted).
-    pub denied: Vec<Capability>,
+    pub denied: RwLock<Vec<Capability>>,
+    
+    /// Si está activado, lanza un prompt en consola cuando se detecta un permiso no configurado.
+    pub interactive: bool,
 
     // Flags de denegación global por categoría
     deny_all_fs: bool,
@@ -44,17 +51,24 @@ impl PermissionState {
         Self::default()
     }
 
+    /// Activa el modo interactivo para preguntar al usuario al vuelo.
+    pub fn set_interactive(&mut self, interactive: bool) {
+        self.interactive = interactive;
+    }
+
     /// Concede una capability. No la agrega si ya existe.
-    pub fn grant(&mut self, cap: Capability) {
-        if !self.granted.contains(&cap) {
-            self.granted.push(cap);
+    pub fn grant(&self, cap: Capability) {
+        let mut granted = self.granted.write().unwrap();
+        if !granted.contains(&cap) {
+            granted.push(cap);
         }
     }
 
     /// Deniega una capability explícita (tiene precedencia sobre `grant`).
-    pub fn deny(&mut self, cap: Capability) {
-        if !self.denied.contains(&cap) {
-            self.denied.push(cap);
+    pub fn deny(&self, cap: Capability) {
+        let mut denied = self.denied.write().unwrap();
+        if !denied.contains(&cap) {
+            denied.push(cap);
         }
     }
 
@@ -101,12 +115,72 @@ impl PermissionState {
         }
 
         // Paso 2: deny-list explícita
-        if self.denied.iter().any(|d| caps_match(d, required)) {
-            return false;
+        {
+            let denied = self.denied.read().unwrap();
+            if denied.iter().any(|d| caps_match(d, required)) {
+                return false;
+            }
         }
 
         // Paso 3: granted-list
-        self.granted.iter().any(|g| caps_match(g, required))
+        {
+            let granted = self.granted.read().unwrap();
+            if granted.iter().any(|g| caps_match(g, required)) {
+                return true;
+            }
+        }
+
+        // Paso 4: Modo interactivo
+        if self.interactive {
+            return self.prompt_user(required);
+        }
+
+        false
+    }
+
+    fn prompt_user(&self, required: &Capability) -> bool {
+        // En un entorno de producción real, esto debería verificar si la salida es un TTY
+        // y si estamos en modo accesible, pero usaremos print directo.
+        let msg = match required {
+            Capability::FileRead(p) => format!("leer el archivo '{}'", p.display()),
+            Capability::FileWrite(p) => format!("escribir el archivo '{}'", p.display()),
+            Capability::Network(h) => format!("conectarse a la red '{}'", h),
+            Capability::SpawnProcess => "crear procesos hijos".to_string(),
+            Capability::EnvAccess => "acceder a variables de entorno".to_string(),
+            Capability::FFI => "acceder a llamadas FFI nativas".to_string(),
+        };
+
+        eprint!("\n[!] El script está intentando {msg}.\n¿Permitir? [y (Sí una vez) / N (Denegar) / A (Permitir Siempre)] ");
+        let _ = std::io::stdout().flush();
+
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_ok() {
+            let choice = input.trim();
+            if choice.eq_ignore_ascii_case("y") {
+                return true; // Permitido solo esta vez
+            } else if choice == "A" {
+                self.grant(required.clone());
+                return true; // Permitido siempre
+            }
+        }
+        
+        // Cualquier otra cosa (N o enter) es deny
+        self.deny(required.clone());
+        false
+    }
+}
+
+impl Clone for PermissionState {
+    fn clone(&self) -> Self {
+        Self {
+            granted: RwLock::new(self.granted.read().unwrap().clone()),
+            denied: RwLock::new(self.denied.read().unwrap().clone()),
+            interactive: self.interactive,
+            deny_all_fs: self.deny_all_fs,
+            deny_all_net: self.deny_all_net,
+            deny_all_env: self.deny_all_env,
+            deny_all_process: self.deny_all_process,
+        }
     }
 }
 
@@ -160,14 +234,14 @@ mod tests {
 
     #[test]
     fn grant_allows() {
-        let mut state = PermissionState::new();
+        let state = PermissionState::new();
         state.grant(Capability::EnvAccess);
         assert!(state.check(&Capability::EnvAccess));
     }
 
     #[test]
     fn deny_overrides_grant() {
-        let mut state = PermissionState::new();
+        let state = PermissionState::new();
         state.grant(Capability::EnvAccess);
         state.deny(Capability::EnvAccess);
         assert!(!state.check(&Capability::EnvAccess));
@@ -183,7 +257,7 @@ mod tests {
 
     #[test]
     fn path_prefix_matching() {
-        let mut state = PermissionState::new();
+        let state = PermissionState::new();
         state.grant(Capability::FileRead(PathBuf::from("/app")));
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/config.json"))));
         assert!(!state.check(&Capability::FileRead(PathBuf::from("/etc/passwd"))));
@@ -191,7 +265,7 @@ mod tests {
 
     #[test]
     fn wildcard_host_matching() {
-        let mut state = PermissionState::new();
+        let state = PermissionState::new();
         state.grant(Capability::Network("*.example.com".to_string()));
         assert!(state.check(&Capability::Network("api.example.com".to_string())));
         assert!(!state.check(&Capability::Network("evil.com".to_string())));

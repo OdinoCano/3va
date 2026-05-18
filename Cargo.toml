@@ -19,6 +19,8 @@ anyhow = "1.0"
 thiserror = "1.0"
 url = "2.5"
 base64 = "0.22"
+sha2 = "0.10"
+tempfile = "3.8"
 
 [profile.release]
 opt-level = 3

@@ -2,25 +2,31 @@ pub mod builtins;
 
 use rquickjs::{Context, Runtime};
 use vvva_permissions::PermissionState;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 pub struct JsEngine {
     runtime: Runtime,
     context: Context,
+    permissions: Rc<RefCell<PermissionState>>,
 }
 
 impl JsEngine {
-    pub fn new(_permissions: &PermissionState) -> anyhow::Result<Self> {
+    pub fn new(permissions: &PermissionState) -> anyhow::Result<Self> {
         let runtime = Runtime::new()?;
         let context = Context::full(&runtime)?;
+        
+        let perms = Rc::new(RefCell::new(permissions.clone()));
 
         context.with(|ctx: rquickjs::Ctx| {
-            let _ = builtins::inject_all(&ctx);
+            let _ = builtins::inject_all(&ctx, perms.clone());
             Ok::<(), rquickjs::Error>(())
         })?;
 
         Ok(Self {
             runtime,
             context,
+            permissions: perms,
         })
     }
 
