@@ -30,22 +30,41 @@ Se ha finalizado exitosamente la "Fase de Integración" (Wiring Phase). Los sigu
 
 ---
 
-## 10.2 Siguientes Pasos: Estabilización y Features
+## 10.2 Fase de Estabilización (Completado)
 
-### 10.2.1 Transpilador TypeScript
-- **Acción:** Integrar transpilación TS → JS antes de `eval()`
+### ✅ Transpilador TypeScript
+- `js/src/transpiler.rs` — stripper de tipos en puro Rust (sin deps extra)
+- Elimina: `interface`, `type`, `declare`, `import type`, `export type`
+- Elimina anotaciones inline: `const x: string` → `const x`
+- Elimina `as TypeName`, modificadores de acceso, `!` non-null, genéricos
+- Integrado en `JsEngine::eval_file()` — transpilación automática para `.ts`/`.tsx`
+- 16 tests de transpilación, todos passing
 
-### 10.2.2 Runtime Async
-- **Acción:** Conectar el TimerWheel con el event loop para ejecutar callbacks reales
+### ✅ Runtime Async (Event Loop)
+- `TimerManager` reimplementado en `js/src/builtins/timers.rs` con `thread_local!`
+- Nativos Rust: `__nativeSetTimeout`, `__nativeSetInterval`, `__nativeClearTimer`
+- JS wrappers reales: `setTimeout`/`setInterval` registran callbacks y llaman nativos
+- `__fireTimer(id)` ejecuta el callback cuando el timer expira
+- `JsEngine::run_event_loop()` — drena todos los timers pendientes después de `eval_file()`
+- CLI: `3va run` ahora ejecuta el event loop automáticamente tras la ejecución
 
-### 10.2.3 Módulo System
-- **Acción:** Implementar `require()` y `import` para ESM/CJS
+### ✅ Módulo System (CommonJS require)
+- `js/src/builtins/modules.rs` — `require()` respaldado por Rust
+- Cache de módulos vía `global.__requireCache`
+- Wrapper CJS: `(function(exports, module, __filename, __dirname) { ... })`
+- Resolución de paths relativos con extensiones `.js` y `.ts`
+- Verificación de permisos (`Capability::FileRead`) antes de leer archivos
+- Transpilación automática de `.ts` en `require()`
 
-### 10.2.4 Lockfile y Cache
-- **Ación:** Completar generación y parsing de `.3va-lock`
+### ✅ Lockfile y Cache
+- `install_package()` lee/crea `package.json`, resuelve deps y genera `3va-lock.json`
+- Formato compatible con npm lockfile v3 con extensiones de seguridad 3va
 
-## 10.3 Resumen de Prioridad
+---
 
-1. **Prioridad 1:** Transpilador TypeScript
-2. **Prioridad 2:** Runtime async con callbacks reales
-3. **Prioridad 3:** Módulo system (require/import)
+## 10.3 Siguientes Pasos
+
+1. **ESM import/export** — usar `rquickjs::Module` para carga nativa de módulos ES
+2. **Async/await real** — integrar Promises de QuickJS con Tokio para I/O no bloqueante
+3. **REPL / Sandbox interactivo** — implementar `3va sandbox`
+4. **Dev server** — implementar `3va dev` con hot-reload

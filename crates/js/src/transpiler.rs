@@ -211,6 +211,21 @@ pub fn transpile(source: &str) -> String {
                 continue;
             }
 
+            // Access modifiers in class bodies: public/private/protected/readonly/override
+            // These appear at statement start inside class bodies
+            if (kw == "public" || kw == "private" || kw == "protected"
+                || kw == "readonly" || kw == "override")
+                && i < len
+                && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\n')
+            {
+                // Drop the modifier and continue parsing at stmt start
+                while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                    i += 1;
+                }
+                // Stay at at_stmt_start = true so the next token is parsed correctly
+                continue;
+            }
+
             // Emit regular keyword
             out.push_str(&kw);
             if kw.is_empty() {
