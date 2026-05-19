@@ -213,8 +213,11 @@ pub fn transpile(source: &str) -> String {
 
             // Access modifiers in class bodies: public/private/protected/readonly/override
             // These appear at statement start inside class bodies
-            if (kw == "public" || kw == "private" || kw == "protected"
-                || kw == "readonly" || kw == "override")
+            if (kw == "public"
+                || kw == "private"
+                || kw == "protected"
+                || kw == "readonly"
+                || kw == "override")
                 && i < len
                 && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\n')
             {
@@ -276,7 +279,16 @@ pub fn transpile(source: &str) -> String {
             let prev = last_non_space_char(&out);
             let next = if i + 1 < len { chars[i + 1] } else { '\0' };
             if (prev.is_alphanumeric() || prev == '_' || prev == ')' || prev == ']')
-                && (next == '.' || next == '[' || next == '(' || next == ';' || next == ',' || next == ')' || next == ']' || next == '\n' || next == ' ' || next == '\0')
+                && (next == '.'
+                    || next == '['
+                    || next == '('
+                    || next == ';'
+                    || next == ','
+                    || next == ')'
+                    || next == ']'
+                    || next == '\n'
+                    || next == ' '
+                    || next == '\0')
             {
                 // Non-null assertion — skip `!`
                 i += 1;
@@ -422,7 +434,10 @@ pub fn transpile(source: &str) -> String {
             let ident: String = chars[id_start..i].iter().collect();
 
             // Strip access modifiers in class bodies
-            if (ident == "public" || ident == "private" || ident == "protected" || ident == "readonly")
+            if (ident == "public"
+                || ident == "private"
+                || ident == "protected"
+                || ident == "readonly")
                 && i < len
                 && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\n')
             {
@@ -435,10 +450,7 @@ pub fn transpile(source: &str) -> String {
             }
 
             // `override` keyword (TS 4.3+)
-            if ident == "override"
-                && i < len
-                && (chars[i] == ' ' || chars[i] == '\t')
-            {
+            if ident == "override" && i < len && (chars[i] == ' ' || chars[i] == '\t') {
                 while i < len && (chars[i] == ' ' || chars[i] == '\t') {
                     i += 1;
                 }
@@ -473,7 +485,10 @@ fn find_closing_angle(chars: &[char], start: usize) -> Option<usize> {
 
     while i < len {
         match chars[i] {
-            '<' => { depth += 1; i += 1; }
+            '<' => {
+                depth += 1;
+                i += 1;
+            }
             '>' => {
                 depth -= 1;
                 if depth == 0 {
@@ -486,7 +501,9 @@ fn find_closing_angle(chars: &[char], start: usize) -> Option<usize> {
                 suspicious = true;
                 i += 1;
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
         // If we've gone too far without closing, give up
         if i - start > 256 {
@@ -504,7 +521,10 @@ fn skip_to_statement_end(chars: &[char], i: &mut usize) {
 
     while *i < len {
         match chars[*i] {
-            '{' => { depth += 1; *i += 1; }
+            '{' => {
+                depth += 1;
+                *i += 1;
+            }
             '}' => {
                 if depth > 0 {
                     depth -= 1;
@@ -535,12 +555,19 @@ fn skip_to_statement_end(chars: &[char], i: &mut usize) {
                 let q = chars[*i];
                 *i += 1;
                 while *i < len {
-                    if chars[*i] == '\\' { *i += 2; }
-                    else if chars[*i] == q { *i += 1; break; }
-                    else { *i += 1; }
+                    if chars[*i] == '\\' {
+                        *i += 2;
+                    } else if chars[*i] == q {
+                        *i += 1;
+                        break;
+                    } else {
+                        *i += 1;
+                    }
                 }
             }
-            _ => { *i += 1; }
+            _ => {
+                *i += 1;
+            }
         }
     }
 }
@@ -575,7 +602,9 @@ fn skip_interface_or_type_block(chars: &[char], i: &mut usize) {
                 *i += 1;
                 return;
             }
-            _ => { *i += 1; }
+            _ => {
+                *i += 1;
+            }
         }
     }
 }
@@ -590,7 +619,10 @@ fn skip_type_expr(chars: &[char], i: &mut usize) {
 
     while *i < len {
         match chars[*i] {
-            '(' => { depth_paren += 1; *i += 1; }
+            '(' => {
+                depth_paren += 1;
+                *i += 1;
+            }
             ')' => {
                 if depth_paren > 0 {
                     depth_paren -= 1;
@@ -599,7 +631,10 @@ fn skip_type_expr(chars: &[char], i: &mut usize) {
                     break;
                 }
             }
-            '{' => { depth_brace += 1; *i += 1; }
+            '{' => {
+                depth_brace += 1;
+                *i += 1;
+            }
             '}' => {
                 if depth_brace > 0 {
                     depth_brace -= 1;
@@ -608,7 +643,10 @@ fn skip_type_expr(chars: &[char], i: &mut usize) {
                     break;
                 }
             }
-            '[' => { depth_bracket += 1; *i += 1; }
+            '[' => {
+                depth_bracket += 1;
+                *i += 1;
+            }
             ']' => {
                 if depth_bracket > 0 {
                     depth_bracket -= 1;
@@ -626,7 +664,9 @@ fn skip_type_expr(chars: &[char], i: &mut usize) {
                 }
             }
             // Type union/intersection/optional — keep going
-            '|' | '&' => { *i += 1; }
+            '|' | '&' => {
+                *i += 1;
+            }
             // Fat arrow in type: `() => void` — keep going
             '=' if *i + 1 < len && chars[*i + 1] == '>' => {
                 *i += 2;
@@ -645,12 +685,16 @@ fn skip_type_expr(chars: &[char], i: &mut usize) {
                 *i += 1;
             }
             // Skip whitespace
-            ' ' | '\t' => { *i += 1; }
+            ' ' | '\t' => {
+                *i += 1;
+            }
             // Skip identifier characters (type names)
             c if c.is_alphanumeric() || c == '_' || c == '$' || c == '.' || c == '?' => {
                 *i += 1;
             }
-            _ => { break; }
+            _ => {
+                break;
+            }
         }
     }
     // Skip any trailing whitespace
@@ -669,7 +713,9 @@ fn is_case_colon(out: &str) -> bool {
     // Look backwards in output for "case" keyword after last newline/semicolon
     let trimmed = out.trim_end();
     // Find last statement boundary
-    let last_boundary = trimmed.rfind(|c| c == '\n' || c == ';' || c == '{').unwrap_or(0);
+    let last_boundary = trimmed
+        .rfind(|c| c == '\n' || c == ';' || c == '{')
+        .unwrap_or(0);
     let stmt = &trimmed[last_boundary..].trim_start_matches(|c: char| c.is_whitespace());
     stmt.starts_with("case ")
 }
@@ -697,14 +743,43 @@ fn is_type_start(ch: char, chars: &[char], j: usize) -> bool {
     // Type keywords
     matches!(
         word.as_str(),
-        "string" | "number" | "boolean" | "void" | "null" | "undefined"
-        | "never" | "any" | "unknown" | "object" | "symbol" | "bigint"
-        | "Array" | "Promise" | "Record" | "Map" | "Set" | "Error"
-        | "Function" | "RegExp" | "Date" | "HTMLElement" | "Event"
-        | "ReadonlyArray" | "Partial" | "Required" | "Readonly"
-        | "Pick" | "Omit" | "Exclude" | "Extract" | "NonNullable"
-        | "ReturnType" | "InstanceType" | "Parameters" | "ConstructorParameters"
-    ) || ch.is_uppercase()   // Capitalized identifier → probably a type
+        "string"
+            | "number"
+            | "boolean"
+            | "void"
+            | "null"
+            | "undefined"
+            | "never"
+            | "any"
+            | "unknown"
+            | "object"
+            | "symbol"
+            | "bigint"
+            | "Array"
+            | "Promise"
+            | "Record"
+            | "Map"
+            | "Set"
+            | "Error"
+            | "Function"
+            | "RegExp"
+            | "Date"
+            | "HTMLElement"
+            | "Event"
+            | "ReadonlyArray"
+            | "Partial"
+            | "Required"
+            | "Readonly"
+            | "Pick"
+            | "Omit"
+            | "Exclude"
+            | "Extract"
+            | "NonNullable"
+            | "ReturnType"
+            | "InstanceType"
+            | "Parameters"
+            | "ConstructorParameters"
+    ) || ch.is_uppercase() // Capitalized identifier → probably a type
 }
 
 #[cfg(test)]
@@ -723,8 +798,14 @@ mod tests {
     fn test_variable_type_annotation() {
         let input = "const x: string = 'hello';";
         let output = transpile(input);
-        assert!(!output.contains(": string"), "should strip type annotation, got: {output}");
-        assert!(output.contains("const x"), "should keep variable declaration");
+        assert!(
+            !output.contains(": string"),
+            "should strip type annotation, got: {output}"
+        );
+        assert!(
+            output.contains("const x"),
+            "should keep variable declaration"
+        );
         assert!(output.contains("'hello'"), "should keep value");
     }
 
@@ -777,8 +858,14 @@ const y = 2;
         let input = "const obj = { key: 'value', count: 42 };";
         let output = transpile(input);
         // Object literals should be preserved
-        assert!(output.contains("key"), "should keep object key, got: {output}");
-        assert!(output.contains("'value'"), "should keep object value, got: {output}");
+        assert!(
+            output.contains("key"),
+            "should keep object key, got: {output}"
+        );
+        assert!(
+            output.contains("'value'"),
+            "should keep object value, got: {output}"
+        );
     }
 
     #[test]
@@ -794,7 +881,10 @@ const y = 2;
     fn test_generic_function() {
         let input = "function identity<T>(x: T): T { return x; }";
         let output = transpile(input);
-        assert!(!output.contains("<T>"), "should strip generic, got: {output}");
+        assert!(
+            !output.contains("<T>"),
+            "should strip generic, got: {output}"
+        );
         assert!(output.contains("function identity("), "got: {output}");
     }
 
@@ -843,7 +933,10 @@ const y = 2;
     fn test_regular_import_preserved() {
         let input = "import { foo } from './bar';\nconst x = foo();";
         let output = transpile(input);
-        assert!(output.contains("import"), "should keep regular import, got: {output}");
+        assert!(
+            output.contains("import"),
+            "should keep regular import, got: {output}"
+        );
         assert!(output.contains("foo"), "got: {output}");
     }
 

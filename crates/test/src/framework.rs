@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type TestFn = Box<dyn Fn() + Send + Sync>;
 
@@ -10,7 +10,11 @@ pub struct TestCase {
 
 impl TestCase {
     pub fn new(name: String, fn_name: String, test_fn: TestFn) -> Self {
-        Self { name, fn_name, test_fn }
+        Self {
+            name,
+            fn_name,
+            test_fn,
+        }
     }
 }
 
@@ -31,7 +35,9 @@ pub enum TestStatus {
 }
 
 impl Default for TestStatus {
-    fn default() -> Self { TestStatus::Pending }
+    fn default() -> Self {
+        TestStatus::Pending
+    }
 }
 
 pub struct TestState {
@@ -41,15 +47,26 @@ pub struct TestState {
 
 impl TestState {
     pub fn new() -> Self {
-        Self { root: Vec::new(), results: Vec::new() }
+        Self {
+            root: Vec::new(),
+            results: Vec::new(),
+        }
     }
 
     pub fn it(&mut self, name: String, test_fn: TestFn) {
-        self.root.push(TestCase::new(name.clone(), format!("it: {}", name), test_fn));
+        self.root.push(TestCase::new(
+            name.clone(),
+            format!("it: {}", name),
+            test_fn,
+        ));
     }
 
     pub fn test(&mut self, name: String, test_fn: TestFn) {
-        self.root.push(TestCase::new(name.clone(), format!("test: {}", name), test_fn));
+        self.root.push(TestCase::new(
+            name.clone(),
+            format!("test: {}", name),
+            test_fn,
+        ));
     }
 
     pub fn run_all(&mut self) -> Vec<TestResult> {

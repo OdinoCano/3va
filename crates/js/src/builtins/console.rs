@@ -1,4 +1,4 @@
-use rquickjs::{Ctx, Object, Function, Result};
+use rquickjs::{Ctx, Function, Object, Result};
 use std::sync::Arc;
 use vvva_permissions::PermissionState;
 

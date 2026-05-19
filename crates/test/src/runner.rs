@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
 use crate::framework::TestResult;
 use crate::framework::TestStatus;
+use std::path::{Path, PathBuf};
 
 pub struct TestRunner {
     results: Vec<TestResult>,
@@ -23,7 +23,9 @@ impl Default for TestConfig {
 
 impl TestRunner {
     pub fn new(_config: TestConfig) -> Self {
-        Self { results: Vec::new() }
+        Self {
+            results: Vec::new(),
+        }
     }
 
     pub fn run_file(&mut self, path: &Path) -> anyhow::Result<()> {
@@ -55,9 +57,17 @@ impl TestRunner {
     }
 
     pub fn print_summary(&self) {
-        let passed = self.results.iter().filter(|r| r.status == TestStatus::Passed).count();
-        let failed = self.results.iter().filter(|r| r.status == TestStatus::Failed).count();
-        
+        let passed = self
+            .results
+            .iter()
+            .filter(|r| r.status == TestStatus::Passed)
+            .count();
+        let failed = self
+            .results
+            .iter()
+            .filter(|r| r.status == TestStatus::Failed)
+            .count();
+
         println!("\n=============================");
         println!("Test Suites: {}", self.results.len());
         println!("Tests Passed: {}", passed);
@@ -104,7 +114,7 @@ mod tests {
             duration_ms: 10,
             error: None,
         }];
-        
+
         let output = reporter.report(&results);
         assert!(output.contains("test"));
     }

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
-use std::path::PathBuf;
 
 pub mod accessibility;
 
@@ -12,7 +12,11 @@ pub mod accessibility;
 #[command(about = "Modern, secure-by-default, WASM-first JS/TS runtime", long_about = None)]
 struct Cli {
     /// Activa el modo de accesibilidad para lectores Braille/Screen readers (desactiva color y animaciones)
-    #[arg(global = true, long = "accessible", help = "Enable screen-reader/braille accessible output (disables colors and animations)")]
+    #[arg(
+        global = true,
+        long = "accessible",
+        help = "Enable screen-reader/braille accessible output (disables colors and animations)"
+    )]
     accessible: bool,
 
     #[command(subcommand)]
@@ -99,7 +103,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    
+
     let is_accessible = accessibility::is_accessible_mode(cli.accessible);
 
     // Initialize tracing with ANSI colors conditionally
@@ -107,18 +111,24 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(Level::INFO)
         .with_ansi(!is_accessible)
         .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     if is_accessible {
         info!("Accessible mode enabled: colors and complex terminal animations are turned off.");
     }
 
     match &cli.command {
-        Commands::Run { file, allow_read, allow_net, allow_write, allow_env, allow_child_process } => {
+        Commands::Run {
+            file,
+            allow_read,
+            allow_net,
+            allow_write,
+            allow_env,
+            allow_child_process,
+        } => {
             info!("Running {:?} (Sandboxed)", file);
             let mut permissions = vvva_permissions::PermissionState::new();
-            
+
             // Habilitar prompts interactivos por defecto para mejorar la DX
             permissions.set_interactive(true);
 
@@ -147,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
             let engine = vvva_js::JsEngine::new(&permissions)?;
             let _runtime = vvva_core::Runtime::new(permissions);
             info!("3va Runtime initialized securely.");
-            
+
             // Execute file (transpiles TypeScript automatically)
             engine.eval_file(file)?;
             // Run event loop to process any pending timers/callbacks
@@ -163,7 +173,10 @@ async fn main() -> anyhow::Result<()> {
                 info!("Note: Post-install scripts are DISABLED by default for security.");
             }
         }
-        Commands::Update { packages, allow_net } => {
+        Commands::Update {
+            packages,
+            allow_net,
+        } => {
             info!("Updating packages...");
             vvva_pm::update_packages(packages, allow_net.as_deref()).await?;
         }
@@ -187,12 +200,21 @@ async fn main() -> anyhow::Result<()> {
             };
             info!("Running tests...");
             let results = vvva_test::run_tests(target_paths, None)?;
-            let failed = results.iter().filter(|r| r.status == vvva_test::TestStatus::Failed).count();
+            let failed = results
+                .iter()
+                .filter(|r| r.status == vvva_test::TestStatus::Failed)
+                .count();
             if failed > 0 {
                 anyhow::bail!("{} tests failed.", failed);
             }
         }
-        Commands::Audit => info!("Auditing dependencies..."),
+        Commands::Audit => {
+            info!("Auditing dependencies...");
+            let clean = vvva_pm::audit_packages()?;
+            if !clean {
+                anyhow::bail!("Audit detected critical threats.");
+            }
+        }
         Commands::Doctor => info!("Checking 3va health..."),
         Commands::Sandbox => info!("Entering interactive sandbox..."),
     }

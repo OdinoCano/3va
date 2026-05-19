@@ -1,0 +1,17 @@
+rules:
+  - id: 3va-security
+    pattern: null
+    message: 3VA Security Rules
+    severity: INFRA
+    languages: [rust]
+
+paths:
+  exclude:
+    - "target/**"
+    - "*.lock"
+    - "vendor/**"
+    - "fuzz/**"
+
+severity:
+  - ERROR
+  - WARNING

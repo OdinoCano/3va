@@ -12,7 +12,7 @@ pub struct Semver {
 impl Semver {
     pub fn parse(version: &str) -> Option<Self> {
         let version = version.trim();
-        
+
         let (main, prerelease_build) = if let Some((main, pb)) = version.split_once('-') {
             (main, Some(pb))
         } else {
@@ -97,7 +97,7 @@ pub enum SemverRange {
 impl SemverRange {
     pub fn parse(range: &str) -> Option<Self> {
         let range = range.trim();
-        
+
         if range == "*" || range == "" {
             return Some(SemverRange::Any);
         }
@@ -145,9 +145,7 @@ impl SemverRange {
             SemverRange::Any => true,
             SemverRange::Exact(v) => version == v,
             SemverRange::Caret(base) => {
-                version.major == base.major
-                    && version >= base
-                    && version.major < base.major + 1
+                version.major == base.major && version >= base && version.major < base.major + 1
             }
             SemverRange::Tilde(base) => {
                 version.major == base.major

@@ -1,6 +1,6 @@
+use sha2::Digest;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use sha2::Digest;
 
 pub struct PackageFetcher {
     registry: String,
@@ -18,47 +18,47 @@ impl PackageFetcher {
     }
 
     pub async fn fetch(&self, name: &str, version: &str) -> anyhow::Result<Vec<u8>> {
-        let url = format!(
-            "{}/{}/-/{}-{}.tgz",
-            self.registry, name, name, version
-        );
+        let url = format!("{}/{}/-/{}-{}.tgz", self.registry, name, name, version);
 
         tracing::info!("Fetching {}@{} from {}", name, version, url);
 
         let response = self.client.get(&url).send().await?;
 
         if !response.status().is_success() {
-            anyhow::bail!("Failed to fetch {}@{}: {}", name, version, response.status());
+            anyhow::bail!(
+                "Failed to fetch {}@{}: {}",
+                name,
+                version,
+                response.status()
+            );
         }
 
         let bytes = response.bytes().await?.to_vec();
-        
+
         Ok(bytes)
     }
 
     pub fn extract(&self, tarball: &[u8], dest: &PathBuf) -> anyhow::Result<()> {
         let decoder = flate2::read::GzDecoder::new(tarball);
         let mut archive = tar::Archive::new(decoder);
-        
+
         std::fs::create_dir_all(dest)?;
-        
+
         for entry in archive.entries()? {
             let mut entry = entry?;
             let path = entry.path()?;
-            
-            let cleaned: std::path::PathBuf = path.iter()
-                .skip(1)
-                .collect();
-            
+
+            let cleaned: std::path::PathBuf = path.iter().skip(1).collect();
+
             let out_path = dest.join(cleaned);
-            
+
             if let Some(parent) = out_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            
+
             entry.unpack(&out_path)?;
         }
-        
+
         Ok(())
     }
 
@@ -101,43 +101,46 @@ impl PackageCache {
 
     pub fn put(&mut self, name: &str, version: &str, path: PathBuf) {
         let key = format!("{}@{}", name, version);
-        let size = std::fs::metadata(&path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        
-        self.metadata.insert(key, CacheEntry {
-            path,
-            size,
-            last_access: std::time::SystemTime::now(),
-        });
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+        self.metadata.insert(
+            key,
+            CacheEntry {
+                path,
+                size,
+                last_access: std::time::SystemTime::now(),
+            },
+        );
     }
 
     pub fn prune(&mut self) -> anyhow::Result<()> {
         let total_size: u64 = self.metadata.values().map(|e| e.size).sum();
-        
+
         if total_size <= self.max_size {
             return Ok(());
         }
 
-        let mut entries: Vec<_> = self.metadata.iter()
+        let mut entries: Vec<_> = self
+            .metadata
+            .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        
+
         entries.sort_by(|a, b| a.1.last_access.cmp(&b.1.last_access));
-        
+
         let mut current_size = total_size;
         for (key, entry) in entries {
             if current_size <= self.max_size / 2 {
                 break;
             }
-            
+
             if let Some(e) = self.metadata.get(&key) {
                 current_size -= e.size;
                 let _ = std::fs::remove_dir_all(&e.path);
             }
             self.metadata.remove(&key);
         }
-        
+
         Ok(())
     }
 }

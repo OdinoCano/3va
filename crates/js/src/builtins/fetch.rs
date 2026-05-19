@@ -1,13 +1,15 @@
-use rquickjs::{Ctx, Result, Function};
-use vvva_permissions::{PermissionState, Capability};
-use std::rc::Rc;
+use rquickjs::{Ctx, Function, Result};
 use std::cell::RefCell;
+use std::rc::Rc;
+use vvva_permissions::{Capability, PermissionState};
 
 pub fn inject_fetch(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result<()> {
-    ctx.eval::<(), _>(r#"
-        global.fetch = async function(url) {
+    ctx.eval::<(), _>(
+        r#"
+        globalThis.fetch = async function(url) {
             throw new Error('fetch() not implemented - network access requires --allow-net');
         }
-    "#)?;
+    "#,
+    )?;
     Ok(())
 }

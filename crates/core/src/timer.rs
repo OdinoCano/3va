@@ -30,7 +30,11 @@ impl Timer {
         }
     }
 
-    pub fn interval(id: TimerId, callback: Box<dyn FnOnce() + Send + Send>, interval: Duration) -> Self {
+    pub fn interval(
+        id: TimerId,
+        callback: Box<dyn FnOnce() + Send + Send>,
+        interval: Duration,
+    ) -> Self {
         let scheduled_at = Instant::now() + interval;
         Self {
             id,
@@ -248,8 +252,12 @@ impl TimerWheel {
     }
 
     pub fn pending_count(&self) -> usize {
-        self.wheel_ms.len() + self.wheel_s.len() + self.wheel_m.len()
-            + self.wheel_h.len() + self.wheel_d.len() + self.wheel_large.len()
+        self.wheel_ms.len()
+            + self.wheel_s.len()
+            + self.wheel_m.len()
+            + self.wheel_h.len()
+            + self.wheel_d.len()
+            + self.wheel_large.len()
     }
 
     pub fn next_duration(&self) -> Option<Duration> {

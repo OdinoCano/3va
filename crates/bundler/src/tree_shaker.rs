@@ -18,30 +18,31 @@ impl TreeShaker {
         let mut in_string = false;
         let mut current = String::new();
         let mut chars = code.chars().peekable();
-        
+
         while let Some(c) = chars.next() {
             if c == '\'' || c == '"' {
                 in_string = !in_string;
             }
-            
+
             if in_string && c != '\'' && c != '"' {
                 current.push(c);
             }
-            
+
             if !in_string && !current.is_empty() {
-                if current.starts_with("./") || current.starts_with("../") || !current.contains('/') {
+                if current.starts_with("./") || current.starts_with("../") || !current.contains('/')
+                {
                     imports.insert(current.clone());
                 }
                 current.clear();
             }
         }
-        
+
         imports
     }
 
     pub fn analyze_exports(&self, code: &str) -> Vec<String> {
         let mut exports = Vec::new();
-        
+
         for line in code.lines() {
             let line = line.trim();
             if line.starts_with("export ") {
@@ -50,7 +51,7 @@ impl TreeShaker {
                 exports.push(line.to_string());
             }
         }
-        
+
         exports
     }
 
@@ -70,18 +71,18 @@ impl TreeShaker {
 
     pub fn remove_dead_code(&self, code: &str) -> String {
         let mut result = String::new();
-        
+
         for line in code.lines() {
             let trimmed = line.trim();
-            
+
             if trimmed.contains("if (false)") || trimmed.starts_with("if (false)") {
                 continue;
             }
-            
+
             result.push_str(line);
             result.push('\n');
         }
-        
+
         result
     }
 }
@@ -101,28 +102,28 @@ impl DeadCodeEliminator {
         let mut result = Vec::new();
         let mut skip_block = false;
         let mut brace_count = 0;
-        
+
         for line in code.lines() {
             let trimmed = line.trim();
-            
+
             if trimmed.starts_with("if (false)") || trimmed == "if (false) {" {
                 skip_block = true;
                 brace_count = 0;
             }
-            
+
             if skip_block {
                 brace_count += trimmed.matches('{').count() as i32;
                 brace_count -= trimmed.matches('}').count() as i32;
-                
+
                 if brace_count <= 0 {
                     skip_block = false;
                 }
                 continue;
             }
-            
+
             result.push(line);
         }
-        
+
         result.join("\n")
     }
 }
@@ -140,13 +141,13 @@ mod tests {
     #[test]
     fn test_tree_shaker_analyze_imports() {
         let mut shaper = TreeShaker::new(vec!["main".to_string()]);
-        
+
         let code = r#"
 import foo from './foo';
 import { bar } from './bar';
 const x = require('./baz');
 "#;
-        
+
         let imports = shaper.analyze_imports(code);
         assert!(imports.contains(&"./foo".to_string()));
         assert!(imports.contains(&"./bar".to_string()));
@@ -155,13 +156,13 @@ const x = require('./baz');
     #[test]
     fn test_tree_shaker_analyze_exports() {
         let shaper = TreeShaker::new(vec![]);
-        
+
         let code = r#"
 export function test() {}
 export const x = 1;
 module.exports = {};
 "#;
-        
+
         let exports = shaper.analyze_exports(code);
         assert!(!exports.is_empty());
     }
@@ -169,7 +170,7 @@ module.exports = {};
     #[test]
     fn test_dead_code_eliminator() {
         let elim = DeadCodeEliminator::new();
-        
+
         let code = r#"
 const a = 1;
 if (false) {
@@ -177,7 +178,7 @@ if (false) {
 }
 const b = 3;
 "#;
-        
+
         let result = elim.eliminate(code);
         assert!(!result.contains("if (false)"));
     }

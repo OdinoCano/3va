@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf, Component};
 use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct MountPoint {
@@ -17,7 +17,12 @@ impl VirtualFs {
         Self::default()
     }
 
-    pub fn mount<P: AsRef<Path>, S: AsRef<Path>>(&mut self, virtual_path: P, source: S, read_only: bool) {
+    pub fn mount<P: AsRef<Path>, S: AsRef<Path>>(
+        &mut self,
+        virtual_path: P,
+        source: S,
+        read_only: bool,
+    ) {
         self.mounts.insert(
             virtual_path.as_ref().to_path_buf(),
             MountPoint {
@@ -29,10 +34,9 @@ impl VirtualFs {
 
     pub fn resolve(&self, path: &Path) -> Result<PathBuf, String> {
         let normalized = normalize_path(path);
-        
+
         for (vp, mount) in &self.mounts {
-            if normalized.starts_with(vp) {
-                let relative = normalized.strip_prefix(vp).unwrap();
+            if let Ok(relative) = normalized.strip_prefix(vp) {
                 let real = mount.source.join(relative);
                 return Ok(real);
             }
@@ -81,8 +85,8 @@ impl VirtualNetwork {
                 return true;
             }
             if let Some(suffix) = allowed.strip_prefix("*.") {
-                return host.ends_with(suffix) 
-                    && host.len() > suffix.len() 
+                return host.ends_with(suffix)
+                    && host.len() > suffix.len()
                     && host.as_bytes()[host.len() - suffix.len() - 1] == b'.';
             }
             false
@@ -108,7 +112,10 @@ mod tests {
 
         // Valid resolution
         let resolved = vfs.resolve(Path::new("/app/config.json")).unwrap();
-        assert_eq!(resolved.to_str().unwrap(), "/var/lib/3va/sandbox1/config.json");
+        assert_eq!(
+            resolved.to_str().unwrap(),
+            "/var/lib/3va/sandbox1/config.json"
+        );
 
         // Path traversal attempt gets normalized to stay within bounds or errors if out
         // /app/../etc/passwd -> /etc/passwd -> not starts with /app -> error
@@ -125,7 +132,7 @@ mod tests {
 
         assert!(vnet.is_allowed("api.github.com"));
         assert!(!vnet.is_allowed("github.com"));
-        
+
         assert!(vnet.is_allowed("maps.google.com"));
         assert!(vnet.is_allowed("api.maps.google.com"));
         assert!(!vnet.is_allowed("google.com"));

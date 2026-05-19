@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleKey {
@@ -27,7 +27,14 @@ impl ModuleResolver {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
-            extensions: vec![".ts".to_string(), ".tsx".to_string(), ".js".to_string(), ".jsx".to_string(), ".mjs".to_string(), ".json".to_string()],
+            extensions: vec![
+                ".ts".to_string(),
+                ".tsx".to_string(),
+                ".js".to_string(),
+                ".jsx".to_string(),
+                ".mjs".to_string(),
+                ".json".to_string(),
+            ],
             alias: HashMap::new(),
         }
     }
@@ -106,21 +113,20 @@ impl ModuleResolver {
         let path = PathBuf::from(specifier);
         if path.is_file() {
             let module_type = self.guess_type(&path);
-            return Ok(ModuleKey {
-                path,
-                module_type,
-            });
+            return Ok(ModuleKey { path, module_type });
         }
         anyhow::bail!("Cannot resolve absolute path: {}", specifier)
     }
 
     fn resolve_node_module(&self, _from: &Path, specifier: &str) -> anyhow::Result<ModuleKey> {
         let node_modules = self.root.join("node_modules").join(specifier);
-        
+
         if node_modules.is_dir() {
             let package_json = node_modules.join("package.json");
             if package_json.is_file() {
-                if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&package_json)?) {
+                if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(
+                    &std::fs::read_to_string(&package_json)?,
+                ) {
                     if let Some(main) = pkg.get("main").and_then(|m| m.as_str()) {
                         let main_path = node_modules.join(main);
                         if main_path.is_file() {
@@ -132,7 +138,7 @@ impl ModuleResolver {
                         }
                     }
                 }
-                
+
                 let index_path = node_modules.join("index.js");
                 if index_path.is_file() {
                     return Ok(ModuleKey {
@@ -170,10 +176,10 @@ mod tests {
     fn test_resolver_relative() {
         let root = std::env::temp_dir();
         let resolver = ModuleResolver::new(root.clone());
-        
+
         let from = root.join("index.ts");
         let result = resolver.resolve(&from, "./nonexistent");
-        
+
         assert!(result.is_err());
     }
 }

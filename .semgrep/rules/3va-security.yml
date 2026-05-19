@@ -1,0 +1,159 @@
+rules:
+  # === CAPABILITY BYPASS ===
+  - id: capability-bypass-env
+    pattern: std::env::var($KEY)
+    message: "Acceso a entorno sin capability --allow-env validada"
+    severity: ERROR
+    languages: [rust]
+    paths:
+      include:
+        - crates/permissions/**
+        - crates/core/**
+
+  - id: capability-bypass-net
+    patterns:
+      - pattern: reqwest::get(...)
+      - pattern: reqwest::Client::new().get(...)
+      - pattern: ureq::get(...)
+      - pattern: tokio::net::TcpStream::connect(...)
+    message: "Red sin capability --allow-net validada"
+    severity: ERROR
+    languages: [rust]
+    paths:
+      include:
+        - crates/**
+      exclude:
+        - crates/pm/src/lib.rs   # PM tiene validación propia de --allow-net
+
+  # === HOST VALIDATION ===
+  - id: host-substring-match
+    # Detecta comparaciones de host con .contains() que permiten bypass de dominio.
+    # Correcto: usar == (igualdad exacta) o ends_with con separador de dominio.
+    # Incorrecto: "registry.npmjs.org.evil.com".contains("npmjs.org") == true
+    patterns:
+      - pattern: $ALLOWED.contains($REG)
+      - pattern: $REG.contains($ALLOWED)
+    message: >
+      Comparación de host con .contains() permite bypass de dominio.
+      Usar igualdad exacta (==) o ends_with con prefijo '.' para validar subdominios.
+    severity: ERROR
+    languages: [rust]
+    paths:
+      include:
+        - crates/pm/**
+      exclude:
+        - crates/pm/src/lib.rs   # Ya corregido a host_is_allowed()
+
+  - id: no-host-validation-net
+    pattern: reqwest::get($URL)
+    message: "Petición de red sin validación de host. Validar URL contra allowlist."
+    severity: ERROR
+    languages: [rust]
+    paths:
+      include:
+        - crates/**
+      exclude:
+        - crates/pm/src/lib.rs
+
+  # === SANDBOX / PATH TRAVERSAL ===
+  - id: strip-prefix-unwrap
+    # strip_prefix().unwrap() panics si el prefix no coincide.
+    # Usar strip_prefix(...).ok_or(...) o if let Ok(...) = ...
+    pattern: $X.strip_prefix($P).unwrap()
+    message: >
+      strip_prefix().unwrap() puede pánico si starts_with() y strip_prefix() no son atómicos.
+      Usar: if let Ok(rel) = path.strip_prefix(base) { ... }
+    severity: WARNING
+    languages: [rust]
+    paths:
+      include:
+        - crates/**
+
+  - id: sandbox-bypass-symlink
+    pattern: |
+      std::fs::read_link($PATH)
+      ...
+      std::fs::read_to_string($RESULT)
+    message: "Posible symlink escape — verificar que read_link() sigue la política de sandbox"
+    severity: ERROR
+    languages: [rust]
+
+  - id: sandbox-bypass-path-traversal
+    patterns:
+      - pattern: $X.join($Y)
+      - pattern: PathBuf::from($UNTRUSTED)
+    message: >
+      Construcción de path sin canonicalize() puede permitir path traversal.
+      Llamar .canonicalize() y verificar que el resultado empieza por la raíz del sandbox.
+    severity: WARNING
+    languages: [rust]
+    paths:
+      include:
+        - crates/js/**
+        - crates/pm/**
+      exclude:
+        - crates/js/src/builtins/modules.rs   # resolve_path_from() ya valida
+
+  # === RWLOCK POISONING ===
+  - id: rwlock-unwrap
+    patterns:
+      - pattern: $LOCK.read().unwrap()
+      - pattern: $LOCK.write().unwrap()
+    message: >
+      RwLock::read/write().unwrap() puede pánico si otro hilo entró en pánico mientras
+      sostenía el lock (lock poisoning). Usar .unwrap_or_else(|p| p.into_inner()).
+    severity: WARNING
+    languages: [rust]
+    paths:
+      include:
+        - crates/**
+      exclude:
+        - crates/permissions/src/enforcement.rs   # Ya corregido
+
+  # === DESERIALIZACIÓN ===
+  - id: unsafe-deserialization-value
+    patterns:
+      - pattern: serde_json::from_str::<serde_json::Value>($INPUT)
+      - pattern: toml::from_str::<toml::Value>($INPUT)
+    message: "Deserialización a Value sin esquema — preferir struct tipado con serde derive"
+    severity: WARNING
+    languages: [rust]
+    paths:
+      include:
+        - crates/pm/**
+        - crates/bundler/**
+
+  - id: unwrap-on-external-json
+    # Deserializar JSON externo (red, disco) con .unwrap() puede pánico con input malicioso.
+    patterns:
+      - pattern: serde_json::from_str($X).unwrap()
+      - pattern: serde_json::from_slice($X).unwrap()
+    message: "Parseo de JSON externo con .unwrap() — usar ? o map_err para propagar el error"
+    severity: ERROR
+    languages: [rust]
+    paths:
+      include:
+        - crates/**
+      exclude:
+        - "**/*_test*"
+        - "**/tests/**"
+        - "**/test*"
+
+  # === ENV/SECRET ===
+  - id: env-secret-exposure
+    patterns:
+      - pattern: std::env::set_var($KEY, $VALUE)
+      - pattern: std::env::remove_var($KEY)
+    message: "Modificación de entorno detectada — posible leakage de secrets en procesos hijos"
+    severity: ERROR
+    languages: [rust]
+
+  # === JS↔RUST BRIDGE ===
+  - id: js-bridge-type-confusion
+    pattern: $JS_VALUE.as_$TYPE().unwrap()
+    message: "Conversión JS→Rust sin validación de tipo — usar as_TYPE().ok_or_else(...)"
+    severity: WARNING
+    languages: [rust]
+    paths:
+      include:
+        - crates/js/**

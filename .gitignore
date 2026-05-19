@@ -1,3 +1,36 @@
 /target
 **/*.rs.bk
-Cargo.lock
+
+# 3va runtime artifacts
+node_modules/
+.3va-cache/
+*.tgz
+
+# npm artifacts (use 3va-lock.json instead)
+package-lock.json
+yarn.lock
+
+# Editor / tooling
+.claude/
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/settings.json
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Fuzzing artifacts
+fuzz/corpus/
+fuzz/artifacts/
+corpus/
+
+# Security — estos archivos SÍ van al repo
+# .semgrep/   → reglas de seguridad, deben commitearse
+# Cargo.lock  → trackeado para reproducibilidad y auditoría de supply chain

@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatcherResult {
@@ -13,7 +13,11 @@ impl Matchers {
         let passed = format!("{:?}", actual) == format!("{:?}", expected);
         MatcherResult {
             passed,
-            message: if passed { "PASS".to_string() } else { format!("Expected {:?} to be {:?}", actual, expected) },
+            message: if passed {
+                "PASS".to_string()
+            } else {
+                format!("Expected {:?} to be {:?}", actual, expected)
+            },
         }
     }
 
@@ -25,7 +29,11 @@ impl Matchers {
         let passed = !format!("{:?}", value).is_empty();
         MatcherResult {
             passed,
-            message: if passed { "PASS".to_string() } else { "Expected value to be truthy".to_string() },
+            message: if passed {
+                "PASS".to_string()
+            } else {
+                "Expected value to be truthy".to_string()
+            },
         }
     }
 
@@ -33,7 +41,11 @@ impl Matchers {
         let passed = format!("{:?}", value).is_empty();
         MatcherResult {
             passed,
-            message: if passed { "PASS".to_string() } else { "Expected value to be falsy".to_string() },
+            message: if passed {
+                "PASS".to_string()
+            } else {
+                "Expected value to be falsy".to_string()
+            },
         }
     }
 
@@ -41,7 +53,11 @@ impl Matchers {
         let passed = haystack.contains(needle);
         MatcherResult {
             passed,
-            message: if passed { "PASS".to_string() } else { format!("Expected '{}' to contain '{}'", haystack, needle) },
+            message: if passed {
+                "PASS".to_string()
+            } else {
+                format!("Expected '{}' to contain '{}'", haystack, needle)
+            },
         }
     }
 
@@ -49,7 +65,11 @@ impl Matchers {
         let passed = actual > expected;
         MatcherResult {
             passed,
-            message: if passed { "PASS".to_string() } else { format!("Expected {} > {}", actual, expected) },
+            message: if passed {
+                "PASS".to_string()
+            } else {
+                format!("Expected {} > {}", actual, expected)
+            },
         }
     }
 
@@ -57,7 +77,11 @@ impl Matchers {
         let passed = actual < expected;
         MatcherResult {
             passed,
-            message: if passed { "PASS".to_string() } else { format!("Expected {} < {}", actual, expected) },
+            message: if passed {
+                "PASS".to_string()
+            } else {
+                format!("Expected {} < {}", actual, expected)
+            },
         }
     }
 }

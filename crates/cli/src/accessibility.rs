@@ -1,6 +1,6 @@
 use std::env;
 
-/// Determina si el entorno o el usuario han solicitado desactivar 
+/// Determina si el entorno o el usuario han solicitado desactivar
 /// el coloreado ANSI y animaciones complejas, garantizando la compatibilidad
 /// con displays Braille y lectores de pantalla (EN 301 549).
 pub fn is_accessible_mode(cli_flag: bool) -> bool {
@@ -17,7 +17,7 @@ pub fn is_accessible_mode(cli_flag: bool) -> bool {
     }
 
     // Si la consola no es un TTY, deberíamos comportarnos como accesibles por defecto
-    // aunque esto depende de cada implementación, pero para este proyecto lo simplificamos 
+    // aunque esto depende de cada implementación, pero para este proyecto lo simplificamos
     // a la presencia del flag o variable.
 
     false

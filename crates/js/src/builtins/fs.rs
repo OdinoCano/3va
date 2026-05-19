@@ -1,10 +1,11 @@
-use rquickjs::{Ctx, Result, Function, Object};
-use std::rc::Rc;
+use rquickjs::{Ctx, Function, Object, Result};
 use std::cell::RefCell;
-use vvva_permissions::{PermissionState, Capability};
+use std::rc::Rc;
+use vvva_permissions::{Capability, PermissionState};
 
 pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result<()> {
-    ctx.eval::<(), _>(r#"
+    ctx.eval::<(), _>(
+        r#"
         const fs = {
             readFile: function(path) {
                 throw new Error('fs.readFile requires --allow-read');
@@ -19,7 +20,8 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
                 throw new Error('fs.readdir requires --allow-read');
             }
         };
-        global.fs = fs;
-    "#)?;
+        globalThis.fs = fs;
+    "#,
+    )?;
     Ok(())
 }

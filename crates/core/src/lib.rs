@@ -45,7 +45,8 @@ impl Runtime {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.timer_wheel.schedule_interval_with_callback(interval, callback)
+        self.timer_wheel
+            .schedule_interval_with_callback(interval, callback)
     }
 
     pub fn clear_timeout(&mut self, id: TimerId) -> bool {

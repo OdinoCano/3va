@@ -1,5 +1,5 @@
-use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,14 +119,24 @@ impl AuditLogger {
     pub fn log_file(&mut self, path: &PathBuf, operation: &str, allowed: bool) {
         self.log.log_file_access(path, operation, allowed);
         if self.enable_console && !allowed {
-            eprintln!("[AUDIT] FILE {} {} - {}", operation, path.display(), if allowed { "allowed" } else { "denied" });
+            eprintln!(
+                "[AUDIT] FILE {} {} - {}",
+                operation,
+                path.display(),
+                if allowed { "allowed" } else { "denied" }
+            );
         }
     }
 
     pub fn log_network(&mut self, host: &str, port: u16, allowed: bool) {
         self.log.log_network_access(host, port, allowed);
         if self.enable_console && !allowed {
-            eprintln!("[AUDIT] NETWORK {}:{} - {}", host, port, if allowed { "allowed" } else { "denied" });
+            eprintln!(
+                "[AUDIT] NETWORK {}:{} - {}",
+                host,
+                port,
+                if allowed { "allowed" } else { "denied" }
+            );
         }
     }
 
@@ -154,7 +164,7 @@ mod tests {
         let mut logger = AuditLogger::new();
         logger.log_denied("FileRead", "/etc/passwd", "No permission granted");
         logger.log_network("evil.com", 443, false);
-        
+
         let json = logger.export();
         assert!(json.contains("PermissionDenied"));
         assert!(json.contains("NetworkAccess"));

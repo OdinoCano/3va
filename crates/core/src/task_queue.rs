@@ -1,5 +1,5 @@
-use std::collections::{VecDeque, BinaryHeap};
 use std::cmp::Ordering;
+use std::collections::{BinaryHeap, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TaskType {
@@ -70,7 +70,9 @@ impl PartialEq for DelayedTask {
 
 impl Ord for DelayedTask {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.scheduled_at.cmp(&self.scheduled_at)
+        other
+            .scheduled_at
+            .cmp(&self.scheduled_at)
             .then_with(|| other.id.cmp(&self.id))
     }
 }
@@ -136,17 +138,24 @@ impl TaskQueue {
             }
         }
 
-        self.high_priority.pop_front()
+        self.high_priority
+            .pop_front()
             .or_else(|| self.normal_priority.pop_front())
             .or_else(|| self.low_priority.pop_front())
     }
 
     pub fn pending_count(&self) -> usize {
-        self.high_priority.len() + self.normal_priority.len() + self.low_priority.len() + self.delayed.len()
+        self.high_priority.len()
+            + self.normal_priority.len()
+            + self.low_priority.len()
+            + self.delayed.len()
     }
 
     pub fn has_ready_delayed(&self) -> bool {
-        self.delayed.peek().map(|d| d.scheduled_at <= std::time::Instant::now()).unwrap_or(false)
+        self.delayed
+            .peek()
+            .map(|d| d.scheduled_at <= std::time::Instant::now())
+            .unwrap_or(false)
     }
 
     pub fn next_delayed_duration(&self) -> Option<std::time::Duration> {

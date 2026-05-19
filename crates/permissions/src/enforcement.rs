@@ -1,6 +1,6 @@
+use crate::capability::{Capability, PermissionState};
 use std::path::PathBuf;
 use std::sync::Arc;
-use crate::capability::{Capability, PermissionState};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PermissionError {
@@ -56,7 +56,9 @@ impl FsEnforcer {
     }
 
     pub fn from_arc(state: Arc<PermissionState>) -> Self {
-        Self { permission_state: state }
+        Self {
+            permission_state: state,
+        }
     }
 
     pub fn check_read(&self, path: &std::path::Path) -> Result<(), PermissionError> {
@@ -82,7 +84,8 @@ impl FsEnforcer {
     }
 
     pub fn check_read_recursive(&self, path: &std::path::Path) -> Result<(), PermissionError> {
-        let granted = self.permission_state.granted.read().unwrap();
+        let granted = self.permission_state.granted.read()
+            .unwrap_or_else(|p| p.into_inner()); // recover from poisoned lock
         for cap in granted.iter() {
             if let Capability::FileRead(allowed) = cap {
                 if path.starts_with(allowed) || allowed.starts_with(path) {
@@ -109,7 +112,9 @@ impl NetEnforcer {
     }
 
     pub fn from_arc(state: Arc<PermissionState>) -> Self {
-        Self { permission_state: state }
+        Self {
+            permission_state: state,
+        }
     }
 
     pub fn check_connect(&self, host: &str, port: u16) -> Result<(), PermissionError> {
@@ -125,9 +130,9 @@ impl NetEnforcer {
     }
 
     pub fn check_url(&self, url: &url::Url) -> Result<(), PermissionError> {
-        let host = url.host_str().ok_or_else(|| {
-            PermissionError::InvalidUrl(url.to_string())
-        })?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| PermissionError::InvalidUrl(url.to_string()))?;
 
         self.check_connect(host, url.port().unwrap_or(80))
     }

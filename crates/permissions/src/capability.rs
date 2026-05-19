@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use serde::{Serialize, Deserialize};
 
 /// Un permiso explícito para realizar una operación específica sobre un recurso.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -18,8 +18,8 @@ pub enum Capability {
     FFI,
 }
 
-use std::sync::RwLock;
 use std::io::Write;
+use std::sync::RwLock;
 
 /// Estado de permisos del proceso, conforme al modelo deny-by-default.
 ///
@@ -35,7 +35,7 @@ pub struct PermissionState {
     pub granted: RwLock<Vec<Capability>>,
     /// Capabilities denegadas explícitamente (tienen precedencia sobre granted).
     pub denied: RwLock<Vec<Capability>>,
-    
+
     /// Si está activado, lanza un prompt en consola cuando se detecta un permiso no configurado.
     pub interactive: bool,
 
@@ -150,7 +150,9 @@ impl PermissionState {
             Capability::FFI => "acceder a llamadas FFI nativas".to_string(),
         };
 
-        eprint!("\n[!] El script está intentando {msg}.\n¿Permitir? [y (Sí una vez) / N (Denegar) / A (Permitir Siempre)] ");
+        eprint!(
+            "\n[!] El script está intentando {msg}.\n¿Permitir? [y (Sí una vez) / N (Denegar) / A (Permitir Siempre)] "
+        );
         let _ = std::io::stdout().flush();
 
         let mut input = String::new();
@@ -163,7 +165,7 @@ impl PermissionState {
                 return true; // Permitido siempre
             }
         }
-        
+
         // Cualquier otra cosa (N o enter) es deny
         self.deny(required.clone());
         false

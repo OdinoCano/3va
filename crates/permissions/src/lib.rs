@@ -1,11 +1,9 @@
 pub mod audit;
 pub mod capability;
-pub mod sandbox;
 pub mod enforcement;
+pub mod sandbox;
 
-pub use audit::{AuditLogger, AuditLog, AuditEvent};
+pub use audit::{AuditEvent, AuditLog, AuditLogger};
 pub use capability::{Capability, PermissionState};
+pub use enforcement::{EnvEnforcer, FsEnforcer, NetEnforcer, PermissionError, ProcessEnforcer};
 pub use sandbox::{VirtualFs, VirtualNetwork};
-pub use enforcement::{
-    FsEnforcer, NetEnforcer, EnvEnforcer, ProcessEnforcer, PermissionError
-};

@@ -7,8 +7,8 @@ pub mod process;
 pub mod timers;
 
 use rquickjs::Ctx;
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
 use vvva_permissions::PermissionState;
 
 pub fn inject_all(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> rquickjs::Result<()> {

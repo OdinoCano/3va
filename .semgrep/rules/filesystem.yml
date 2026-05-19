@@ -1,0 +1,24 @@
+rules:
+  - id: no-std-fs-without-validation
+    patterns:
+      - pattern: std::fs::read_to_string($PATH)
+        condition: not $PATH.contains("...")
+      - pattern: std::fs::write($PATH, ...)
+        condition: not $PATH.contains("...")
+      - pattern: std::fs::read_dir($PATH)
+    message: "std::fs sin validación de path. Usar canonicalize y validación de sandbox."
+    severity: WARNING
+    languages: [rust]
+    paths:
+      include:
+        - crates/core/**
+        - crates/pm/**
+
+  - id: no-tokio-process-without-validation
+    pattern: tokio::process::Command
+    message: "tokio::process::Command detectado. Validar entrada y usar sandboxing."
+    severity: WARNING
+    languages: [rust]
+    paths:
+      include:
+        - crates/**

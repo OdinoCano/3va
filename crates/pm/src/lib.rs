@@ -1,17 +1,17 @@
 pub mod fetcher;
 pub mod lockfile;
-pub mod manifest;
 pub mod malware_scanner;
+pub mod manifest;
 pub mod resolver;
 pub mod semver;
 pub mod signature_verifier;
 
-pub use manifest::{PackageManifest, PackageInfo, PackagePermissions};
 pub use lockfile::Lockfile;
 pub use malware_scanner::{MalwareScanner, ScanResult, Threat, ThreatLevel};
+pub use manifest::{PackageInfo, PackageManifest, PackagePermissions};
 pub use resolver::{DependencyGraph, DependencyNode, Resolver};
 pub use semver::{Semver, SemverRange};
-pub use signature_verifier::{SignatureVerifier, VerificationStatus, HashAlgorithm, SignatureInfo};
+pub use signature_verifier::{HashAlgorithm, SignatureInfo, SignatureVerifier, VerificationStatus};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -30,13 +30,22 @@ impl Registry {
     /// Deriva el registro desde el host especificado en --allow-net.
     /// El host que el usuario autoriza explícitamente define el registro.
     pub fn from_allowed_host(host: &str) -> Self {
-        let h = host.trim().trim_start_matches("https://").trim_start_matches("http://");
-        let h = h.split('/').next().unwrap_or(h); // quita paths
-        if h.contains("jsr.io") {
+        let h = host
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        // Strip path component and port — keep only hostname
+        let h = h.split('/').next().unwrap_or(h);
+        let h = h.split(':').next().unwrap_or(h);
+        // Exact-match or public-suffix match against known registries.
+        // Using .contains() would let "evil.npmjs.org.attacker.com" match — use eq or suffix.
+        if h == "jsr.io" || h.ends_with(".jsr.io") || h == "npm.jsr.io" {
             Registry::Jsr
-        } else if h.contains("yarnpkg.com") {
+        } else if h == "registry.yarnpkg.com" || h.ends_with(".yarnpkg.com") {
             Registry::Yarn
-        } else if h.contains("npmjs.org") || h.contains("npmjs.com") {
+        } else if h == "registry.npmjs.org" || h == "registry.npmjs.com"
+            || h.ends_with(".npmjs.org") || h.ends_with(".npmjs.com")
+        {
             Registry::Npm
         } else {
             Registry::Custom(format!("https://{}", h))
@@ -77,7 +86,12 @@ impl PackageManager {
         }
     }
 
-    pub fn install(&mut self, deps: &HashMap<String, String>, project_name: &str, project_version: &str) -> anyhow::Result<Lockfile> {
+    pub fn install(
+        &mut self,
+        deps: &HashMap<String, String>,
+        project_name: &str,
+        project_version: &str,
+    ) -> anyhow::Result<Lockfile> {
         let graph = self.resolver.resolve(deps);
         let lockfile = Lockfile::generate(&graph, project_name, project_version);
         tracing::info!("Resolved {} dependencies", graph.nodes().len());
@@ -95,12 +109,22 @@ impl PackageManager {
 
 // ── Registry lookups ──────────────────────────────────────────────────────────
 
+struct VersionMeta {
+    tarball: String,
+    integrity: Option<String>,
+}
+
 struct RegistryInfo {
     versions: Vec<String>,
     latest: Option<String>,
+    version_meta: HashMap<String, VersionMeta>,
 }
 
-async fn lookup_npm_compat(client: &reqwest::Client, base_url: &str, pkg_name: &str) -> anyhow::Result<RegistryInfo> {
+async fn lookup_npm_compat(
+    client: &reqwest::Client,
+    base_url: &str,
+    pkg_name: &str,
+) -> anyhow::Result<RegistryInfo> {
     let url = format!("{}/{}", base_url, pkg_name);
     let resp = client
         .get(&url)
@@ -118,12 +142,27 @@ async fn lookup_npm_compat(client: &reqwest::Client, base_url: &str, pkg_name: &
 
     let data: serde_json::Value = resp.json().await?;
     let latest = data["dist-tags"]["latest"].as_str().map(|s| s.to_string());
-    let versions: Vec<String> = data["versions"]
-        .as_object()
-        .map(|o| o.keys().cloned().collect())
-        .unwrap_or_default();
 
-    Ok(RegistryInfo { versions, latest })
+    let mut versions = Vec::new();
+    let mut version_meta = HashMap::new();
+
+    if let Some(obj) = data["versions"].as_object() {
+        for (ver, meta) in obj {
+            versions.push(ver.clone());
+            let tarball = meta["dist"]["tarball"]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}/{}/-/{}-{}.tgz", base_url, pkg_name, pkg_name, ver));
+            let integrity = meta["dist"]["integrity"].as_str().map(|s| s.to_string());
+            version_meta.insert(ver.clone(), VersionMeta { tarball, integrity });
+        }
+    }
+
+    Ok(RegistryInfo {
+        versions,
+        latest,
+        version_meta,
+    })
 }
 
 async fn lookup_jsr(client: &reqwest::Client, pkg_name: &str) -> anyhow::Result<RegistryInfo> {
@@ -135,34 +174,11 @@ async fn lookup_jsr(client: &reqwest::Client, pkg_name: &str) -> anyhow::Result<
     }
     let trimmed = pkg_name.trim_start_matches('@');
     let (scope, name) = trimmed.split_once('/').unwrap();
-
-    let url = format!("https://jsr.io/api/scopes/{}/packages/{}/versions", scope, name);
-    let resp = client
-        .get(&url)
-        .header("Accept", "application/json")
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await?;
-
-    if resp.status().as_u16() == 404 {
-        anyhow::bail!("Package '{}' not found on jsr.io", pkg_name);
-    }
-    if !resp.status().is_success() {
-        anyhow::bail!("JSR returned HTTP {}", resp.status());
-    }
-
-    let data: serde_json::Value = resp.json().await?;
-    let versions: Vec<String> = data["items"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| item["version"].as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let latest = versions.last().cloned();
-    Ok(RegistryInfo { versions, latest })
+    // JSR exposes npm-compatible packages at npm.jsr.io under @jsr/scope__name
+    let npm_name = format!("@jsr/{}__{}", scope, name);
+    lookup_npm_compat(client, "https://npm.jsr.io", &npm_name)
+        .await
+        .map_err(|e| anyhow::anyhow!("Package '{}' not found on jsr.io: {}", pkg_name, e))
 }
 
 async fn lookup_registry(registry: &Registry, pkg_name: &str) -> anyhow::Result<RegistryInfo> {
@@ -212,7 +228,11 @@ fn find_nearby_versions(requested: &str, available: &[String], count: usize) -> 
         .collect();
 
     scored.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(a.1)));
-    scored.iter().take(count).map(|(_, v)| (*v).clone()).collect()
+    scored
+        .iter()
+        .take(count)
+        .map(|(_, v)| (*v).clone())
+        .collect()
 }
 
 // ── Package spec parsing ──────────────────────────────────────────────────────
@@ -236,7 +256,10 @@ fn is_valid_package_name(name: &str) -> bool {
 }
 
 fn normalize_version(version: &str) -> String {
-    let v = version.trim_start_matches('^').trim_start_matches('*').to_string();
+    let v = version
+        .trim_start_matches('^')
+        .trim_start_matches('*')
+        .to_string();
     if v.is_empty() { "*".to_string() } else { v }
 }
 
@@ -264,7 +287,10 @@ fn parse_package_spec(input: &str) -> anyhow::Result<(String, Option<String>)> {
                 return Ok((input.to_string(), None));
             }
         }
-        anyhow::bail!("Invalid scoped package format: '{}'. Expected @scope/name", input);
+        anyhow::bail!(
+            "Invalid scoped package format: '{}'. Expected @scope/name",
+            input
+        );
     }
 
     // Regular packages: name or name@version
@@ -281,30 +307,338 @@ fn parse_package_spec(input: &str) -> anyhow::Result<(String, Option<String>)> {
     }
     if let Some(v) = version {
         if v.contains(':') {
-            anyhow::bail!("Invalid version '{}'. Use name@version format (not name:version)", v);
+            anyhow::bail!(
+                "Invalid version '{}'. Use name@version format (not name:version)",
+                v
+            );
         }
     }
 
     Ok((name.to_string(), version.map(|s| s.to_string())))
 }
 
+// ── Integrity verification ────────────────────────────────────────────────────
+
+fn verify_integrity(data: &[u8], integrity: &str) -> anyhow::Result<()> {
+    use base64::Engine;
+    use sha2::Digest;
+
+    if let Some(expected_b64) = integrity.strip_prefix("sha512-") {
+        let mut hasher = sha2::Sha512::new();
+        hasher.update(data);
+        let computed = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
+        if computed != expected_b64 {
+            anyhow::bail!(
+                "Integrity check failed (sha512): tarball hash does not match registry metadata"
+            );
+        }
+        return Ok(());
+    }
+    if let Some(expected_b64) = integrity.strip_prefix("sha256-") {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(data);
+        let computed = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
+        if computed != expected_b64 {
+            anyhow::bail!(
+                "Integrity check failed (sha256): tarball hash does not match registry metadata"
+            );
+        }
+        return Ok(());
+    }
+    // Unknown format — log and continue
+    tracing::warn!(
+        "Unknown integrity format '{}', skipping verification",
+        integrity
+    );
+    Ok(())
+}
+
+// ── Download + extract ────────────────────────────────────────────────────────
+
+async fn download_tarball(url: &str) -> anyhow::Result<Vec<u8>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Network error downloading tarball: {}", e))?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "Failed to download tarball from {}: HTTP {}",
+            url,
+            resp.status()
+        );
+    }
+
+    Ok(resp.bytes().await?.to_vec())
+}
+
+fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()> {
+    use std::io::Read;
+    let decoder = flate2::read::GzDecoder::new(data);
+    let mut archive = tar::Archive::new(decoder);
+
+    if dest.exists() {
+        std::fs::remove_dir_all(dest)?;
+    }
+    std::fs::create_dir_all(dest)?;
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        // npm tarballs have a leading "package/" directory — skip it
+        let cleaned: PathBuf = path.iter().skip(1).collect();
+        if cleaned.as_os_str().is_empty() {
+            continue;
+        }
+        let out = dest.join(&cleaned);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        entry.unpack(&out)?;
+    }
+    Ok(())
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub async fn install_package(name: &str, allow_net: Option<&[String]>) -> anyhow::Result<()> {
-    install_package_impl(name, false, allow_net).await
+    install_with_transitive(name, false, allow_net).await
 }
 
 pub async fn reinstall_package(name: &str, allow_net: Option<&[String]>) -> anyhow::Result<()> {
-    install_package_impl(name, true, allow_net).await
+    install_with_transitive(name, true, allow_net).await
 }
 
-pub async fn update_packages(packages: &[String], allow_net: Option<&[String]>) -> anyhow::Result<()> {
+/// BFS install: installs `root` and all of its transitive dependencies.
+async fn install_with_transitive(
+    root: &str,
+    force: bool,
+    allow_net: Option<&[String]>,
+) -> anyhow::Result<()> {
+    use std::collections::{HashSet, VecDeque};
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    queue.push_back(root.to_string());
+
+    while let Some(pkg) = queue.pop_front() {
+        if visited.contains(&pkg) {
+            continue;
+        }
+        visited.insert(pkg.clone());
+
+        // Skip if already extracted (and not forced), but still read its deps
+        let node_modules_dest = PathBuf::from("node_modules").join(&pkg);
+        let already_ok = !force && {
+            let pj = node_modules_dest.join("package.json");
+            pj.exists()
+        };
+
+        if already_ok && pkg != root {
+            // Already installed — just enqueue its deps
+        } else {
+            install_package_impl(&pkg, force && pkg == root, allow_net).await?;
+        }
+
+        // Read transitive deps from the installed package.json
+        let pkg_json = node_modules_dest.join("package.json");
+        if let Ok(content) = std::fs::read_to_string(&pkg_json) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(deps_obj) = val["dependencies"].as_object() {
+                    for dep_name in deps_obj.keys() {
+                        if !visited.contains(dep_name.as_str()) {
+                            queue.push_back(dep_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn audit_packages() -> anyhow::Result<bool> {
+    let lockfile_path = PathBuf::from("3va-lock.json");
+    let node_modules = PathBuf::from("node_modules");
+
+    if !node_modules.exists() {
+        eprintln!(
+            "✗ node_modules/ not found. Run '3va install <package> --allow-net=<host>' first."
+        );
+        anyhow::bail!("node_modules not found");
+    }
+
+    let installed: Vec<(String, String, Option<String>)> = if lockfile_path.exists() {
+        let lock = Lockfile::load(&lockfile_path)?;
+        lock.dependencies
+            .iter()
+            .map(|(name, dep)| (name.clone(), dep.version.clone(), dep.registry.clone()))
+            .collect()
+    } else {
+        // Fall back to scanning all directories in node_modules/
+        let mut pkgs = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&node_modules) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    // Handle scoped packages (@scope/name)
+                    if name.starts_with('@') {
+                        if let Ok(sub) = std::fs::read_dir(&path) {
+                            for sub_entry in sub.flatten() {
+                                let sub_name =
+                                    format!("{}/{}", name, sub_entry.file_name().to_string_lossy());
+                                pkgs.push((sub_name, "unknown".to_string(), None));
+                            }
+                        }
+                    } else {
+                        pkgs.push((name, "unknown".to_string(), None));
+                    }
+                }
+            }
+        }
+        pkgs
+    };
+
+    if installed.is_empty() {
+        println!("No packages to audit.");
+        return Ok(true);
+    }
+
+    println!();
+    println!(
+        "Auditing {} package(s) in node_modules/ ...",
+        installed.len()
+    );
+    println!();
+
+    let scanner = MalwareScanner::new();
+    let mut total_threats = 0usize;
+    let mut packages_with_issues = 0usize;
+    let mut any_critical = false;
+
+    for (pkg_name, version, registry) in &installed {
+        let pkg_dir = node_modules.join(pkg_name);
+        if !pkg_dir.exists() {
+            println!(
+                "  {:<35} (not extracted)",
+                format!("{}@{}", pkg_name, version)
+            );
+            continue;
+        }
+
+        let results = scanner.scan_directory(&pkg_dir);
+        let all_threats: Vec<_> = results.iter().flat_map(|r| r.threats.iter()).collect();
+        let threat_count = all_threats.len();
+        total_threats += threat_count;
+
+        let reg_label = registry.as_deref().unwrap_or("unknown");
+
+        if threat_count == 0 {
+            println!(
+                "  {:<40} ✓ Clean  [{}]",
+                format!("{}@{}", pkg_name, version),
+                reg_label
+            );
+        } else {
+            packages_with_issues += 1;
+            let worst = results
+                .iter()
+                .flat_map(|r| r.threats.iter())
+                .map(|t| match t.severity {
+                    ThreatLevel::Critical => 4,
+                    ThreatLevel::High => 3,
+                    ThreatLevel::Medium => 2,
+                    ThreatLevel::Low => 1,
+                    ThreatLevel::Safe => 0,
+                })
+                .max()
+                .unwrap_or(0);
+
+            if worst >= 4 {
+                any_critical = true;
+            }
+
+            let level_str = match worst {
+                4 => "CRITICAL",
+                3 => "HIGH",
+                2 => "MEDIUM",
+                _ => "LOW",
+            };
+            eprintln!(
+                "  {:<40} ✗ {} — {} threat(s)",
+                format!("{}@{}", pkg_name, version),
+                level_str,
+                threat_count
+            );
+
+            for result in &results {
+                for threat in &result.threats {
+                    let sev = match threat.severity {
+                        ThreatLevel::Critical => "CRITICAL",
+                        ThreatLevel::High => "HIGH    ",
+                        ThreatLevel::Medium => "MEDIUM  ",
+                        ThreatLevel::Low => "LOW     ",
+                        ThreatLevel::Safe => "SAFE    ",
+                    };
+                    eprintln!(
+                        "    [{}] {}:{} — {}",
+                        sev,
+                        result
+                            .file
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
+                        threat.line,
+                        threat.description
+                    );
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("  Packages scanned : {}", installed.len());
+    println!("  Threats found    : {}", total_threats);
+    println!("  Packages flagged : {}", packages_with_issues);
+
+    if total_threats == 0 {
+        println!();
+        println!("✓ Audit complete. All packages are clean.");
+        Ok(true)
+    } else {
+        println!();
+        if any_critical {
+            eprintln!(
+                "✗ Audit failed: critical threats detected. Remove affected packages immediately."
+            );
+        } else {
+            eprintln!("! Audit complete with warnings. Review flagged packages.");
+        }
+        Ok(!any_critical)
+    }
+}
+
+pub async fn update_packages(
+    packages: &[String],
+    allow_net: Option<&[String]>,
+) -> anyhow::Result<()> {
     let lockfile_path = PathBuf::from("3va-lock.json");
 
     let lockfile = match Lockfile::load(&lockfile_path) {
         Ok(l) => l,
         Err(_) => {
-            eprintln!("✗ No 3va-lock.json found. Run '3va install <package> --allow-net=<host>' first.");
+            eprintln!(
+                "✗ No 3va-lock.json found. Run '3va install <package> --allow-net=<host>' first."
+            );
             anyhow::bail!("Lockfile not found");
         }
     };
@@ -330,17 +664,25 @@ pub async fn update_packages(packages: &[String], allow_net: Option<&[String]>) 
 
     // Map registry → packages that need it
     let by_registry = lockfile.registries_needed(&targets);
-    let unknown: Vec<&str> = targets.iter()
+    let unknown: Vec<&str> = targets
+        .iter()
         .filter(|p| lockfile.registry_for(p).is_none())
         .map(|s| s.as_str())
         .collect();
 
-    // Normalize a host string for comparison (strip scheme, trailing slash)
+    // Normalize a host: strip scheme, path, port, trailing slash — hostname only.
     fn normalize_host(h: &str) -> &str {
         let h = h.trim();
         let h = h.strip_prefix("https://").unwrap_or(h);
         let h = h.strip_prefix("http://").unwrap_or(h);
+        let h = h.split('/').next().unwrap_or(h);
+        let h = h.split(':').next().unwrap_or(h);
         h.trim_end_matches('/')
+    }
+
+    // Exact host match — prevents "evil.registry.npmjs.org.attacker.com" from matching "registry.npmjs.org".
+    fn host_is_allowed(allowed_host: &str, required_registry: &str) -> bool {
+        allowed_host == required_registry
     }
 
     let allowed: Vec<&str> = allow_net
@@ -348,8 +690,13 @@ pub async fn update_packages(packages: &[String], allow_net: Option<&[String]>) 
         .unwrap_or_default();
 
     // Find which registries are needed but not allowed
-    let missing: Vec<(&str, &Vec<String>)> = by_registry.iter()
-        .filter(|(reg, _)| !allowed.iter().any(|h| h.contains(reg.as_str()) || reg.contains(h)))
+    let missing: Vec<(&str, &Vec<String>)> = by_registry
+        .iter()
+        .filter(|(reg, _)| {
+            !allowed
+                .iter()
+                .any(|h| host_is_allowed(h, reg.as_str()))
+        })
         .map(|(r, pkgs)| (r.as_str(), pkgs))
         .collect();
 
@@ -370,7 +717,10 @@ pub async fn update_packages(packages: &[String], allow_net: Option<&[String]>) 
     }
 
     if !unknown.is_empty() {
-        eprintln!("! Warning: no registry recorded for: {}. Skipping.", unknown.join(", "));
+        eprintln!(
+            "! Warning: no registry recorded for: {}. Skipping.",
+            unknown.join(", ")
+        );
     }
 
     // Update each package using its stored registry as the allowed host
@@ -389,13 +739,20 @@ pub async fn update_packages(packages: &[String], allow_net: Option<&[String]>) 
     Ok(())
 }
 
-async fn install_package_impl(input: &str, force: bool, allow_net: Option<&[String]>) -> anyhow::Result<()> {
+async fn install_package_impl(
+    input: &str,
+    force: bool,
+    allow_net: Option<&[String]>,
+) -> anyhow::Result<()> {
     let (pkg_name, requested_version) = parse_package_spec(input)?;
 
     if let Some(ref v) = requested_version {
         if v.is_empty() {
             eprintln!();
-            eprintln!("✗ Error: Empty version is not allowed. Use {}@<version>", pkg_name);
+            eprintln!(
+                "✗ Error: Empty version is not allowed. Use {}@<version>",
+                pkg_name
+            );
             anyhow::bail!("Empty version specified");
         }
     }
@@ -410,8 +767,14 @@ async fn install_package_impl(input: &str, force: bool, allow_net: Option<&[Stri
             eprintln!("  The package manager requires explicit network permission.");
             eprintln!("  Specify the registry host with --allow-net:");
             eprintln!();
-            eprintln!("    3va install {} --allow-net=registry.npmjs.org", pkg_name);
-            eprintln!("    3va install {} --allow-net=registry.yarnpkg.com", pkg_name);
+            eprintln!(
+                "    3va install {} --allow-net=registry.npmjs.org",
+                pkg_name
+            );
+            eprintln!(
+                "    3va install {} --allow-net=registry.yarnpkg.com",
+                pkg_name
+            );
             eprintln!("    3va install {} --allow-net=jsr.io", pkg_name);
             anyhow::bail!("Network access denied: --allow-net not specified");
         }
@@ -424,7 +787,11 @@ async fn install_package_impl(input: &str, force: bool, allow_net: Option<&[Stri
     if let Some(ref v) = requested_version {
         println!("  Version:  {}", v);
     }
-    println!("  Registry: {} (allowed via --allow-net={})", registry.display_name(), allowed_host);
+    println!(
+        "  Registry: {} (allowed via --allow-net={})",
+        registry.display_name(),
+        allowed_host
+    );
     println!();
 
     // ── Registry lookup ───────────────────────────────────────────────────────
@@ -473,41 +840,88 @@ async fn install_package_impl(input: &str, force: bool, allow_net: Option<&[Stri
         latest
     };
 
-    // ── Already installed check ───────────────────────────────────────────────
-    if let Err(e) = std::fs::create_dir_all(".3va-cache") {
-        eprintln!("✗ Error: Cannot create cache directory: {}", e);
-        anyhow::bail!("Failed to create cache directory");
-    }
+    // ── Download, verify, extract ─────────────────────────────────────────────
+    std::fs::create_dir_all(".3va-cache")
+        .map_err(|e| anyhow::anyhow!("Cannot create cache directory: {}", e))?;
 
-    let tarball_path = PathBuf::from(".3va-cache")
-        .join(format!("{}.tgz", pkg_name.replace('/', "-")));
+    let safe_name = pkg_name.replace('/', "-").trim_matches('-').to_string();
+    let cached_tarball =
+        PathBuf::from(".3va-cache").join(format!("{}-{}.tgz", safe_name, resolved_version));
+    let node_modules_dest = PathBuf::from("node_modules").join(&pkg_name);
 
-    tracing::info!("Verifying signatures for '{}'...", pkg_name);
-    let verifier = SignatureVerifier::default();
-    match verifier.verify_from_registry(&pkg_name, &resolved_version, &tarball_path) {
-        VerificationStatus::Verified => println!("  ✓ Signatures verified"),
-        VerificationStatus::Unverified => println!("  ! Warning: Package signatures not verified"),
-        VerificationStatus::Missing => println!("  ! Warning: No signature data available for verification"),
-        VerificationStatus::Mismatch => {
-            eprintln!("✗ Error: Package hash mismatch — possible tampering detected!");
-            anyhow::bail!("Signature verification failed: hash mismatch");
+    // Check if already fully extracted at correct version (skip if not forced)
+    let already_extracted = !force && {
+        let pkg_json = node_modules_dest.join("package.json");
+        pkg_json.exists()
+            && std::fs::read_to_string(&pkg_json)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v["version"].as_str().map(|s| s.to_string()))
+                .as_deref()
+                == Some(resolved_version.as_str())
+    };
+
+    if already_extracted {
+        println!("  ✓ Already extracted in node_modules/{}", pkg_name);
+    } else {
+        // Fetch or use cached tarball
+        let tarball_bytes = if cached_tarball.exists() && !force {
+            println!("  ✓ Using cached tarball");
+            std::fs::read(&cached_tarball)?
+        } else {
+            let tarball_url = info
+                .version_meta
+                .get(&resolved_version)
+                .map(|m| m.tarball.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}/{}/-/{}-{}.tgz",
+                        registry.base_url(),
+                        pkg_name,
+                        pkg_name,
+                        resolved_version
+                    )
+                });
+
+            println!("  Downloading {}@{} ...", pkg_name, resolved_version);
+            tracing::info!("Downloading from {}", tarball_url);
+            let bytes = download_tarball(&tarball_url).await?;
+            std::fs::write(&cached_tarball, &bytes)?;
+            bytes
+        };
+
+        // Verify integrity against registry metadata
+        if let Some(meta) = info.version_meta.get(&resolved_version) {
+            if let Some(ref integrity) = meta.integrity {
+                print!("  Verifying integrity... ");
+                match verify_integrity(&tarball_bytes, integrity) {
+                    Ok(()) => println!("✓"),
+                    Err(e) => {
+                        // Remove corrupt cached tarball
+                        let _ = std::fs::remove_file(&cached_tarball);
+                        eprintln!();
+                        eprintln!("✗ {}", e);
+                        anyhow::bail!("{}", e);
+                    }
+                }
+            } else {
+                println!("  ! Warning: No integrity hash in registry metadata");
+            }
         }
-        VerificationStatus::Failed(reason) => {
-            eprintln!("✗ Error: Signature verification failed: {}", reason);
-            anyhow::bail!("Signature verification failed");
-        }
-    }
 
-    let cache_path = PathBuf::from(".3va-cache")
-        .join(format!("{}-cache", pkg_name.replace('/', "-")));
-    std::fs::create_dir_all(&cache_path).ok();
+        // Extract to node_modules/
+        println!("  Extracting to node_modules/{} ...", pkg_name);
+        std::fs::create_dir_all("node_modules")?;
+        extract_tarball(&tarball_bytes, &node_modules_dest)?;
+        println!("  ✓ Extracted successfully");
+    }
 
     // ── package.json ──────────────────────────────────────────────────────────
     let pkg_json_path = PathBuf::from("package.json");
     let (project_name, project_version, mut deps) = if pkg_json_path.exists() {
         let content = std::fs::read_to_string(&pkg_json_path)?;
-        let val: serde_json::Value = serde_json::from_str(&content)
-            .unwrap_or_else(|_| serde_json::json!({}));
+        let val: serde_json::Value =
+            serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
 
         let pname = val["name"].as_str().unwrap_or("project").to_string();
         let pver = val["version"].as_str().unwrap_or("0.0.0").to_string();
@@ -542,14 +956,19 @@ async fn install_package_impl(input: &str, force: bool, allow_net: Option<&[Stri
 
     if already_installed && !force {
         let existing_ver = existing_version.as_deref().unwrap_or("*");
-        let same_version = requested_version.as_deref().map_or(true, |rv| rv == existing_ver);
+        let same_version = requested_version
+            .as_deref()
+            .map_or(true, |rv| rv == existing_ver);
         if same_version {
             println!();
             println!("✓ {}@{} is already installed.", pkg_name, existing_ver);
             println!("  Use 'reinstall' to force reinstall.");
             return Ok(());
         }
-        println!("  Updating {}@{} → {}@{}", pkg_name, existing_ver, pkg_name, resolved_version);
+        println!(
+            "  Updating {}@{} → {}@{}",
+            pkg_name, existing_ver, pkg_name, resolved_version
+        );
     }
 
     deps.insert(pkg_name.clone(), resolved_version.clone());
@@ -591,13 +1010,22 @@ async fn install_package_impl(input: &str, force: bool, allow_net: Option<&[Stri
     lockfile.set_registry(&pkg_name, registry.display_name());
 
     lockfile.save(&lockfile_path)?;
-    tracing::info!("Lockfile written to 3va-lock.json ({} packages).", lockfile.packages.len());
+    tracing::info!(
+        "Lockfile written to 3va-lock.json ({} packages).",
+        lockfile.packages.len()
+    );
 
     println!();
     if force {
-        println!("✓ {}@{} reinstalled successfully.", pkg_name, resolved_version);
+        println!(
+            "✓ {}@{} reinstalled successfully.",
+            pkg_name, resolved_version
+        );
     } else {
-        println!("✓ {}@{} installed successfully.", pkg_name, resolved_version);
+        println!(
+            "✓ {}@{} installed successfully.",
+            pkg_name, resolved_version
+        );
     }
     println!("  Run: 3va run <your-file>.ts");
 

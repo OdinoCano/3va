@@ -1,6 +1,6 @@
+use crate::resolver::{DependencyGraph, DependencyNode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::resolver::{DependencyGraph, DependencyNode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lockfile {
@@ -38,46 +38,59 @@ impl Lockfile {
         let mut packages = HashMap::new();
         let mut dependencies = HashMap::new();
 
-        packages.insert("".to_string(), LockfilePackage {
-            version: version.to_string(),
-            resolved: None,
-            integrity: None,
-            dev: None,
-            registry: None,
-        });
-
-        for (_, node) in graph.nodes() {
-            let key = format!("node_modules/{}", node.name);
-            packages.insert(key.clone(), LockfilePackage {
-                version: node.version.clone(),
-                resolved: node.resolved.clone(),
-                integrity: node.integrity.clone(),
-                dev: None,
-                registry: None,
-            });
-
-            let pkg_key = format!("node_modules/{}/package.json", node.name);
-            packages.insert(pkg_key, LockfilePackage {
-                version: node.version.clone(),
+        packages.insert(
+            "".to_string(),
+            LockfilePackage {
+                version: version.to_string(),
                 resolved: None,
                 integrity: None,
                 dev: None,
                 registry: None,
-            });
+            },
+        );
 
-            let deps: HashMap<String, String> = node.dependencies
+        for (_, node) in graph.nodes() {
+            let key = format!("node_modules/{}", node.name);
+            packages.insert(
+                key.clone(),
+                LockfilePackage {
+                    version: node.version.clone(),
+                    resolved: node.resolved.clone(),
+                    integrity: node.integrity.clone(),
+                    dev: None,
+                    registry: None,
+                },
+            );
+
+            let pkg_key = format!("node_modules/{}/package.json", node.name);
+            packages.insert(
+                pkg_key,
+                LockfilePackage {
+                    version: node.version.clone(),
+                    resolved: None,
+                    integrity: None,
+                    dev: None,
+                    registry: None,
+                },
+            );
+
+            let deps: HashMap<String, String> = node
+                .dependencies
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
 
-            dependencies.insert(node.name.clone(), LockfileDep {
-                version: node.version.clone(),
-                resolved: node.resolved.clone(),
-                integrity: node.integrity.clone(),
-                dependencies: if deps.is_empty() { None } else { Some(deps) },
-                dev: None,
-                registry: None,
-            });
+            dependencies.insert(
+                node.name.clone(),
+                LockfileDep {
+                    version: node.version.clone(),
+                    resolved: node.resolved.clone(),
+                    integrity: node.integrity.clone(),
+                    dependencies: if deps.is_empty() { None } else { Some(deps) },
+                    dev: None,
+                    registry: None,
+                },
+            );
         }
 
         Self {
@@ -95,8 +108,12 @@ impl Lockfile {
     }
 
     /// Returns a map of registry_host → [package names] for all packages that have a registry recorded.
-    pub fn registries_needed(&self, packages: &[String]) -> std::collections::HashMap<String, Vec<String>> {
-        let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    pub fn registries_needed(
+        &self,
+        packages: &[String],
+    ) -> std::collections::HashMap<String, Vec<String>> {
+        let mut map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for pkg in packages {
             if let Some(reg) = self.registry_for(pkg) {
                 map.entry(reg.to_string()).or_default().push(pkg.clone());
@@ -137,11 +154,12 @@ mod tests {
     #[test]
     fn test_lockfile_generation() {
         let mut graph = DependencyGraph::new();
-        let node = crate::resolver::DependencyNode::new("lodash".to_string(), "4.17.21".to_string());
+        let node =
+            crate::resolver::DependencyNode::new("lodash".to_string(), "4.17.21".to_string());
         graph.add_node(node);
-        
+
         let lockfile = Lockfile::generate(&graph, "test-project", "1.0.0");
-        
+
         assert_eq!(lockfile.lockfile_version, 3);
         assert!(lockfile.packages.contains_key("node_modules/lodash"));
         assert!(lockfile.dependencies.contains_key("lodash"));

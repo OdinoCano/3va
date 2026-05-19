@@ -1,7 +1,7 @@
-use rquickjs::{Ctx, Result, Function, Value, function::Rest};
-use std::time::{Duration, Instant};
-use std::sync::{Arc, Mutex};
+use rquickjs::{Ctx, Function, Result, Value, function::Rest};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 type TimerId = u64;
 
@@ -30,24 +30,30 @@ impl TimerManager {
     pub fn set_timeout(&self, id: TimerId, ms: u64) {
         let fires_at = Instant::now() + Duration::from_millis(ms);
         let mut timers = self.timers.lock().unwrap();
-        timers.insert(id, TimerEntry {
-            fires_at,
-            repeating: false,
-            interval_ms: 0,
-            cancelled: false,
-        });
+        timers.insert(
+            id,
+            TimerEntry {
+                fires_at,
+                repeating: false,
+                interval_ms: 0,
+                cancelled: false,
+            },
+        );
     }
 
     /// Register a repeating interval timer.
     pub fn set_interval(&self, id: TimerId, ms: u64) {
         let fires_at = Instant::now() + Duration::from_millis(ms);
         let mut timers = self.timers.lock().unwrap();
-        timers.insert(id, TimerEntry {
-            fires_at,
-            repeating: true,
-            interval_ms: ms,
-            cancelled: false,
-        });
+        timers.insert(
+            id,
+            TimerEntry {
+                fires_at,
+                repeating: true,
+                interval_ms: ms,
+                cancelled: false,
+            },
+        );
     }
 
     /// Cancel a timer by ID.
@@ -104,7 +110,8 @@ impl TimerManager {
     pub fn next_expiry(&self) -> Option<Duration> {
         let now = Instant::now();
         let timers = self.timers.lock().unwrap();
-        timers.values()
+        timers
+            .values()
             .filter(|e| !e.cancelled)
             .map(|e| e.fires_at.saturating_duration_since(now))
             .min()
@@ -114,7 +121,10 @@ impl TimerManager {
     pub fn fire_pending(ctx: &Ctx, manager: Arc<Self>) -> Result<()> {
         let expired = manager.poll_expired_ids();
         for id in expired {
-            let code = format!("if (typeof __fireTimer === 'function') {{ __fireTimer({}); }}", id);
+            let code = format!(
+                "if (typeof __fireTimer === 'function') {{ __fireTimer({}); }}",
+                id
+            );
             let _ = ctx.eval::<Value, _>(code.as_str());
         }
         Ok(())
@@ -173,7 +183,8 @@ pub fn inject_timers(ctx: &Ctx) -> Result<()> {
     globals.set("__nativeClearTimer", native_clear_timer)?;
 
     // Inject JS-level timer wrappers
-    ctx.eval::<(), _>(r#"
+    ctx.eval::<(), _>(
+        r#"
         globalThis.__timerCallbacks = {};
         globalThis.__timerNextId = 0;
 
@@ -216,7 +227,8 @@ pub fn inject_timers(ctx: &Ctx) -> Result<()> {
             delete globalThis.__timerCallbacks[id];
             __nativeClearTimer(id);
         };
-    "#)?;
+    "#,
+    )?;
 
     Ok(())
 }

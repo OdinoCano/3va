@@ -1,8 +1,8 @@
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256, Sha512};
 use std::fs::File;
-use std::io::{Read, BufReader};
-use sha2::{Sha256, Sha512, Digest};
-use serde::{Serialize, Deserialize};
+use std::io::{BufReader, Read};
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HashAlgorithm {
@@ -36,24 +36,30 @@ impl SignatureVerifier {
     }
 
     pub fn sha256() -> Self {
-        Self { algorithm: HashAlgorithm::SHA256 }
+        Self {
+            algorithm: HashAlgorithm::SHA256,
+        }
     }
 
     pub fn sha512() -> Self {
-        Self { algorithm: HashAlgorithm::SHA512 }
+        Self {
+            algorithm: HashAlgorithm::SHA512,
+        }
     }
 
     pub fn compute_hash(&self, path: &Path) -> Result<String, std::io::Error> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
-        
+
         match self.algorithm {
             HashAlgorithm::SHA256 => {
                 let mut hasher = Sha256::new();
                 let mut buffer = [0u8; 8192];
                 loop {
                     let bytes_read = reader.read(&mut buffer)?;
-                    if bytes_read == 0 { break; }
+                    if bytes_read == 0 {
+                        break;
+                    }
                     hasher.update(&buffer[..bytes_read]);
                 }
                 Ok(format!("{:x}", hasher.finalize()))
@@ -63,7 +69,9 @@ impl SignatureVerifier {
                 let mut buffer = [0u8; 8192];
                 loop {
                     let bytes_read = reader.read(&mut buffer)?;
-                    if bytes_read == 0 { break; }
+                    if bytes_read == 0 {
+                        break;
+                    }
                     hasher.update(&buffer[..bytes_read]);
                 }
                 Ok(format!("{:x}", hasher.finalize()))
@@ -84,16 +92,24 @@ impl SignatureVerifier {
         }
     }
 
-    pub fn verify_from_registry(&self, package_name: &str, version: &str, tarball_path: &Path) -> VerificationStatus {
+    pub fn verify_from_registry(
+        &self,
+        package_name: &str,
+        version: &str,
+        tarball_path: &Path,
+    ) -> VerificationStatus {
         let expected_hash = format!("{}-{}.sha256", package_name, version);
-        eprintln!("[SIGNATURE] Would verify against registry for {}", expected_hash);
-        
+        eprintln!(
+            "[SIGNATURE] Would verify against registry for {}",
+            expected_hash
+        );
+
         VerificationStatus::Missing
     }
 
     pub fn compute_file_hashes(dir: &Path) -> Vec<(String, String)> {
         let mut hashes = Vec::new();
-        
+
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -107,7 +123,7 @@ impl SignatureVerifier {
                 }
             }
         }
-        
+
         hashes
     }
 }
@@ -131,9 +147,12 @@ mod tests {
         let file = dir.path().join("test.txt");
         let mut f = std::fs::File::create(&file).unwrap();
         f.write_all(b"hello world").unwrap();
-        
+
         let hash = verifier.compute_hash(&file).unwrap();
-        assert_eq!(hash, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
     }
 
     #[test]
@@ -143,10 +162,13 @@ mod tests {
         let file = dir.path().join("test.txt");
         let mut f = std::fs::File::create(&file).unwrap();
         f.write_all(b"hello world").unwrap();
-        
-        let result = verifier.verify(&file, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+
+        let result = verifier.verify(
+            &file,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+        );
         assert!(matches!(result, VerificationStatus::Verified));
-        
+
         let bad_result = verifier.verify(&file, "wronghash");
         assert!(matches!(bad_result, VerificationStatus::Mismatch));
     }

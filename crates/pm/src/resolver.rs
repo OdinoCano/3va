@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::semver::{Semver, SemverRange};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct DependencyNode {
@@ -51,7 +51,8 @@ impl DependencyGraph {
             return Some(v.clone());
         }
 
-        let candidates: Vec<_> = self.nodes
+        let candidates: Vec<_> = self
+            .nodes
             .values()
             .filter(|n| n.name == name)
             .filter(|n| {
@@ -64,11 +65,13 @@ impl DependencyGraph {
             })
             .collect();
 
-        if let Some(best) = candidates.iter().max_by(|a, b| {
-            Semver::parse(&a.version).cmp(&Semver::parse(&b.version))
-        }) {
+        if let Some(best) = candidates
+            .iter()
+            .max_by(|a, b| Semver::parse(&a.version).cmp(&Semver::parse(&b.version)))
+        {
             let version = best.version.clone();
-            self.resolved_versions.insert(name.to_string(), version.clone());
+            self.resolved_versions
+                .insert(name.to_string(), version.clone());
             return Some(version);
         }
 
@@ -106,16 +109,18 @@ impl Resolver {
 
     fn resolve_dep(&mut self, graph: &mut DependencyGraph, name: &str, version: &str) {
         let key = name.to_string();
-        
+
         if graph.resolved_versions.contains_key(name) {
             return;
         }
 
         let node = self.fetch_metadata(name, version);
-        
+
         if let Some(n) = node {
             graph.add_node(n.clone());
-            graph.resolved_versions.insert(name.to_string(), n.version.clone());
+            graph
+                .resolved_versions
+                .insert(name.to_string(), n.version.clone());
 
             for (dep_name, dep_version) in &n.dependencies {
                 self.resolve_dep(graph, dep_name, dep_version);
@@ -125,7 +130,7 @@ impl Resolver {
 
     fn fetch_metadata(&mut self, name: &str, version: &str) -> Option<DependencyNode> {
         let key = name.to_string();
-        
+
         if let Some(cached) = self.cache.get(&key) {
             for node in cached {
                 if let Some(v) = Semver::parse(&node.version) {
@@ -139,30 +144,33 @@ impl Resolver {
         }
 
         let mut node = DependencyNode::new(name.to_string(), version.to_string());
-        
+
         node.dependencies = match name {
-            "lodash" => [
-                ("lodash".to_string(), "^4.17.21".to_string())
-            ].into_iter().collect(),
+            "lodash" => [("lodash".to_string(), "^4.17.21".to_string())]
+                .into_iter()
+                .collect(),
             "express" => [
                 ("accepts".to_string(), "^1.3.7".to_string()),
                 ("body-parser".to_string(), "^1.20.2".to_string()),
                 ("express".to_string(), "4.18.2".to_string()),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
             "axios" => [
                 ("follow-redirects".to_string(), "^1.15.0".to_string()),
                 ("proxy-from-env".to_string(), "^1.1.0".to_string()),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
             _ => HashMap::new(),
         };
 
         self.cache.entry(key).or_default().push(node.clone());
-        
+
         Some(node)
     }
 
-    fn resolve_conflicts(&self, _graph: &mut DependencyGraph) {
-    }
+    fn resolve_conflicts(&self, _graph: &mut DependencyGraph) {}
 }
 
 #[cfg(test)]
@@ -172,24 +180,26 @@ mod tests {
     #[test]
     fn test_dependency_graph() {
         let mut graph = DependencyGraph::new();
-        
+
         let node = DependencyNode::new("lodash".to_string(), "4.17.21".to_string());
         graph.add_node(node);
-        
+
         assert!(graph.get_node("lodash", "4.17.21").is_some());
     }
 
     #[test]
     fn test_resolver() {
         let mut resolver = Resolver::new("https://registry.npmjs.org");
-        
+
         let deps: std::collections::HashMap<String, String> = [
             ("lodash".to_string(), "^4.17.21".to_string()),
             ("axios".to_string(), "^1.0.0".to_string()),
-        ].into_iter().collect();
-        
+        ]
+        .into_iter()
+        .collect();
+
         let graph = resolver.resolve(&deps);
-        
+
         assert!(graph.resolved_versions.contains_key("lodash"));
         assert!(graph.resolved_versions.contains_key("axios"));
     }

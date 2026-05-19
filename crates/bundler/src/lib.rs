@@ -2,7 +2,7 @@ pub mod generator;
 pub mod resolver;
 pub mod tree_shaker;
 
-pub use generator::{BundlerOptions, CodeGenerator, Chunk, OutputFormat};
+pub use generator::{BundlerOptions, Chunk, CodeGenerator, OutputFormat};
 pub use resolver::{ModuleKey, ModuleResolver, ModuleType};
 pub use tree_shaker::{DeadCodeEliminator, TreeShaker};
 
@@ -52,9 +52,9 @@ impl Bundler {
 
     fn process_module(&self, path: &Path) -> anyhow::Result<String> {
         let content = std::fs::read_to_string(path)?;
-        
+
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        
+
         match ext {
             "ts" | "tsx" => Ok(self.strip_types(&content)),
             "js" | "jsx" => Ok(content),
@@ -65,10 +65,10 @@ impl Bundler {
 
     fn strip_types(&self, code: &str) -> String {
         let mut result = String::new();
-        
+
         for line in code.lines() {
             let trimmed = line.trim();
-            
+
             if trimmed.starts_with("interface ")
                 || trimmed.starts_with("type ")
                 || trimmed.contains(": string")
@@ -79,30 +79,34 @@ impl Bundler {
             {
                 continue;
             }
-            
+
             result.push_str(line);
             result.push('\n');
         }
-        
+
         result
     }
 }
 
-pub fn bundle_file(input: &str, output: &str, options: Option<BundlerOptions>) -> anyhow::Result<()> {
+pub fn bundle_file(
+    input: &str,
+    output: &str,
+    options: Option<BundlerOptions>,
+) -> anyhow::Result<()> {
     let root = PathBuf::from(".");
     let mut bundler = Bundler::new(root);
-    
+
     if let Some(opts) = options {
         bundler = bundler.with_options(opts);
     }
-    
+
     bundler.add_entry(input)?;
     let result = bundler.bundle()?;
-    
+
     std::fs::write(output, result)?;
-    
+
     tracing::info!("Bundled {} -> {}", input, output);
-    
+
     Ok(())
 }
 

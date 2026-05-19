@@ -1,17 +1,23 @@
 pub mod framework;
 pub mod matchers;
 pub mod runner;
+pub mod security;
 
-pub use framework::{describe, it, test, run_all_tests, expect, Expect, TestState, TestResult, TestStatus};
+pub use framework::{
+    describe, expect, it, run_all_tests, test, Expect, TestResult, TestState, TestStatus,
+};
 pub use matchers::{MatcherResult, Matchers};
-pub use runner::{TestRunner, TestConfig, TestReporter, ReportFormat};
+pub use runner::{ReportFormat, TestConfig, TestReporter, TestRunner};
 
 use std::path::PathBuf;
 
-pub fn run_tests(paths: Vec<PathBuf>, config: Option<TestConfig>) -> anyhow::Result<Vec<TestResult>> {
+pub fn run_tests(
+    paths: Vec<PathBuf>,
+    config: Option<TestConfig>,
+) -> anyhow::Result<Vec<TestResult>> {
     let cfg = config.unwrap_or_default();
     let mut runner = TestRunner::new(cfg);
-    
+
     for path in paths {
         if path.is_file() {
             runner.run_file(&path)?;
@@ -19,9 +25,9 @@ pub fn run_tests(paths: Vec<PathBuf>, config: Option<TestConfig>) -> anyhow::Res
             runner.run_directory(&path)?;
         }
     }
-    
+
     runner.print_summary();
-    
+
     Ok(runner.get_results().clone())
 }
 
