@@ -62,6 +62,7 @@
 - [02-matchers.md](09-testing/02-matchers.md) - Matchers y aserciones
 - [03-snapshots.md](09-testing/03-snapshots.md) - Snapshots
 - [04-watch-mode.md](09-testing/04-watch-mode.md) - Modo watch
+- [05-scripts.md](09-testing/05-scripts.md) - Scripts de test y verificación
 
 ## Volumen 10: Funciones de Seguridad Avanzadas
 
