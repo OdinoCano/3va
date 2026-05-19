@@ -84,13 +84,16 @@ impl FsEnforcer {
     }
 
     pub fn check_read_recursive(&self, path: &std::path::Path) -> Result<(), PermissionError> {
-        let granted = self.permission_state.granted.read()
+        let granted = self
+            .permission_state
+            .granted
+            .read()
             .unwrap_or_else(|p| p.into_inner()); // recover from poisoned lock
         for cap in granted.iter() {
-            if let Capability::FileRead(allowed) = cap {
-                if path.starts_with(allowed) || allowed.starts_with(path) {
-                    return Ok(());
-                }
+            if let Capability::FileRead(allowed) = cap
+                && (path.starts_with(allowed) || allowed.starts_with(path))
+            {
+                return Ok(());
             }
         }
 

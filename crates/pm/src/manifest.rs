@@ -12,7 +12,7 @@ pub struct PackageInfo {
     pub version: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct PackagePermissions {
     #[serde(default)]
     pub network: bool,
@@ -20,16 +20,6 @@ pub struct PackagePermissions {
     pub filesystem: bool,
     #[serde(default)]
     pub process: bool,
-}
-
-impl Default for PackagePermissions {
-    fn default() -> Self {
-        Self {
-            network: false,
-            filesystem: false,
-            process: false,
-        }
-    }
 }
 
 #[cfg(test)]

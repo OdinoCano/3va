@@ -21,7 +21,9 @@ pub fn reset_capabilities() {
 }
 
 pub fn check_read(path: &str) -> Result<String, String> {
-    let caps = ENABLED_CAPABILITIES.read().unwrap_or_else(|p| p.into_inner());
+    let caps = ENABLED_CAPABILITIES
+        .read()
+        .unwrap_or_else(|p| p.into_inner());
 
     // Deny rules take precedence over allow rules (deny-overrides-allow semantics).
     let deny_key = format!("deny-read={}", path);
@@ -272,8 +274,14 @@ mod dos_prevention {
         let max_file_size: usize = 100 * 1024 * 1024; // 100 MiB cap
         let oversized: usize = 150 * 1024 * 1024;
         let within_limit: usize = 50 * 1024 * 1024;
-        assert!(oversized > max_file_size, "Test setup: oversized must exceed limit");
-        assert!(within_limit <= max_file_size, "Test setup: within_limit must fit");
+        assert!(
+            oversized > max_file_size,
+            "Test setup: oversized must exceed limit"
+        );
+        assert!(
+            within_limit <= max_file_size,
+            "Test setup: within_limit must fit"
+        );
     }
 
     #[test]
@@ -282,7 +290,10 @@ mod dos_prevention {
         let max_memory_mb: usize = 512;
         let excessive_mb: usize = 600;
         let normal_mb: usize = 256;
-        assert!(excessive_mb > max_memory_mb, "Test setup: excessive must exceed cap");
+        assert!(
+            excessive_mb > max_memory_mb,
+            "Test setup: excessive must exceed cap"
+        );
         assert!(normal_mb <= max_memory_mb, "Test setup: normal must fit");
     }
 

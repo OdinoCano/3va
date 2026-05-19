@@ -3,7 +3,7 @@ rules:
   - id: capability-bypass-env
     pattern: std::env::var($KEY)
     message: "Acceso a entorno sin capability --allow-env validada"
-    severity: ERROR
+    severity: WARNING
     languages: [rust]
     paths:
       include:

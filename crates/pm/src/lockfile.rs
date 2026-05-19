@@ -1,4 +1,4 @@
-use crate::resolver::{DependencyGraph, DependencyNode};
+use crate::resolver::DependencyGraph;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -49,7 +49,7 @@ impl Lockfile {
             },
         );
 
-        for (_, node) in graph.nodes() {
+        for node in graph.nodes().values() {
             let key = format!("node_modules/{}", node.name);
             packages.insert(
                 key.clone(),

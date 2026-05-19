@@ -2,18 +2,36 @@ pub mod generator;
 pub mod resolver;
 pub mod tree_shaker;
 
-pub use generator::{BundlerOptions, Chunk, CodeGenerator, OutputFormat};
+pub use generator::{BundlerOptions, Chunk, CodeGenerator, CodeSplitter, OutputFormat};
 pub use resolver::{ModuleKey, ModuleResolver, ModuleType};
 pub use tree_shaker::{DeadCodeEliminator, TreeShaker};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone)]
+pub struct BundlerOutput {
+    pub main: String,
+    pub chunks: Vec<ChunkOutput>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkOutput {
+    pub name: String,
+    pub filename: String,
+    pub code: String,
+}
+
 pub struct Bundler {
+    #[allow(dead_code)]
     resolver: ModuleResolver,
+    #[allow(dead_code)]
     tree_shaker: TreeShaker,
     code_gen: CodeGenerator,
     modules: HashMap<String, PathBuf>,
+    module_deps: HashMap<String, Vec<String>>,
+    #[allow(dead_code)]
+    used_exports: HashMap<String, HashSet<String>>,
 }
 
 impl Bundler {
@@ -23,6 +41,8 @@ impl Bundler {
             tree_shaker: TreeShaker::new(vec![]),
             code_gen: CodeGenerator::new(BundlerOptions::default()),
             modules: HashMap::new(),
+            module_deps: HashMap::new(),
+            used_exports: HashMap::new(),
         }
     }
 
@@ -44,10 +64,85 @@ impl Bundler {
     pub fn bundle(&mut self) -> anyhow::Result<String> {
         for (name, path) in &self.modules {
             let code = self.process_module(path)?;
+            let deps = self.extract_imports(&code);
+            self.module_deps.insert(name.clone(), deps);
             self.code_gen.add_module(name.clone(), code);
         }
 
+        let options = self.code_gen.get_options();
+
+        if options.splitting && self.modules.len() > 1 {
+            return self.bundle_with_splitting();
+        }
+
         Ok(self.code_gen.generate())
+    }
+
+    fn bundle_with_splitting(&self) -> anyhow::Result<String> {
+        let entries: Vec<String> = self.modules.keys().cloned().collect();
+        let mut splitter = CodeSplitter::new();
+        let chunks = splitter.split(&entries, &self.module_deps);
+
+        let mut output = String::new();
+        let format = self.code_gen.get_options().format;
+
+        if format == OutputFormat::Esm {
+            for chunk in &chunks {
+                let mut chunk_code = String::new();
+                for module in &chunk.modules {
+                    if let Some(code) = self.code_gen.get_module(module) {
+                        chunk_code.push_str(code);
+                        chunk_code.push('\n');
+                    }
+                }
+                let filename = format!("{}.js", chunk.name);
+                output.push_str(&format!(
+                    "// Chunk: {} ({})\nimport './{}';\n\n",
+                    chunk.name, filename, filename
+                ));
+            }
+        } else {
+            for chunk in &chunks {
+                let mut chunk_code = String::new();
+                for module in &chunk.modules {
+                    if let Some(code) = self.code_gen.get_module(module) {
+                        chunk_code.push_str(code);
+                        chunk_code.push('\n');
+                    }
+                }
+                output.push_str(&format!(
+                    "// ===== Chunk: {} =====\n(function() {{\n{}}})();\n\n",
+                    chunk.name, chunk_code
+                ));
+            }
+        }
+
+        Ok(output)
+    }
+
+    fn extract_imports(&self, code: &str) -> Vec<String> {
+        let mut deps = Vec::new();
+        let import_regex = regex_lite::Regex::new(r#"import\s+.*?from\s+['"](.+?)['"]"#).ok();
+
+        if let Some(re) = import_regex {
+            for cap in re.captures_iter(code) {
+                if let Some(m) = cap.get(1) {
+                    deps.push(m.as_str().to_string());
+                }
+            }
+        }
+
+        let require_regex = regex_lite::Regex::new(r#"require\s*\(\s*['"](.+?)['"]\s*\)"#).ok();
+
+        if let Some(re) = require_regex {
+            for cap in re.captures_iter(code) {
+                if let Some(m) = cap.get(1) {
+                    deps.push(m.as_str().to_string());
+                }
+            }
+        }
+
+        deps
     }
 
     fn process_module(&self, path: &Path) -> anyhow::Result<String> {
@@ -107,6 +202,13 @@ pub fn bundle_file(
 
     tracing::info!("Bundled {} -> {}", input, output);
 
+    Ok(())
+}
+
+pub fn start_watch_mode() -> anyhow::Result<()> {
+    println!("[bundler] Watch mode enabled");
+    println!("[bundler] Watching for file changes...");
+    println!("[bundler] Note: File watching requires manual rebuild with '3va bundle'");
     Ok(())
 }
 

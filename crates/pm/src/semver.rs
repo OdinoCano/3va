@@ -31,7 +31,7 @@ impl Semver {
         let (prerelease, build) = match prerelease_build {
             Some(pb) => {
                 let parts: Vec<&str> = pb.split('+').collect();
-                let pre = parts.get(0).map(|s| s.to_string()).unwrap_or_default();
+                let pre = parts.first().map(|s| s.to_string()).unwrap_or_default();
                 let build = parts.get(1).map(|s| s.to_string()).unwrap_or_default();
                 (pre, build)
             }
@@ -98,7 +98,7 @@ impl SemverRange {
     pub fn parse(range: &str) -> Option<Self> {
         let range = range.trim();
 
-        if range == "*" || range == "" {
+        if range == "*" || range.is_empty() {
             return Some(SemverRange::Any);
         }
 

@@ -30,8 +30,10 @@ fn is_esm_source(code: &str) -> bool {
 }
 
 pub struct JsEngine {
+    #[allow(dead_code)]
     runtime: Runtime,
     context: Context,
+    #[allow(dead_code)]
     permissions: Rc<RefCell<PermissionState>>,
 }
 
@@ -116,7 +118,7 @@ impl JsEngine {
         use builtins::timers::TIMER_MANAGER;
         use std::sync::Arc;
 
-        let manager = TIMER_MANAGER.with(|m| Arc::clone(m));
+        let manager = TIMER_MANAGER.with(Arc::clone);
 
         // Loop until no more pending timers
         let max_iterations = 10_000; // safety limit
@@ -126,10 +128,10 @@ impl JsEngine {
             iterations += 1;
 
             // If the next timer hasn't fired yet, sleep a short while
-            if let Some(wait) = manager.next_expiry() {
-                if wait.as_millis() > 0 {
-                    std::thread::sleep(wait.min(std::time::Duration::from_millis(50)));
-                }
+            if let Some(wait) = manager.next_expiry()
+                && wait.as_millis() > 0
+            {
+                std::thread::sleep(wait.min(std::time::Duration::from_millis(50)));
             }
 
             // Fire any expired timers

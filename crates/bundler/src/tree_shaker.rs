@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 pub struct TreeShaker {
     used_exports: HashMap<String, HashSet<String>>,
+    #[allow(dead_code)]
     entry_points: Vec<String>,
 }
 
@@ -17,9 +18,9 @@ impl TreeShaker {
         let mut imports = HashSet::new();
         let mut in_string = false;
         let mut current = String::new();
-        let mut chars = code.chars().peekable();
+        let chars = code.chars().peekable();
 
-        while let Some(c) = chars.next() {
+        for c in chars {
             if c == '\'' || c == '"' {
                 in_string = !in_string;
             }
@@ -45,9 +46,10 @@ impl TreeShaker {
 
         for line in code.lines() {
             let line = line.trim();
-            if line.starts_with("export ") {
-                exports.push(line.to_string());
-            } else if line.starts_with("module.exports") || line.starts_with("exports.") {
+            if line.starts_with("export ")
+                || line.starts_with("module.exports")
+                || line.starts_with("exports.")
+            {
                 exports.push(line.to_string());
             }
         }
@@ -85,9 +87,106 @@ impl TreeShaker {
 
         result
     }
+
+    pub fn shake(&mut self, module_code: &str, used_exports: &HashSet<String>) -> String {
+        let mut result = String::new();
+        let mut in_export_block = false;
+        let mut brace_count = 0;
+        let mut current_export = String::new();
+
+        for line in module_code.lines() {
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("export ") && !trimmed.contains("from") {
+                let export_name = self.extract_export_name(trimmed);
+                if let Some(name) = export_name {
+                    if used_exports.is_empty() || used_exports.contains(&name) {
+                        result.push_str(line);
+                        result.push('\n');
+                    }
+                    continue;
+                }
+            }
+
+            if trimmed.starts_with("export {") || trimmed.starts_with("export { ") {
+                in_export_block = true;
+                brace_count = 0;
+                current_export.clear();
+            }
+
+            if in_export_block {
+                brace_count += trimmed.matches('{').count() as i32;
+                brace_count -= trimmed.matches('}').count() as i32;
+
+                for name in self.extract_named_exports(trimmed) {
+                    if used_exports.is_empty() || used_exports.contains(&name) {
+                        current_export.push_str(&format!(" {},", name));
+                    }
+                }
+
+                if brace_count <= 0 {
+                    in_export_block = false;
+                    if !current_export.is_empty() {
+                        result.push_str(&format!("export {{{}}};\n", current_export.trim()));
+                    }
+                }
+                continue;
+            }
+
+            if trimmed.starts_with("if (false)") || trimmed.contains("if (false)") {
+                continue;
+            }
+
+            result.push_str(line);
+            result.push('\n');
+        }
+
+        result
+    }
+
+    fn extract_export_name(&self, export_line: &str) -> Option<String> {
+        if export_line.starts_with("export function ") {
+            let name = export_line.strip_prefix("export function ").unwrap_or("");
+            return name.split_whitespace().next().map(String::from);
+        }
+        if export_line.starts_with("export const ") || export_line.starts_with("export let ") {
+            let name = export_line
+                .strip_prefix("export const ")
+                .or(export_line.strip_prefix("export let "))
+                .unwrap_or("");
+            return name.split_whitespace().next().map(String::from);
+        }
+        if export_line.starts_with("export class ") {
+            let name = export_line.strip_prefix("export class ").unwrap_or("");
+            return name.split_whitespace().next().map(String::from);
+        }
+        None
+    }
+
+    fn extract_named_exports(&self, line: &str) -> Vec<String> {
+        let mut exports = Vec::new();
+        let trimmed = line.trim();
+        let content = trimmed.trim_start_matches('{').trim_end_matches('}');
+
+        for part in content.split(',') {
+            let part = part.trim();
+            if !part.is_empty()
+                && !part.starts_with("//")
+                && let Some(name) = part.split_whitespace().next()
+            {
+                let name = name.trim_end_matches(',').trim_end_matches(';');
+                if !name.is_empty() && name != "from" {
+                    exports.push(name.to_string());
+                }
+            }
+        }
+
+        exports
+    }
 }
 
 pub struct DeadCodeEliminator {
+    #[allow(dead_code)]
     conditionals: Vec<String>,
 }
 

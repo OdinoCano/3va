@@ -1,6 +1,4 @@
 use rquickjs::{Ctx, Function, Object, Result};
-use std::sync::Arc;
-use vvva_permissions::PermissionState;
 
 pub fn inject_console(ctx: &Ctx) -> Result<()> {
     let globals = ctx.globals();

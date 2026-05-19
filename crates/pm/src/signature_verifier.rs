@@ -96,7 +96,7 @@ impl SignatureVerifier {
         &self,
         package_name: &str,
         version: &str,
-        tarball_path: &Path,
+        _tarball_path: &Path,
     ) -> VerificationStatus {
         let expected_hash = format!("{}-{}.sha256", package_name, version);
         eprintln!(
@@ -115,10 +115,10 @@ impl SignatureVerifier {
                 let path = entry.path();
                 if path.is_file() {
                     let verifier = Self::sha256();
-                    if let Ok(hash) = verifier.compute_hash(&path) {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            hashes.push((name.to_string(), hash));
-                        }
+                    if let Ok(hash) = verifier.compute_hash(&path)
+                        && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    {
+                        hashes.push((name.to_string(), hash));
                     }
                 }
             }

@@ -56,10 +56,10 @@ impl DependencyGraph {
             .values()
             .filter(|n| n.name == name)
             .filter(|n| {
-                if let Some(v) = Semver::parse(&n.version) {
-                    if let Some(r) = SemverRange::parse(range) {
-                        return r.matches(&v);
-                    }
+                if let Some(v) = Semver::parse(&n.version)
+                    && let Some(r) = SemverRange::parse(range)
+                {
+                    return r.matches(&v);
                 }
                 false
             })
@@ -84,6 +84,7 @@ impl DependencyGraph {
 }
 
 pub struct Resolver {
+    #[allow(dead_code)]
     registry_url: String,
     cache: HashMap<String, Vec<DependencyNode>>,
 }
@@ -108,7 +109,7 @@ impl Resolver {
     }
 
     fn resolve_dep(&mut self, graph: &mut DependencyGraph, name: &str, version: &str) {
-        let key = name.to_string();
+        let _key = name.to_string();
 
         if graph.resolved_versions.contains_key(name) {
             return;
@@ -133,12 +134,11 @@ impl Resolver {
 
         if let Some(cached) = self.cache.get(&key) {
             for node in cached {
-                if let Some(v) = Semver::parse(&node.version) {
-                    if let Some(r) = SemverRange::parse(version) {
-                        if r.matches(&v) {
-                            return Some(node.clone());
-                        }
-                    }
+                if let Some(v) = Semver::parse(&node.version)
+                    && let Some(r) = SemverRange::parse(version)
+                    && r.matches(&v)
+                {
+                    return Some(node.clone());
                 }
             }
         }

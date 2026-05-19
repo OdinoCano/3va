@@ -1,9 +1,9 @@
-use rquickjs::{Ctx, Function, Result};
+use rquickjs::{Ctx, Result};
 use std::cell::RefCell;
 use std::rc::Rc;
-use vvva_permissions::{Capability, PermissionState};
+use vvva_permissions::PermissionState;
 
-pub fn inject_fetch(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result<()> {
+pub fn inject_fetch(ctx: &Ctx, _permissions: Rc<RefCell<PermissionState>>) -> Result<()> {
     ctx.eval::<(), _>(
         r#"
         globalThis.fetch = async function(url) {

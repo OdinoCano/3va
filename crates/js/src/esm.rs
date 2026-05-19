@@ -1,7 +1,6 @@
 use rquickjs::{Ctx, Module};
 use std::path::{Path, PathBuf};
 
-use crate::builtins::modules::resolve_path;
 use crate::transpiler;
 
 /// Resolve an ESM import specifier relative to a base file path.
@@ -43,23 +42,23 @@ fn resolve_node_module_esm(cwd: &PathBuf, name: &str) -> PathBuf {
     let pkg_dir = cwd.join("node_modules").join(name);
     if pkg_dir.is_dir() {
         let pkg_json = pkg_dir.join("package.json");
-        if let Ok(content) = std::fs::read_to_string(&pkg_json) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                // Prefer "module" (ESM entry), then "main"
-                for field in &["module", "main"] {
-                    if let Some(entry) = json[field].as_str() {
-                        let path = resolve_relative(&pkg_dir.join(entry));
-                        if path.is_file() {
-                            return path;
-                        }
-                    }
-                }
-                // Try exports["."] as string
-                if let Some(exp) = json["exports"]["."].as_str() {
-                    let path = resolve_relative(&pkg_dir.join(exp.trim_start_matches("./")));
+        if let Ok(content) = std::fs::read_to_string(&pkg_json)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+        {
+            // Prefer "module" (ESM entry), then "main"
+            for field in &["module", "main"] {
+                if let Some(entry) = json[field].as_str() {
+                    let path = resolve_relative(&pkg_dir.join(entry));
                     if path.is_file() {
                         return path;
                     }
+                }
+            }
+            // Try exports["."] as string
+            if let Some(exp) = json["exports"]["."].as_str() {
+                let path = resolve_relative(&pkg_dir.join(exp.trim_start_matches("./")));
+                if path.is_file() {
+                    return path;
                 }
             }
         }

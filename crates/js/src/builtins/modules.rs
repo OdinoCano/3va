@@ -650,10 +650,10 @@ fn exports_cjs_path(val: &serde_json::Value) -> Option<&str> {
         serde_json::Value::Object(_) => {
             // Prefer require condition (CJS), then node, then default
             for key in &["require", "node", "default"] {
-                if let Some(child) = val.get(key) {
-                    if let Some(path) = exports_cjs_path(child) {
-                        return Some(path);
-                    }
+                if let Some(child) = val.get(key)
+                    && let Some(path) = exports_cjs_path(child)
+                {
+                    return Some(path);
                 }
             }
             None
@@ -665,39 +665,38 @@ fn exports_cjs_path(val: &serde_json::Value) -> Option<&str> {
 /// Given an already-located package directory, find its entry point.
 fn resolve_node_module_entry(pkg_dir: &PathBuf) -> PathBuf {
     let pkg_json_path = pkg_dir.join("package.json");
-    if let Ok(content) = std::fs::read_to_string(&pkg_json_path) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(exports) = json.get("exports") {
-                // Standard form: exports["."] is the entry condition map
-                if let Some(exp_dot) = exports.get(".") {
-                    if let Some(path_str) = exports_cjs_path(exp_dot) {
-                        let p = pkg_dir.join(path_str.trim_start_matches("./"));
-                        let resolved = resolve_file_path(&p);
-                        if resolved.is_file() {
-                            return resolved;
-                        }
-                    }
-                }
-                // Shorthand form: exports itself IS the condition map (no "." key)
-                if exports.is_object()
-                    && !exports.as_object().map_or(false, |m| m.contains_key("."))
-                {
-                    if let Some(path_str) = exports_cjs_path(exports) {
-                        let p = pkg_dir.join(path_str.trim_start_matches("./"));
-                        let resolved = resolve_file_path(&p);
-                        if resolved.is_file() {
-                            return resolved;
-                        }
-                    }
-                }
-            }
-            // Fallback to "main"
-            if let Some(main) = json["main"].as_str() {
-                let main_path = pkg_dir.join(main);
-                let resolved = resolve_file_path(&main_path);
+    if let Ok(content) = std::fs::read_to_string(&pkg_json_path)
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        if let Some(exports) = json.get("exports") {
+            // Standard form: exports["."] is the entry condition map
+            if let Some(exp_dot) = exports.get(".")
+                && let Some(path_str) = exports_cjs_path(exp_dot)
+            {
+                let p = pkg_dir.join(path_str.trim_start_matches("./"));
+                let resolved = resolve_file_path(&p);
                 if resolved.is_file() {
                     return resolved;
                 }
+            }
+            // Shorthand form: exports itself IS the condition map (no "." key)
+            if exports.is_object()
+                && !exports.as_object().is_some_and(|m| m.contains_key("."))
+                && let Some(path_str) = exports_cjs_path(exports)
+            {
+                let p = pkg_dir.join(path_str.trim_start_matches("./"));
+                let resolved = resolve_file_path(&p);
+                if resolved.is_file() {
+                    return resolved;
+                }
+            }
+        }
+        // Fallback to "main"
+        if let Some(main) = json["main"].as_str() {
+            let main_path = pkg_dir.join(main);
+            let resolved = resolve_file_path(&main_path);
+            if resolved.is_file() {
+                return resolved;
             }
         }
     }

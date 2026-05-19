@@ -5,6 +5,8 @@ pub struct BundlerOptions {
     pub format: OutputFormat,
     pub minify: bool,
     pub sourcemap: bool,
+    pub splitting: bool,
+    pub chunk_filename: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +23,8 @@ impl Default for BundlerOptions {
             format: OutputFormat::Iife,
             minify: false,
             sourcemap: false,
+            splitting: false,
+            chunk_filename: "[name].[hash].js".to_string(),
         }
     }
 }
@@ -40,6 +44,14 @@ impl CodeGenerator {
 
     pub fn add_module(&mut self, name: String, code: String) {
         self.modules.insert(name, code);
+    }
+
+    pub fn get_module(&self, name: &str) -> Option<&String> {
+        self.modules.get(name)
+    }
+
+    pub fn get_options(&self) -> &BundlerOptions {
+        &self.options
     }
 
     pub fn generate(&self) -> String {

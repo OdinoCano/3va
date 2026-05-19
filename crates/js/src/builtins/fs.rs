@@ -1,9 +1,9 @@
-use rquickjs::{Ctx, Function, Object, Result};
+use rquickjs::{Ctx, Result};
 use std::cell::RefCell;
 use std::rc::Rc;
-use vvva_permissions::{Capability, PermissionState};
+use vvva_permissions::PermissionState;
 
-pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result<()> {
+pub fn inject_fs(ctx: &Ctx, _permissions: Rc<RefCell<PermissionState>>) -> Result<()> {
     ctx.eval::<(), _>(
         r#"
         const fs = {

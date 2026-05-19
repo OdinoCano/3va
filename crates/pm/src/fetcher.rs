@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 pub struct PackageFetcher {
     registry: String,
+    #[allow(dead_code)]
     cache_dir: PathBuf,
     client: reqwest::Client,
 }
@@ -63,7 +64,6 @@ impl PackageFetcher {
     }
 
     pub fn verify_hash(tarball: &[u8], expected: &str) -> bool {
-        use std::io::Read;
         let mut hasher = sha2::Sha256::new();
         hasher.update(tarball);
         let result = hasher.finalize();
@@ -73,6 +73,7 @@ impl PackageFetcher {
 }
 
 pub struct PackageCache {
+    #[allow(dead_code)]
     cache_dir: PathBuf,
     metadata: HashMap<String, CacheEntry>,
     max_size: u64,
@@ -126,10 +127,10 @@ impl PackageCache {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        entries.sort_by(|a, b| a.1.last_access.cmp(&b.1.last_access));
+        entries.sort_by_key(|a| a.1.last_access);
 
         let mut current_size = total_size;
-        for (key, entry) in entries {
+        for (key, _entry) in entries {
             if current_size <= self.max_size / 2 {
                 break;
             }

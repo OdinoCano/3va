@@ -43,8 +43,10 @@ impl Registry {
             Registry::Jsr
         } else if h == "registry.yarnpkg.com" || h.ends_with(".yarnpkg.com") {
             Registry::Yarn
-        } else if h == "registry.npmjs.org" || h == "registry.npmjs.com"
-            || h.ends_with(".npmjs.org") || h.ends_with(".npmjs.com")
+        } else if h == "registry.npmjs.org"
+            || h == "registry.npmjs.com"
+            || h.ends_with(".npmjs.org")
+            || h.ends_with(".npmjs.com")
         {
             Registry::Npm
         } else {
@@ -75,6 +77,7 @@ impl Registry {
 
 pub struct PackageManager {
     resolver: Resolver,
+    #[allow(dead_code)]
     cache_dir: PathBuf,
 }
 
@@ -265,8 +268,7 @@ fn normalize_version(version: &str) -> String {
 
 fn parse_package_spec(input: &str) -> anyhow::Result<(String, Option<String>)> {
     // Scoped packages: @scope/name or @scope/name@version
-    if input.starts_with('@') {
-        let after_at = &input[1..];
+    if let Some(after_at) = input.strip_prefix('@') {
         if let Some(slash_pos) = after_at.find('/') {
             let after_slash = &after_at[slash_pos + 1..];
             if let Some(ver_at_pos) = after_slash.find('@') {
@@ -305,13 +307,13 @@ fn parse_package_spec(input: &str) -> anyhow::Result<(String, Option<String>)> {
             name
         );
     }
-    if let Some(v) = version {
-        if v.contains(':') {
-            anyhow::bail!(
-                "Invalid version '{}'. Use name@version format (not name:version)",
-                v
-            );
-        }
+    if let Some(v) = version
+        && v.contains(':')
+    {
+        anyhow::bail!(
+            "Invalid version '{}'. Use name@version format (not name:version)",
+            v
+        );
     }
 
     Ok((name.to_string(), version.map(|s| s.to_string())))
@@ -376,7 +378,6 @@ async fn download_tarball(url: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()> {
-    use std::io::Read;
     let decoder = flate2::read::GzDecoder::new(data);
     let mut archive = tar::Archive::new(decoder);
 
@@ -445,14 +446,13 @@ async fn install_with_transitive(
 
         // Read transitive deps from the installed package.json
         let pkg_json = node_modules_dest.join("package.json");
-        if let Ok(content) = std::fs::read_to_string(&pkg_json) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(deps_obj) = val["dependencies"].as_object() {
-                    for dep_name in deps_obj.keys() {
-                        if !visited.contains(dep_name.as_str()) {
-                            queue.push_back(dep_name.clone());
-                        }
-                    }
+        if let Ok(content) = std::fs::read_to_string(&pkg_json)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(deps_obj) = val["dependencies"].as_object()
+        {
+            for dep_name in deps_obj.keys() {
+                if !visited.contains(dep_name.as_str()) {
+                    queue.push_back(dep_name.clone());
                 }
             }
         }
@@ -692,11 +692,7 @@ pub async fn update_packages(
     // Find which registries are needed but not allowed
     let missing: Vec<(&str, &Vec<String>)> = by_registry
         .iter()
-        .filter(|(reg, _)| {
-            !allowed
-                .iter()
-                .any(|h| host_is_allowed(h, reg.as_str()))
-        })
+        .filter(|(reg, _)| !allowed.iter().any(|h| host_is_allowed(h, reg.as_str())))
         .map(|(r, pkgs)| (r.as_str(), pkgs))
         .collect();
 
@@ -746,15 +742,15 @@ async fn install_package_impl(
 ) -> anyhow::Result<()> {
     let (pkg_name, requested_version) = parse_package_spec(input)?;
 
-    if let Some(ref v) = requested_version {
-        if v.is_empty() {
-            eprintln!();
-            eprintln!(
-                "✗ Error: Empty version is not allowed. Use {}@<version>",
-                pkg_name
-            );
-            anyhow::bail!("Empty version specified");
-        }
+    if let Some(ref v) = requested_version
+        && v.is_empty()
+    {
+        eprintln!();
+        eprintln!(
+            "✗ Error: Empty version is not allowed. Use {}@<version>",
+            pkg_name
+        );
+        anyhow::bail!("Empty version specified");
     }
 
     // secure-by-default: red denegada sin --allow-net explícito
@@ -958,7 +954,7 @@ async fn install_package_impl(
         let existing_ver = existing_version.as_deref().unwrap_or("*");
         let same_version = requested_version
             .as_deref()
-            .map_or(true, |rv| rv == existing_ver);
+            .is_none_or(|rv| rv == existing_ver);
         if same_version {
             println!();
             println!("✓ {}@{} is already installed.", pkg_name, existing_ver);
@@ -974,21 +970,21 @@ async fn install_package_impl(
     deps.insert(pkg_name.clone(), resolved_version.clone());
 
     // Write updated package.json
-    if let Ok(content) = std::fs::read_to_string(&pkg_json_path) {
-        if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(obj) = val.as_object_mut() {
-                let deps_obj = obj
-                    .entry("dependencies")
-                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-                if let Some(deps_map) = deps_obj.as_object_mut() {
-                    deps_map.insert(
-                        pkg_name.clone(),
-                        serde_json::Value::String(resolved_version.clone()),
-                    );
-                }
+    if let Ok(content) = std::fs::read_to_string(&pkg_json_path)
+        && let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        if let Some(obj) = val.as_object_mut() {
+            let deps_obj = obj
+                .entry("dependencies")
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(deps_map) = deps_obj.as_object_mut() {
+                deps_map.insert(
+                    pkg_name.clone(),
+                    serde_json::Value::String(resolved_version.clone()),
+                );
             }
-            std::fs::write(&pkg_json_path, serde_json::to_string_pretty(&val).unwrap())?;
         }
+        std::fs::write(&pkg_json_path, serde_json::to_string_pretty(&val).unwrap())?;
     }
 
     // Generate lockfile

@@ -13,6 +13,7 @@ clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+notify = "6.1"
 vvva_core = { path = "../core" }
 vvva_pm = { path = "../pm" }
 vvva_js = { path = "../js" }

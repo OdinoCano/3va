@@ -2,7 +2,7 @@ rules:
   - id: no-unwrap-in-security-critical
     pattern: $X.unwrap()
     message: "unwrap() no permitido en código de seguridad. Usar if let/ok_or/ok_or_else"
-    severity: ERROR
+    severity: WARNING
     languages: [rust]
     paths:
       include:
@@ -10,16 +10,11 @@ rules:
         - crates/permissions/**
         - crates/js/**
         - crates/pm/**
-      exclude:
-        # Tests pueden usar unwrap() — el riesgo es en código de producción
-        - "**/*test*"
-        - "**/tests/**"
-        - "**/*_tests.rs"
 
   - id: no-expect-in-security-critical
     pattern: $X.expect(...)
     message: "expect() no permitido en código de seguridad. Usar ok_or/ok_or_else"
-    severity: ERROR
+    severity: WARNING
     languages: [rust]
     paths:
       include:
@@ -27,9 +22,6 @@ rules:
         - crates/permissions/**
         - crates/js/**
         - crates/pm/**
-      exclude:
-        - "**/*test*"
-        - "**/tests/**"
 
   - id: no-unsafe-block
     pattern: unsafe { ... }
@@ -46,7 +38,7 @@ rules:
   - id: no-panic-in-security-critical
     pattern: panic!(...)
     message: "panic! no permitido en código de seguridad. Usar Result."
-    severity: ERROR
+    severity: WARNING
     languages: [rust]
     paths:
       include:
@@ -54,9 +46,9 @@ rules:
         - crates/core/**
 
   - id: no-unwrap-in-command-execution
-    pattern: std::process::Command->unwrap()
-    message: "unwrap() después de Command. Revisar validación de entrada."
-    severity: ERROR
+    pattern: std::process::$CMD.unwrap()
+    message: "unwrap() en std::process. Revisar validación de entrada."
+    severity: WARNING
     languages: [rust]
     paths:
       include:

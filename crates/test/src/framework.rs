@@ -26,23 +26,24 @@ pub struct TestResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum TestStatus {
     Passed,
     Failed,
     Skipped,
+    #[default]
     Pending,
-}
-
-impl Default for TestStatus {
-    fn default() -> Self {
-        TestStatus::Pending
-    }
 }
 
 pub struct TestState {
     root: Vec<TestCase>,
     results: Vec<TestResult>,
+}
+
+impl Default for TestState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestState {

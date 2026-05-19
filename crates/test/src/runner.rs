@@ -1,6 +1,6 @@
 use crate::framework::TestResult;
 use crate::framework::TestStatus;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub struct TestRunner {
     results: Vec<TestResult>,

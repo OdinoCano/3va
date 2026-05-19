@@ -28,6 +28,7 @@ pub fn transpile(source: &str) -> String {
     // for detecting top-level `interface`, `type`, `declare` keywords.
     let mut at_stmt_start = true;
     // brace depth so we can track class bodies
+    #[allow(unused_variables)]
     let mut brace_depth: i32 = 0;
 
     while i < len {
@@ -623,37 +624,25 @@ fn skip_type_expr(chars: &[char], i: &mut usize) {
                 depth_paren += 1;
                 *i += 1;
             }
-            ')' => {
-                if depth_paren > 0 {
-                    depth_paren -= 1;
-                    *i += 1;
-                } else {
-                    break;
-                }
+            ')' if depth_paren > 0 => {
+                depth_paren -= 1;
+                *i += 1;
             }
             '{' => {
                 depth_brace += 1;
                 *i += 1;
             }
-            '}' => {
-                if depth_brace > 0 {
-                    depth_brace -= 1;
-                    *i += 1;
-                } else {
-                    break;
-                }
+            '}' if depth_brace > 0 => {
+                depth_brace -= 1;
+                *i += 1;
             }
             '[' => {
                 depth_bracket += 1;
                 *i += 1;
             }
-            ']' => {
-                if depth_bracket > 0 {
-                    depth_bracket -= 1;
-                    *i += 1;
-                } else {
-                    break;
-                }
+            ']' if depth_bracket > 0 => {
+                depth_bracket -= 1;
+                *i += 1;
             }
             '<' => {
                 // Try to consume angle bracket (generic)
@@ -713,9 +702,7 @@ fn is_case_colon(out: &str) -> bool {
     // Look backwards in output for "case" keyword after last newline/semicolon
     let trimmed = out.trim_end();
     // Find last statement boundary
-    let last_boundary = trimmed
-        .rfind(|c| c == '\n' || c == ';' || c == '{')
-        .unwrap_or(0);
+    let last_boundary = trimmed.rfind(['\n', ';', '{']).unwrap_or(0);
     let stmt = &trimmed[last_boundary..].trim_start_matches(|c: char| c.is_whitespace());
     stmt.starts_with("case ")
 }

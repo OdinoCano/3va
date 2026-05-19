@@ -132,10 +132,10 @@ impl TaskQueue {
     }
 
     pub fn pop(&mut self) -> Option<Task> {
-        if let Some(delayed) = self.delayed.peek() {
-            if delayed.scheduled_at <= std::time::Instant::now() {
-                return self.delayed.pop().map(|dt| dt.task);
-            }
+        if let Some(delayed) = self.delayed.peek()
+            && delayed.scheduled_at <= std::time::Instant::now()
+        {
+            return self.delayed.pop().map(|dt| dt.task);
         }
 
         self.high_priority

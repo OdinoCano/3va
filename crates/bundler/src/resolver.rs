@@ -126,16 +126,15 @@ impl ModuleResolver {
             if package_json.is_file() {
                 if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(
                     &std::fs::read_to_string(&package_json)?,
-                ) {
-                    if let Some(main) = pkg.get("main").and_then(|m| m.as_str()) {
-                        let main_path = node_modules.join(main);
-                        if main_path.is_file() {
-                            let module_type = self.guess_type(&main_path);
-                            return Ok(ModuleKey {
-                                path: main_path,
-                                module_type,
-                            });
-                        }
+                ) && let Some(main) = pkg.get("main").and_then(|m| m.as_str())
+                {
+                    let main_path = node_modules.join(main);
+                    if main_path.is_file() {
+                        let module_type = self.guess_type(&main_path);
+                        return Ok(ModuleKey {
+                            path: main_path,
+                            module_type,
+                        });
                     }
                 }
 

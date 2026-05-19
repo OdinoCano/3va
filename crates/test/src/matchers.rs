@@ -25,7 +25,7 @@ impl Matchers {
         Self::to_be(actual, expected)
     }
 
-    pub fn toBeTruthy<T: std::fmt::Debug>(value: &T) -> MatcherResult {
+    pub fn to_be_truthy<T: std::fmt::Debug>(value: &T) -> MatcherResult {
         let passed = !format!("{:?}", value).is_empty();
         MatcherResult {
             passed,
@@ -37,7 +37,7 @@ impl Matchers {
         }
     }
 
-    pub fn toBeFalsy<T: std::fmt::Debug>(value: &T) -> MatcherResult {
+    pub fn to_be_falsy<T: std::fmt::Debug>(value: &T) -> MatcherResult {
         let passed = format!("{:?}", value).is_empty();
         MatcherResult {
             passed,
@@ -61,7 +61,7 @@ impl Matchers {
         }
     }
 
-    pub fn toBeGreaterThan(actual: f64, expected: f64) -> MatcherResult {
+    pub fn to_be_greater_than(actual: f64, expected: f64) -> MatcherResult {
         let passed = actual > expected;
         MatcherResult {
             passed,
@@ -73,7 +73,7 @@ impl Matchers {
         }
     }
 
-    pub fn toBeLessThan(actual: f64, expected: f64) -> MatcherResult {
+    pub fn to_be_less_than(actual: f64, expected: f64) -> MatcherResult {
         let passed = actual < expected;
         MatcherResult {
             passed,
