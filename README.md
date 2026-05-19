@@ -30,7 +30,27 @@ cd 3va
 
 # Build the runtime
 cargo build --release
-```
+
+### Running the binary
+
+After building, you can run `3va` in three ways:
+
+1. **Direct path** (recommended for quick testing):
+   ```bash
+   ./target/release/3va run app.ts
+   ```
+
+2. **Add to PATH temporarily** (for the current terminal session):
+   ```bash
+   export PATH="$PWD/target/release:$PATH"
+   3va run app.ts
+   ```
+
+3. **Install globally** (requires `sudo`, persists across sessions):
+   ```bash
+   sudo cp target/release/3va /usr/local/bin/
+   3va run app.ts
+   ```
 
 ### Usage (CLI Preview)
 

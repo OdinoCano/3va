@@ -20,9 +20,10 @@ pub struct SignatureInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VerificationStatus {
     Verified,
+    Unverified,
     Mismatch,
     Missing,
-    Error(String),
+    Failed(String),
 }
 
 pub struct SignatureVerifier {
@@ -79,7 +80,7 @@ impl SignatureVerifier {
                     VerificationStatus::Mismatch
                 }
             }
-            Err(e) => VerificationStatus::Error(e.to_string()),
+            Err(e) => VerificationStatus::Failed(e.to_string()),
         }
     }
 

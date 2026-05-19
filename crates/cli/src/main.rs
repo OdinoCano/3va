@@ -48,10 +48,19 @@ enum Commands {
     },
     /// Install dependencies from 3va registry
     Install {
-        /// The package to install
+        /// The package to install (e.g. axios or axios@1.7.9)
         package: Option<String>,
-        
-        /// Allow network access to specified hosts for the installed package
+
+        /// Registry host to allow network access to (e.g. registry.npmjs.org, registry.yarnpkg.com, jsr.io)
+        #[arg(long = "allow-net")]
+        allow_net: Option<Vec<String>>,
+    },
+    /// Reinstall a package (force reinstall even if already installed)
+    Reinstall {
+        /// The package to reinstall (e.g. axios or axios@1.7.9)
+        package: String,
+
+        /// Registry host to allow network access to (e.g. registry.npmjs.org, registry.yarnpkg.com, jsr.io)
         #[arg(long = "allow-net")]
         allow_net: Option<Vec<String>>,
     },
@@ -136,21 +145,26 @@ async fn main() -> anyhow::Result<()> {
             engine.run_event_loop()?;
             info!("Execution finished.");
         }
-        Commands::Install { package, allow_net: _ } => {
+        Commands::Install { package, allow_net } => {
             if let Some(pkg) = package {
                 info!("Installing package '{}'", pkg);
-                vvva_pm::install_package(pkg).await?;
+                vvva_pm::install_package(pkg, allow_net.as_deref()).await?;
             } else {
                 info!("Installing dependencies from manifest...");
                 info!("Note: Post-install scripts are DISABLED by default for security.");
             }
         }
+        Commands::Reinstall { package, allow_net } => {
+            info!("Reinstalling package '{}'", package);
+            vvva_pm::reinstall_package(&package, allow_net.as_deref()).await?;
+        }
         Commands::Dev => info!("Starting dev server..."),
         Commands::Bundle { input, output } => {
             info!("Bundling application from {} to {}...", input, output);
-            // Si el modo accesible está activo, podríamos pasar opciones sin source maps y output plain
             vvva_bundler::bundle_file(input, output, None)?;
-            info!("Bundle completed successfully.");
+            println!("");
+            println!("✓ Bundle created: {}", output);
+            println!("  Run: 3va run {} --allow-net=<trusted-hosts>", output);
         }
         Commands::Test { paths } => {
             let target_paths = if paths.is_empty() {
