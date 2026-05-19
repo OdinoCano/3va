@@ -1,0 +1,98 @@
+{
+  "lockfileVersion": 3,
+  "name": "project",
+  "version": "0.0.0",
+  "packages": {
+    "node_modules/axios": {
+      "version": "1.16.1",
+      "resolved": null,
+      "integrity": null,
+      "dev": null,
+      "registry": "registry.npmjs.org"
+    },
+    "node_modules/axios/package.json": {
+      "version": "1.16.1",
+      "resolved": null,
+      "integrity": null,
+      "dev": null
+    },
+    "node_modules/follow-redirects/package.json": {
+      "version": "^1.15.0",
+      "resolved": null,
+      "integrity": null,
+      "dev": null
+    },
+    "node_modules/proxy-from-env": {
+      "version": "^1.1.0",
+      "resolved": null,
+      "integrity": null,
+      "dev": null
+    },
+    "node_modules/proxy-from-env/package.json": {
+      "version": "^1.1.0",
+      "resolved": null,
+      "integrity": null,
+      "dev": null
+    },
+    "node_modules/@std/path/package.json": {
+      "version": "0.196.0",
+      "resolved": null,
+      "integrity": null,
+      "dev": null
+    },
+    "node_modules/follow-redirects": {
+      "version": "^1.15.0",
+      "resolved": null,
+      "integrity": null,
+      "dev": null
+    },
+    "node_modules/@std/path": {
+      "version": "0.196.0",
+      "resolved": null,
+      "integrity": null,
+      "dev": null,
+      "registry": "jsr.io"
+    },
+    "": {
+      "version": "0.0.0",
+      "resolved": null,
+      "integrity": null,
+      "dev": null
+    }
+  },
+  "dependencies": {
+    "axios": {
+      "version": "1.16.1",
+      "resolved": null,
+      "integrity": null,
+      "dependencies": {
+        "proxy-from-env": "^1.1.0",
+        "follow-redirects": "^1.15.0"
+      },
+      "dev": null,
+      "registry": "registry.npmjs.org"
+    },
+    "follow-redirects": {
+      "version": "^1.15.0",
+      "resolved": null,
+      "integrity": null,
+      "dependencies": null,
+      "dev": null
+    },
+    "proxy-from-env": {
+      "version": "^1.1.0",
+      "resolved": null,
+      "integrity": null,
+      "dependencies": null,
+      "dev": null
+    },
+    "@std/path": {
+      "version": "0.196.0",
+      "resolved": null,
+      "integrity": null,
+      "dependencies": null,
+      "dev": null,
+      "registry": "jsr.io"
+    }
+  }
+}

@@ -18,6 +18,8 @@ pub struct LockfilePackage {
     pub resolved: Option<String>,
     pub integrity: Option<String>,
     pub dev: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +29,8 @@ pub struct LockfileDep {
     pub integrity: Option<String>,
     pub dependencies: Option<HashMap<String, String>>,
     pub dev: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
 }
 
 impl Lockfile {
@@ -39,6 +43,7 @@ impl Lockfile {
             resolved: None,
             integrity: None,
             dev: None,
+            registry: None,
         });
 
         for (_, node) in graph.nodes() {
@@ -48,6 +53,7 @@ impl Lockfile {
                 resolved: node.resolved.clone(),
                 integrity: node.integrity.clone(),
                 dev: None,
+                registry: None,
             });
 
             let pkg_key = format!("node_modules/{}/package.json", node.name);
@@ -56,6 +62,7 @@ impl Lockfile {
                 resolved: None,
                 integrity: None,
                 dev: None,
+                registry: None,
             });
 
             let deps: HashMap<String, String> = node.dependencies
@@ -69,6 +76,7 @@ impl Lockfile {
                 integrity: node.integrity.clone(),
                 dependencies: if deps.is_empty() { None } else { Some(deps) },
                 dev: None,
+                registry: None,
             });
         }
 
@@ -78,6 +86,33 @@ impl Lockfile {
             version: version.to_string(),
             packages,
             dependencies,
+        }
+    }
+
+    /// Returns the stored registry host for a top-level dependency, if recorded.
+    pub fn registry_for(&self, pkg_name: &str) -> Option<&str> {
+        self.dependencies.get(pkg_name)?.registry.as_deref()
+    }
+
+    /// Returns a map of registry_host → [package names] for all packages that have a registry recorded.
+    pub fn registries_needed(&self, packages: &[String]) -> std::collections::HashMap<String, Vec<String>> {
+        let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for pkg in packages {
+            if let Some(reg) = self.registry_for(pkg) {
+                map.entry(reg.to_string()).or_default().push(pkg.clone());
+            }
+        }
+        map
+    }
+
+    /// Records the registry for a specific top-level dependency in-place.
+    pub fn set_registry(&mut self, pkg_name: &str, registry_host: &str) {
+        if let Some(dep) = self.dependencies.get_mut(pkg_name) {
+            dep.registry = Some(registry_host.to_string());
+        }
+        let node_key = format!("node_modules/{}", pkg_name);
+        if let Some(pkg) = self.packages.get_mut(&node_key) {
+            pkg.registry = Some(registry_host.to_string());
         }
     }
 

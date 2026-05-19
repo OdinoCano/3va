@@ -84,11 +84,15 @@
 - [03-release-process.md](12-roadmap/03-release-process.md) - Proceso de release
 - [04-compatibility.md](12-roadmap/04-compatibility.md) - Compatibilidad retroactiva
 
+## Changelog
+
+- [CHANGELOG.md](../CHANGELOG.md) — Historial de cambios por versión (Keep a Changelog 1.0.0)
+
 ---
 
 **Identificador del documento:** 3VA-SPEC-2026-001
-**Versión:** 1.0.0
-**Fecha:** 2026-05-18
+**Versión:** 1.1.0
+**Fecha:** 2026-05-19
 **Clasificación:** Público
 **Estado:** Borrador
 

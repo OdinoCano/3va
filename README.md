@@ -66,7 +66,10 @@ After building, you can run `3va` in three ways:
   --deny-child-process
 
 # Install dependencies (strictly sandboxed, no post-install execution)
-3va install axios --allow-net=https://api.example.com
+# The --allow-net host defines which registry to use — no separate --registry flag needed
+3va install axios --allow-net=registry.npmjs.org
+3va install @std/path --allow-net=jsr.io
+3va install react --allow-net=registry.yarnpkg.com
 ```
 
 ## Architecture

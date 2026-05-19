@@ -55,6 +55,15 @@ enum Commands {
         #[arg(long = "allow-net")]
         allow_net: Option<Vec<String>>,
     },
+    /// Update installed packages to their latest version, preserving their original registry
+    Update {
+        /// Specific packages to update (if omitted, updates all packages in lockfile)
+        packages: Vec<String>,
+
+        /// Registry hosts to allow network access to (must cover all registries of the packages being updated)
+        #[arg(long = "allow-net")]
+        allow_net: Option<Vec<String>>,
+    },
     /// Reinstall a package (force reinstall even if already installed)
     Reinstall {
         /// The package to reinstall (e.g. axios or axios@1.7.9)
@@ -153,6 +162,10 @@ async fn main() -> anyhow::Result<()> {
                 info!("Installing dependencies from manifest...");
                 info!("Note: Post-install scripts are DISABLED by default for security.");
             }
+        }
+        Commands::Update { packages, allow_net } => {
+            info!("Updating packages...");
+            vvva_pm::update_packages(packages, allow_net.as_deref()).await?;
         }
         Commands::Reinstall { package, allow_net } => {
             info!("Reinstalling package '{}'", package);

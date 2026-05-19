@@ -298,6 +298,97 @@ pub async fn reinstall_package(name: &str, allow_net: Option<&[String]>) -> anyh
     install_package_impl(name, true, allow_net).await
 }
 
+pub async fn update_packages(packages: &[String], allow_net: Option<&[String]>) -> anyhow::Result<()> {
+    let lockfile_path = PathBuf::from("3va-lock.json");
+
+    let lockfile = match Lockfile::load(&lockfile_path) {
+        Ok(l) => l,
+        Err(_) => {
+            eprintln!("✗ No 3va-lock.json found. Run '3va install <package> --allow-net=<host>' first.");
+            anyhow::bail!("Lockfile not found");
+        }
+    };
+
+    // Determine target packages (all deps or specific subset)
+    let all_deps: Vec<String> = lockfile.dependencies.keys().cloned().collect();
+    let targets: Vec<String> = if packages.is_empty() {
+        all_deps
+    } else {
+        for pkg in packages {
+            if !lockfile.dependencies.contains_key(pkg.as_str()) {
+                eprintln!("✗ '{}' is not in the lockfile. Install it first.", pkg);
+                anyhow::bail!("Package not found in lockfile: {}", pkg);
+            }
+        }
+        packages.to_vec()
+    };
+
+    if targets.is_empty() {
+        println!("No packages to update.");
+        return Ok(());
+    }
+
+    // Map registry → packages that need it
+    let by_registry = lockfile.registries_needed(&targets);
+    let unknown: Vec<&str> = targets.iter()
+        .filter(|p| lockfile.registry_for(p).is_none())
+        .map(|s| s.as_str())
+        .collect();
+
+    // Normalize a host string for comparison (strip scheme, trailing slash)
+    fn normalize_host(h: &str) -> &str {
+        let h = h.trim();
+        let h = h.strip_prefix("https://").unwrap_or(h);
+        let h = h.strip_prefix("http://").unwrap_or(h);
+        h.trim_end_matches('/')
+    }
+
+    let allowed: Vec<&str> = allow_net
+        .map(|v| v.iter().map(|s| normalize_host(s.as_str())).collect())
+        .unwrap_or_default();
+
+    // Find which registries are needed but not allowed
+    let missing: Vec<(&str, &Vec<String>)> = by_registry.iter()
+        .filter(|(reg, _)| !allowed.iter().any(|h| h.contains(reg.as_str()) || reg.contains(h)))
+        .map(|(r, pkgs)| (r.as_str(), pkgs))
+        .collect();
+
+    if !missing.is_empty() || (allowed.is_empty() && !by_registry.is_empty()) {
+        eprintln!();
+        eprintln!("✗ Update requires network access to:");
+        eprintln!();
+        for (registry, pkgs) in &by_registry {
+            eprintln!("    {:<35} ({})", registry, pkgs.join(", "));
+        }
+        if !unknown.is_empty() {
+            eprintln!("    (no registry recorded for: {})", unknown.join(", "));
+        }
+        eprintln!();
+        let hosts: Vec<&str> = by_registry.keys().map(|s| s.as_str()).collect();
+        eprintln!("  Run: 3va update --allow-net={}", hosts.join(","));
+        anyhow::bail!("Network access denied: --allow-net missing required registries");
+    }
+
+    if !unknown.is_empty() {
+        eprintln!("! Warning: no registry recorded for: {}. Skipping.", unknown.join(", "));
+    }
+
+    // Update each package using its stored registry as the allowed host
+    println!();
+    println!("Updating {} package(s)...", targets.len());
+
+    for pkg in &targets {
+        if let Some(reg) = lockfile.registry_for(pkg) {
+            let host = reg.to_string();
+            install_package_impl(pkg, true, Some(&[host])).await?;
+        }
+    }
+
+    println!();
+    println!("✓ All packages updated.");
+    Ok(())
+}
+
 async fn install_package_impl(input: &str, force: bool, allow_net: Option<&[String]>) -> anyhow::Result<()> {
     let (pkg_name, requested_version) = parse_package_spec(input)?;
 
@@ -484,9 +575,21 @@ async fn install_package_impl(input: &str, force: bool, allow_net: Option<&[Stri
     // Generate lockfile
     let cache_dir = PathBuf::from(".3va-cache");
     let mut pm = PackageManager::new(cache_dir);
-    let lockfile = pm.install(&deps, &project_name, &project_version)?;
+    let mut lockfile = pm.install(&deps, &project_name, &project_version)?;
 
     let lockfile_path = PathBuf::from("3va-lock.json");
+
+    // Preserve existing registry assignments from the previous lockfile before overwriting
+    if let Ok(old_lock) = Lockfile::load(&lockfile_path) {
+        for (name, dep) in &old_lock.dependencies {
+            if let Some(reg) = &dep.registry {
+                lockfile.set_registry(name, reg);
+            }
+        }
+    }
+    // Record the registry for the package we just installed/updated
+    lockfile.set_registry(&pkg_name, registry.display_name());
+
     lockfile.save(&lockfile_path)?;
     tracing::info!("Lockfile written to 3va-lock.json ({} packages).", lockfile.packages.len());
 

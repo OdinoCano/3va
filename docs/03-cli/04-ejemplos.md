@@ -1,199 +1,220 @@
 # 04 - EJEMPLOS DE USO
 
-## 4.1 Ejemplos de Ejecución
+## 4.1 Ejecución de Scripts
 
 ### 4.1.1 Ejecución Básica
 
 ```bash
-# Ejecutar archivo JavaScript
+# JavaScript
 3va run hello.js
 
-# Ejecutar archivo TypeScript
+# TypeScript (transpilación automática)
 3va run app.ts
-
-# Ejecutar con argumentos
-3va run script.ts -- --nombre valor
 ```
 
 ### 4.1.2 Con Permisos Granulares
 
+Los permisos son denegados por defecto. Se conceden explícitamente:
+
 ```bash
-# Leer solo un directorio específico
+# Acceso de lectura a un directorio específico
 3va run app.ts --allow-read=/app/data
 
-# Conectar a una API específica
+# Acceso de red a un host específico
 3va run app.ts --allow-net=api.example.com
 
-# Desarrollo completo local
-3va run dev.ts --allow-read --allow-write --allow-net
+# Combinación de permisos
+3va run app.ts --allow-read=/app/config --allow-net=api.example.com --allow-env
+
+# Acceso de escritura
+3va run app.ts --allow-write=/tmp/output
 ```
 
-### 4.1.3 Modo Inspector
+---
 
+## 4.2 Package Manager
+
+### 4.2.1 Conceptos Clave
+
+**El host en `--allow-net` define el registry.** No existe un flag `--registry` separado.
+
+| Comando | Registry usado |
+|---------|---------------|
+| `--allow-net=registry.npmjs.org` | npm |
+| `--allow-net=registry.yarnpkg.com` | Yarn |
+| `--allow-net=jsr.io` | JSR |
+
+**Sin `--allow-net` la red está denegada:**
 ```bash
-# Con inspector para Chrome DevTools
-3va run app.ts --inspect
-
-# Con breakpoint inicial
-3va run app.ts --inspect-brk
-# Después en Chrome: chrome://inspect
+3va install axios
+# ✗ Network access denied.
+#   3va install axios --allow-net=registry.npmjs.org
+#   3va install axios --allow-net=registry.yarnpkg.com
+#   3va install axios --allow-net=jsr.io
 ```
 
-## 4.2 Ejemplos de Package Manager
-
-### 4.2.1 Instalación Básica
+### 4.2.2 Instalación desde npm
 
 ```bash
-# Instalar un paquete
-3va install lodash
-
-# Con versión específica
-3va install react@18.2.0
-
-# Instalar y guardar en dependencies
-3va install axios --save
-
-# Instalar como dependencia de desarrollo
-3va install jest --save-dev
-```
-
-### 4.2.2 Instalación con Permisos
-
-```bash
-# Instalar con acceso a red para registry
+# Última versión
 3va install axios --allow-net=registry.npmjs.org
 
-# Instalar desde registry específico
-3va install axios --registry=https://registry.npmmirror.com
+# Versión específica
+3va install axios@1.7.2 --allow-net=registry.npmjs.org
+
+# Versión no existente → muestra alternativas
+3va install axios@99.0.0 --allow-net=registry.npmjs.org
+# ✗ Version axios@99.0.0 not found in registry.
+#
+#   Versions available near 99.0.0:
+#     axios@1.7.9
+#     axios@1.7.8
+#     axios@1.7.7
+#     axios@1.7.6
+#     axios@1.7.5
 ```
 
-### 4.2.3 Gestión de Paquetes
+### 4.2.3 Instalación desde Yarn
 
 ```bash
-# Listar paquetes instalados
-3va list
+3va install axios --allow-net=registry.yarnpkg.com
+3va install react@18.3.1 --allow-net=registry.yarnpkg.com
+```
 
-# Listar con profundidad
-3va list --depth=2
+### 4.2.4 Instalación desde JSR
 
-# Actualizar paquetes
+JSR solo acepta paquetes con scope (`@scope/name`):
+
+```bash
+# Correcto — paquete con scope
+3va install @std/path --allow-net=jsr.io
+3va install @std/path@0.196.0 --allow-net=jsr.io
+
+# Error — paquete sin scope no válido en JSR
+3va install axios --allow-net=jsr.io
+# ✗ JSR only supports scoped packages (e.g. @scope/name)
+```
+
+### 4.2.5 Proyecto Multi-Registry
+
+En un mismo proyecto pueden convivir dependencias de distintos registries:
+
+```bash
+# axios desde npm, react desde Yarn, @std/path desde JSR
+3va install axios --allow-net=registry.npmjs.org
+3va install react --allow-net=registry.yarnpkg.com
+3va install @std/path --allow-net=jsr.io
+```
+
+El lockfile `3va-lock.json` registra el origen de cada uno:
+
+```json
+{
+  "dependencies": {
+    "axios":     { "version": "1.7.2",   "registry": "registry.npmjs.org" },
+    "react":     { "version": "18.3.1",  "registry": "registry.yarnpkg.com" },
+    "@std/path": { "version": "0.196.0", "registry": "jsr.io" }
+  }
+}
+```
+
+### 4.2.6 Reinstalación
+
+```bash
+3va reinstall axios --allow-net=registry.npmjs.org
+3va reinstall @std/path --allow-net=jsr.io
+```
+
+### 4.2.7 Actualización
+
+`update` respeta el registry registrado en el lockfile para cada paquete:
+
+```bash
+# Sin --allow-net: el CLI informa qué hosts se necesitan
 3va update
+# ✗ Update requires network access to:
+#
+#     registry.npmjs.org        (axios)
+#     registry.yarnpkg.com      (react)
+#     jsr.io                    (@std/path)
+#
+# Run: 3va update --allow-net=registry.npmjs.org,registry.yarnpkg.com,jsr.io
 
-# Desinstalar
-3va remove lodash
+# Actualizar todo
+3va update --allow-net=registry.npmjs.org,registry.yarnpkg.com,jsr.io
+
+# Actualizar un solo paquete
+3va update axios --allow-net=registry.npmjs.org
+
+# Actualizar paquetes específicos de distintos registries
+3va update axios @std/path --allow-net=registry.npmjs.org,jsr.io
 ```
 
-## 4.3 Ejemplos de Testing
-
-### 4.3.1 Ejecución de Tests
+**Migrar un paquete a otro registry** (acción explícita, queda registrada en el lockfile):
 
 ```bash
-# Ejecutar todos los tests
+# axios pasará a actualizarse desde Yarn en el futuro
+3va install axios --allow-net=registry.yarnpkg.com
+```
+
+---
+
+## 4.3 Testing
+
+```bash
+# Todos los tests en el directorio actual
 3va test
 
-# Ejecutar archivos específicos
+# Directorio específico
 3va test tests/
 
-# Modo watch
-3va test --watch
-
-# Con coverage
-3va test --coverage
-
-# Bail en primer fallo
-3va test --bail
-
-# Actualizar snapshots
-3va test --update-snapshots
-
-# Filtrar por nombre
-3va test --test-name-pattern="auth"
+# Archivo específico
+3va test tests/auth.test.ts
 ```
 
-### 4.3.2 Configuración de Tests
+---
 
-Archivo `jest.config.js` o en `package.json`:
-```javascript
-module.exports = {
-  testEnvironment: "node",
-  testMatch: ["**/*.test.js", "**/*.test.ts"],
-  collectCoverage: true,
-  coverageDirectory: "coverage",
-};
-```
-
-## 4.4 Ejemplos de Build
-
-### 4.4.1 Build Básico
+## 4.4 Bundler
 
 ```bash
-# Build básico
-3va build index.ts
+# Bundle con output por defecto (dist/bundle.js)
+3va bundle src/index.ts
 
-# Output a directorio específico
-3va build index.ts --out-dir ./dist
+# Output personalizado
+3va bundle src/index.ts --output dist/app.js
 
-# Minificar
-3va build index.ts --minify
+# Ejecutar el bundle resultante
+3va run dist/bundle.js --allow-net=api.example.com
 ```
 
-### 4.4.2 Build Avanzado
+---
+
+## 4.5 Accesibilidad
+
+Desactiva colores y animaciones para lectores de pantalla y terminales Braille (EN 301 549):
 
 ```bash
-# ES Modules para Node.js
-3va build index.ts --format=esm --target=node
-
-# IIFE para navegador
-3va build index.ts --format=iife --target=browser --minify
-
-# Con source maps
-3va build index.ts --source-map
-
-# Watch mode
-3va build:watch index.ts
+3va --accessible run app.ts
+3va --accessible install axios --allow-net=registry.npmjs.org
+3va --accessible update --allow-net=registry.npmjs.org,jsr.io
 ```
 
-## 4.5 Ejemplos de Seguridad
+---
 
-### 4.5.1 Configuración Restrictiva
-
-```bash
-# Entorno muy restrictivo
-3va run app.ts --allow-read
-
-# Sin acceso a red
-3va run app.ts --deny-net
-
-# Solo lectura de archivos específicos
-3va run app.ts --allow-read=/app/config.json
-```
-
-### 4.5.2 Auditoría
-
-```bash
-# Ver logs de auditoría
-3va run app.ts -V 2>&1 | grep AUDIT
-
-# Logs en archivo
-3va run app.ts --log-file=/var/log/3va/audit.log
-```
-
-## 4.6 Scripts de package.json
+## 4.6 Scripts en `package.json`
 
 ```json
 {
   "scripts": {
-    "start": "3va run src/index.ts",
-    "dev": "3va run src/index.ts --watch",
-    "build": "3va build src/index.ts --out-dir dist --minify",
-    "test": "3va test",
-    "test:watch": "3va test --watch",
-    "test:coverage": "3va test --coverage",
-    "install": "3va install"
+    "start":   "3va run src/index.ts --allow-net=api.mycompany.com",
+    "build":   "3va bundle src/index.ts --output dist/app.js",
+    "test":    "3va test",
+    "install": "3va install --allow-net=registry.npmjs.org",
+    "update":  "3va update --allow-net=registry.npmjs.org,jsr.io"
   }
 }
 ```
 
 ---
 
-*Ejemplos conformes a IEEE 829 y casos de uso.*
+*Ejemplos conformes a IEEE 829 y al modelo de capacidades de 3va.*
