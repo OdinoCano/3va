@@ -1,8 +1,10 @@
+pub mod coverage;
 pub mod framework;
 pub mod matchers;
 pub mod runner;
 pub mod security;
 
+pub use coverage::{CoverageReport, generate_coverage_report, print_coverage_report};
 pub use framework::{
     describe, expect, it, run_all_tests, test, Expect, TestResult, TestState, TestStatus,
 };
@@ -18,11 +20,11 @@ pub fn run_tests(
     let cfg = config.unwrap_or_default();
     let mut runner = TestRunner::new(cfg);
 
-    for path in paths {
+    for path in &paths {
         if path.is_file() {
-            runner.run_file(&path)?;
+            runner.run_file(path)?;
         } else if path.is_dir() {
-            runner.run_directory(&path)?;
+            runner.run_directory(path)?;
         }
     }
 

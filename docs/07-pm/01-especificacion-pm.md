@@ -37,7 +37,8 @@ Tener un flag `--registry` separado duplicaría la autorización y rompería el 
 | Flag de registry | `--registry` | `--registry` | `--allow-net` |
 | Post-install scripts | Por defecto | Por defecto | **Deshabilitado** |
 | Verificación de firma | Opcional | Opcional | Obligatoria |
-| Análisis de malware | No | No | Sí |
+| Análisis de malware | No | No | **Sí** |
+| Auditoría CVE (OSV) | No | No | **Sí** |
 | Multi-registry por proyecto | No | No | **Sí** |
 | Origen por paquete en lockfile | No | No | **Sí** |
 

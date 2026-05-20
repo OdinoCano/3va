@@ -64,6 +64,19 @@ impl JsEngine {
         Ok(())
     }
 
+    /// Evaluate a JS expression and return its string value.
+    pub fn eval_to_string(&self, code: &str) -> anyhow::Result<String> {
+        let result = self.context.with(|ctx| -> rquickjs::Result<String> {
+            let val: rquickjs::Value = ctx.eval(code)?;
+            if let Some(s) = val.as_string() {
+                Ok(s.to_string()?)
+            } else {
+                Ok(String::new())
+            }
+        })?;
+        Ok(result)
+    }
+
     /// Read a file, transpile if TypeScript, set `__filename`/`__dirname`, then eval.
     /// Automatically detects ESM (top-level import/export) and uses Module evaluation.
     pub fn eval_file(&self, path: &Path) -> anyhow::Result<()> {

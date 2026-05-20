@@ -227,6 +227,19 @@ pub fn inject_timers(ctx: &Ctx) -> Result<()> {
             delete globalThis.__timerCallbacks[id];
             __nativeClearTimer(id);
         };
+
+        // setImmediate/clearImmediate — schedules a callback as a 0ms timeout
+        globalThis.setImmediate = function(fn) {
+            return globalThis.setTimeout(fn, 0);
+        };
+        globalThis.clearImmediate = function(id) {
+            globalThis.clearTimeout(id);
+        };
+
+        // queueMicrotask — fires after current sync execution, before timers
+        globalThis.queueMicrotask = function(fn) {
+            Promise.resolve().then(fn);
+        };
     "#,
     )?;
 

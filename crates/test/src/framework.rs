@@ -98,7 +98,9 @@ lazy_static::lazy_static! {
     static ref STATE: std::sync::Mutex<TestState> = std::sync::Mutex::new(TestState::new());
 }
 
-pub fn describe(_name: &str, _f: impl FnOnce()) {}
+pub fn describe(_name: &str, f: impl FnOnce()) {
+    f();
+}
 
 pub fn it(name: String, test_fn: TestFn) {
     STATE.lock().unwrap().it(name, test_fn);
