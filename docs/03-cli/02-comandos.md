@@ -226,10 +226,74 @@ Empaqueta una aplicación desde un punto de entrada.
 
 ### 2.6.1 `audit`
 
-Audita las dependencias instaladas.
+Audita las dependencias instaladas en **dos fases**:
 
+1. **Análisis estático de malware** — escanea el código extraído en `node_modules/` buscando patrones maliciosos conocidos (exfiltración de datos, inyección de comandos, etc.).
+2. **Vulnerabilidades conocidas (OSV)** — consulta la [OSV Batch API](https://osv.dev) por cada paquete@versión en `3va-lock.json` y reporta CVEs, GHSAs y entradas de RustSec/NVD.
+
+**Firma:**
+```
+3va audit [--deny] [--update-cache]
+```
+
+**Opciones:**
+| Opción | Descripción |
+|--------|-------------|
+| `--deny` | Sale con código de error ≠ 0 si se detecta alguna vulnerabilidad de severidad **CRITICAL** o **HIGH**. Recomendado en pipelines CI/CD. |
+| `--update-cache` | Ignora la caché local (TTL 24 h) y descarga datos frescos de la API OSV para todos los paquetes. |
+
+**Comportamiento:**
+- Lee `3va-lock.json` para obtener la lista de paquetes instalados con sus versiones exactas.
+- Si `3va-lock.json` no existe, recorre `node_modules/` como fallback.
+- Consulta `https://api.osv.dev/v1/querybatch` en lotes de hasta 100 paquetes por petición HTTP.
+- Cachea cada resultado en `~/.cache/3va/audit/<pkg>@<version>.json` durante 24 horas.
+- Si la API no está disponible, usa la caché stale y avisa al usuario — el comando nunca falla por problemas de conectividad.
+- Solo envía `{ name, version, ecosystem }` a OSV. No se transmiten rutas de archivos ni código fuente.
+
+**Severidad OSV:**
+| Rango CVSS v3 | Etiqueta |
+|---------------|---------|
+| 9.0 – 10.0 | CRITICAL |
+| 7.0 – 8.9 | HIGH |
+| 4.0 – 6.9 | MEDIUM |
+| 0.1 – 3.9 | LOW |
+
+La severidad se calcula en este orden de preferencia: CVSS v3 vector → CVSS v2 score → etiqueta `database_specific.severity` (formato GitHub Advisory).
+
+**Caché local:**
+```
+~/.cache/3va/audit/
+  lodash@4.17.20.json
+  axios@1.7.9.json
+  @scope__pkg@2.0.0.json    ← @ y / sanitizados
+```
+
+**Ejemplos:**
 ```bash
+# Auditoría completa (malware + CVEs)
 3va audit
+
+# CI/CD: falla si hay HIGH o CRITICAL
+3va audit --deny
+
+# Forzar datos frescos de OSV
+3va audit --update-cache
+
+# Ejemplo de salida con vulnerabilidad
+# === Phase 2: Known Vulnerabilities (OSV) ===
+#
+#   HIGH lodash@4.17.20 — 1 issue(s)
+#     [HIGH] GHSA-35jh-r3h4-6jhm — Prototype Pollution in lodash
+#            Fix: upgrade to 4.17.21
+#            See: https://github.com/advisories/GHSA-35jh-r3h4-6jhm
+#
+#   Packages scanned      : 12
+#   Packages with vulns   : 1
+#   Total vulnerabilities : 1
+#   High                  : 1
+#
+# ! 1 CRITICAL/HIGH issue(s) found. Review the findings above.
+# Use '3va audit --deny' in CI/CD pipelines to enforce a hard block.
 ```
 
 ### 2.6.2 `doctor`

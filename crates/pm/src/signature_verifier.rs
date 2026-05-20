@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::fs::File;
@@ -92,19 +93,46 @@ impl SignatureVerifier {
         }
     }
 
+    /// Verify a tarball's bytes against an SRI integrity string from a registry
+    /// (`sha512-<base64>` or `sha256-<base64>`).  Returns `Missing` when no
+    /// integrity string is provided (caller should warn but not fail hard).
+    pub fn verify_tarball(&self, data: &[u8], integrity: &str) -> VerificationStatus {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        if let Some(expected) = integrity.strip_prefix("sha512-") {
+            let mut h = Sha512::new();
+            h.update(data);
+            let computed = b64.encode(h.finalize());
+            return if computed == expected {
+                VerificationStatus::Verified
+            } else {
+                VerificationStatus::Mismatch
+            };
+        }
+        if let Some(expected) = integrity.strip_prefix("sha256-") {
+            let mut h = Sha256::new();
+            h.update(data);
+            let computed = b64.encode(h.finalize());
+            return if computed == expected {
+                VerificationStatus::Verified
+            } else {
+                VerificationStatus::Mismatch
+            };
+        }
+        // Unknown algorithm — cannot verify
+        VerificationStatus::Missing
+    }
+
+    /// Verify a tarball against the optional integrity string supplied by the
+    /// registry metadata.  This is the main entry point used by the install flow.
     pub fn verify_from_registry(
         &self,
-        package_name: &str,
-        version: &str,
-        _tarball_path: &Path,
+        tarball_data: &[u8],
+        integrity: Option<&str>,
     ) -> VerificationStatus {
-        let expected_hash = format!("{}-{}.sha256", package_name, version);
-        eprintln!(
-            "[SIGNATURE] Would verify against registry for {}",
-            expected_hash
-        );
-
-        VerificationStatus::Missing
+        match integrity {
+            Some(hash) => self.verify_tarball(tarball_data, hash),
+            None => VerificationStatus::Missing,
+        }
     }
 
     pub fn compute_file_hashes(dir: &Path) -> Vec<(String, String)> {

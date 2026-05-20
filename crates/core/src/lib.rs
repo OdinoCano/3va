@@ -21,7 +21,40 @@ impl Runtime {
         }
     }
 
-    pub fn run(&self) -> anyhow::Result<()> {
+    /// Drive the event loop: fire expired timers and drain completed tasks.
+    /// Returns when all pending work is exhausted or the safety limit is hit.
+    pub fn run(&mut self) -> anyhow::Result<()> {
+        const MAX_ITERS: usize = 100_000;
+        let mut iters = 0;
+
+        while self.pending_task_count() > 0 && iters < MAX_ITERS {
+            iters += 1;
+
+            // Fire all timers that have expired
+            let expired = self.timer_wheel.poll();
+            for timer in expired {
+                (timer.callback)();
+                // Re-add repeating timers
+                if timer.repeating {
+                    if let Some(interval) = timer.interval {
+                        self.timer_wheel.schedule_with_callback(interval, || {});
+                    }
+                }
+            }
+
+            // Short yield to let tokio tasks make progress
+            if self.task_queue.pending_count() > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+
+            // Next timer hasn't fired yet — sleep until it's due
+            if let Some(wait) = self.next_timer_duration() {
+                if wait > std::time::Duration::ZERO {
+                    std::thread::sleep(wait.min(std::time::Duration::from_millis(50)));
+                }
+            }
+        }
+
         Ok(())
     }
 

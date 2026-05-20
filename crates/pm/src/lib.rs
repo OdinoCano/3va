@@ -1,3 +1,4 @@
+pub mod auditor;
 pub mod fetcher;
 pub mod lockfile;
 pub mod malware_scanner;
@@ -6,6 +7,7 @@ pub mod resolver;
 pub mod semver;
 pub mod signature_verifier;
 
+pub use auditor::{print_audit_report, run_audit, AuditReport, VulnFinding, VulnSeverity, Vulnerability};
 pub use lockfile::Lockfile;
 pub use malware_scanner::{MalwareScanner, ScanResult, Threat, ThreatLevel};
 pub use manifest::{PackageInfo, PackageManifest, PackagePermissions};
@@ -317,42 +319,6 @@ fn parse_package_spec(input: &str) -> anyhow::Result<(String, Option<String>)> {
     }
 
     Ok((name.to_string(), version.map(|s| s.to_string())))
-}
-
-// ── Integrity verification ────────────────────────────────────────────────────
-
-fn verify_integrity(data: &[u8], integrity: &str) -> anyhow::Result<()> {
-    use base64::Engine;
-    use sha2::Digest;
-
-    if let Some(expected_b64) = integrity.strip_prefix("sha512-") {
-        let mut hasher = sha2::Sha512::new();
-        hasher.update(data);
-        let computed = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
-        if computed != expected_b64 {
-            anyhow::bail!(
-                "Integrity check failed (sha512): tarball hash does not match registry metadata"
-            );
-        }
-        return Ok(());
-    }
-    if let Some(expected_b64) = integrity.strip_prefix("sha256-") {
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(data);
-        let computed = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
-        if computed != expected_b64 {
-            anyhow::bail!(
-                "Integrity check failed (sha256): tarball hash does not match registry metadata"
-            );
-        }
-        return Ok(());
-    }
-    // Unknown format — log and continue
-    tracing::warn!(
-        "Unknown integrity format '{}', skipping verification",
-        integrity
-    );
-    Ok(())
 }
 
 // ── Download + extract ────────────────────────────────────────────────────────
@@ -886,22 +852,30 @@ async fn install_package_impl(
             bytes
         };
 
-        // Verify integrity against registry metadata
+        // Verify integrity against registry metadata via SignatureVerifier
         if let Some(meta) = info.version_meta.get(&resolved_version) {
-            if let Some(ref integrity) = meta.integrity {
-                print!("  Verifying integrity... ");
-                match verify_integrity(&tarball_bytes, integrity) {
-                    Ok(()) => println!("✓"),
-                    Err(e) => {
-                        // Remove corrupt cached tarball
-                        let _ = std::fs::remove_file(&cached_tarball);
-                        eprintln!();
-                        eprintln!("✗ {}", e);
-                        anyhow::bail!("{}", e);
-                    }
+            print!("  Verifying integrity... ");
+            let verifier = SignatureVerifier::sha512();
+            match verifier.verify_from_registry(&tarball_bytes, meta.integrity.as_deref()) {
+                VerificationStatus::Verified => println!("✓"),
+                VerificationStatus::Mismatch => {
+                    let _ = std::fs::remove_file(&cached_tarball);
+                    eprintln!();
+                    anyhow::bail!(
+                        "Integrity check failed for {}@{}: tarball hash does not match registry metadata",
+                        pkg_name, resolved_version
+                    );
                 }
-            } else {
-                println!("  ! Warning: No integrity hash in registry metadata");
+                VerificationStatus::Missing => {
+                    println!("  ! Warning: No integrity hash in registry metadata — cannot verify");
+                }
+                VerificationStatus::Failed(e) => {
+                    let _ = std::fs::remove_file(&cached_tarball);
+                    anyhow::bail!("Integrity check failed for {}@{}: {}", pkg_name, resolved_version, e);
+                }
+                VerificationStatus::Unverified => {
+                    println!("  ! Warning: Integrity unverified");
+                }
             }
         }
 

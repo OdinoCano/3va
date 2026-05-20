@@ -71,6 +71,7 @@
 - [03-secrets-detection.md](10-security/03-secrets-detection.md) - Detección de secretos
 - [04-fuzzing.md](10-security/04-fuzzing.md) - Fuzzing integrado
 - [05-post-quantum.md](10-security/05-post-quantum.md) - Criptografía post-cuántica
+- [06-osv-audit.md](10-security/06-osv-audit.md) - Auditoría de vulnerabilidades (OSV)
 
 ## Volumen 11: APIs y Referencia
 

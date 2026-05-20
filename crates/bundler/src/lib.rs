@@ -78,6 +78,18 @@ impl Bundler {
         Ok(self.code_gen.generate())
     }
 
+    pub fn bundle_with_sourcemap(&mut self) -> anyhow::Result<(String, Option<String>)> {
+        for (name, path) in &self.modules {
+            let code = self.process_module(path)?;
+            let deps = self.extract_imports(&code);
+            self.module_deps.insert(name.clone(), deps);
+            self.code_gen.add_module(name.clone(), code);
+        }
+
+        let (code, map) = self.code_gen.generate_with_sourcemap();
+        Ok((code, map))
+    }
+
     fn bundle_with_splitting(&self) -> anyhow::Result<String> {
         let entries: Vec<String> = self.modules.keys().cloned().collect();
         let mut splitter = CodeSplitter::new();
@@ -191,14 +203,30 @@ pub fn bundle_file(
     let root = PathBuf::from(".");
     let mut bundler = Bundler::new(root);
 
+    let sourcemap = options.as_ref().map(|o| o.sourcemap).unwrap_or(false);
+
     if let Some(opts) = options {
         bundler = bundler.with_options(opts);
     }
 
     bundler.add_entry(input)?;
-    let result = bundler.bundle()?;
 
-    std::fs::write(output, result)?;
+    let (code, map) = bundler.bundle_with_sourcemap()?;
+
+    if sourcemap {
+        if let Some(map_json) = map {
+            let map_path = format!("{}.map", output);
+            std::fs::write(&map_path, &map_json)?;
+            // Append sourceMappingURL comment to bundle
+            let code = format!("{}\n//# sourceMappingURL={}.map\n", code, output);
+            std::fs::write(output, code)?;
+            tracing::info!("Source map written to {}", map_path);
+        } else {
+            std::fs::write(output, code)?;
+        }
+    } else {
+        std::fs::write(output, code)?;
+    }
 
     tracing::info!("Bundled {} -> {}", input, output);
 
