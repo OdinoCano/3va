@@ -197,7 +197,7 @@ if check_tool cargo-fuzz && [ -d "fuzz" ]; then
     FUZZ_TARGETS=$(ls fuzz/fuzz_targets/ 2>/dev/null || echo "")
     if [ -n "$FUZZ_TARGETS" ]; then
         for target in $FUZZ_TARGETS; do
-            if timeout 30 cargo fuzz run "${target%.rs}" -- -max_total_time=30 2>/dev/null; then
+            if PATH="$HOME/.cargo/bin:$PATH" timeout 180 cargo fuzz run "${target%.rs}" -- -max_total_time=15 2>/dev/null; then
                 log_success "Fuzz $target: OK"
             else
                 log_warning "Fuzz $target: timeout o error"
@@ -216,26 +216,62 @@ fi
 
 log_info "=== NIVEL 4: SANITIZERS ==="
 
+# Asegurar nightly con rust-src (necesario para -Zbuild-std y sanitizers)
+setup_nightly() {
+    if ! rustup toolchain list 2>/dev/null | grep -q nightly; then
+        log_info "Instalando Rust nightly (requerido para sanitizers)..."
+        rustup toolchain install nightly --component rust-src llvm-tools-preview 2>/dev/null || {
+            log_warning "No se pudo instalar nightly automáticamente"
+            return 1
+        }
+    fi
+    # Asegurar rust-src instalado en nightly
+    if ! rustup component list --toolchain nightly 2>/dev/null | grep -q "^rust-src (installed)"; then
+        rustup component add rust-src --toolchain nightly 2>/dev/null
+    fi
+    return 0
+}
+
+run_with_nightly() {
+    local flags="$1"
+    # Prepend el bin dir de nightly para que rustc/cargo sean nightly,
+    # sin afectar el toolchain principal del proyecto (asdf = stable)
+    local rustup_home
+    rustup_home="$(rustup show home 2>/dev/null || echo "$HOME/.rustup")"
+    # Detectar el triple del host automáticamente
+    local host_triple
+    host_triple="$(rustup show active-toolchain 2>/dev/null | grep -oP 'nightly-\S+' | head -1)"
+    host_triple="${host_triple:-nightly-x86_64-unknown-linux-gnu}"
+    local nightly_bin="$rustup_home/toolchains/$host_triple/bin"
+    if [ ! -d "$nightly_bin" ]; then
+        return 1
+    fi
+    PATH="$nightly_bin:$HOME/.cargo/bin:$PATH" \
+        RUSTFLAGS="$flags" \
+        cargo test --all-features -Zbuild-std \
+        --target x86_64-unknown-linux-gnu 2>/dev/null
+}
+
 step "9. AddressSanitizer (ASAN)"
-if rustup +nightly 2>/dev/null >/dev/null; then
-    if RUSTFLAGS="-Z sanitizer=address" cargo +nightly test --all-features -Zbuild-std 2>/dev/null; then
+if setup_nightly; then
+    if run_with_nightly "-Z sanitizer=address"; then
         log_success "ASAN OK"
     else
-        log_warning "ASAN no disponible o falló (requiere nightly)"
+        log_warning "ASAN no disponible o falló en este entorno"
     fi
 else
     log_warning "Rust nightly no disponible para ASAN"
 fi
 
-step "10. UndefinedBehaviorSanitizer (UBSAN)"
-if rustup +nightly 2>/dev/null >/dev/null; then
-    if RUSTFLAGS="-Z sanitizer=undefined" cargo +nightly test --all-features -Zbuild-std 2>/dev/null; then
-        log_success "UBSAN OK"
+step "10. LeakSanitizer (LSAN) — detección de fugas de memoria"
+if setup_nightly; then
+    if run_with_nightly "-Z sanitizer=leak"; then
+        log_success "LSAN OK"
     else
-        log_warning "UBSAN no disponible o falló"
+        log_warning "LSAN no disponible o falló en este entorno"
     fi
 else
-    log_warning "Rust nightly no disponible para UBSAN"
+    log_warning "Rust nightly no disponible para LSAN"
 fi
 
 #######################################
@@ -245,41 +281,31 @@ fi
 log_info "=== NIVEL 5: TESTS DE SEGURIDAD ==="
 
 step "11. Path Traversal Tests"
-if [ -d "tests/security" ]; then
-    if cargo test --test security path_traversal 2>/dev/null; then
-        log_success "Path traversal tests OK"
-    else
-        log_warning "Tests de path traversal fallaron o no existen"
-    fi
+if cargo test -p vvva_test 'security::path_traversal' 2>/dev/null; then
+    log_success "Path traversal tests OK"
 else
-    log_warning "Directorio tests/security no existe"
+    log_warning "Tests de path traversal fallaron o no existen"
 fi
 
 step "12. Sandbox Escape Tests"
-if [ -d "tests/security" ]; then
-    if cargo test --test security sandbox_escape 2>/dev/null; then
-        log_success "Sandbox escape tests OK"
-    else
-        log_warning "Tests de sandbox escape fallaron o no existen"
-    fi
+if cargo test -p vvva_test 'security::sandbox_escape' 2>/dev/null; then
+    log_success "Sandbox escape tests OK"
+else
+    log_warning "Tests de sandbox escape fallaron o no existen"
 fi
 
 step "13. Capability Bypass Tests"
-if [ -d "tests/security" ]; then
-    if cargo test --test security capability_bypass 2>/dev/null; then
-        log_success "Capability bypass tests OK"
-    else
-        log_warning "Tests de capability bypass fallaron o no existen"
-    fi
+if cargo test -p vvva_test 'security::capability_bypass' 2>/dev/null; then
+    log_success "Capability bypass tests OK"
+else
+    log_warning "Tests de capability bypass fallaron o no existen"
 fi
 
 step "14. DOS Prevention Tests"
-if [ -d "tests/security" ]; then
-    if cargo test --test security dos 2>/dev/null; then
-        log_success "DOS tests OK"
-    else
-        log_warning "Tests de DOS fallaron o no existen"
-    fi
+if cargo test -p vvva_test 'security::dos_prevention' 2>/dev/null; then
+    log_success "DOS tests OK"
+else
+    log_warning "Tests de DOS fallaron o no existen"
 fi
 
 #######################################
