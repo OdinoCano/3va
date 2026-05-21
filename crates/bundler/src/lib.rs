@@ -233,11 +233,64 @@ pub fn bundle_file(
     Ok(())
 }
 
-pub fn start_watch_mode() -> anyhow::Result<()> {
-    println!("[bundler] Watch mode enabled");
-    println!("[bundler] Watching for file changes...");
-    println!("[bundler] Note: File watching requires manual rebuild with '3va bundle'");
-    Ok(())
+/// Start a file-watching build loop. Bundles `input` → `output` immediately,
+/// then re-bundles whenever a `.js`, `.ts`, `.jsx`, or `.tsx` file changes
+/// under the input's parent directory. Blocks until the process is killed.
+pub fn start_watch_mode(input: &Path, output: &Path, options: Option<BundlerOptions>) -> anyhow::Result<()> {
+    use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let watch_dir = input.parent().unwrap_or(Path::new("."));
+
+    println!("[bundler] Watch mode: {} → {}", input.display(), output.display());
+    println!("[bundler] Watching: {}", watch_dir.display());
+
+    // Initial build
+    do_bundle(input, output, options.clone())?;
+
+    let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
+    let mut watcher = RecommendedWatcher::new(
+        move |res| { let _ = tx.send(res); },
+        Config::default().with_poll_interval(Duration::from_millis(500)),
+    )?;
+    watcher.watch(watch_dir, RecursiveMode::Recursive)?;
+
+    let mut last_build = Instant::now();
+    let debounce = Duration::from_millis(300);
+
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(event)) => {
+                let is_source = event.paths.iter().any(|p| {
+                    matches!(
+                        p.extension().and_then(|e| e.to_str()),
+                        Some("js" | "ts" | "jsx" | "tsx" | "mjs" | "cjs")
+                    )
+                });
+                let is_modify = matches!(
+                    event.kind,
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                );
+                if is_source && is_modify && last_build.elapsed() > debounce {
+                    println!("\n[bundler] Change detected: {:?}", event.paths);
+                    match do_bundle(input, output, options.clone()) {
+                        Ok(()) => println!("[bundler] ✓ Rebuilt {}", output.display()),
+                        Err(e) => eprintln!("[bundler] ✗ Build error: {}", e),
+                    }
+                    last_build = Instant::now();
+                }
+            }
+            Ok(Err(e)) => eprintln!("[bundler] Watch error: {}", e),
+            Err(_) => {} // recv timeout, keep looping
+        }
+    }
+}
+
+fn do_bundle(input: &Path, output: &Path, options: Option<BundlerOptions>) -> anyhow::Result<()> {
+    let input_str = input.to_string_lossy().to_string();
+    let output_str = output.to_string_lossy().to_string();
+    bundle_file(&input_str, &output_str, options)
 }
 
 #[cfg(test)]

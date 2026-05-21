@@ -764,3 +764,188 @@ pub fn print_audit_report(report: &AuditReport, deny: bool) -> bool {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // ── AuditReport helpers ───────────────────────────────────────────────────
+
+    fn report_clean(n: usize) -> AuditReport {
+        AuditReport {
+            findings: vec![],
+            total_packages: n,
+            packages_with_vulns: 0,
+            total_vulns: 0,
+            critical_count: 0,
+            high_count: 0,
+            cache_hits: 0,
+            network_errors: vec![],
+        }
+    }
+
+    fn report_with_critical() -> AuditReport {
+        AuditReport {
+            findings: vec![VulnFinding {
+                pkg_name: "evil-pkg".to_string(),
+                pkg_version: "1.0.0".to_string(),
+                vulns: vec![Vulnerability {
+                    id: "GHSA-xxxx-yyyy-zzzz".to_string(),
+                    severity: VulnSeverity::Critical,
+                    summary: "Remote code execution".to_string(),
+                    fixed_versions: vec!["1.0.1".to_string()],
+                    details_url: "https://osv.dev/GHSA-xxxx-yyyy-zzzz".to_string(),
+                }],
+            }],
+            total_packages: 1,
+            packages_with_vulns: 1,
+            total_vulns: 1,
+            critical_count: 1,
+            high_count: 0,
+            cache_hits: 0,
+            network_errors: vec![],
+        }
+    }
+
+    fn report_with_high_only() -> AuditReport {
+        AuditReport {
+            findings: vec![VulnFinding {
+                pkg_name: "risky-pkg".to_string(),
+                pkg_version: "2.0.0".to_string(),
+                vulns: vec![Vulnerability {
+                    id: "GHSA-aaaa-bbbb-cccc".to_string(),
+                    severity: VulnSeverity::High,
+                    summary: "SQL injection".to_string(),
+                    fixed_versions: vec![],
+                    details_url: "https://osv.dev/GHSA-aaaa-bbbb-cccc".to_string(),
+                }],
+            }],
+            total_packages: 2,
+            packages_with_vulns: 1,
+            total_vulns: 1,
+            critical_count: 0,
+            high_count: 1,
+            cache_hits: 0,
+            network_errors: vec![],
+        }
+    }
+
+    // ── print_audit_report ────────────────────────────────────────────────────
+
+    #[test]
+    fn print_audit_report_clean_returns_true() {
+        let r = report_clean(5);
+        assert!(print_audit_report(&r, false));
+        assert!(print_audit_report(&r, true)); // --deny has no effect when clean
+    }
+
+    #[test]
+    fn print_audit_report_critical_deny_returns_false() {
+        let r = report_with_critical();
+        assert!(!print_audit_report(&r, true), "CRITICAL + --deny must return false");
+    }
+
+    #[test]
+    fn print_audit_report_critical_no_deny_returns_true() {
+        let r = report_with_critical();
+        assert!(print_audit_report(&r, false), "CRITICAL without --deny warns but returns true");
+    }
+
+    #[test]
+    fn print_audit_report_high_deny_returns_false() {
+        let r = report_with_high_only();
+        assert!(!print_audit_report(&r, true), "HIGH + --deny must return false");
+    }
+
+    #[test]
+    fn print_audit_report_high_no_deny_returns_true() {
+        let r = report_with_high_only();
+        assert!(print_audit_report(&r, false));
+    }
+
+    #[test]
+    fn print_audit_report_zero_packages() {
+        let r = report_clean(0);
+        assert!(print_audit_report(&r, true));
+    }
+
+    // ── VulnSeverity ordering ─────────────────────────────────────────────────
+
+    #[test]
+    fn severity_ordering_critical_gt_high() {
+        assert!(VulnSeverity::Critical > VulnSeverity::High);
+        assert!(VulnSeverity::High > VulnSeverity::Medium);
+        assert!(VulnSeverity::Medium > VulnSeverity::Low);
+        assert!(VulnSeverity::Low > VulnSeverity::Unknown);
+    }
+
+    #[test]
+    fn severity_is_high_or_critical() {
+        assert!(VulnSeverity::Critical.is_high_or_critical());
+        assert!(VulnSeverity::High.is_high_or_critical());
+        assert!(!VulnSeverity::Medium.is_high_or_critical());
+        assert!(!VulnSeverity::Low.is_high_or_critical());
+    }
+
+    // ── run_audit: empty / no lockfile ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_audit_no_lockfile_no_node_modules_errors() {
+        let dir = TempDir::new().unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let result = run_audit(false).await;
+
+        std::env::set_current_dir(prev).unwrap();
+        assert!(result.is_err(), "debe fallar sin lockfile ni node_modules");
+    }
+
+    #[tokio::test]
+    async fn run_audit_empty_lockfile_returns_empty_report() {
+        let dir = TempDir::new().unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        // Write a minimal valid lockfile with no dependencies
+        let lockfile_content = r#"{
+            "lockfileVersion": 1,
+            "name": "test-project",
+            "version": "0.0.0",
+            "packages": {},
+            "dependencies": {}
+        }"#;
+        fs::write(dir.path().join("3va-lock.json"), lockfile_content).unwrap();
+        // Create empty node_modules so the code path passes
+        fs::create_dir(dir.path().join("node_modules")).unwrap();
+
+        let result = run_audit(false).await;
+
+        std::env::set_current_dir(prev).unwrap();
+        let report = result.unwrap();
+        assert_eq!(report.total_packages, 0);
+        assert_eq!(report.total_vulns, 0);
+        assert!(report.findings.is_empty());
+    }
+
+    // ── cache helpers ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_roundtrip_write_and_read() {
+        // write_cache / read_cache should be inverse operations
+        let vulns: Vec<RawVuln> = vec![];
+        write_cache("test-pkg", "1.0.0", &vulns);
+        let cached = read_cache("test-pkg", "1.0.0", false);
+        assert!(cached.is_some(), "cache debe retornar lo que se escribió");
+        assert!(cached.unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_cache_force_refresh_ignores_cache() {
+        write_cache("force-pkg", "2.0.0", &[]);
+        let cached = read_cache("force-pkg", "2.0.0", true);
+        assert!(cached.is_none(), "force_refresh=true debe ignorar el caché");
+    }
+}

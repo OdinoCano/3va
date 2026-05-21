@@ -234,11 +234,17 @@ impl TestRunner {
             println!("\n  {}", display);
         }
 
-        // Grant read/write to CWD so test files and __snapshots__/ are accessible
+        // Grant read/write to CWD and to the test file's own directory so
+        // __snapshots__/ can be written even when the file lives in a TempDir.
         let perms = PermissionState::new();
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         perms.grant(vvva_permissions::Capability::FileRead(cwd.clone()));
         perms.grant(vvva_permissions::Capability::FileWrite(cwd.clone()));
+        if let Some(test_dir) = path.parent() {
+            let canonical = test_dir.canonicalize().unwrap_or_else(|_| test_dir.to_path_buf());
+            perms.grant(vvva_permissions::Capability::FileRead(canonical.clone()));
+            perms.grant(vvva_permissions::Capability::FileWrite(canonical));
+        }
 
         let engine = vvva_js::JsEngine::new(&perms)
             .map_err(|e| anyhow::anyhow!("Failed to init JS engine for {}: {}", display, e))?;

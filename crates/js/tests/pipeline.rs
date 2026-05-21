@@ -433,6 +433,92 @@ fn eval_file_blocked_without_read_permission() {
     // Este test documenta la brecha: eval_file no pasa por el permission enforcer.
 }
 
+// ── async/await ──────────────────────────────────────────────────────────────
+
+#[test]
+fn async_function_with_await_resolves() {
+    let js = r#"
+        async function compute() {
+            return 21 * 2;
+        }
+        async function main() {
+            const result = await compute();
+            globalThis._async_result = result;
+        }
+        main();
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("async.js");
+    std::fs::write(&path, js).unwrap();
+
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+    engine.eval_file(&path).expect("async/await debe ejecutar sin error");
+
+    let result = engine.eval_to_string("String(globalThis._async_result)").unwrap();
+    assert_eq!(result, "42", "await debe resolver el valor de la promesa");
+}
+
+#[test]
+fn async_await_with_promise_chain() {
+    let js = r#"
+        function delay(val) {
+            return new Promise(resolve => resolve(val));
+        }
+        async function main() {
+            const a = await delay(10);
+            const b = await delay(32);
+            globalThis._chain_result = a + b;
+        }
+        main();
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("chain.js");
+    std::fs::write(&path, js).unwrap();
+
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+    engine.eval_file(&path).expect("await sobre Promise.resolve debe funcionar");
+
+    let result = engine.eval_to_string("String(globalThis._chain_result)").unwrap();
+    assert_eq!(result, "42", "await chain debe sumar 10 + 32 = 42");
+}
+
+#[test]
+fn async_await_error_propagates_as_rejection() {
+    let js = r#"
+        async function fail() {
+            throw new Error('async error');
+        }
+        async function main() {
+            try {
+                await fail();
+                globalThis._caught = false;
+            } catch(e) {
+                globalThis._caught = true;
+                globalThis._err_msg = e.message;
+            }
+        }
+        main();
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("async_err.js");
+    std::fs::write(&path, js).unwrap();
+
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+    engine.eval_file(&path).expect("try/catch en async debe capturar el error");
+
+    let caught = engine.eval_to_string("String(globalThis._caught)").unwrap();
+    assert_eq!(caught, "true", "el catch async debe ejecutarse");
+
+    let msg = engine.eval_to_string("String(globalThis._err_msg)").unwrap();
+    assert_eq!(msg, "async error");
+}
+
 // ── ESM: import/export cross-file ────────────────────────────────────────────
 
 #[test]

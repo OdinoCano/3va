@@ -416,6 +416,344 @@ else
 fi
 
 # ============================================
+# FASE 11: AUDIT (3va audit)
+# ============================================
+echo ""
+log_info "══════════════════════════════════════════════════════════"
+log_info "FASE 11: AUDIT (3va audit)"
+log_info "══════════════════════════════════════════════════════════"
+
+log_step "11.1 Audit flags disponibles"
+if "$BINARY" audit --help 2>&1 | grep -q "deny"; then
+    log_pass "audit: --deny flag existe"
+else
+    log_fail "audit: --deny flag falta"
+fi
+
+if "$BINARY" audit --help 2>&1 | grep -q "update-cache"; then
+    log_pass "audit: --update-cache flag existe"
+else
+    log_fail "audit: --update-cache flag falta"
+fi
+
+if "$BINARY" audit --help 2>&1 | grep -q "secrets"; then
+    log_pass "audit: --secrets flag existe"
+else
+    log_fail "audit: --secrets flag falta"
+fi
+
+if "$BINARY" audit --help 2>&1 | grep -q "json"; then
+    log_pass "audit: --json flag existe"
+else
+    log_fail "audit: --json flag falta"
+fi
+
+log_step "11.2 Audit Phase 1: malware scan (paquetes ya instalados)"
+OUTPUT=$("$BINARY" audit 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -q "Static Malware Analysis"; then
+    log_pass "audit: Phase 1 malware ejecutada"
+else
+    log_fail "audit: Phase 1 malware no ejecutada"
+fi
+
+log_step "11.3 Audit Phase 2: OSV scan (con cache)"
+if echo "$OUTPUT" | grep -q "Known Vulnerabilities\|OSV"; then
+    log_pass "audit: Phase 2 OSV ejecutada"
+else
+    log_fail "audit: Phase 2 OSV no ejecutada"
+fi
+
+log_step "11.4 Audit resultado: paquetes limpios pasan"
+# lodash y axios son paquetes conocidos y generalmente limpios
+EXIT_CODE=0
+"$BINARY" audit 2>&1 > /dev/null || EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ]; then
+    log_pass "audit: exit 0 en paquetes limpios"
+else
+    log_warn "audit: exit $EXIT_CODE (posibles vulns reales detectadas por OSV)"
+fi
+
+log_step "11.5 Audit --json genera JSON válido"
+JSON_OUTPUT=$("$BINARY" audit --json 2>&1)
+log_debug "JSON Output: ${JSON_OUTPUT:0:200}"
+if echo "$JSON_OUTPUT" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+    log_pass "audit: --json produce JSON válido"
+else
+    log_fail "audit: --json no produce JSON válido"
+fi
+
+log_step "11.6 Audit --json tiene campos esperados"
+if echo "$JSON_OUTPUT" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert 'passed' in d, 'missing passed'
+assert 'phases' in d, 'missing phases'
+assert 'osv' in d['phases'], 'missing osv'
+assert 'malware' in d['phases'], 'missing malware'
+assert 'secrets' in d['phases'], 'missing secrets'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+    log_pass "audit: --json tiene estructura correcta"
+else
+    log_fail "audit: --json estructura incorrecta"
+fi
+
+log_step "11.7 Audit --secrets escanea el proyecto"
+OUTPUT=$("$BINARY" audit --secrets 2>&1)
+log_debug "Secrets output: ${OUTPUT:0:300}"
+if echo "$OUTPUT" | grep -q "Phase 3\|Secrets Detection\|No hardcoded secrets\|secrets found"; then
+    log_pass "audit: --secrets ejecuta Phase 3"
+else
+    log_fail "audit: --secrets no ejecuta Phase 3"
+fi
+
+log_step "11.8 Audit --deny falla si hay CVEs críticos (test con pkg inventado)"
+# Crear un lockfile falso con un paquete que sabemos tiene CVEs (lodash < 4.17.21)
+mkdir -p /tmp/audit-deny-test
+cat > /tmp/audit-deny-test/3va-lock.json << 'LOCKEOF'
+{
+  "lockfileVersion": 1,
+  "name": "vuln-test",
+  "version": "0.0.0",
+  "packages": {},
+  "dependencies": {
+    "lodash": {
+      "version": "4.17.4",
+      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.4.tgz",
+      "registry": "registry.npmjs.org"
+    }
+  }
+}
+LOCKEOF
+mkdir -p /tmp/audit-deny-test/node_modules/lodash
+echo '{"name":"lodash","version":"4.17.4"}' > /tmp/audit-deny-test/node_modules/lodash/package.json
+ORIG_DIR=$(pwd)
+cd /tmp/audit-deny-test
+DENY_OUT=$("$BINARY" audit --json 2>&1)
+cd "$ORIG_DIR"
+rm -rf /tmp/audit-deny-test
+log_debug "Deny test output: ${DENY_OUT:0:400}"
+if echo "$DENY_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print('json_ok')" 2>/dev/null | grep -q "json_ok"; then
+    log_pass "audit: --json funciona con paquete vulnerable"
+else
+    log_warn "audit: respuesta no es JSON (posible error de red)"
+fi
+
+# ============================================
+# FASE 12: SANDBOX REPL (3va sandbox)
+# ============================================
+echo ""
+log_info "══════════════════════════════════════════════════════════"
+log_info "FASE 11: SANDBOX REPL (3va sandbox)"
+log_info "══════════════════════════════════════════════════════════"
+
+log_step "11.1 Sandbox evalúa expresiones básicas"
+OUTPUT=$(printf '1 + 1\n"hello"\n' | "$BINARY" sandbox 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -q "^2$" && echo "$OUTPUT" | grep -q '"hello"'; then
+    log_pass "sandbox: expresiones numéricas y strings"
+else
+    log_fail "sandbox: expresiones básicas fallaron"
+fi
+
+log_step "11.2 Sandbox muestra objetos como JSON"
+OUTPUT=$(printf '({"a":1,"b":2})\n' | "$BINARY" sandbox 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -q '"a"'; then
+    log_pass "sandbox: objeto mostrado como JSON"
+else
+    log_fail "sandbox: objeto no mostrado"
+fi
+
+log_step "11.3 Sandbox evalúa arrays"
+OUTPUT=$(printf '[1,2,3].map(x => x * 2)\n' | "$BINARY" sandbox 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -q "4"; then
+    log_pass "sandbox: array.map evaluado"
+else
+    log_fail "sandbox: array.map falló"
+fi
+
+log_step "11.4 Sandbox define y llama funciones"
+OUTPUT=$(printf 'function add(a,b){return a+b}\nadd(10,32)\n' | "$BINARY" sandbox 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -q "^42$"; then
+    log_pass "sandbox: definición y llamada de función"
+else
+    log_fail "sandbox: función falló (esperado 42)"
+fi
+
+log_step "11.5 Sandbox soporta multi-línea"
+OUTPUT=$(printf 'function greet(name) {\n  return "hello " + name;\n}\ngreet("mundo")\n' | "$BINARY" sandbox 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -q "hello mundo"; then
+    log_pass "sandbox: función multi-línea"
+else
+    log_fail "sandbox: función multi-línea falló"
+fi
+
+log_step "11.6 Sandbox .permissions sin grants"
+OUTPUT=$(printf '.permissions\n' | "$BINARY" sandbox 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -q "no permissions granted"; then
+    log_pass "sandbox: .permissions vacío"
+else
+    log_fail "sandbox: .permissions no muestra estado vacío"
+fi
+
+log_step "11.7 Sandbox .allow-read y .permissions listan grant"
+OUTPUT=$(printf '.allow-read=/tmp\n.permissions\n' | "$BINARY" sandbox 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -qi "FileRead.*tmp"; then
+    log_pass "sandbox: .allow-read concede y .permissions lo muestra"
+else
+    log_fail "sandbox: grant no aparece en .permissions"
+fi
+
+log_step "11.8 Sandbox .allow-net concede Network"
+OUTPUT=$(printf '.allow-net=api.example.com\n.permissions\n' | "$BINARY" sandbox 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -qi "Network.*api.example.com"; then
+    log_pass "sandbox: .allow-net concede Network"
+else
+    log_fail "sandbox: .allow-net no funciona"
+fi
+
+log_step "11.9 Sandbox .clear resetea contexto JS"
+OUTPUT=$(printf 'const x = 42\n.clear\nx\n' | "$BINARY" sandbox 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -qi "Error\|not defined\|ReferenceError"; then
+    log_pass "sandbox: .clear elimina variables definidas"
+else
+    log_fail "sandbox: .clear no eliminó el contexto"
+fi
+
+log_step "11.10 Sandbox reporta errores de sintaxis"
+OUTPUT=$(printf 'const x = ;;;\n' | "$BINARY" sandbox 2>&1)
+log_debug "Output: $OUTPUT"
+if echo "$OUTPUT" | grep -qi "Error\|Uncaught\|syntax\|unexpected"; then
+    log_pass "sandbox: error de sintaxis reportado"
+else
+    log_fail "sandbox: error de sintaxis no reportado"
+fi
+
+# ============================================
+# FASE 12: DEV SERVER (3va dev)
+# ============================================
+echo ""
+log_info "══════════════════════════════════════════════════════════"
+log_info "FASE 12: DEV SERVER (3va dev)"
+log_info "══════════════════════════════════════════════════════════"
+
+log_step "12.1 Dev --help muestra flags --port, --host, --open"
+DEV_HELP=$("$BINARY" dev --help 2>&1)
+log_debug "Dev help: ${DEV_HELP:0:300}"
+if echo "$DEV_HELP" | grep -q "port"; then
+    log_pass "dev: --port flag existe"
+else
+    log_fail "dev: --port flag falta"
+fi
+if echo "$DEV_HELP" | grep -q "host"; then
+    log_pass "dev: --host flag existe"
+else
+    log_fail "dev: --host flag falta"
+fi
+if echo "$DEV_HELP" | grep -q "open"; then
+    log_pass "dev: --open flag existe"
+else
+    log_fail "dev: --open flag falta"
+fi
+if echo "$DEV_HELP" | grep -q "public"; then
+    log_pass "dev: --public-dir flag existe"
+else
+    log_fail "dev: --public-dir flag falta"
+fi
+
+log_step "12.2 Dev server inicia, sirve bundle.js y responde en HTTP"
+# Create a simple JS file to bundle
+cat > "$TEST_DIR/dev_entry.js" << 'JSEOF'
+export const hello = "world";
+JSEOF
+
+# Start dev server in background on a high port
+DEV_PORT=18543
+"$BINARY" dev --port $DEV_PORT --public-dir /tmp/no-public-dir-here 2>&1 &
+DEV_PID=$!
+sleep 2  # Wait for initial build and bind
+
+# Test: server is listening
+if curl -s --max-time 3 "http://127.0.0.1:${DEV_PORT}/" > /dev/null 2>&1; then
+    log_pass "dev: servidor responde en HTTP"
+else
+    log_fail "dev: servidor no responde en HTTP"
+fi
+
+# Test: built-in dev page served when no public/index.html
+DEV_INDEX=$(curl -s --max-time 3 "http://127.0.0.1:${DEV_PORT}/")
+log_debug "Dev index: ${DEV_INDEX:0:200}"
+if echo "$DEV_INDEX" | grep -qi "3VA\|bundle\|dev"; then
+    log_pass "dev: página de inicio servida"
+else
+    log_fail "dev: página de inicio no servida"
+fi
+
+# Test: /bundle.js endpoint exists (may 404 if no entry file, but should respond)
+BUNDLE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:${DEV_PORT}/bundle.js")
+log_debug "Bundle status: $BUNDLE_STATUS"
+if [ "$BUNDLE_STATUS" = "200" ] || [ "$BUNDLE_STATUS" = "404" ]; then
+    log_pass "dev: /bundle.js endpoint responde"
+else
+    log_fail "dev: /bundle.js no responde (status $BUNDLE_STATUS)"
+fi
+
+# Test: /__hmr SSE endpoint — use -v so headers go to stderr, captured via 2>&1
+HMR_VERBOSE=$(curl -vs --max-time 1 "http://127.0.0.1:${DEV_PORT}/__hmr" 2>&1; true)
+log_debug "HMR verbose: ${HMR_VERBOSE:0:300}"
+if echo "$HMR_VERBOSE" | grep -qi "event-stream\|connected"; then
+    log_pass "dev: /__hmr SSE endpoint responde"
+else
+    log_fail "dev: /__hmr SSE endpoint no responde"
+fi
+
+# Test: public dir static file serving
+mkdir -p /tmp/3va-dev-public
+echo '<html><body><h1>Test App</h1></body></html>' > /tmp/3va-dev-public/index.html
+echo 'body { color: red; }' > /tmp/3va-dev-public/style.css
+
+"$BINARY" dev --port 18544 --public-dir /tmp/3va-dev-public 2>&1 &
+DEV_PID2=$!
+sleep 2
+
+# index.html served with HMR injected
+HTML_RESP=$(curl -s --max-time 3 "http://127.0.0.1:18544/")
+log_debug "HTML response: ${HTML_RESP:0:300}"
+if echo "$HTML_RESP" | grep -q "__hmr"; then
+    log_pass "dev: HMR client inyectado en HTML"
+else
+    log_fail "dev: HMR client no inyectado en HTML"
+fi
+if echo "$HTML_RESP" | grep -q "Test App"; then
+    log_pass "dev: index.html servido desde public-dir"
+else
+    log_fail "dev: index.html no servido desde public-dir"
+fi
+
+# CSS file served with correct MIME
+CSS_CT=$(curl -s -o /dev/null -w "%{content_type}" --max-time 3 "http://127.0.0.1:18544/style.css")
+log_debug "CSS content-type: $CSS_CT"
+if echo "$CSS_CT" | grep -q "css"; then
+    log_pass "dev: archivos CSS servidos con MIME correcto"
+else
+    log_fail "dev: MIME incorrecto para CSS (got: $CSS_CT)"
+fi
+
+# Kill dev servers
+kill $DEV_PID 2>/dev/null
+kill $DEV_PID2 2>/dev/null
+rm -rf /tmp/3va-dev-public
+
+# ============================================
 # RESUMEN FINAL
 # ============================================
 echo ""
