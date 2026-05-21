@@ -35,12 +35,15 @@ fn collect_source_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name.starts_with('.') || name == "node_modules" || name == "dist" || name == "target" {
+            if name.starts_with('.') || name == "node_modules" || name == "dist" || name == "target"
+            {
                 continue;
             }
             collect_recursive(&path, out);
@@ -100,10 +103,7 @@ fn find_test_file(source: &Path) -> Option<PathBuf> {
 }
 
 /// Build a coverage report from test results and source files under `root`.
-pub fn generate_coverage_report(
-    test_results: &[TestResult],
-    root: &Path,
-) -> CoverageReport {
+pub fn generate_coverage_report(test_results: &[TestResult], root: &Path) -> CoverageReport {
     let source_files = collect_source_files(root);
 
     // Map test file path -> results for that file
@@ -131,10 +131,19 @@ pub fn generate_coverage_report(
         let (tests_total, tests_passed, tests_failed) = if let Some(ref tf) = test_file {
             let canon = tf.canonicalize().unwrap_or_else(|_| tf.clone());
             let key = canon.to_string_lossy().to_string();
-            let results = results_by_file.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
-            let total   = results.len();
-            let passed  = results.iter().filter(|r| r.status == TestStatus::Passed).count();
-            let failed  = results.iter().filter(|r| r.status == TestStatus::Failed).count();
+            let results = results_by_file
+                .get(&key)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let total = results.len();
+            let passed = results
+                .iter()
+                .filter(|r| r.status == TestStatus::Passed)
+                .count();
+            let failed = results
+                .iter()
+                .filter(|r| r.status == TestStatus::Failed)
+                .count();
             (total, passed, failed)
         } else {
             (0, 0, 0)
@@ -143,7 +152,7 @@ pub fn generate_coverage_report(
         if test_file.is_some() {
             covered_files += 1;
         }
-        total_tests  += tests_total;
+        total_tests += tests_total;
         passed_tests += tests_passed;
 
         files.push(FileCoverage {
@@ -179,14 +188,18 @@ pub fn print_coverage_report(report: &CoverageReport) {
 
     println!("\n=============================== Coverage ================================");
     println!();
-    println!("  File coverage :  {}/{} files have tests ({:.1}%)",
-        report.covered_files, report.total_source_files, file_coverage_pct);
-    println!("  Test pass rate:  {}/{} tests passed ({:.1}%)",
-        report.passed_tests, report.total_tests, test_pass_pct);
+    println!(
+        "  File coverage :  {}/{} files have tests ({:.1}%)",
+        report.covered_files, report.total_source_files, file_coverage_pct
+    );
+    println!(
+        "  Test pass rate:  {}/{} tests passed ({:.1}%)",
+        report.passed_tests, report.total_tests, test_pass_pct
+    );
     println!();
 
     // Print per-file table
-    println!("  {:<50} {:<20} {}", "Source file", "Test file", "Tests");
+    println!("  {:<50} {:<20} Tests", "Source file", "Test file");
     println!("  {}", "-".repeat(80));
 
     for f in &report.files {
@@ -202,7 +215,13 @@ pub fn print_coverage_report(report: &CoverageReport) {
         } else {
             String::new()
         };
-        let marker = if f.test_file.is_none() { "✗" } else if f.tests_failed > 0 { "!" } else { "✓" };
+        let marker = if f.test_file.is_none() {
+            "✗"
+        } else if f.tests_failed > 0 {
+            "!"
+        } else {
+            "✓"
+        };
         println!("  {} {:<50} {:<20} {}", marker, src, test_indicator, stats);
     }
 

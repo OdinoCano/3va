@@ -204,7 +204,11 @@ pub struct TestConfig {
 
 impl Default for TestConfig {
     fn default() -> Self {
-        Self { verbose: false, test_timeout_ms: 5000, update_snapshots: false }
+        Self {
+            verbose: false,
+            test_timeout_ms: 5000,
+            update_snapshots: false,
+        }
     }
 }
 
@@ -218,7 +222,10 @@ struct RawResult {
 
 impl TestRunner {
     pub fn new(config: TestConfig) -> Self {
-        Self { results: Vec::new(), config }
+        Self {
+            results: Vec::new(),
+            config,
+        }
     }
 
     pub fn run_file(&mut self, path: &Path) -> anyhow::Result<()> {
@@ -236,7 +243,8 @@ impl TestRunner {
         let engine = vvva_js::JsEngine::new(&perms)
             .map_err(|e| anyhow::anyhow!("Failed to init JS engine for {}: {}", display, e))?;
 
-        engine.eval(TEST_FRAMEWORK_JS)
+        engine
+            .eval(TEST_FRAMEWORK_JS)
             .map_err(|e| anyhow::anyhow!("Test framework injection failed: {}", e))?;
 
         // Inject snapshot globals: file path and update flag
@@ -244,7 +252,12 @@ impl TestRunner {
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .join("__snapshots__")
-            .join(path.file_name().unwrap_or_default().to_string_lossy().as_ref());
+            .join(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .as_ref(),
+            );
         let snap_file = snap_dir.to_string_lossy().replace('\\', "/");
         let update = self.config.update_snapshots;
         engine
@@ -288,7 +301,11 @@ impl TestRunner {
 
             match status {
                 TestStatus::Passed => println!("  ✓ {}", r.name),
-                TestStatus::Failed => eprintln!("  ✗ {} — {}", r.name, r.error.as_deref().unwrap_or("unknown error")),
+                TestStatus::Failed => eprintln!(
+                    "  ✗ {} — {}",
+                    r.name,
+                    r.error.as_deref().unwrap_or("unknown error")
+                ),
                 _ => println!("  - {} (skipped)", r.name),
             }
 
@@ -304,9 +321,7 @@ impl TestRunner {
     }
 
     pub fn run_directory(&mut self, dir: &Path) -> anyhow::Result<()> {
-        let mut entries: Vec<_> = std::fs::read_dir(dir)?
-            .flatten()
-            .collect();
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.flatten().collect();
         entries.sort_by_key(|e| e.path());
 
         for entry in entries {
@@ -337,21 +352,41 @@ impl TestRunner {
     }
 
     pub fn print_summary(&self) {
-        let passed  = self.results.iter().filter(|r| r.status == TestStatus::Passed).count();
-        let failed  = self.results.iter().filter(|r| r.status == TestStatus::Failed).count();
-        let skipped = self.results.iter().filter(|r| r.status == TestStatus::Skipped).count();
-        let total   = self.results.len();
+        let passed = self
+            .results
+            .iter()
+            .filter(|r| r.status == TestStatus::Passed)
+            .count();
+        let failed = self
+            .results
+            .iter()
+            .filter(|r| r.status == TestStatus::Failed)
+            .count();
+        let skipped = self
+            .results
+            .iter()
+            .filter(|r| r.status == TestStatus::Skipped)
+            .count();
+        let total = self.results.len();
 
         println!("\n=============================");
         println!("Tests:   {total}");
         println!("Passed:  {passed}");
-        if failed  > 0 { eprintln!("Failed:  {failed}"); }
-        if skipped > 0 { println!("Skipped: {skipped}"); }
+        if failed > 0 {
+            eprintln!("Failed:  {failed}");
+        }
+        if skipped > 0 {
+            println!("Skipped: {skipped}");
+        }
         println!("=============================\n");
 
         if failed > 0 {
             eprintln!("Failed tests:");
-            for r in self.results.iter().filter(|r| r.status == TestStatus::Failed) {
+            for r in self
+                .results
+                .iter()
+                .filter(|r| r.status == TestStatus::Failed)
+            {
                 eprintln!("  ✗ {}", r.name);
                 if let Some(err) = &r.error {
                     eprintln!("      {}", err);

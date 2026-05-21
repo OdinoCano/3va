@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditEvent {
@@ -62,10 +62,10 @@ impl AuditLog {
         });
     }
 
-    pub fn log_file_access(&mut self, path: &PathBuf, operation: &str, allowed: bool) {
+    pub fn log_file_access(&mut self, path: &Path, operation: &str, allowed: bool) {
         self.add_event(AuditEvent::FileAccess {
             timestamp: Utc::now(),
-            path: path.clone(),
+            path: path.to_path_buf(),
             operation: operation.to_string(),
             allowed,
         });
@@ -116,7 +116,7 @@ impl AuditLogger {
         }
     }
 
-    pub fn log_file(&mut self, path: &PathBuf, operation: &str, allowed: bool) {
+    pub fn log_file(&mut self, path: &Path, operation: &str, allowed: bool) {
         self.log.log_file_access(path, operation, allowed);
         if self.enable_console && !allowed {
             eprintln!(

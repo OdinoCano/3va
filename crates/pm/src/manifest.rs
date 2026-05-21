@@ -44,11 +44,11 @@ mod tests {
         assert_eq!(manifest.package.version.as_deref(), Some("4.17.21"));
 
         // Provided by JSON
-        assert_eq!(manifest.permissions.network, true);
+        assert!(manifest.permissions.network);
 
         // Defaults correctly assigned
-        assert_eq!(manifest.permissions.filesystem, false);
-        assert_eq!(manifest.permissions.process, false);
+        assert!(!manifest.permissions.filesystem);
+        assert!(!manifest.permissions.process);
     }
 
     #[test]
@@ -63,8 +63,8 @@ mod tests {
         let manifest: PackageManifest = serde_json::from_str(json).unwrap();
 
         // All security permissions should be false by default if empty struct provided
-        assert_eq!(manifest.permissions.network, false);
-        assert_eq!(manifest.permissions.filesystem, false);
-        assert_eq!(manifest.permissions.process, false);
+        assert!(!manifest.permissions.network);
+        assert!(!manifest.permissions.filesystem);
+        assert!(!manifest.permissions.process);
     }
 }

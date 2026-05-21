@@ -4,7 +4,7 @@ pub mod matchers;
 pub mod runner;
 pub mod security;
 
-pub use coverage::{CoverageReport, generate_coverage_report, print_coverage_report};
+pub use coverage::{generate_coverage_report, print_coverage_report, CoverageReport};
 pub use framework::{
     describe, expect, it, run_all_tests, test, Expect, TestResult, TestState, TestStatus,
 };

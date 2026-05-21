@@ -17,7 +17,6 @@
 /// - `!` non-null assertions: `x!.foo` → `x.foo`
 /// - Generic type parameters from function/class signatures: `function f<T>(x: T)` → `function f(x)`
 /// - Preserves ternary colons, object literal colons, `case x:` labels
-
 pub fn transpile(source: &str) -> String {
     let chars: Vec<char> = source.chars().collect();
     let len = chars.len();
@@ -27,10 +26,6 @@ pub fn transpile(source: &str) -> String {
     // Track whether we're at start-of-statement (after newline / semicolon)
     // for detecting top-level `interface`, `type`, `declare` keywords.
     let mut at_stmt_start = true;
-    // brace depth so we can track class bodies
-    #[allow(unused_variables)]
-    let mut brace_depth: i32 = 0;
-
     while i < len {
         // --- Single-line comment ---
         if chars[i] == '/' && i + 1 < len && chars[i + 1] == '/' {
@@ -243,16 +238,13 @@ pub fn transpile(source: &str) -> String {
 
         let ch = chars[i];
 
-        // Track brace depth
         if ch == '{' {
-            brace_depth += 1;
             out.push(ch);
             i += 1;
             at_stmt_start = true;
             continue;
         }
         if ch == '}' {
-            brace_depth -= 1;
             out.push(ch);
             i += 1;
             at_stmt_start = true;
@@ -773,6 +765,7 @@ fn is_type_start(ch: char, chars: &[char], j: usize) -> bool {
 mod tests {
     use super::*;
 
+    #[allow(dead_code)]
     fn norm(s: &str) -> String {
         // Normalize whitespace for comparison: collapse blank lines
         s.lines()

@@ -30,6 +30,47 @@ Ejecuta automáticamente:
 - `cargo deny check`
 - `cargo geiger` (detección de unsafe)
 
+### Clippy — Lints de Seguridad
+
+El paso de Clippy se ejecuta en dos fases:
+
+**Fase 1 — Warnings como errores (todos los targets):**
+```bash
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+**Fase 2 — Lints específicos de seguridad:**
+```bash
+cargo clippy --all-targets --all-features -- \
+  -D clippy::unwrap_used \
+  -D clippy::expect_used \
+  -D clippy::panic \
+  -D clippy::indexing_slicing \
+  -D clippy::integer_arithmetic \
+  -D clippy::todo \
+  -D clippy::unimplemented \
+  -W clippy::unreachable \
+  -W clippy::wildcard_enum_match_arm
+```
+
+| Lint | Nivel | Razón |
+|------|-------|-------|
+| `unwrap_used` | error | Panic silencioso en producción |
+| `expect_used` | error | Panic con mensaje, igual de peligroso |
+| `panic` | error | Aborta el runtime sin cleanup |
+| `indexing_slicing` | error | Panic por índice fuera de rango |
+| `integer_arithmetic` | error | Overflow/underflow no chequeado |
+| `todo` | error | Código incompleto en producción |
+| `unimplemented` | error | Igual que `todo` |
+| `unreachable` | warning | Puede indicar lógica incorrecta |
+| `wildcard_enum_match_arm` | warning | Match no exhaustivo en enums |
+
+Para silenciar un lint puntualmente con justificación documentada:
+```rust
+#[allow(clippy::unwrap_used)] // SAFETY: campo inicializado en new(), invariante garantizado
+let val = self.inner.unwrap();
+```
+
 ### Instalación de herramientas de Nivel 1
 
 ```bash
@@ -199,8 +240,21 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
-      - name: Clippy
+      - name: Clippy (general)
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Clippy (security lints)
+        run: |
+          cargo clippy --all-targets --all-features -- \
+            -D clippy::unwrap_used \
+            -D clippy::expect_used \
+            -D clippy::panic \
+            -D clippy::indexing_slicing \
+            -D clippy::integer_arithmetic \
+            -D clippy::todo \
+            -D clippy::unimplemented \
+            -W clippy::unreachable \
+            -W clippy::wildcard_enum_match_arm
 
       - name: Tests
         run: cargo test --all-features

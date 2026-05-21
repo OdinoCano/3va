@@ -23,7 +23,7 @@ El alcance de 3va comprende los siguientes componentes principales:
 - Modelo de capacidades basado en deny-by-default
 - Matching de patrones glob para hostnames y paths
 - Enforcement de políticas en tiempo de ejecución
-- Auditoría de operaciones敏感性
+- Auditoría de sensibilidad operativa
 
 #### 2.1.1.4 Package Manager (vvva_pm)
 - Resolución de dependencias compatible con npm

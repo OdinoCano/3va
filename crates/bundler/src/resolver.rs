@@ -169,7 +169,6 @@ impl ModuleResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     #[test]
     fn test_resolver_relative() {

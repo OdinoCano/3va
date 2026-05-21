@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::path::Path;
+#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::{LazyLock, RwLock};
 
@@ -63,7 +65,7 @@ pub fn check_env(key: &str) -> Result<String, String> {
     }
 }
 
-pub fn is_path_safe(base: &PathBuf, input: &PathBuf) -> bool {
+pub fn is_path_safe(base: &Path, input: &Path) -> bool {
     let Ok(canonical_base) = base.canonicalize() else {
         return false;
     };
@@ -96,9 +98,9 @@ pub fn is_safe_zip_entry(entry_path: &str) -> bool {
     !normalized.contains("..") && !normalized.starts_with('/')
 }
 
-pub fn detect_symlink_loop_in_path(path: &PathBuf) -> bool {
+pub fn detect_symlink_loop_in_path(path: &Path) -> bool {
     let mut visited = Vec::new();
-    let mut current = path.clone();
+    let mut current = path.to_path_buf();
 
     while let Ok(target) = std::fs::read_link(&current) {
         if visited.contains(&target) {

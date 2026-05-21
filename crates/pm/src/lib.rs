@@ -7,7 +7,9 @@ pub mod resolver;
 pub mod semver;
 pub mod signature_verifier;
 
-pub use auditor::{print_audit_report, run_audit, AuditReport, VulnFinding, VulnSeverity, Vulnerability};
+pub use auditor::{
+    AuditReport, VulnFinding, VulnSeverity, Vulnerability, print_audit_report, run_audit,
+};
 pub use lockfile::Lockfile;
 pub use malware_scanner::{MalwareScanner, ScanResult, Threat, ThreatLevel};
 pub use manifest::{PackageInfo, PackageManifest, PackagePermissions};
@@ -16,7 +18,7 @@ pub use semver::{Semver, SemverRange};
 pub use signature_verifier::{HashAlgorithm, SignatureInfo, SignatureVerifier, VerificationStatus};
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ── Registry ──────────────────────────────────────────────────────────────────
 
@@ -103,11 +105,11 @@ impl PackageManager {
         Ok(lockfile)
     }
 
-    pub fn load_lockfile(path: &PathBuf) -> anyhow::Result<Lockfile> {
+    pub fn load_lockfile(path: &Path) -> anyhow::Result<Lockfile> {
         Lockfile::load(path)
     }
 
-    pub fn save_lockfile(&self, lockfile: &Lockfile, path: &PathBuf) -> anyhow::Result<()> {
+    pub fn save_lockfile(&self, lockfile: &Lockfile, path: &Path) -> anyhow::Result<()> {
         lockfile.save(path)
     }
 }
@@ -863,7 +865,8 @@ async fn install_package_impl(
                     eprintln!();
                     anyhow::bail!(
                         "Integrity check failed for {}@{}: tarball hash does not match registry metadata",
-                        pkg_name, resolved_version
+                        pkg_name,
+                        resolved_version
                     );
                 }
                 VerificationStatus::Missing => {
@@ -871,7 +874,12 @@ async fn install_package_impl(
                 }
                 VerificationStatus::Failed(e) => {
                     let _ = std::fs::remove_file(&cached_tarball);
-                    anyhow::bail!("Integrity check failed for {}@{}: {}", pkg_name, resolved_version, e);
+                    anyhow::bail!(
+                        "Integrity check failed for {}@{}: {}",
+                        pkg_name,
+                        resolved_version,
+                        e
+                    );
                 }
                 VerificationStatus::Unverified => {
                     println!("  ! Warning: Integrity unverified");

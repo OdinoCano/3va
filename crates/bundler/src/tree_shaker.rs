@@ -248,8 +248,8 @@ const x = require('./baz');
 "#;
 
         let imports = shaper.analyze_imports(code);
-        assert!(imports.contains(&"./foo".to_string()));
-        assert!(imports.contains(&"./bar".to_string()));
+        assert!(imports.iter().any(|s| s == "./foo"));
+        assert!(imports.iter().any(|s| s == "./bar"));
     }
 
     #[test]
