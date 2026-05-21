@@ -2238,6 +2238,7 @@ dependencies = [
  "base64",
  "rquickjs",
  "serde_json",
+ "tempfile",
  "ureq",
  "url",
  "vvva_core",

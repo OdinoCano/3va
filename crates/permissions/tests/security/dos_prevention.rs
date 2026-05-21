@@ -8,9 +8,9 @@
 
 use std::path::{Path, PathBuf};
 use vvva_permissions::{
+    Capability, PermissionState,
     audit::AuditLogger,
     enforcement::{EnvEnforcer, FsEnforcer, PermissionError},
-    Capability, PermissionState,
 };
 
 // ── check_read_recursive: verifica si un directorio padre tiene grant ─────────
@@ -22,7 +22,11 @@ fn check_read_recursive_allows_when_parent_granted() {
     state.grant(Capability::FileRead(PathBuf::from("/app")));
     let enforcer = FsEnforcer::new(state);
     // El grant de /app cubre cualquier subdirectorio
-    assert!(enforcer.check_read_recursive(Path::new("/app/deep/nested")).is_ok());
+    assert!(
+        enforcer
+            .check_read_recursive(Path::new("/app/deep/nested"))
+            .is_ok()
+    );
     assert!(enforcer.check_read_recursive(Path::new("/app")).is_ok());
 }
 
@@ -48,7 +52,11 @@ fn check_read_recursive_allows_when_child_grant_covers_parent_query() {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(PathBuf::from("/app/node_modules")));
     let enforcer = FsEnforcer::new(state);
-    assert!(enforcer.check_read_recursive(Path::new("/app/node_modules/lodash")).is_ok());
+    assert!(
+        enforcer
+            .check_read_recursive(Path::new("/app/node_modules/lodash"))
+            .is_ok()
+    );
 }
 
 // ── Grant raíz (--allow-read) da acceso a cualquier path ─────────────────────
@@ -61,8 +69,16 @@ fn root_grant_allows_any_path() {
     state.grant(Capability::FileRead(PathBuf::from("/")));
     let enforcer = FsEnforcer::new(state);
     assert!(enforcer.check_read(Path::new("/etc/passwd")).is_ok());
-    assert!(enforcer.check_read(Path::new("/home/user/.ssh/id_rsa")).is_ok());
-    assert!(enforcer.check_read(Path::new("/app/node_modules/pkg/index.js")).is_ok());
+    assert!(
+        enforcer
+            .check_read(Path::new("/home/user/.ssh/id_rsa"))
+            .is_ok()
+    );
+    assert!(
+        enforcer
+            .check_read(Path::new("/app/node_modules/pkg/index.js"))
+            .is_ok()
+    );
 }
 
 // ── EnvEnforcer::all() requiere EnvAccess ─────────────────────────────────────
@@ -72,7 +88,10 @@ fn env_all_denied_without_capability() {
     // all() expone el entorno completo → requiere EnvAccess explícito
     let state = PermissionState::new();
     let enforcer = EnvEnforcer::new(state);
-    assert!(matches!(enforcer.all(), Err(PermissionError::EnvAccessDenied)));
+    assert!(matches!(
+        enforcer.all(),
+        Err(PermissionError::EnvAccessDenied)
+    ));
 }
 
 #[test]
@@ -181,5 +200,9 @@ fn deny_does_not_duplicate_capabilities() {
     state.deny(Capability::SpawnProcess);
 
     let denied = state.denied.read().unwrap();
-    assert_eq!(denied.len(), 1, "deny duplicado no debe multiplicar la lista");
+    assert_eq!(
+        denied.len(),
+        1,
+        "deny duplicado no debe multiplicar la lista"
+    );
 }

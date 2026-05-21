@@ -11,7 +11,7 @@ NC='\033[0m'
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-TOTAL_STEPS=19
+TOTAL_STEPS=22
 CURRENT_STEP=0
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -123,7 +123,7 @@ step "4. Cargo Audit"
 if ! check_tool cargo-audit; then
     install_tool "cargo-audit" "cargo install cargo-audit"
 fi
-if cargo audit --deny-warnings 2>/dev/null; then
+if cargo audit --deny warnings 2>/dev/null; then
     log_success "Audit OK"
 else
     log_warning "Audit encontró vulnerabilidades"
@@ -280,32 +280,64 @@ fi
 
 log_info "=== NIVEL 5: TESTS DE SEGURIDAD ==="
 
-step "11. Path Traversal Tests"
-if cargo test -p vvva_test 'security::path_traversal' 2>/dev/null; then
+# Los tests de seguridad viven en crates/permissions/tests/security/
+# y se ejecutan como integration tests del crate vvva_permissions.
+# Ejecutar el suite completo: cargo test -p vvva_permissions --test security
+
+step "11. Path Traversal Tests (VirtualFs::resolve)"
+if cargo test -p vvva_permissions --test security path_traversal 2>/dev/null; then
     log_success "Path traversal tests OK"
 else
-    log_warning "Tests de path traversal fallaron o no existen"
+    log_error "Tests de path traversal fallaron"
+    total_failures=$((total_failures + 1))
 fi
 
-step "12. Sandbox Escape Tests"
-if cargo test -p vvva_test 'security::sandbox_escape' 2>/dev/null; then
+step "12. Sandbox Escape Tests (VirtualFs + VirtualNetwork)"
+if cargo test -p vvva_permissions --test security sandbox_escape 2>/dev/null; then
     log_success "Sandbox escape tests OK"
 else
-    log_warning "Tests de sandbox escape fallaron o no existen"
+    log_error "Tests de sandbox escape fallaron"
+    total_failures=$((total_failures + 1))
 fi
 
-step "13. Capability Bypass Tests"
-if cargo test -p vvva_test 'security::capability_bypass' 2>/dev/null; then
+step "13. Capability Bypass Tests (PermissionState + Enforcers)"
+if cargo test -p vvva_permissions --test security capability_bypass 2>/dev/null; then
     log_success "Capability bypass tests OK"
 else
-    log_warning "Tests de capability bypass fallaron o no existen"
+    log_error "Tests de capability bypass fallaron"
+    total_failures=$((total_failures + 1))
 fi
 
-step "14. DOS Prevention Tests"
-if cargo test -p vvva_test 'security::dos_prevention' 2>/dev/null; then
-    log_success "DOS tests OK"
+step "14. Enforcement Boundary Tests (AuditLogger + FsEnforcer)"
+if cargo test -p vvva_permissions --test security dos_prevention 2>/dev/null; then
+    log_success "Enforcement boundary tests OK"
 else
-    log_warning "Tests de DOS fallaron o no existen"
+    log_error "Tests de enforcement boundary fallaron"
+    total_failures=$((total_failures + 1))
+fi
+
+step "15. Permisos ↔ JS Engine (builtins fs con permission checks)"
+if cargo test -p vvva_js --test permission_enforcement 2>/dev/null; then
+    log_success "Permisos ↔ JS engine OK"
+else
+    log_error "Tests permisos ↔ JS engine fallaron"
+    total_failures=$((total_failures + 1))
+fi
+
+step "16. CLI ↔ PermissionState (flags --allow-* → capabilities)"
+if cargo test -p vvva_cli 2>/dev/null; then
+    log_success "CLI ↔ PermissionState OK"
+else
+    log_error "Tests CLI fallaron"
+    total_failures=$((total_failures + 1))
+fi
+
+step "17. Package Manager (signature verifier, lockfile, malware scanner)"
+if cargo test -p vvva_pm 2>/dev/null; then
+    log_success "Package manager tests OK"
+else
+    log_error "Tests package manager fallaron"
+    total_failures=$((total_failures + 1))
 fi
 
 #######################################

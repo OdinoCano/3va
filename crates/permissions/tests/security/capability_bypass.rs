@@ -4,8 +4,8 @@
 
 use std::path::PathBuf;
 use vvva_permissions::{
-    enforcement::{EnvEnforcer, FsEnforcer, NetEnforcer, PermissionError, ProcessEnforcer},
     Capability, PermissionState,
+    enforcement::{EnvEnforcer, FsEnforcer, NetEnforcer, PermissionError, ProcessEnforcer},
 };
 
 // ── Deny-by-default (paso 5 del algoritmo de verificación) ───────────────────
@@ -26,7 +26,10 @@ fn deny_by_default_fs_write() {
     let state = PermissionState::new();
     let enforcer = FsEnforcer::new(state);
     let result = enforcer.check_write(std::path::Path::new("/tmp/evil.sh"));
-    assert!(matches!(result, Err(PermissionError::FileWriteDenied { .. })));
+    assert!(matches!(
+        result,
+        Err(PermissionError::FileWriteDenied { .. })
+    ));
 }
 
 #[test]
@@ -61,8 +64,16 @@ fn scoped_read_allows_subpath() {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(PathBuf::from("/app")));
     let enforcer = FsEnforcer::new(state);
-    assert!(enforcer.check_read(std::path::Path::new("/app/config.json")).is_ok());
-    assert!(enforcer.check_read(std::path::Path::new("/app/subdir/file.rs")).is_ok());
+    assert!(
+        enforcer
+            .check_read(std::path::Path::new("/app/config.json"))
+            .is_ok()
+    );
+    assert!(
+        enforcer
+            .check_read(std::path::Path::new("/app/subdir/file.rs"))
+            .is_ok()
+    );
 }
 
 #[test]
@@ -214,7 +225,10 @@ fn env_enforcer_all_denied_without_capability() {
     // all() expone todas las variables → requiere EnvAccess
     let state = PermissionState::new();
     let enforcer = EnvEnforcer::new(state);
-    assert!(matches!(enforcer.all(), Err(PermissionError::EnvAccessDenied)));
+    assert!(matches!(
+        enforcer.all(),
+        Err(PermissionError::EnvAccessDenied)
+    ));
 }
 
 // ── ProcessEnforcer: lista de comandos permitidos ─────────────────────────────
@@ -224,8 +238,8 @@ fn env_enforcer_all_denied_without_capability() {
 fn process_enforcer_command_allowlist_blocks_unlisted() {
     let state = PermissionState::new();
     state.grant(Capability::SpawnProcess);
-    let enforcer =
-        ProcessEnforcer::new(state).with_allowed_commands(vec!["ls".to_string(), "cat".to_string()]);
+    let enforcer = ProcessEnforcer::new(state)
+        .with_allowed_commands(vec!["ls".to_string(), "cat".to_string()]);
     assert!(enforcer.spawn("ls", &["-la".to_string()]).is_ok());
     assert!(matches!(
         enforcer.spawn("rm", &["-rf".to_string(), "/".to_string()]),

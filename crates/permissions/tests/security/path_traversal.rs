@@ -101,7 +101,9 @@ fn deep_valid_path_resolves_correctly() {
     let mut vfs = VirtualFs::new();
     vfs.mount("/app", &sandbox, true);
 
-    let resolved = vfs.resolve(Path::new("/app/subdir/nested/file.json")).unwrap();
+    let resolved = vfs
+        .resolve(Path::new("/app/subdir/nested/file.json"))
+        .unwrap();
     assert_eq!(resolved, sandbox.join("subdir/nested/file.json"));
 }
 

@@ -183,6 +183,77 @@ mod tests {
         );
     }
 
+    // ── verify_tarball: SRI integrity strings del registry ───────────────────
+
+    #[test]
+    fn verify_tarball_sha512_correct() {
+        use base64::Engine;
+        use sha2::{Digest, Sha512};
+        let data = b"fake tarball content for testing";
+        let mut h = Sha512::new();
+        h.update(data);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(h.finalize());
+        let integrity = format!("sha512-{}", b64);
+
+        let verifier = SignatureVerifier::sha512();
+        let result = verifier.verify_tarball(data, &integrity);
+        assert!(matches!(result, VerificationStatus::Verified));
+    }
+
+    #[test]
+    fn verify_tarball_sha256_correct() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        let data = b"fake tarball content for sha256";
+        let mut h = Sha256::new();
+        h.update(data);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(h.finalize());
+        let integrity = format!("sha256-{}", b64);
+
+        let verifier = SignatureVerifier::sha256();
+        let result = verifier.verify_tarball(data, &integrity);
+        assert!(matches!(result, VerificationStatus::Verified));
+    }
+
+    #[test]
+    fn verify_tarball_mismatch_detected() {
+        let verifier = SignatureVerifier::sha512();
+        let data = b"real tarball content";
+        let integrity = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let result = verifier.verify_tarball(data, integrity);
+        assert!(matches!(result, VerificationStatus::Mismatch));
+    }
+
+    #[test]
+    fn verify_tarball_unknown_algorithm_returns_missing() {
+        let verifier = SignatureVerifier::sha256();
+        let data = b"some data";
+        let result = verifier.verify_tarball(data, "md5-abc123");
+        assert!(matches!(result, VerificationStatus::Missing));
+    }
+
+    #[test]
+    fn verify_from_registry_none_returns_missing() {
+        let verifier = SignatureVerifier::sha512();
+        let result = verifier.verify_from_registry(b"data", None);
+        assert!(matches!(result, VerificationStatus::Missing));
+    }
+
+    #[test]
+    fn verify_from_registry_some_delegates_to_verify_tarball() {
+        use base64::Engine;
+        use sha2::{Digest, Sha512};
+        let data = b"tarball bytes";
+        let mut h = Sha512::new();
+        h.update(data);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(h.finalize());
+        let integrity = format!("sha512-{}", b64);
+
+        let verifier = SignatureVerifier::sha512();
+        let result = verifier.verify_from_registry(data, Some(&integrity));
+        assert!(matches!(result, VerificationStatus::Verified));
+    }
+
     #[test]
     fn test_hash_verification() {
         let verifier = SignatureVerifier::sha256();
