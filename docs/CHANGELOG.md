@@ -8,12 +8,49 @@ Formato: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versi
 ## [Unreleased]
 
 ### Añadido
+
+- `3va dev` — servidor de desarrollo completo:
+  - Flags `--port <N>` (default 3000), `--host <H>` (default 127.0.0.1), `--open`, `--public-dir <D>`.
+  - HMR via Server-Sent Events en el endpoint `/__hmr`.
+  - Script cliente HMR inyectado automáticamente antes de `</body>` en todos los HTML servidos.
+  - Servicio de archivos estáticos con MIME types correctos (15 tipos soportados).
+  - Fallback SPA: rutas desconocidas sirven `public/index.html`.
+  - Rebuild automático con debounce de 300 ms al detectar cambios en archivos `.js`, `.ts`, `.jsx`, `.tsx`.
+  - Página de desarrollo integrada cuando no existe `public/index.html`.
+- `3va audit --secrets` — Fase 3 de auditoría: detección de secretos hardcodeados en dependencias (claves AWS, tokens GitHub, claves privadas PEM, tokens JWT, claves Stripe y otros patrones comunes) via `SecretsScanner`.
+- `3va audit --json` — salida machine-readable con estructura `{ passed, phases: { malware, osv, secrets } }`; suprime completamente el output human-readable.
+- `audit_packages_silent()` en `vvva_pm` — variante de auditoría sin output a consola, usada internamente en modo `--json`.
+- `3va sandbox` — REPL interactivo completo:
+  - Soporte multi-línea con detector de brackets balanceados (paréntesis, corchetes, llaves).
+  - Comandos de sesión: `.help`, `.exit`, `.clear`, `.allow-read <path>`, `.allow-net <host>`, `.permissions`.
+  - Formato de salida estilo Node.js: objetos como JSON, `undefined` explícito para declaraciones.
+  - Detección de TTY: en pipes y entornos CI (stdin no-TTY), sale inmediatamente sin bloquear.
+- `3va test --watch` — re-ejecuta la suite automáticamente al detectar cambios en archivos.
+- `3va test --coverage` — informe de cobertura de líneas y ramas al finalizar la ejecución.
+- `3va test --update-snapshots` / `-u` — sobreescribe snapshots existentes con los valores actuales.
+- `3va bundle --split` — code splitting; `--minify` — minificación; `--source-map` — generación de mapa de fuentes.
+- ESM completo: `EsmResolver` y `EsmLoader` en `vvva_js::esm`; soporte de `import`/`export` con rutas relativas, re-exportaciones y módulos TypeScript.
+- Soporte completo de async/await y Promise chains mediante el loop de microtasks `execute_pending_job`.
+- Watch mode del bundler (`start_watch_mode`) con watcher `notify` real (anteriormente era un stub sin implementación).
+- Soporte de bloques `describe` y snapshots (`toMatchSnapshot`) en el test runner.
+- `list_granted()` en `PermissionState` — expone la lista de capabilities concedidas en la sesión actual.
 - Subcomando `3va update` con seguimiento de registry por paquete.
 - Campo `registry` en `3va-lock.json` (en `packages` y `dependencies`) para registrar el origen de cada paquete instalado.
-- Lógica de preservación de registries en el lockfile al regenerarlo: los registries de paquetes ya instalados no se pierden cuando se instala un paquete nuevo.
-- Validación de `--allow-net` en `3va update`: el CLI inspecciona el lockfile, agrupa paquetes por registry y muestra el comando exacto que el usuario debe ejecutar si falta algún host autorizado.
+- Lógica de preservación de registries en el lockfile al regenerarlo: los registries de paquetes ya instalados no se pierden al instalar nuevos paquetes.
+- Validación de `--allow-net` en `3va update`: el CLI inspecciona el lockfile, agrupa paquetes por registry y muestra el comando exacto a ejecutar si falta algún host autorizado.
 - Soporte multi-registry en un mismo proyecto (e.g., `axios` desde `registry.npmjs.org` y `@std/path` desde `jsr.io`).
 - Métodos `registry_for()`, `registries_needed()` y `set_registry()` en `Lockfile` (`crates/pm/src/lockfile.rs`).
+- 11 tests de integración en `crates/test/tests/runner_integration.rs`.
+- 12 tests unitarios en `crates/pm/src/auditor.rs`.
+- 28 tests en `crates/js/tests/pipeline.rs` (ESM, async/await, TypeScript, permisos).
+- Suite de integración `scripts/integration_tests.sh`: 58 tests en 12 fases (100% passing).
+
+### Corregido
+
+- `is_esm_source()` dejaba de escanear al encontrar la primera línea que no era un import; ahora escanea el archivo completo con tracking de comentarios de bloque.
+- Permiso de snapshot fallaba cuando el test file estaba en `/tmp/` (TempDir); ahora se concede `FileRead`/`FileWrite` al directorio padre del test file.
+- `audit --json` emitía output human-readable antes del JSON porque el malware scanner escribía directamente a stdout; resuelto mediante `audit_packages_silent()`.
+- `run_audit_human` retornaba antes de alcanzar la Fase 3 si la Fase 1 (malware) o la Fase 2 (OSV) producían un error; ahora las tres fases son resilientes a fallos individuales y siempre se ejecutan de forma independiente.
 
 ---
 
@@ -32,7 +69,7 @@ Formato: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versi
 - Verificación de existencia del paquete antes de instalar.
 - Resolución de versión: si no se especifica, usa `dist-tags.latest`; si la versión solicitada no existe, muestra las 5 más cercanas por distancia semver.
 - Sugerencias de versiones en formato `name@version`.
-- Puerta de seguridad: cualquier intento de instalar sin `--allow-net` muestra un error explicativo y sugiere los comandos correctos — ninguna llamada de red silenciosa.
+- Puerta de seguridad: cualquier intento de instalar sin `--allow-net` muestra un error explicativo y sugiere el comando correcto — ninguna llamada de red silenciosa.
 - Detección de paquete ya instalado: evita reinstalación accidental y sugiere `reinstall`.
 - Actualización de `package.json` y `3va-lock.json` tras cada instalación exitosa.
 - Verificación de firmas vía `SignatureVerifier` (SHA-256/SHA-512).
