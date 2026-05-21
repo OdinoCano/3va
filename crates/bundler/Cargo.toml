@@ -10,6 +10,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 regex-lite = "0.1"
+notify = "6.1"
 vvva_pm = { path = "../pm" }
 oxc_allocator = "0.132.0"
 oxc_parser = "0.132.0"

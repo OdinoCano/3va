@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -102,37 +103,418 @@ fn check_system_info() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_sandbox_shell() -> anyhow::Result<()> {
-    use std::io::{self, Write};
+/// Count unmatched opening brackets/braces/parens to detect incomplete input.
+fn is_incomplete(src: &str) -> bool {
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_template = false;
+    let mut prev = '\0';
 
-    println!("\n=== 3VA Interactive Sandbox ===\n");
-    println!("Security: All capabilities are DENIED by default.");
-    println!("Type 'exit' to leave the sandbox.\n");
+    for ch in src.chars() {
+        if in_single {
+            if ch == '\'' && prev != '\\' { in_single = false; }
+        } else if in_double {
+            if ch == '"' && prev != '\\' { in_double = false; }
+        } else if in_template {
+            if ch == '`' && prev != '\\' { in_template = false; }
+        } else {
+            match ch {
+                '\'' => in_single = true,
+                '"' => in_double = true,
+                '`' => in_template = true,
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth -= 1,
+                _ => {}
+            }
+        }
+        prev = ch;
+    }
+    depth > 0 || in_single || in_double || in_template
+}
+
+/// Format the *current value* of a JS expression for REPL display.
+/// `code` is already evaluated — this only inspects its value.
+fn format_repl_result(engine: &vvva_js::JsEngine, code: &str) -> Option<String> {
+    let type_tag = engine.eval_to_string(&format!("typeof ({})", code)).ok()?;
+
+    match type_tag.as_str() {
+        "undefined" => None,
+        "function" => {
+            // Show [Function: name] like Node.js
+            let name = engine
+                .eval_to_string(&format!("({}).name || ''", code))
+                .unwrap_or_default();
+            if name.is_empty() {
+                Some("[Function (anonymous)]".to_string())
+            } else {
+                Some(format!("[Function: {}]", name))
+            }
+        }
+        "string" => engine
+            .eval_to_string(&format!("JSON.stringify({})", code))
+            .ok(),
+        "object" => engine
+            .eval_to_string(&format!(
+                "(function(v){{ try{{ return JSON.stringify(v,null,2); }}catch(e){{ return String(v); }} }})({})",
+                code
+            ))
+            .ok(),
+        _ => engine.eval_to_string(&format!("String({})", code)).ok(),
+    }
+}
+
+async fn run_sandbox_shell() -> anyhow::Result<()> {
+    use std::io::{self, BufRead, Write};
+    use vvva_permissions::Capability;
+
+    let is_tty = atty::is(atty::Stream::Stdin);
+
+    if is_tty {
+        println!("\n=== 3VA Interactive Sandbox ===");
+        println!("Security: all capabilities DENIED by default.");
+        println!();
+        println!("  .help               — show this help");
+        println!("  .permissions        — list granted permissions");
+        println!("  .allow-read=PATH    — grant FileRead for PATH");
+        println!("  .allow-write=PATH   — grant FileWrite for PATH");
+        println!("  .allow-net=HOST     — grant Network for HOST");
+        println!("  .allow-env          — grant Env access");
+        println!("  .clear              — reset JS context");
+        println!("  exit / quit / ^D    — leave sandbox");
+        println!();
+    }
 
     let permissions = vvva_permissions::PermissionState::new();
-    let engine = vvva_js::JsEngine::new(&permissions)?;
+    let mut engine = vvva_js::JsEngine::new(&permissions)?;
+
+    let mut buffer = String::new(); // multi-line accumulator
+    let stdin = io::stdin();
 
     loop {
-        print!("3va:sandbox> ");
-        io::stdout().flush()?;
+        if is_tty {
+            if buffer.is_empty() {
+                print!("3va> ");
+            } else {
+                print!("...  ");
+            }
+            io::stdout().flush()?;
+        }
 
         let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        let line = line.trim();
-
-        if line == "exit" || line == "quit" {
-            println!("Leaving sandbox...");
+        let n = stdin.lock().read_line(&mut line)?;
+        if n == 0 {
+            // EOF (^D or piped input exhausted)
+            if !buffer.trim().is_empty() {
+                // flush remaining buffer
+                eval_and_print(&engine, buffer.trim(), is_tty);
+            }
+            if is_tty { println!("\nLeaving sandbox..."); }
             break;
         }
 
-        if line.is_empty() {
-            continue;
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+
+        // ── Meta-commands ─────────────────────────────────────────────────
+        match trimmed.trim() {
+            "exit" | "quit" => {
+                if is_tty { println!("Leaving sandbox..."); }
+                break;
+            }
+            ".help" => {
+                println!("  .help               — show this help");
+                println!("  .permissions        — list granted permissions");
+                println!("  .allow-read=PATH    — grant FileRead for PATH");
+                println!("  .allow-write=PATH   — grant FileWrite for PATH");
+                println!("  .allow-net=HOST     — grant Network for HOST");
+                println!("  .allow-env          — grant Env access");
+                println!("  .clear              — reset JS context (re-creates engine)");
+                println!("  exit / quit / ^D    — leave sandbox");
+                continue;
+            }
+            ".permissions" => {
+                let granted = permissions.list_granted();
+                if granted.is_empty() {
+                    println!("  (no permissions granted)");
+                } else {
+                    for cap in &granted {
+                        println!("  ✓ {:?}", cap);
+                    }
+                }
+                continue;
+            }
+            ".clear" => {
+                engine = vvva_js::JsEngine::new(&permissions)?;
+                buffer.clear();
+                if is_tty { println!("Context cleared."); }
+                continue;
+            }
+            cmd if cmd.starts_with(".allow-read=") => {
+                let path = PathBuf::from(cmd.trim_start_matches(".allow-read="));
+                permissions.grant(Capability::FileRead(path.clone()));
+                if is_tty { println!("  ✓ FileRead granted: {}", path.display()); }
+                continue;
+            }
+            cmd if cmd.starts_with(".allow-write=") => {
+                let path = PathBuf::from(cmd.trim_start_matches(".allow-write="));
+                permissions.grant(Capability::FileWrite(path.clone()));
+                if is_tty { println!("  ✓ FileWrite granted: {}", path.display()); }
+                continue;
+            }
+            cmd if cmd.starts_with(".allow-net=") => {
+                let host = cmd.trim_start_matches(".allow-net=").to_string();
+                permissions.grant(Capability::Network(host.clone()));
+                if is_tty { println!("  ✓ Network granted: {}", host); }
+                continue;
+            }
+            ".allow-env" => {
+                permissions.grant(Capability::EnvAccess);
+                if is_tty { println!("  ✓ Env access granted"); }
+                continue;
+            }
+            "" if buffer.is_empty() => continue,
+            _ => {}
         }
 
-        match engine.eval(line) {
-            Ok(_) => {}
+        // ── Multi-line accumulation ───────────────────────────────────────
+        if !buffer.is_empty() {
+            buffer.push('\n');
+        }
+        buffer.push_str(trimmed);
+
+        if is_incomplete(&buffer) {
+            continue; // wait for more input
+        }
+
+        let src = buffer.trim().to_string();
+        buffer.clear();
+
+        if !src.is_empty() {
+            eval_and_print(&engine, &src, is_tty);
+        }
+    }
+
+    Ok(())
+}
+
+fn eval_and_print(engine: &vvva_js::JsEngine, src: &str, is_tty: bool) {
+    let trimmed = src.trim();
+
+    // For object literals `{a:1}` at statement position, wrap in parens so the
+    // parser treats them as expression statements, not block statements.
+    let eval_src = if trimmed.starts_with('{') && !trimmed.starts_with("{{") {
+        format!("({})", trimmed)
+    } else {
+        src.to_string()
+    };
+
+    // Step 1: always eval for side effects (defines functions, variables, etc.)
+    if let Err(e) = engine.eval(&eval_src) {
+        let msg = e.to_string();
+        let clean = msg
+            .trim_start_matches("Error evaluating script: ")
+            .trim_start_matches("Error: ");
+        if is_tty {
+            eprintln!("\x1b[31mUncaught: {}\x1b[0m", clean);
+        } else {
+            eprintln!("Error: {}", clean);
+        }
+        return;
+    }
+
+    // Step 2: display result only for expression-like inputs.
+    // Statement keywords produce side effects but no printable value.
+    let trimmed = src.trim();
+    let is_declaration = trimmed.starts_with("const ")
+        || trimmed.starts_with("let ")
+        || trimmed.starts_with("var ")
+        || trimmed.starts_with("function ")
+        || trimmed.starts_with("async function ")
+        || trimmed.starts_with("class ")
+        || trimmed.starts_with("if ")
+        || trimmed.starts_with("for ")
+        || trimmed.starts_with("while ")
+        || trimmed.starts_with("do {")
+        || trimmed.starts_with("switch ")
+        || trimmed.starts_with("try {")
+        || trimmed.starts_with("import ")
+        || trimmed.starts_with("export ");
+
+    if is_declaration {
+        return;
+    }
+
+    // For object literals `{a:1}`, wrap in parens so they parse as expressions.
+    let as_expr = if trimmed.starts_with('{') {
+        format!("({})", trimmed)
+    } else {
+        trimmed.to_string()
+    };
+
+    if let Some(out) = format_repl_result(engine, &as_expr) {
+        if is_tty {
+            println!("\x1b[32m{}\x1b[0m", out);
+        } else {
+            println!("{}", out);
+        }
+    }
+}
+
+/// Discover the project entry point: package.json "main", then common fallbacks.
+fn discover_entry() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Ok(content) = std::fs::read_to_string(cwd.join("package.json")) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(main) = json["main"].as_str() {
+                let p = cwd.join(main);
+                if p.exists() {
+                    return p;
+                }
+            }
+        }
+    }
+    for candidate in &["src/index.ts", "src/index.js", "index.ts", "index.js"] {
+        let p = cwd.join(candidate);
+        if p.exists() {
+            return p;
+        }
+    }
+    cwd.join("index.js")
+}
+
+/// Shared build state broadcast over SSE to connected browsers.
+#[derive(Clone, Debug)]
+enum BuildEvent {
+    /// Bundle rebuilt successfully.
+    Reload,
+    /// Bundle rebuild failed; carries a short error string.
+    Error(String),
+}
+
+async fn run_dev_server(
+    port: u16,
+    host: String,
+    open: bool,
+    public_dir: PathBuf,
+) -> anyhow::Result<()> {
+    use tokio::net::TcpListener;
+    use tokio::signal;
+    use tokio::sync::broadcast;
+
+    let entry = discover_entry();
+    let output = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("dist/bundle.js");
+
+    println!();
+    println!("  3VA Dev Server");
+    println!("  Entry  : {}", entry.display());
+    println!("  Output : {}", output.display());
+    println!("  Public : {}", public_dir.display());
+    println!();
+
+    // Channel for broadcasting HMR events to all connected SSE clients.
+    let (tx, _rx) = broadcast::channel::<BuildEvent>(16);
+    let tx_watcher = tx.clone();
+
+    // Build the bundle once before the server starts, then watch for changes.
+    let entry_clone = entry.clone();
+    let output_clone = output.clone();
+    std::thread::spawn(move || {
+        // Initial build
+        match vvva_bundler::bundle_file(
+            &entry_clone.to_string_lossy(),
+            &output_clone.to_string_lossy(),
+            None,
+        ) {
+            Ok(()) => {
+                let _ = tx_watcher.send(BuildEvent::Reload);
+            }
             Err(e) => {
-                println!("Error: {}", e);
+                eprintln!("[bundler] Initial build error: {}", e);
+                let _ = tx_watcher.send(BuildEvent::Error(e.to_string()));
+            }
+        }
+
+        // Watch mode: rebuild on source changes
+        use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+        use std::sync::mpsc;
+
+        let (file_tx, file_rx) = mpsc::channel::<Result<Event, notify::Error>>();
+        let mut watcher = match RecommendedWatcher::new(
+            move |res| { let _ = file_tx.send(res); },
+            Config::default().with_poll_interval(Duration::from_millis(300)),
+        ) {
+            Ok(w) => w,
+            Err(e) => { eprintln!("[bundler] Watcher init error: {}", e); return; }
+        };
+        let watch_root = entry_clone.parent().unwrap_or(std::path::Path::new("."));
+        let _ = watcher.watch(watch_root, RecursiveMode::Recursive);
+
+        let mut last_rebuild = Instant::now();
+        let debounce = Duration::from_millis(300);
+
+        loop {
+            if let Ok(Ok(event)) = file_rx.recv_timeout(Duration::from_millis(200)) {
+                let is_source = event.paths.iter().any(|p| {
+                    matches!(
+                        p.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref(),
+                        Some("js") | Some("ts") | Some("jsx") | Some("tsx")
+                    )
+                });
+                let changed: Vec<_> = event.paths.iter()
+                    .filter(|p| !p.ends_with(&output_clone))
+                    .collect();
+
+                if is_source && !changed.is_empty() && last_rebuild.elapsed() > debounce {
+                    if !matches!(event.kind, EventKind::Access(_)) {
+                        last_rebuild = Instant::now();
+                        let t = Instant::now();
+                        match vvva_bundler::bundle_file(
+                            &entry_clone.to_string_lossy(),
+                            &output_clone.to_string_lossy(),
+                            None,
+                        ) {
+                            Ok(()) => {
+                                println!("[dev] Rebuilt in {}ms", t.elapsed().as_millis());
+                                let _ = tx_watcher.send(BuildEvent::Reload);
+                            }
+                            Err(e) => {
+                                eprintln!("[dev] Build error: {}", e);
+                                let _ = tx_watcher.send(BuildEvent::Error(e.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let addr = format!("{}:{}", host, port);
+    let listener = TcpListener::bind(&addr).await?;
+    let url = format!("http://{}:{}", host, port);
+
+    println!("  Ready  : \x1b[36m{}\x1b[0m", url);
+    println!("  Press Ctrl+C to stop.\n");
+
+    if open {
+        open_browser(&url);
+    }
+
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                let (mut stream, _) = result?;
+                let tx_conn = tx.clone();
+                let pub_dir = public_dir.clone();
+                let out_path = output.clone();
+                tokio::spawn(async move {
+                    let _ = handle_dev_connection(&mut stream, tx_conn, pub_dir, out_path).await;
+                });
+            }
+            _ = signal::ctrl_c() => {
+                println!("\n[dev] Shutting down.");
+                break;
             }
         }
     }
@@ -140,34 +522,193 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_dev_server() -> anyhow::Result<()> {
-    use tokio::net::TcpListener;
-    use tokio::signal;
+/// Try to open the given URL in the system default browser.
+fn open_browser(url: &str) {
+    let _ = std::process::Command::new(if cfg!(target_os = "macos") { "open" }
+        else if cfg!(target_os = "windows") { "cmd" }
+        else { "xdg-open" })
+        .args(if cfg!(target_os = "windows") { vec!["/c", "start", url] } else { vec![url] })
+        .spawn();
+}
 
-    println!("\n=== 3VA Dev Server ===\n");
-    println!("Starting development server...");
-    println!("Press Ctrl+C to stop.\n");
+/// Tiny HMR client injected into every HTML response.
+/// On `reload` the page refreshes; on `error` it shows an overlay.
+const HMR_CLIENT_JS: &str = r#"<script>
+(function(){
+  var es = new EventSource('/__hmr');
+  es.onmessage = function(e){
+    var d = JSON.parse(e.data);
+    if(d.type==='reload'){
+      document.getElementById('__hmr_overlay')&&document.getElementById('__hmr_overlay').remove();
+      location.reload();
+    } else if(d.type==='error'){
+      var o=document.getElementById('__hmr_overlay')||document.createElement('div');
+      o.id='__hmr_overlay';
+      o.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.85);color:#ff6b6b;font-family:monospace;font-size:14px;padding:40px;z-index:999999;white-space:pre-wrap;overflow:auto';
+      o.textContent='Build error:\n\n'+d.message;
+      document.body.appendChild(o);
+    }
+  };
+})();
+</script>"#;
 
-    info!("Initializing bundler in watch mode...");
-    vvva_bundler::start_watch_mode()?;
+async fn handle_dev_connection(
+    stream: &mut tokio::net::TcpStream,
+    tx: tokio::sync::broadcast::Sender<BuildEvent>,
+    public_dir: PathBuf,
+    bundle_path: PathBuf,
+) -> anyhow::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let listener = TcpListener::bind("127.0.0.1:3000").await?;
-    println!("Server running at http://127.0.0.1:3000");
-    info!("Dev server listening on http://127.0.0.1:3000");
+    let mut buffer = vec![0u8; 4096];
+    let n = stream.read(&mut buffer).await?;
+    if n == 0 { return Ok(()); }
 
-    loop {
-        tokio::select! {
-            result = listener.accept() => {
-                let (mut stream, _) = result?;
-                let _ = handle_connection(&mut stream).await;
+    let request = String::from_utf8_lossy(&buffer[..n]);
+    let first_line = request.lines().next().unwrap_or("");
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+
+    if parts.len() < 2 {
+        stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n").await?;
+        return Ok(());
+    }
+
+    let path = parts[1].split('?').next().unwrap_or("/");
+
+    // SSE endpoint for HMR
+    if path == "/__hmr" {
+        let mut rx = tx.subscribe();
+        let headers = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/event-stream\r\n",
+            "Cache-Control: no-cache\r\n",
+            "Connection: keep-alive\r\n",
+            "Access-Control-Allow-Origin: *\r\n",
+            "\r\n"
+        );
+        stream.write_all(headers.as_bytes()).await?;
+        // Send a keep-alive comment immediately so the browser knows the connection is open
+        stream.write_all(b": connected\n\n").await?;
+
+        loop {
+            match rx.recv().await {
+                Ok(BuildEvent::Reload) => {
+                    stream.write_all(b"data: {\"type\":\"reload\"}\n\n").await?;
+                }
+                Ok(BuildEvent::Error(msg)) => {
+                    let escaped = msg.replace('"', "\\\"").replace('\n', "\\n");
+                    let payload = format!("data: {{\"type\":\"error\",\"message\":\"{}\"}}\n\n", escaped);
+                    stream.write_all(payload.as_bytes()).await?;
+                }
+                Err(_) => break,
             }
-            _ = signal::ctrl_c() => {
-                info!("Shutting down dev server...");
-                break;
-            }
+        }
+        return Ok(());
+    }
+
+    // /bundle.js
+    if path == "/bundle.js" {
+        return serve_file(stream, &bundle_path, false).await;
+    }
+
+    // Static assets from public/
+    let rel = path.trim_start_matches('/');
+    if !rel.is_empty() {
+        let candidate = public_dir.join(rel);
+        if candidate.exists() && candidate.is_file() {
+            return serve_file(stream, &candidate, false).await;
         }
     }
 
+    // SPA fallback: serve public/index.html injecting HMR client, or a default page
+    let index = public_dir.join("index.html");
+    if index.exists() {
+        return serve_html_with_hmr(stream, &index).await;
+    }
+
+    // No index.html — serve built-in dev page
+    let html = format!(
+        "<!DOCTYPE html><html><head><meta charset=utf-8><title>3VA Dev</title></head><body>\
+        <h2 style='font-family:sans-serif'>3VA Dev Server</h2>\
+        <p>Entry: <code>{}</code></p>\
+        <p>Bundle ready at <a href='/bundle.js'>/bundle.js</a></p>\
+        {HMR_CLIENT_JS}</body></html>",
+        bundle_path.display()
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        html.len(), html
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+fn mime_type(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("html") | Some("htm") => "text/html; charset=utf-8",
+        Some("js") | Some("mjs") => "application/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("wasm") => "application/wasm",
+        Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn serve_file(
+    stream: &mut tokio::net::TcpStream,
+    path: &std::path::Path,
+    _inject_hmr: bool,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let ct = mime_type(path);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                ct, bytes.len()
+            );
+            stream.write_all(header.as_bytes()).await?;
+            stream.write_all(&bytes).await?;
+        }
+        Err(_) => {
+            stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+        }
+    }
+    Ok(())
+}
+
+async fn serve_html_with_hmr(
+    stream: &mut tokio::net::TcpStream,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let html = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => {
+            stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            return Ok(());
+        }
+    };
+    // Inject HMR client before </body> (or at end if no </body>)
+    let injected = if let Some(pos) = html.to_lowercase().rfind("</body>") {
+        format!("{}{}{}", &html[..pos], HMR_CLIENT_JS, &html[pos..])
+    } else {
+        format!("{}{}", html, HMR_CLIENT_JS)
+    };
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n{}",
+        injected.len(), injected
+    );
+    stream.write_all(response.as_bytes()).await?;
     Ok(())
 }
 
@@ -291,50 +832,6 @@ fn build_permissions(
     permissions
 }
 
-async fn handle_connection(stream: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let mut buffer = [0u8; 1024];
-    let n = stream.read(&mut buffer).await?;
-
-    if n == 0 {
-        return Ok(());
-    }
-
-    let request = String::from_utf8_lossy(&buffer[..n]);
-    let lines: Vec<&str> = request.lines().collect();
-
-    let (status, body) = if let Some(first_line) = lines.first() {
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let path = parts[1];
-            match path {
-                "/" => (200, "<html><body><h1>3VA Dev Server</h1><p>Use /bundle.js to get the app</p></body></html>".to_string()),
-                "/bundle.js" => {
-                    match std::fs::read_to_string("dist/bundle.js") {
-                        Ok(content) => (200, content),
-                        Err(_) => (404, "Bundle not found. Run '3va bundle' first.".to_string()),
-                    }
-                }
-                _ => (404, "Not Found".to_string()),
-            }
-        } else {
-            (400, "Bad Request".to_string())
-        }
-    } else {
-        (400, "Bad Request".to_string())
-    };
-
-    let response = format!(
-        "HTTP/1.1 {} \r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        status,
-        body.len(),
-        body
-    );
-
-    stream.write_all(response.as_bytes()).await?;
-    Ok(())
-}
 
 #[derive(Parser)]
 #[command(name = "3va")]
@@ -418,8 +915,21 @@ enum Commands {
         #[arg(long = "allow-net")]
         allow_net: Option<Vec<String>>,
     },
-    /// Development server
-    Dev,
+    /// Development server with hot module replacement
+    Dev {
+        /// Port to listen on
+        #[arg(long, short, default_value = "3000")]
+        port: u16,
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Open browser automatically
+        #[arg(long)]
+        open: bool,
+        /// Public directory to serve static assets from
+        #[arg(long = "public-dir", default_value = "public")]
+        public_dir: PathBuf,
+    },
     /// Bundle the application
     Bundle {
         /// The entry file to bundle
@@ -465,11 +975,186 @@ enum Commands {
         /// from the OSV API for every package.
         #[arg(long = "update-cache")]
         update_cache: bool,
+
+        /// Also scan source files in the current project for hardcoded secrets.
+        #[arg(long = "secrets")]
+        secrets: bool,
+
+        /// Output results as JSON (for CI/CD pipelines).
+        #[arg(long = "json")]
+        json: bool,
     },
     /// Check runtime health
     Doctor,
     /// Enter an isolated interactive sandbox
     Sandbox,
+}
+
+async fn run_audit_human(deny: bool, update_cache: bool, scan_secrets: bool) -> anyhow::Result<()> {
+    // ── Phase 1: static malware analysis ─────────────────────────────────────
+    println!();
+    println!("=== Phase 1: Static Malware Analysis ===");
+    let malware_clean = match vvva_pm::audit_packages() {
+        Ok(clean) => clean,
+        Err(e) => {
+            eprintln!("  (skipped: {e})");
+            true // no node_modules → nothing to flag
+        }
+    };
+
+    // ── Phase 2: OSV known-vulnerability scan ────────────────────────────────
+    println!();
+    println!("=== Phase 2: Known Vulnerabilities (OSV) ===");
+    let (report_opt, vuln_ok) = match vvva_pm::run_audit(update_cache).await {
+        Ok(report) => {
+            let ok = vvva_pm::print_audit_report(&report, deny);
+            (Some(report), ok)
+        }
+        Err(e) => {
+            eprintln!("✗ OSV scan error: {e}");
+            (None, true) // no lockfile → no vulns to report
+        }
+    };
+    let _ = report_opt;
+
+    // ── Phase 3: secrets detection (opt-in) ──────────────────────────────────
+    let secrets_clean = if scan_secrets {
+        println!();
+        println!("=== Phase 3: Secrets Detection ===");
+        run_secrets_scan_human()
+    } else {
+        true
+    };
+
+    if !malware_clean {
+        anyhow::bail!("Audit failed: malware patterns detected.");
+    }
+    if !vuln_ok {
+        anyhow::bail!("Audit failed: CRITICAL or HIGH vulnerabilities detected.");
+    }
+    if !secrets_clean {
+        anyhow::bail!("Audit failed: hardcoded secrets detected.");
+    }
+    Ok(())
+}
+
+fn run_secrets_scan_human() -> bool {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let scanner = vvva_pm::SecretsScanner::new();
+    let findings = scanner.scan_directory(&cwd);
+
+    if findings.is_empty() {
+        println!("✓ No hardcoded secrets found.");
+        println!();
+        return true;
+    }
+
+    // Group by severity
+    let critical: Vec<_> = findings.iter().filter(|f| f.severity == vvva_pm::SecretSeverity::Critical).collect();
+    let high: Vec<_> = findings.iter().filter(|f| f.severity == vvva_pm::SecretSeverity::High).collect();
+
+    for f in &findings {
+        let sev = format!("{:?}", f.severity).to_uppercase();
+        eprintln!(
+            "  [{}] {}:{} — {} — {}",
+            sev,
+            f.file.display(),
+            f.line,
+            f.secret_type,
+            f.snippet
+        );
+        eprintln!("        Fix: {}", f.suggestion);
+    }
+
+    println!();
+    eprintln!("  Secrets found: {} ({} critical, {} high)", findings.len(), critical.len(), high.len());
+
+    if !critical.is_empty() {
+        eprintln!("✗ Critical secrets detected. Remove them immediately.");
+        false
+    } else {
+        eprintln!("! Secrets detected. Review and rotate affected credentials.");
+        true // non-critical: warn but don't fail by default
+    }
+}
+
+async fn run_audit_json(deny: bool, update_cache: bool, scan_secrets: bool) -> anyhow::Result<()> {
+    let malware_ok = vvva_pm::audit_packages_silent().unwrap_or(true);
+    let osv_report = match vvva_pm::run_audit(update_cache).await {
+        Ok(r) => r,
+        Err(e) => {
+            let output = serde_json::json!({
+                "passed": false,
+                "error": e.to_string(),
+                "phases": {
+                    "malware": { "clean": malware_ok },
+                    "osv": { "total_packages": 0, "packages_with_vulns": 0, "total_vulns": 0, "critical": 0, "high": 0, "findings": [] },
+                    "secrets": { "scanned": false, "findings": [] }
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            anyhow::bail!(e);
+        }
+    };
+
+    let secrets_findings: Vec<serde_json::Value> = if scan_secrets {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let scanner = vvva_pm::SecretsScanner::new();
+        scanner.scan_directory(&cwd).iter().map(|f| {
+            serde_json::json!({
+                "file": f.file.display().to_string(),
+                "line": f.line,
+                "type": f.secret_type,
+                "severity": format!("{:?}", f.severity),
+                "suggestion": f.suggestion,
+            })
+        }).collect()
+    } else {
+        vec![]
+    };
+
+    let has_severe_vulns = osv_report.critical_count > 0 || osv_report.high_count > 0;
+    let passed = malware_ok && (!deny || !has_severe_vulns) && secrets_findings.iter().all(|f| {
+        f["severity"].as_str() != Some("Critical")
+    });
+
+    let output = serde_json::json!({
+        "passed": passed,
+        "phases": {
+            "malware": {
+                "clean": malware_ok,
+            },
+            "osv": {
+                "total_packages": osv_report.total_packages,
+                "packages_with_vulns": osv_report.packages_with_vulns,
+                "total_vulns": osv_report.total_vulns,
+                "critical": osv_report.critical_count,
+                "high": osv_report.high_count,
+                "findings": osv_report.findings.iter().map(|f| serde_json::json!({
+                    "package": f.pkg_name,
+                    "version": f.pkg_version,
+                    "vulns": f.vulns.iter().map(|v| serde_json::json!({
+                        "id": v.id,
+                        "severity": v.severity.as_str(),
+                        "summary": v.summary,
+                        "fixed_versions": v.fixed_versions,
+                        "url": v.details_url,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            },
+            "secrets": {
+                "scanned": scan_secrets,
+                "findings": secrets_findings,
+            },
+        }
+    });
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+
+    if !passed {
+        anyhow::bail!("Audit failed.");
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -526,7 +1211,7 @@ async fn main() -> anyhow::Result<()> {
                 allow_net.as_deref(),
                 *allow_env,
                 *allow_child_process,
-                true, // interactive: habilita prompts de consola para mejorar la DX
+                std::io::stderr().is_terminal(), // solo prompt si stderr es visible (no capturado)
             );
 
             let engine = vvva_js::JsEngine::new(&permissions)?;
@@ -627,23 +1312,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Audit { deny, update_cache } => {
-            // ── Phase 1: static malware analysis ─────────────────────────────
-            println!();
-            println!("=== Phase 1: Static Malware Analysis ===");
-            let malware_clean = vvva_pm::audit_packages()?;
-
-            // ── Phase 2: OSV known-vulnerability scan ─────────────────────────
-            println!();
-            println!("=== Phase 2: Known Vulnerabilities (OSV) ===");
-            let report = vvva_pm::run_audit(*update_cache).await?;
-            let vuln_ok = vvva_pm::print_audit_report(&report, *deny);
-
-            if !malware_clean {
-                anyhow::bail!("Audit failed: malware patterns detected.");
-            }
-            if !vuln_ok {
-                anyhow::bail!("Audit failed: CRITICAL or HIGH vulnerabilities detected.");
+        Commands::Audit { deny, update_cache, secrets, json } => {
+            if *json {
+                run_audit_json(*deny, *update_cache, *secrets).await?;
+            } else {
+                run_audit_human(*deny, *update_cache, *secrets).await?;
             }
         }
         Commands::Doctor => {
@@ -652,8 +1325,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Sandbox => {
             run_sandbox_shell().await?;
         }
-        Commands::Dev => {
-            run_dev_server().await?;
+        Commands::Dev { port, host, open, public_dir } => {
+            run_dev_server(*port, host.clone(), *open, public_dir.clone()).await?;
         }
     }
 

@@ -598,6 +598,59 @@ pub fn audit_packages() -> anyhow::Result<bool> {
     }
 }
 
+/// Like `audit_packages()` but produces no output — for use in JSON mode.
+pub fn audit_packages_silent() -> anyhow::Result<bool> {
+    let node_modules = PathBuf::from("node_modules");
+    if !node_modules.exists() {
+        return Ok(true); // no packages → nothing malicious
+    }
+
+    let lockfile_path = PathBuf::from("3va-lock.json");
+    let installed: Vec<(String, String)> = if lockfile_path.exists() {
+        let lock = Lockfile::load(&lockfile_path)?;
+        lock.dependencies
+            .iter()
+            .map(|(name, dep)| (name.clone(), dep.version.clone()))
+            .collect()
+    } else {
+        let mut pkgs = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&node_modules) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    if name.starts_with('@') {
+                        if let Ok(sub) = std::fs::read_dir(&path) {
+                            for sub_entry in sub.flatten() {
+                                pkgs.push((format!("{}/{}", name, sub_entry.file_name().to_string_lossy()), "unknown".to_string()));
+                            }
+                        }
+                    } else {
+                        pkgs.push((name, "unknown".to_string()));
+                    }
+                }
+            }
+        }
+        pkgs
+    };
+
+    let scanner = MalwareScanner::new();
+    let mut any_critical = false;
+    for (pkg_name, _version) in &installed {
+        let pkg_dir = node_modules.join(pkg_name);
+        if !pkg_dir.exists() { continue; }
+        let results = scanner.scan_directory(&pkg_dir);
+        for result in &results {
+            for threat in &result.threats {
+                if matches!(threat.severity, ThreatLevel::Critical) {
+                    any_critical = true;
+                }
+            }
+        }
+    }
+    Ok(!any_critical)
+}
+
 pub async fn update_packages(
     packages: &[String],
     allow_net: Option<&[String]>,

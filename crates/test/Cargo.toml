@@ -19,3 +19,6 @@ oxc_parser = "0.132"
 oxc_span = "0.132"
 oxc_ast = "0.132"
 oxc_ast_visit = "0.132"
+
+[dev-dependencies]
+tempfile = "3"

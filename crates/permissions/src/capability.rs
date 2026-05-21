@@ -92,6 +92,11 @@ impl PermissionState {
         self.deny_all_process = true;
     }
 
+    /// Retorna una copia de todas las capabilities concedidas actualmente.
+    pub fn list_granted(&self) -> Vec<Capability> {
+        self.granted.read().unwrap().clone()
+    }
+
     /// Verifica si una operación está permitida.
     ///
     /// Para paths de archivo y hosts de red, el matching es por prefijo/subdominio,

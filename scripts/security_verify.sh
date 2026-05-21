@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 export TERM=xterm-256color
 RED='\033[0;31m'
@@ -60,9 +60,11 @@ total_warnings=0
 log_info "=== NIVEL 1: CARGO HARDENING ==="
 
 step "1. Cargo Format Check"
-if cargo fmt --check 2>/dev/null; then
+FMT_OUTPUT=$(cargo fmt --check 2>&1) || true
+if [ -z "$FMT_OUTPUT" ]; then
     log_success "Format OK"
 else
+    echo "$FMT_OUTPUT" | head -40
     log_error "Format falló. Ejecutar: cargo fmt"
     total_failures=$((total_failures + 1))
 fi
@@ -121,7 +123,7 @@ fi
 
 step "4. Cargo Audit"
 if ! check_tool cargo-audit; then
-    install_tool "cargo-audit" "cargo install cargo-audit"
+    install_tool "cargo-audit" "cargo install cargo-audit --locked"
 fi
 if cargo audit --deny warnings 2>/dev/null; then
     log_success "Audit OK"
@@ -132,7 +134,7 @@ fi
 
 step "5. Cargo Deny"
 if ! check_tool cargo-deny; then
-    install_tool "cargo-deny" "cargo install cargo-deny"
+    install_tool "cargo-deny" "cargo install cargo-deny --locked"
 fi
 if cargo deny check 2>/dev/null; then
     log_success "Deny OK"
@@ -143,7 +145,7 @@ fi
 
 step "6. Cargo Geiger (Unsafe Detection)"
 if ! check_tool cargo-geiger; then
-    install_tool "cargo-geiger" "cargo install cargo-geiger"
+    install_tool "cargo-geiger" "cargo install cargo-geiger --locked"
 fi
 UNSAFE_COUNT=$(cargo geiger 2>/dev/null | grep -c "unsafe" 2>/dev/null || true)
 if [ "$UNSAFE_COUNT" -eq "0" ]; then
@@ -162,7 +164,7 @@ log_info "=== NIVEL 2: SEMGREP ==="
 
 step "7. Semgrep - Reglas Custom"
 if ! check_tool semgrep; then
-    install_tool "semgrep" "pip install semgrep" || npm install -g semgrep
+    PIP_BREAK_SYSTEM_PACKAGES=1 pip install semgrep 2>/dev/null || npm install -g semgrep 2>/dev/null || true
 fi
 
 SEMGREP_RULES=".semgrep/rules"
@@ -220,14 +222,14 @@ log_info "=== NIVEL 4: SANITIZERS ==="
 setup_nightly() {
     if ! rustup toolchain list 2>/dev/null | grep -q nightly; then
         log_info "Instalando Rust nightly (requerido para sanitizers)..."
-        rustup toolchain install nightly --component rust-src llvm-tools-preview 2>/dev/null || {
+        RUSTUP_NO_PROMPT=1 rustup toolchain install nightly --component rust-src llvm-tools-preview -y 2>/dev/null || {
             log_warning "No se pudo instalar nightly automáticamente"
             return 1
         }
     fi
     # Asegurar rust-src instalado en nightly
     if ! rustup component list --toolchain nightly 2>/dev/null | grep -q "^rust-src (installed)"; then
-        rustup component add rust-src --toolchain nightly 2>/dev/null
+        rustup component add rust-src --toolchain nightly -y 2>/dev/null
     fi
     return 0
 }
