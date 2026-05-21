@@ -385,13 +385,21 @@ log_info "═══════════════════════�
 log_info "FASE 10: SANDBOX SECURITY"
 log_info "══════════════════════════════════════════════════════════"
 
-log_step "10.1 Sandbox blocks by default"
-echo 'require("fs")' > fs_test.js
-OUTPUT=$("$BINARY" run fs_test.js 2>&1 | head -10)
-if echo "$OUTPUT" | grep -qiE "(denied|blocked|error|exception)"; then
-    log_pass "sandbox: blocks require('fs')"
+log_step "10.1 Sandbox blocks fs operations by default"
+cat > fs_test.js << 'EOF'
+try {
+    const fs = require("fs");
+    fs.readFile("/etc/passwd");
+    console.log("fs-allowed");
+} catch(e) {
+    console.log("fs-blocked");
+}
+EOF
+OUTPUT=$("$BINARY" run fs_test.js 2>&1)
+if echo "$OUTPUT" | grep -q "fs-blocked"; then
+    log_pass "sandbox: fs operations blocked without --allow-read"
 else
-    log_warn "sandbox: may allow require in some cases"
+    log_warn "sandbox: fs operations not blocked (gap: __fsReadFileSync sin permiso)"
 fi
 
 log_step "10.2 Help shows permission flags"

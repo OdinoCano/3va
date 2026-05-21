@@ -115,9 +115,14 @@ pub fn detect_symlink_loop_in_path(path: &Path) -> bool {
 #[cfg(test)]
 mod capability_bypass {
     use super::*;
+    use std::sync::{LazyLock, Mutex};
+
+    // Serializa todos los tests de este módulo: comparten ENABLED_CAPABILITIES (global).
+    static CAPS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn test_read_without_capability() {
+        let _g = CAPS_LOCK.lock().unwrap();
         reset_capabilities();
         let result = check_read("/etc/passwd");
         assert!(result.is_err());
@@ -125,6 +130,7 @@ mod capability_bypass {
 
     #[test]
     fn test_read_with_capability() {
+        let _g = CAPS_LOCK.lock().unwrap();
         reset_capabilities();
         enable_capability("allow-read");
         let result = check_read("/tmp/test.txt");
@@ -133,6 +139,7 @@ mod capability_bypass {
 
     #[test]
     fn test_net_without_capability() {
+        let _g = CAPS_LOCK.lock().unwrap();
         reset_capabilities();
         let result = check_net("https://evil.com");
         assert!(result.is_err());
@@ -140,6 +147,7 @@ mod capability_bypass {
 
     #[test]
     fn test_net_with_capability() {
+        let _g = CAPS_LOCK.lock().unwrap();
         reset_capabilities();
         enable_capability("allow-net");
         let result = check_net("https://example.com");
@@ -148,6 +156,7 @@ mod capability_bypass {
 
     #[test]
     fn test_env_without_capability() {
+        let _g = CAPS_LOCK.lock().unwrap();
         reset_capabilities();
         let result = check_env("SECRET_KEY");
         assert!(result.is_err());
@@ -155,21 +164,17 @@ mod capability_bypass {
 
     #[test]
     fn test_env_with_capability() {
-        // Set env var before touching capabilities to avoid races with parallel tests.
+        let _g = CAPS_LOCK.lock().unwrap();
+        reset_capabilities();
+        enable_capability("allow-env");
         std::env::set_var("TEST_VAR", "test_value");
-        // Use a local capability check to avoid mutating the global shared state.
-        let result = if has_capability("allow-env") || std::env::var("TEST_VAR").is_ok() {
-            std::env::var("TEST_VAR").map_err(|e| e.to_string())
-        } else {
-            Err("Capability allow-env not granted".to_string())
-        };
-        // Either the env var is readable (capability granted) or we correctly deny it.
-        // The invariant: without allow-env, secrets must not leak.
-        let _ = result; // result depends on test execution order — just verify no panic
+        let result = check_env("TEST_VAR");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn test_capability_scope_escape() {
+        let _g = CAPS_LOCK.lock().unwrap();
         reset_capabilities();
         enable_capability("allow-read=/home/user");
         let result = check_read("/etc/passwd");
@@ -178,6 +183,7 @@ mod capability_bypass {
 
     #[test]
     fn test_deny_overrides_allow() {
+        let _g = CAPS_LOCK.lock().unwrap();
         reset_capabilities();
         enable_capability("allow-read");
         enable_capability("deny-read=/etc/passwd");

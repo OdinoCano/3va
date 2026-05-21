@@ -137,7 +137,10 @@ fn virtual_network_wildcard_subdomain_not_matches_parent() {
     vnet.allow_host("*.registry.npmjs.org");
 
     assert!(vnet.is_allowed("api.registry.npmjs.org"));
-    assert!(!vnet.is_allowed("registry.npmjs.org"), "el dominio padre no debe estar cubierto por wildcard");
+    assert!(
+        !vnet.is_allowed("registry.npmjs.org"),
+        "el dominio padre no debe estar cubierto por wildcard"
+    );
 }
 
 #[test]

@@ -139,8 +139,15 @@ impl PermissionState {
     }
 
     fn prompt_user(&self, required: &Capability) -> bool {
-        // En un entorno de producción real, esto debería verificar si la salida es un TTY
-        // y si estamos en modo accesible, pero usaremos print directo.
+        use std::io::IsTerminal;
+
+        // En scripts no interactivos (pipes, CI, integration tests) stdin no es un TTY.
+        // Bloquear esperando input causaría un hang indefinido — denegar silenciosamente.
+        if !std::io::stdin().is_terminal() {
+            self.deny(required.clone());
+            return false;
+        }
+
         let msg = match required {
             Capability::FileRead(p) => format!("leer el archivo '{}'", p.display()),
             Capability::FileWrite(p) => format!("escribir el archivo '{}'", p.display()),

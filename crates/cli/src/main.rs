@@ -253,6 +253,44 @@ async fn run_test_watch_mode(paths: Vec<PathBuf>, _coverage: bool) -> anyhow::Re
     }
 }
 
+/// Construye un PermissionState a partir de los flags del subcomando `run`.
+/// Extraído para permitir tests unitarios sin levantar el CLI completo.
+fn build_permissions(
+    allow_read: Option<&[PathBuf]>,
+    allow_write: Option<&[PathBuf]>,
+    allow_net: Option<&[String]>,
+    allow_env: bool,
+    allow_child_process: bool,
+    interactive: bool,
+) -> vvva_permissions::PermissionState {
+    let mut permissions = vvva_permissions::PermissionState::new();
+    permissions.set_interactive(interactive);
+
+    if let Some(reads) = allow_read {
+        for path in reads {
+            permissions.grant(vvva_permissions::Capability::FileRead(path.clone()));
+        }
+    }
+    if let Some(writes) = allow_write {
+        for path in writes {
+            permissions.grant(vvva_permissions::Capability::FileWrite(path.clone()));
+        }
+    }
+    if let Some(nets) = allow_net {
+        for host in nets {
+            permissions.grant(vvva_permissions::Capability::Network(host.clone()));
+        }
+    }
+    if allow_env {
+        permissions.grant(vvva_permissions::Capability::EnvAccess);
+    }
+    if allow_child_process {
+        permissions.grant(vvva_permissions::Capability::SpawnProcess);
+    }
+
+    permissions
+}
+
 async fn handle_connection(stream: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -482,32 +520,14 @@ async fn main() -> anyhow::Result<()> {
             allow_child_process,
         } => {
             info!("Running {:?} (Sandboxed)", file);
-            let mut permissions = vvva_permissions::PermissionState::new();
-
-            // Habilitar prompts interactivos por defecto para mejorar la DX
-            permissions.set_interactive(true);
-
-            if let Some(reads) = allow_read {
-                for path in reads {
-                    permissions.grant(vvva_permissions::Capability::FileRead(path.clone()));
-                }
-            }
-            if let Some(writes) = allow_write {
-                for path in writes {
-                    permissions.grant(vvva_permissions::Capability::FileWrite(path.clone()));
-                }
-            }
-            if let Some(nets) = allow_net {
-                for host in nets {
-                    permissions.grant(vvva_permissions::Capability::Network(host.clone()));
-                }
-            }
-            if *allow_env {
-                permissions.grant(vvva_permissions::Capability::EnvAccess);
-            }
-            if *allow_child_process {
-                permissions.grant(vvva_permissions::Capability::SpawnProcess);
-            }
+            let permissions = build_permissions(
+                allow_read.as_deref(),
+                allow_write.as_deref(),
+                allow_net.as_deref(),
+                *allow_env,
+                *allow_child_process,
+                true, // interactive: habilita prompts de consola para mejorar la DX
+            );
 
             let engine = vvva_js::JsEngine::new(&permissions)?;
             let _runtime = vvva_core::Runtime::new(permissions);
@@ -638,4 +658,105 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vvva_permissions::Capability;
+
+    // ── Sin flags: todo denegado ──────────────────────────────────────────────
+    // Refleja docs/06-permissions/01-capability-model.md §1.2 (deny-by-default)
+
+    #[test]
+    fn no_flags_produces_deny_by_default() {
+        let state = build_permissions(None, None, None, false, false, false);
+        assert!(!state.check(&Capability::FileRead(PathBuf::from("/etc/passwd"))));
+        assert!(!state.check(&Capability::FileWrite(PathBuf::from("/tmp/x"))));
+        assert!(!state.check(&Capability::Network("registry.npmjs.org".to_string())));
+        assert!(!state.check(&Capability::EnvAccess));
+        assert!(!state.check(&Capability::SpawnProcess));
+    }
+
+    // ── --allow-read=<path> concede FileRead con prefix matching ─────────────
+
+    #[test]
+    fn allow_read_flag_grants_file_read_for_path() {
+        let reads = vec![PathBuf::from("/app")];
+        let state = build_permissions(Some(&reads), None, None, false, false, false);
+
+        assert!(state.check(&Capability::FileRead(PathBuf::from("/app/config.json"))));
+        assert!(state.check(&Capability::FileRead(PathBuf::from("/app/subdir/main.ts"))));
+        assert!(!state.check(&Capability::FileRead(PathBuf::from("/etc/passwd"))));
+    }
+
+    #[test]
+    fn allow_read_multiple_paths_all_granted() {
+        let reads = vec![PathBuf::from("/app"), PathBuf::from("/tmp")];
+        let state = build_permissions(Some(&reads), None, None, false, false, false);
+
+        assert!(state.check(&Capability::FileRead(PathBuf::from("/app/main.js"))));
+        assert!(state.check(&Capability::FileRead(PathBuf::from("/tmp/cache.json"))));
+        assert!(!state.check(&Capability::FileRead(PathBuf::from("/home/user/.env"))));
+    }
+
+    // ── --allow-net=<host> concede Network con el host exacto ────────────────
+    // Refleja cómo scripts/integration_tests.sh usa --allow-net=registry.npmjs.org
+
+    #[test]
+    fn allow_net_flag_grants_network_for_host() {
+        let nets = vec!["registry.npmjs.org".to_string()];
+        let state = build_permissions(None, None, Some(&nets), false, false, false);
+
+        assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
+        assert!(!state.check(&Capability::Network("evil.com".to_string())));
+        assert!(!state.check(&Capability::Network("registry.yarnpkg.com".to_string())));
+    }
+
+    #[test]
+    fn allow_net_multiple_registries() {
+        // Espeja los 3 registros de integration_tests.sh fases 1-3
+        let nets = vec![
+            "registry.npmjs.org".to_string(),
+            "registry.yarnpkg.com".to_string(),
+            "jsr.io".to_string(),
+        ];
+        let state = build_permissions(None, None, Some(&nets), false, false, false);
+
+        assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
+        assert!(state.check(&Capability::Network("registry.yarnpkg.com".to_string())));
+        assert!(state.check(&Capability::Network("jsr.io".to_string())));
+        assert!(!state.check(&Capability::Network("evil.com".to_string())));
+    }
+
+    // ── --allow-env / --allow-child-process ───────────────────────────────────
+
+    #[test]
+    fn allow_env_flag_grants_env_access() {
+        let state = build_permissions(None, None, None, true, false, false);
+        assert!(state.check(&Capability::EnvAccess));
+        assert!(!state.check(&Capability::FileRead(PathBuf::from("/etc/passwd"))));
+    }
+
+    #[test]
+    fn allow_child_process_flag_grants_spawn_process() {
+        let state = build_permissions(None, None, None, false, true, false);
+        assert!(state.check(&Capability::SpawnProcess));
+        assert!(!state.check(&Capability::EnvAccess));
+    }
+
+    // ── Flags combinados no se interfieren ───────────────────────────────────
+
+    #[test]
+    fn combined_flags_each_grant_only_their_capability() {
+        let reads = vec![PathBuf::from("/app")];
+        let nets = vec!["api.example.com".to_string()];
+        let state = build_permissions(Some(&reads), None, Some(&nets), true, false, false);
+
+        assert!(state.check(&Capability::FileRead(PathBuf::from("/app/main.js"))));
+        assert!(state.check(&Capability::Network("api.example.com".to_string())));
+        assert!(state.check(&Capability::EnvAccess));
+        assert!(!state.check(&Capability::SpawnProcess));
+        assert!(!state.check(&Capability::FileWrite(PathBuf::from("/app/out.js"))));
+    }
 }
