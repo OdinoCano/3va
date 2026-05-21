@@ -1,6 +1,6 @@
 # Changelog
 
-Todos los cambios notables en 3va se documentan aquí.
+Todos los cambios notables en **3va** se documentan aquí.
 Formato: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versioning: [SemVer](https://semver.org/).
 
 ---

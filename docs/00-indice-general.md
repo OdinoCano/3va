@@ -88,7 +88,7 @@
 
 ## Changelog
 
-- [CHANGELOG.md](../CHANGELOG.md) — Historial de cambios por versión (Keep a Changelog 1.0.0)
+- [CHANGELOG.md](CHANGELOG.md) — Historial de cambios por versión (Keep a Changelog 1.0.0)
 
 ---
 
