@@ -11,7 +11,7 @@ NC='\033[0m'
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-TOTAL_STEPS=18
+TOTAL_STEPS=19
 CURRENT_STEP=0
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -64,22 +64,45 @@ if cargo fmt --check 2>/dev/null; then
     log_success "Format OK"
 else
     log_error "Format falló. Ejecutar: cargo fmt"
-    ((total_failures++))
+    total_failures=$((total_failures + 1))
 fi
 
-step "2. Cargo Clippy"
-CLIPPY_OUTPUT=$(cargo clippy --all-targets --all-features 2>&1) || true
+step "2. Cargo Clippy — Lints generales (-D warnings)"
+CLIPPY_OUTPUT=$(cargo clippy --all-targets --all-features -- -D warnings 2>&1) || true
 if echo "$CLIPPY_OUTPUT" | grep -q "^error:"; then
-    log_error "Clippy errores de compilación"
-    echo "$CLIPPY_OUTPUT" | grep "^error:" | head -5
-    ((total_failures++))
+    log_error "Clippy: warnings tratados como errores"
+    echo "$CLIPPY_OUTPUT" | grep "^error\[" | head -10
+    total_failures=$((total_failures + 1))
 else
-    WARN_COUNT=$(echo "$CLIPPY_OUTPUT" | grep -c "warning:" || echo "0")
-    if [ "$WARN_COUNT" -gt "0" ]; then
-        log_warning "Clippy OK (con $WARN_COUNT warnings - ejecutar: cargo clippy --fix)"
-    else
-        log_success "Clippy OK"
-    fi
+    log_success "Clippy general OK"
+fi
+
+step "2b. Cargo Clippy — Lints de seguridad"
+SECURITY_LINTS=(
+    "-D clippy::unwrap_used"
+    "-D clippy::expect_used"
+    "-D clippy::panic"
+    "-D clippy::indexing_slicing"
+    "-D clippy::integer_arithmetic"
+    "-D clippy::todo"
+    "-D clippy::unimplemented"
+    "-W clippy::unreachable"
+    "-W clippy::wildcard_enum_match_arm"
+)
+LINT_FLAGS="${SECURITY_LINTS[*]}"
+SEC_CLIPPY=$(cargo clippy --all-targets --all-features -- $LINT_FLAGS 2>&1) || true
+SEC_ERR=$(echo "$SEC_CLIPPY" | grep -c "^error\[" 2>/dev/null || true)
+SEC_WARN=$(echo "$SEC_CLIPPY" | grep -c "^warning\[" 2>/dev/null || true)
+if [ "$SEC_ERR" -gt "0" ]; then
+    log_error "Clippy seguridad: $SEC_ERR lints críticos (-D) violados"
+    echo "$SEC_CLIPPY" | grep "^error\[" | head -10
+    total_failures=$((total_failures + 1))
+elif [ "$SEC_WARN" -gt "0" ]; then
+    log_warning "Clippy seguridad: $SEC_WARN lints de advertencia (-W) — revisar"
+    echo "$SEC_CLIPPY" | grep "^warning\[" | head -5
+    total_warnings=$((total_warnings + 1))
+else
+    log_success "Clippy seguridad OK"
 fi
 
 step "3. Cargo Test"
@@ -90,7 +113,7 @@ if echo "$TEST_OUTPUT" | grep -q "test result:.*failed"; then
         log_warning "Tests OK (${FAILED_COUNT:-0} fallidos por entorno no aislado)"
     else
         log_error "Tests fallaron: ${FAILED_COUNT} tests fallidos"
-        ((total_failures++))
+        total_failures=$((total_failures + 1))
     fi
 else
     log_success "Tests OK"
@@ -104,7 +127,7 @@ if cargo audit --deny-warnings 2>/dev/null; then
     log_success "Audit OK"
 else
     log_warning "Audit encontró vulnerabilidades"
-    ((total_warnings++))
+    total_warnings=$((total_warnings + 1))
 fi
 
 step "5. Cargo Deny"
@@ -115,20 +138,20 @@ if cargo deny check 2>/dev/null; then
     log_success "Deny OK"
 else
     log_error "Deny encontró problemas de licencia/seguridad"
-    ((total_failures++))
+    total_failures=$((total_failures + 1))
 fi
 
 step "6. Cargo Geiger (Unsafe Detection)"
 if ! check_tool cargo-geiger; then
     install_tool "cargo-geiger" "cargo install cargo-geiger"
 fi
-UNSAFE_COUNT=$(cargo geiger 2>/dev/null | grep -c "unsafe" || echo "0")
+UNSAFE_COUNT=$(cargo geiger 2>/dev/null | grep -c "unsafe" 2>/dev/null || true)
 if [ "$UNSAFE_COUNT" -eq "0" ]; then
     log_success "Sin código unsafe (geiger)"
 else
     log_warning "Detectados $UNSAFE_COUNT usage de unsafe"
     cargo geiger 2>/dev/null | grep -A5 "unsafe" || true
-    ((total_warnings++))
+    total_warnings=$((total_warnings + 1))
 fi
 
 #######################################
@@ -148,14 +171,14 @@ if [ -d "$SEMGREP_RULES" ]; then
         log_success "Semgrep rules OK"
     else
         log_error "Semgrep encontró problemas críticos"
-        ((total_failures++))
+        total_failures=$((total_failures + 1))
     fi
 else
     log_warning "No hay reglas custom de semgrep, usando auto"
     if semgrep --config auto --severity ERROR . 2>/dev/null; then
         log_success "Semgrep auto OK"
     else
-        ((total_failures++))
+        total_failures=$((total_failures + 1))
     fi
 fi
 
@@ -270,7 +293,7 @@ if [ -f "Cargo.lock" ]; then
     log_success "Cargo.lock presente"
 else
     log_error "Cargo.lock no existe - AGREGAR AL REPO"
-    ((total_failures++))
+    total_failures=$((total_failures + 1))
 fi
 
 step "16. Integridad de dependencias"

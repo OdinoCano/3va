@@ -23,19 +23,23 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args.0.into_iter().next().ok_or_else(|| {
-                    js_err(&ctx, "__fsReadFileSync() requires a path".into())
-                })?;
+                let path_str = args
+                    .0
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| js_err(&ctx, "__fsReadFileSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.borrow().check(&Capability::FileRead(path.clone())) {
                     return Err(js_err(
                         &ctx,
-                        format!("Permission denied: --allow-read={} is required", path.display()),
+                        format!(
+                            "Permission denied: --allow-read={} is required",
+                            path.display()
+                        ),
                     ));
                 }
-                std::fs::read_to_string(&path).map_err(|e| {
-                    js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str))
-                })
+                std::fs::read_to_string(&path)
+                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
             },
         )?,
     )?;
@@ -48,23 +52,25 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
                 let mut it = args.0.into_iter();
-                let path_str = it.next().ok_or_else(|| {
-                    js_err(&ctx, "__fsWriteFileSync() requires a path".into())
-                })?;
+                let path_str = it
+                    .next()
+                    .ok_or_else(|| js_err(&ctx, "__fsWriteFileSync() requires a path".into()))?;
                 let content = it.next().unwrap_or_default();
                 let path = PathBuf::from(&path_str);
                 if !perms.borrow().check(&Capability::FileWrite(path.clone())) {
                     return Err(js_err(
                         &ctx,
-                        format!("Permission denied: --allow-write={} is required", path.display()),
+                        format!(
+                            "Permission denied: --allow-write={} is required",
+                            path.display()
+                        ),
                     ));
                 }
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
-                std::fs::write(&path, content).map_err(|e| {
-                    js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str))
-                })
+                std::fs::write(&path, content)
+                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
             },
         )?,
     )?;
@@ -88,19 +94,23 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args.0.into_iter().next().ok_or_else(|| {
-                    js_err(&ctx, "__fsReaddirSync() requires a path".into())
-                })?;
+                let path_str = args
+                    .0
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| js_err(&ctx, "__fsReaddirSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.borrow().check(&Capability::FileRead(path.clone())) {
                     return Err(js_err(
                         &ctx,
-                        format!("Permission denied: --allow-read={} is required", path.display()),
+                        format!(
+                            "Permission denied: --allow-read={} is required",
+                            path.display()
+                        ),
                     ));
                 }
-                let entries = std::fs::read_dir(&path).map_err(|e| {
-                    js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str))
-                })?;
+                let entries = std::fs::read_dir(&path)
+                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
                 let names: Vec<String> = entries
                     .flatten()
                     .filter_map(|e| e.file_name().into_string().ok())
@@ -117,19 +127,23 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let path_str = args.0.into_iter().next().ok_or_else(|| {
-                    js_err(&ctx, "__fsMkdirSync() requires a path".into())
-                })?;
+                let path_str = args
+                    .0
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| js_err(&ctx, "__fsMkdirSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.borrow().check(&Capability::FileWrite(path.clone())) {
                     return Err(js_err(
                         &ctx,
-                        format!("Permission denied: --allow-write={} is required", path.display()),
+                        format!(
+                            "Permission denied: --allow-write={} is required",
+                            path.display()
+                        ),
                     ));
                 }
-                std::fs::create_dir_all(&path).map_err(|e| {
-                    js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str))
-                })
+                std::fs::create_dir_all(&path)
+                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
             },
         )?,
     )?;
@@ -141,14 +155,19 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let path_str = args.0.into_iter().next().ok_or_else(|| {
-                    js_err(&ctx, "__fsRmSync() requires a path".into())
-                })?;
+                let path_str = args
+                    .0
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| js_err(&ctx, "__fsRmSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.borrow().check(&Capability::FileWrite(path.clone())) {
                     return Err(js_err(
                         &ctx,
-                        format!("Permission denied: --allow-write={} is required", path.display()),
+                        format!(
+                            "Permission denied: --allow-write={} is required",
+                            path.display()
+                        ),
                     ));
                 }
                 let result = if path.is_dir() {

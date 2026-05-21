@@ -1,6 +1,6 @@
 use rquickjs::{Ctx, Function, Result, function::Rest};
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use vvva_permissions::{Capability, PermissionState};
 
@@ -580,9 +580,9 @@ pub fn resolve_path(path: &str) -> PathBuf {
 }
 
 /// Try path as-is, then with common extensions appended, then index files.
-fn resolve_file_path(base: &PathBuf) -> PathBuf {
+fn resolve_file_path(base: &Path) -> PathBuf {
     if base.is_file() {
-        return base.clone();
+        return base.to_path_buf();
     }
     // Append extensions as strings to avoid PathBuf::with_extension clobbering
     // filenames that already contain dots (e.g. "Reflect.getPrototypeOf").
@@ -599,18 +599,18 @@ fn resolve_file_path(base: &PathBuf) -> PathBuf {
             return p;
         }
     }
-    base.clone()
+    base.to_path_buf()
 }
 
 /// Walk up from `start` toward `root` looking for node_modules/<name>.
 /// If `subpath` is Some, resolve that file within the package dir instead of using the entry point.
 fn resolve_node_module_from(
-    start: &PathBuf,
-    root: &PathBuf,
+    start: &Path,
+    root: &Path,
     name: &str,
     subpath: Option<&str>,
 ) -> PathBuf {
-    let mut dir = start.clone();
+    let mut dir = start.to_path_buf();
     loop {
         let pkg_dir = dir.join("node_modules").join(name);
         if pkg_dir.is_dir() {
@@ -625,7 +625,7 @@ fn resolve_node_module_from(
     resolve_in_pkg_dir(&pkg_dir, subpath)
 }
 
-fn resolve_in_pkg_dir(pkg_dir: &PathBuf, subpath: Option<&str>) -> PathBuf {
+fn resolve_in_pkg_dir(pkg_dir: &Path, subpath: Option<&str>) -> PathBuf {
     if let Some(sub) = subpath {
         let p = pkg_dir.join(sub);
         let resolved = resolve_file_path(&p);
@@ -638,7 +638,7 @@ fn resolve_in_pkg_dir(pkg_dir: &PathBuf, subpath: Option<&str>) -> PathBuf {
         if resolved.is_file() {
             return resolved;
         }
-        pkg_dir.clone()
+        pkg_dir.to_path_buf()
     }
 }
 
@@ -663,7 +663,7 @@ fn exports_cjs_path(val: &serde_json::Value) -> Option<&str> {
 }
 
 /// Given an already-located package directory, find its entry point.
-fn resolve_node_module_entry(pkg_dir: &PathBuf) -> PathBuf {
+fn resolve_node_module_entry(pkg_dir: &Path) -> PathBuf {
     let pkg_json_path = pkg_dir.join("package.json");
     if let Ok(content) = std::fs::read_to_string(&pkg_json_path)
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
@@ -705,7 +705,8 @@ fn resolve_node_module_entry(pkg_dir: &PathBuf) -> PathBuf {
 }
 
 /// Resolve a bare module specifier from node_modules, reading package.json for entry point.
-fn resolve_node_module(cwd: &PathBuf, name: &str) -> PathBuf {
+#[allow(dead_code)]
+fn resolve_node_module(cwd: &Path, name: &str) -> PathBuf {
     let (pkg_name, subpath) = split_bare_specifier(name);
     let pkg_dir = cwd.join("node_modules").join(pkg_name);
     if pkg_dir.is_dir() {

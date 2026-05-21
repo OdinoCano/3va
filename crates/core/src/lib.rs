@@ -35,10 +35,10 @@ impl Runtime {
             for timer in expired {
                 (timer.callback)();
                 // Re-add repeating timers
-                if timer.repeating {
-                    if let Some(interval) = timer.interval {
-                        self.timer_wheel.schedule_with_callback(interval, || {});
-                    }
+                if timer.repeating
+                    && let Some(interval) = timer.interval
+                {
+                    self.timer_wheel.schedule_with_callback(interval, || {});
                 }
             }
 
@@ -48,10 +48,10 @@ impl Runtime {
             }
 
             // Next timer hasn't fired yet — sleep until it's due
-            if let Some(wait) = self.next_timer_duration() {
-                if wait > std::time::Duration::ZERO {
-                    std::thread::sleep(wait.min(std::time::Duration::from_millis(50)));
-                }
+            if let Some(wait) = self.next_timer_duration()
+                && wait > std::time::Duration::ZERO
+            {
+                std::thread::sleep(wait.min(std::time::Duration::from_millis(50)));
             }
         }
 

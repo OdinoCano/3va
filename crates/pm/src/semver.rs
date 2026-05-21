@@ -102,38 +102,38 @@ impl SemverRange {
             return Some(SemverRange::Any);
         }
 
-        if range.starts_with('^') {
-            let version = Semver::parse(&range[1..])?;
+        if let Some(rest) = range.strip_prefix('^') {
+            let version = Semver::parse(rest)?;
             return Some(SemverRange::Caret(version));
         }
 
-        if range.starts_with('~') {
-            let version = Semver::parse(&range[1..])?;
+        if let Some(rest) = range.strip_prefix('~') {
+            let version = Semver::parse(rest)?;
             return Some(SemverRange::Tilde(version));
         }
 
-        if range.starts_with(">=") {
-            let version = Semver::parse(&range[2..])?;
+        if let Some(rest) = range.strip_prefix(">=") {
+            let version = Semver::parse(rest)?;
             return Some(SemverRange::Gte(version));
         }
 
-        if range.starts_with('>') {
-            let version = Semver::parse(&range[1..])?;
+        if let Some(rest) = range.strip_prefix('>') {
+            let version = Semver::parse(rest)?;
             return Some(SemverRange::Gt(version));
         }
 
-        if range.starts_with("<=") {
-            let version = Semver::parse(&range[2..])?;
+        if let Some(rest) = range.strip_prefix("<=") {
+            let version = Semver::parse(rest)?;
             return Some(SemverRange::Lte(version));
         }
 
-        if range.starts_with('<') {
-            let version = Semver::parse(&range[1..])?;
+        if let Some(rest) = range.strip_prefix('<') {
+            let version = Semver::parse(rest)?;
             return Some(SemverRange::Lt(version));
         }
 
-        if range.starts_with('=') {
-            let version = Semver::parse(&range[1..])?;
+        if let Some(rest) = range.strip_prefix('=') {
+            let version = Semver::parse(rest)?;
             return Some(SemverRange::Exact(version));
         }
 

@@ -144,7 +144,7 @@ thread_local! {
     pub static TIMER_MANAGER: Arc<TimerManager> = TimerManager::new();
 }
 
-/// Helper to extract a u64 from a JS Value (Int or Float).
+#[allow(dead_code)]
 fn value_to_u64(v: &Value) -> u64 {
     match v.type_of() {
         rquickjs::Type::Int => v.as_int().unwrap_or(0) as u64,

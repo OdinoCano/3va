@@ -19,9 +19,9 @@ pub fn resolve_esm(base: &str, specifier: &str) -> PathBuf {
     }
 }
 
-fn resolve_relative(base: &PathBuf) -> PathBuf {
+fn resolve_relative(base: &Path) -> PathBuf {
     if base.is_file() {
-        return base.clone();
+        return base.to_path_buf();
     }
     for ext in &["js", "mjs", "ts", "tsx", "cjs"] {
         let p = base.with_extension(ext);
@@ -35,10 +35,10 @@ fn resolve_relative(base: &PathBuf) -> PathBuf {
             return p;
         }
     }
-    base.clone()
+    base.to_path_buf()
 }
 
-fn resolve_node_module_esm(cwd: &PathBuf, name: &str) -> PathBuf {
+fn resolve_node_module_esm(cwd: &Path, name: &str) -> PathBuf {
     let pkg_dir = cwd.join("node_modules").join(name);
     if pkg_dir.is_dir() {
         let pkg_json = pkg_dir.join("package.json");

@@ -14,8 +14,7 @@ pub fn inject_process(ctx: &Ctx) -> Result<()> {
 
     // Collect real environment variables into a JS object literal
     let env_json = serde_json::to_string(
-        &std::env::vars()
-            .collect::<std::collections::HashMap<String, String>>(),
+        &std::env::vars().collect::<std::collections::HashMap<String, String>>(),
     )
     .unwrap_or_else(|_| "{}".to_string());
 

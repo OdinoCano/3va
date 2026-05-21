@@ -18,7 +18,11 @@ fn host_from_url(url: &str) -> Option<String> {
     let rest = &url[after_scheme + 3..];
     let host_part = rest.split('/').next().unwrap_or(rest);
     let host = host_part.split(':').next().unwrap_or(host_part);
-    if host.is_empty() { None } else { Some(host.to_lowercase()) }
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_lowercase())
+    }
 }
 
 pub fn inject_fetch(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result<()> {
@@ -33,15 +37,16 @@ pub fn inject_fetch(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Res
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
                 let mut it = args.0.into_iter();
-                let url     = it.next().ok_or_else(|| js_err(&ctx, "__fetchSync() requires a URL".into()))?;
-                let method  = it.next().unwrap_or_else(|| "GET".into());
+                let url = it
+                    .next()
+                    .ok_or_else(|| js_err(&ctx, "__fetchSync() requires a URL".into()))?;
+                let method = it.next().unwrap_or_else(|| "GET".into());
                 let hdrs_js = it.next().unwrap_or_else(|| "{}".into());
-                let body    = it.next();
+                let body = it.next();
 
                 // Permission check
-                let host = host_from_url(&url).ok_or_else(|| {
-                    js_err(&ctx, format!("Invalid URL: {}", url))
-                })?;
+                let host = host_from_url(&url)
+                    .ok_or_else(|| js_err(&ctx, format!("Invalid URL: {}", url)))?;
                 if !perms.borrow().check(&Capability::Network(host.clone())) {
                     return Err(js_err(
                         &ctx,

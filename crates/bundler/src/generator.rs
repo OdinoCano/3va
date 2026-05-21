@@ -281,7 +281,10 @@ impl CodeGenerator {
                 // Replace any whitespace run with a single space, unless
                 // we can drop it entirely around operators.
                 let prev = out.chars().last();
-                let next = chars[i + 1..].iter().find(|&&ch| !ch.is_whitespace()).copied();
+                let next = chars[i + 1..]
+                    .iter()
+                    .find(|&&ch| !ch.is_whitespace())
+                    .copied();
                 let can_drop = matches!(prev, Some(p) if is_op_char(p))
                     || matches!(next, Some(n) if is_op_char(n));
                 if !can_drop {
@@ -425,7 +428,31 @@ fn encode_vlq_segment(gen_col: i64, src_idx: i64, orig_line: i64, orig_col: i64)
 }
 
 fn is_op_char(c: char) -> bool {
-    matches!(c, '=' | '+' | '-' | '*' | '/' | '%' | '<' | '>' | '!' | '&' | '|' | '^' | '~' | '?' | ':' | ';' | ',' | '{' | '}' | '(' | ')' | '[' | ']')
+    matches!(
+        c,
+        '=' | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '<'
+            | '>'
+            | '!'
+            | '&'
+            | '|'
+            | '^'
+            | '~'
+            | '?'
+            | ':'
+            | ';'
+            | ','
+            | '{'
+            | '}'
+            | '('
+            | ')'
+            | '['
+            | ']'
+    )
 }
 
 impl Default for CodeSplitter {

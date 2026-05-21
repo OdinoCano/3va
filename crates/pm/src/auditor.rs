@@ -268,28 +268,27 @@ fn label_severity(label: &str) -> VulnSeverity {
 fn parse_severity(vuln: &RawVuln) -> VulnSeverity {
     // 1. CVSS v3 vector — most precise
     for entry in &vuln.severity {
-        if entry.severity_type.starts_with("CVSS_V3") {
-            if let Some(score) = compute_cvss3_score(&entry.score) {
-                if score > 0.0 {
-                    return numeric_severity(score);
-                }
-            }
+        if entry.severity_type.starts_with("CVSS_V3")
+            && let Some(score) = compute_cvss3_score(&entry.score)
+            && score > 0.0
+        {
+            return numeric_severity(score);
         }
     }
 
     // 2. CVSS v2 numeric score (some older records)
     for entry in &vuln.severity {
-        if entry.severity_type.starts_with("CVSS_V2") {
-            if let Ok(score) = entry.score.parse::<f64>() {
-                // v2 thresholds: High ≥ 7, Medium ≥ 4, Low > 0
-                return if score >= 7.0 {
-                    VulnSeverity::High
-                } else if score >= 4.0 {
-                    VulnSeverity::Medium
-                } else {
-                    VulnSeverity::Low
-                };
-            }
+        if entry.severity_type.starts_with("CVSS_V2")
+            && let Ok(score) = entry.score.parse::<f64>()
+        {
+            // v2 thresholds: High ≥ 7, Medium ≥ 4, Low > 0
+            return if score >= 7.0 {
+                VulnSeverity::High
+            } else if score >= 4.0 {
+                VulnSeverity::Medium
+            } else {
+                VulnSeverity::Low
+            };
         }
     }
 
@@ -323,10 +322,11 @@ fn extract_fixed_versions(vuln: &RawVuln) -> Vec<String> {
     for affected in &vuln.affected {
         for range in &affected.ranges {
             for event in &range.events {
-                if let Some(ver) = event.get("fixed") {
-                    if !ver.is_empty() && !fixed.contains(ver) {
-                        fixed.push(ver.clone());
-                    }
+                if let Some(ver) = event.get("fixed")
+                    && !ver.is_empty()
+                    && !fixed.contains(ver)
+                {
+                    fixed.push(ver.clone());
                 }
             }
         }
@@ -389,7 +389,11 @@ fn read_cache(name: &str, version: &str, force: bool) -> Option<Vec<RawVuln>> {
     let content = std::fs::read_to_string(&path).ok()?;
     let entry: CacheEntry = serde_json::from_str(&content).ok()?;
     let age = now_unix().saturating_sub(entry.fetched_at_unix);
-    if age <= CACHE_TTL_SECS { Some(entry.vulns) } else { None }
+    if age <= CACHE_TTL_SECS {
+        Some(entry.vulns)
+    } else {
+        None
+    }
 }
 
 fn read_stale_cache(name: &str, version: &str) -> Vec<RawVuln> {
@@ -406,7 +410,10 @@ fn write_cache(name: &str, version: &str, vulns: &[RawVuln]) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let entry = CacheEntry { fetched_at_unix: now_unix(), vulns: vulns.to_vec() };
+    let entry = CacheEntry {
+        fetched_at_unix: now_unix(),
+        vulns: vulns.to_vec(),
+    };
     if let Ok(json) = serde_json::to_string(&entry) {
         let _ = std::fs::write(dir.join(cache_filename(name, version)), json);
     }
@@ -477,7 +484,11 @@ fn packages_from_node_modules(root: &Path) -> Vec<(String, String)> {
         if !p.is_dir() {
             continue;
         }
-        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if name.starts_with('@') {
             let Ok(subs) = std::fs::read_dir(&p) else {
                 continue;
@@ -592,7 +603,9 @@ pub async fn run_audit(force_refresh: bool) -> anyhow::Result<AuditReport> {
 
     for (name, version) in &packages {
         let key = (name.clone(), version.clone());
-        let Some(raw) = raw_results.get(&key) else { continue };
+        let Some(raw) = raw_results.get(&key) else {
+            continue;
+        };
         if raw.is_empty() {
             continue;
         }
