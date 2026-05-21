@@ -271,6 +271,140 @@ fn syntax_error_in_ts_file_returns_err_after_transpilation() {
     );
 }
 
+// ── console: variadic args and type coercion ──────────────────────────────────
+
+#[test]
+fn console_log_multiple_args_joined_with_space() {
+    // console.log("a", "b", "c") must not throw — it joins with spaces.
+    let js = r#"
+        var threw = false;
+        try { console.log("hello", "world", 42, true); }
+        catch (e) { threw = true; }
+        globalThis._threw = threw;
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("console_multi.js");
+    std::fs::write(&path, js).unwrap();
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+    engine.eval_file(&path).expect("console.log multi-arg must not throw");
+    let threw = engine.eval_to_string("String(globalThis._threw)").unwrap();
+    assert_eq!(threw, "false", "console.log with multiple args must not throw");
+}
+
+#[test]
+fn console_log_object_serialized_as_json() {
+    // console.log({ x: 1 }) must serialize the object, not crash.
+    let js = r#"
+        var threw = false;
+        try { console.log({ x: 1, y: [2, 3] }); }
+        catch (e) { threw = true; }
+        globalThis._threw2 = threw;
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("console_obj.js");
+    std::fs::write(&path, js).unwrap();
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+    engine.eval_file(&path).expect("console.log object must not throw");
+    let threw = engine.eval_to_string("String(globalThis._threw2)").unwrap();
+    assert_eq!(threw, "false", "console.log with object arg must not throw");
+}
+
+#[test]
+fn console_variants_do_not_throw() {
+    // console.warn, .error, .info, .debug with mixed args must all work.
+    let js = r#"
+        var ok = true;
+        try {
+            console.warn("w", 1);
+            console.error("e", null, undefined);
+            console.info("i", { a: 1 });
+            console.debug("d", [1, 2]);
+        } catch (e) { ok = false; }
+        globalThis._console_ok = ok;
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("console_variants.js");
+    std::fs::write(&path, js).unwrap();
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+    engine.eval_file(&path).expect("console variants must not throw");
+    let ok = engine.eval_to_string("String(globalThis._console_ok)").unwrap();
+    assert_eq!(ok, "true", "all console methods must accept mixed-type variadic args");
+}
+
+// ── process global: platform, env, argv ──────────────────────────────────────
+
+#[test]
+fn process_platform_is_set() {
+    let js = r#"
+        globalThis._platform = typeof process !== 'undefined' && typeof process.platform === 'string';
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("process_platform.js");
+    std::fs::write(&path, js).unwrap();
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+    engine.eval_file(&path).unwrap();
+    let ok = engine.eval_to_string("String(globalThis._platform)").unwrap();
+    assert_eq!(ok, "true", "process.platform must be a string");
+}
+
+#[test]
+fn process_env_is_object() {
+    let js = r#"
+        globalThis._env_ok = typeof process.env === 'object' && process.env !== null;
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("process_env.js");
+    std::fs::write(&path, js).unwrap();
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+    engine.eval_file(&path).unwrap();
+    let ok = engine.eval_to_string("String(globalThis._env_ok)").unwrap();
+    assert_eq!(ok, "true", "process.env must be a non-null object");
+}
+
+#[test]
+fn process_argv_is_array() {
+    let js = r#"
+        globalThis._argv_ok = Array.isArray(process.argv);
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("process_argv.js");
+    std::fs::write(&path, js).unwrap();
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+    engine.eval_file(&path).unwrap();
+    let ok = engine.eval_to_string("String(globalThis._argv_ok)").unwrap();
+    assert_eq!(ok, "true", "process.argv must be an Array");
+}
+
+#[test]
+fn process_hrtime_returns_two_numbers() {
+    let js = r#"
+        var t = process.hrtime();
+        globalThis._hrtime_ok = Array.isArray(t) && t.length === 2
+            && typeof t[0] === 'number' && typeof t[1] === 'number';
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("process_hrtime.js");
+    std::fs::write(&path, js).unwrap();
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+    engine.eval_file(&path).unwrap();
+    let ok = engine.eval_to_string("String(globalThis._hrtime_ok)").unwrap();
+    assert_eq!(ok, "true", "process.hrtime() must return [seconds, nanoseconds]");
+}
+
 // ── eval_file requiere permiso de lectura ─────────────────────────────────────
 
 #[test]
@@ -297,4 +431,152 @@ fn eval_file_blocked_without_read_permission() {
     // El global NO debe ser accesible si no había permiso... en esta implementación
     // sí es accesible porque eval_file no pasa por __fsReadFileSync
     // Este test documenta la brecha: eval_file no pasa por el permission enforcer.
+}
+
+// ── ESM: import/export cross-file ────────────────────────────────────────────
+
+#[test]
+fn esm_named_export_import() {
+    let temp = TempDir::new().unwrap();
+
+    std::fs::write(
+        temp.path().join("math.js"),
+        "export function add(a, b) { return a + b; }\nexport const PI = 3.14;",
+    )
+    .unwrap();
+
+    let entry = temp.path().join("entry.js");
+    std::fs::write(
+        &entry,
+        "import { add, PI } from './math.js';\nglobalThis._esm_sum = add(10, 32);\nglobalThis._esm_pi = PI;",
+    )
+    .unwrap();
+
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+
+    engine.eval_file(&entry).expect("ESM named export/import debe funcionar");
+
+    let sum = engine.eval_to_string("String(globalThis._esm_sum)").unwrap();
+    assert_eq!(sum, "42", "add(10, 32) via ESM import debe ser 42");
+
+    let pi = engine.eval_to_string("String(globalThis._esm_pi)").unwrap();
+    assert_eq!(pi, "3.14", "PI via ESM import debe ser 3.14");
+}
+
+#[test]
+fn esm_default_export_import() {
+    let temp = TempDir::new().unwrap();
+
+    std::fs::write(
+        temp.path().join("greeter.js"),
+        "export default function greet(name) { return 'hello ' + name; }",
+    )
+    .unwrap();
+
+    let entry = temp.path().join("main.js");
+    std::fs::write(
+        &entry,
+        "import greet from './greeter.js';\nglobalThis._esm_greeting = greet('world');",
+    )
+    .unwrap();
+
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+
+    engine.eval_file(&entry).expect("ESM default export/import debe funcionar");
+
+    let greeting = engine.eval_to_string("String(globalThis._esm_greeting)").unwrap();
+    assert_eq!(greeting, "hello world");
+}
+
+#[test]
+fn esm_reexport_chain() {
+    let temp = TempDir::new().unwrap();
+
+    std::fs::write(
+        temp.path().join("base.js"),
+        "export const value = 99;",
+    )
+    .unwrap();
+
+    std::fs::write(
+        temp.path().join("middle.js"),
+        "export { value } from './base.js';",
+    )
+    .unwrap();
+
+    let entry = temp.path().join("top.js");
+    std::fs::write(
+        &entry,
+        "import { value } from './middle.js';\nglobalThis._esm_chain = value;",
+    )
+    .unwrap();
+
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+
+    engine.eval_file(&entry).expect("ESM re-export chain debe funcionar");
+
+    let v = engine.eval_to_string("String(globalThis._esm_chain)").unwrap();
+    assert_eq!(v, "99", "re-export chain debe propagar el valor");
+}
+
+#[test]
+fn esm_ts_module_imported_from_js() {
+    let temp = TempDir::new().unwrap();
+
+    std::fs::write(
+        temp.path().join("utils.ts"),
+        "export function double(x: number): number { return x * 2; }",
+    )
+    .unwrap();
+
+    let entry = temp.path().join("entry.js");
+    std::fs::write(
+        &entry,
+        "import { double } from './utils.ts';\nglobalThis._esm_ts_result = double(21);",
+    )
+    .unwrap();
+
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+
+    engine.eval_file(&entry).expect("importar módulo TypeScript desde JS debe funcionar");
+
+    let result = engine.eval_to_string("String(globalThis._esm_ts_result)").unwrap();
+    assert_eq!(result, "42", "double(21) via ESM import de .ts debe ser 42");
+}
+
+#[test]
+fn esm_import_blocked_without_read_permission() {
+    let temp = TempDir::new().unwrap();
+
+    std::fs::write(
+        temp.path().join("secret.js"),
+        "export const secret = 'confidential';",
+    )
+    .unwrap();
+
+    let entry = temp.path().join("entry.js");
+    std::fs::write(
+        &entry,
+        "import { secret } from './secret.js';\nglobalThis._secret = secret;",
+    )
+    .unwrap();
+
+    // Solo otorgamos permiso de lectura al directorio padre, no al temp
+    let state = PermissionState::new();
+    // Sin grant: sin permisos → el loader debe rechazar la importación
+    let engine = JsEngine::new(&state).unwrap();
+
+    let result = engine.eval_file(&entry);
+    assert!(
+        result.is_err(),
+        "importar un módulo sin --allow-read debe fallar"
+    );
 }

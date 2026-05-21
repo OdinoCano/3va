@@ -1,5 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use oxc_allocator::Allocator;
+use oxc_parser::Parser;
+use oxc_span::SourceType;
+use oxc_ast::ast::{Statement, ModuleDeclaration, Expression, Declaration, BindingPattern};
+use oxc_codegen::{Codegen, CodegenOptions};
 
+/// A robust, AST-based Tree Shaker for JavaScript/TypeScript modules.
 pub struct TreeShaker {
     used_exports: HashMap<String, HashSet<String>>,
     #[allow(dead_code)]
@@ -7,6 +13,7 @@ pub struct TreeShaker {
 }
 
 impl TreeShaker {
+    /// Creates a new TreeShaker instance with the given entry points.
     pub fn new(entry_points: Vec<String>) -> Self {
         Self {
             used_exports: HashMap::new(),
@@ -14,49 +21,87 @@ impl TreeShaker {
         }
     }
 
+    /// Analyzes the source code to find all imported module paths.
+    /// Supports standard ECMAScript imports.
     pub fn analyze_imports(&mut self, code: &str) -> HashSet<String> {
+        let allocator = Allocator::default();
+        let source_type = SourceType::mjs();
+        let ret = Parser::new(&allocator, code, source_type).parse();
+        
         let mut imports = HashSet::new();
-        let mut in_string = false;
-        let mut current = String::new();
-        let chars = code.chars().peekable();
-
-        for c in chars {
-            if c == '\'' || c == '"' {
-                in_string = !in_string;
-            }
-
-            if in_string && c != '\'' && c != '"' {
-                current.push(c);
-            }
-
-            if !in_string && !current.is_empty() {
-                if current.starts_with("./") || current.starts_with("../") || !current.contains('/')
-                {
-                    imports.insert(current.clone());
+        
+        for stmt in &ret.program.body {
+            if let Some(module_decl) = stmt.as_module_declaration() {
+                match module_decl {
+                    ModuleDeclaration::ImportDeclaration(import) => {
+                        imports.insert(import.source.value.to_string());
+                    }
+                    ModuleDeclaration::ExportNamedDeclaration(export) => {
+                        if let Some(source) = &export.source {
+                            imports.insert(source.value.to_string());
+                        }
+                    }
+                    ModuleDeclaration::ExportAllDeclaration(export) => {
+                        imports.insert(export.source.value.to_string());
+                    }
+                    _ => {}
                 }
-                current.clear();
             }
         }
-
+        
         imports
     }
 
+    /// Analyzes the source code to find the names of all exported bindings.
     pub fn analyze_exports(&self, code: &str) -> Vec<String> {
+        let allocator = Allocator::default();
+        let source_type = SourceType::mjs();
+        let ret = Parser::new(&allocator, code, source_type).parse();
+        
         let mut exports = Vec::new();
-
-        for line in code.lines() {
-            let line = line.trim();
-            if line.starts_with("export ")
-                || line.starts_with("module.exports")
-                || line.starts_with("exports.")
-            {
-                exports.push(line.to_string());
+        
+        for stmt in &ret.program.body {
+            if let Some(module_decl) = stmt.as_module_declaration() {
+                match module_decl {
+                    ModuleDeclaration::ExportNamedDeclaration(export) => {
+                        if let Some(decl) = &export.declaration {
+                            match decl {
+                                Declaration::FunctionDeclaration(func) => {
+                                    if let Some(id) = &func.id {
+                                        exports.push(id.name.to_string());
+                                    }
+                                }
+                                Declaration::VariableDeclaration(var) => {
+                                    for d in &var.declarations {
+                                        if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &d.id {
+                                            exports.push(id.name.to_string());
+                                        }
+                                    }
+                                }
+                                Declaration::ClassDeclaration(cls) => {
+                                    if let Some(id) = &cls.id {
+                                        exports.push(id.name.to_string());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        for specifier in &export.specifiers {
+                            exports.push(specifier.exported.name().to_string());
+                        }
+                    }
+                    ModuleDeclaration::ExportDefaultDeclaration(_) => {
+                        exports.push("default".to_string());
+                    }
+                    _ => {}
+                }
             }
         }
-
+        
         exports
     }
 
+    /// Marks a specific export from a module as used.
     pub fn mark_used(&mut self, module: &str, export: &str) {
         self.used_exports
             .entry(module.to_string())
@@ -64,6 +109,7 @@ impl TreeShaker {
             .insert(export.to_string());
     }
 
+    /// Checks if a specific export from a module is used.
     pub fn is_used(&self, module: &str, export: &str) -> bool {
         self.used_exports
             .get(module)
@@ -71,159 +117,146 @@ impl TreeShaker {
             .unwrap_or(true)
     }
 
-    pub fn remove_dead_code(&self, code: &str) -> String {
-        let mut result = String::new();
-
-        for line in code.lines() {
-            let trimmed = line.trim();
-
-            if trimmed.contains("if (false)") || trimmed.starts_with("if (false)") {
-                continue;
-            }
-
-            result.push_str(line);
-            result.push('\n');
-        }
-
-        result
-    }
-
+    /// Performs tree shaking on the provided code by removing unused exports.
+    /// 
+    /// Note: `module_code` is the source to shake, and `used_exports` is the set
+    /// of exports that MUST NOT be removed. Any export not in `used_exports` will
+    /// be stripped.
     pub fn shake(&mut self, module_code: &str, used_exports: &HashSet<String>) -> String {
-        let mut result = String::new();
-        let mut in_export_block = false;
-        let mut brace_count = 0;
-        let mut current_export = String::new();
-
-        for line in module_code.lines() {
-            let trimmed = line.trim();
-
-            if trimmed.starts_with("export ") && !trimmed.contains("from") {
-                let export_name = self.extract_export_name(trimmed);
-                if let Some(name) = export_name {
-                    if used_exports.is_empty() || used_exports.contains(&name) {
-                        result.push_str(line);
-                        result.push('\n');
+        let allocator = Allocator::default();
+        let source_type = SourceType::mjs();
+        let mut ret = Parser::new(&allocator, module_code, source_type).parse();
+        
+        // Mutate AST: Retain only statements that are NOT unused exports.
+        ret.program.body.retain(|stmt| {
+            if let Some(module_decl) = stmt.as_module_declaration() {
+                if let ModuleDeclaration::ExportNamedDeclaration(export) = module_decl {
+                    if used_exports.is_empty() {
+                        return true;
                     }
-                    continue;
-                }
-            }
-
-            if trimmed.starts_with("export {") || trimmed.starts_with("export { ") {
-                in_export_block = true;
-                brace_count = 0;
-                current_export.clear();
-            }
-
-            if in_export_block {
-                brace_count += trimmed.matches('{').count() as i32;
-                brace_count -= trimmed.matches('}').count() as i32;
-
-                for name in self.extract_named_exports(trimmed) {
-                    if used_exports.is_empty() || used_exports.contains(&name) {
-                        current_export.push_str(&format!(" {},", name));
+                    
+                    let mut has_used = false;
+                    
+                    if let Some(declaration) = &export.declaration {
+                        match declaration {
+                            Declaration::FunctionDeclaration(func) => {
+                                if let Some(id) = &func.id {
+                                    if used_exports.contains(id.name.as_str()) {
+                                        has_used = true;
+                                    }
+                                }
+                            }
+                            Declaration::VariableDeclaration(var) => {
+                                for d in &var.declarations {
+                                    if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &d.id {
+                                        if used_exports.contains(id.name.as_str()) {
+                                            has_used = true;
+                                        }
+                                    }
+                                }
+                            }
+                            Declaration::ClassDeclaration(cls) => {
+                                if let Some(id) = &cls.id {
+                                    if used_exports.contains(id.name.as_str()) {
+                                        has_used = true;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
-                }
-
-                if brace_count <= 0 {
-                    in_export_block = false;
-                    if !current_export.is_empty() {
-                        result.push_str(&format!("export {{{}}};\n", current_export.trim()));
+                    
+                    for spec in &export.specifiers {
+                        if used_exports.contains(spec.exported.name().as_str()) {
+                            has_used = true;
+                        }
                     }
-                }
-                continue;
-            }
-
-            if trimmed.starts_with("if (false)") || trimmed.contains("if (false)") {
-                continue;
-            }
-
-            result.push_str(line);
-            result.push('\n');
-        }
-
-        result
-    }
-
-    fn extract_export_name(&self, export_line: &str) -> Option<String> {
-        if export_line.starts_with("export function ") {
-            let name = export_line.strip_prefix("export function ").unwrap_or("");
-            return name.split_whitespace().next().map(String::from);
-        }
-        if export_line.starts_with("export const ") || export_line.starts_with("export let ") {
-            let name = export_line
-                .strip_prefix("export const ")
-                .or(export_line.strip_prefix("export let "))
-                .unwrap_or("");
-            return name.split_whitespace().next().map(String::from);
-        }
-        if export_line.starts_with("export class ") {
-            let name = export_line.strip_prefix("export class ").unwrap_or("");
-            return name.split_whitespace().next().map(String::from);
-        }
-        None
-    }
-
-    fn extract_named_exports(&self, line: &str) -> Vec<String> {
-        let mut exports = Vec::new();
-        let trimmed = line.trim();
-        let content = trimmed.trim_start_matches('{').trim_end_matches('}');
-
-        for part in content.split(',') {
-            let part = part.trim();
-            if !part.is_empty()
-                && !part.starts_with("//")
-                && let Some(name) = part.split_whitespace().next()
-            {
-                let name = name.trim_end_matches(',').trim_end_matches(';');
-                if !name.is_empty() && name != "from" {
-                    exports.push(name.to_string());
+                    
+                    return has_used;
                 }
             }
-        }
-
-        exports
+            true
+        });
+        
+        let mut codegen_options = CodegenOptions::default();
+        codegen_options.minify = false;
+        let codegen = Codegen::new().with_options(codegen_options);
+        codegen.build(&ret.program).code
     }
 }
 
+/// An AST-based eliminator for dead code, specifically unreachable conditionals.
 pub struct DeadCodeEliminator {
     #[allow(dead_code)]
     conditionals: Vec<String>,
 }
 
 impl DeadCodeEliminator {
+    /// Creates a new DeadCodeEliminator.
     pub fn new() -> Self {
         Self {
             conditionals: Vec::new(),
         }
     }
 
+    /// Recursively eliminates block statements that are provably unreachable.
+    /// Natively evaluates AST for `if (false)` without depending on string format.
     pub fn eliminate(&self, code: &str) -> String {
-        let mut result = Vec::new();
-        let mut skip_block = false;
-        let mut brace_count = 0;
+        let allocator = Allocator::default();
+        let source_type = SourceType::mjs();
+        let mut ret = Parser::new(&allocator, code, source_type).parse();
+        
+        self.eliminate_dead_code_recursive(&mut ret.program.body);
+        
+        let mut codegen_options = CodegenOptions::default();
+        codegen_options.minify = false;
+        let codegen = Codegen::new().with_options(codegen_options);
+        codegen.build(&ret.program).code
+    }
 
-        for line in code.lines() {
-            let trimmed = line.trim();
-
-            if trimmed.starts_with("if (false)") || trimmed == "if (false) {" {
-                skip_block = true;
-                brace_count = 0;
-            }
-
-            if skip_block {
-                brace_count += trimmed.matches('{').count() as i32;
-                brace_count -= trimmed.matches('}').count() as i32;
-
-                if brace_count <= 0 {
-                    skip_block = false;
+    fn eliminate_dead_code_recursive(&self, stmts: &mut oxc_allocator::Vec<'_, Statement<'_>>) {
+        stmts.retain(|stmt| {
+            if let Statement::IfStatement(if_stmt) = stmt {
+                if let Expression::BooleanLiteral(b) = &if_stmt.test {
+                    if !b.value && if_stmt.alternate.is_none() {
+                        return false;
+                    }
                 }
-                continue;
             }
+            true
+        });
 
-            result.push(line);
+        for stmt in stmts.iter_mut() {
+            match stmt {
+                Statement::BlockStatement(block) => {
+                    self.eliminate_dead_code_recursive(&mut block.body);
+                }
+                Statement::IfStatement(if_stmt) => {
+                    if let Statement::BlockStatement(block) = &mut if_stmt.consequent {
+                        self.eliminate_dead_code_recursive(&mut block.body);
+                    }
+                    if let Some(Statement::BlockStatement(block)) = &mut if_stmt.alternate {
+                        self.eliminate_dead_code_recursive(&mut block.body);
+                    }
+                }
+                Statement::ForStatement(for_stmt) => {
+                    if let Statement::BlockStatement(block) = &mut for_stmt.body {
+                        self.eliminate_dead_code_recursive(&mut block.body);
+                    }
+                }
+                Statement::WhileStatement(while_stmt) => {
+                    if let Statement::BlockStatement(block) = &mut while_stmt.body {
+                        self.eliminate_dead_code_recursive(&mut block.body);
+                    }
+                }
+                Statement::FunctionDeclaration(func) => {
+                    if let Some(body) = &mut func.body {
+                        self.eliminate_dead_code_recursive(&mut body.statements);
+                    }
+                }
+                _ => {}
+            }
         }
-
-        result.join("\n")
     }
 }
 
@@ -238,47 +271,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tree_shaker_analyze_imports() {
-        let mut shaper = TreeShaker::new(vec!["main".to_string()]);
+    fn test_tree_shaker_analyze_imports_ast() {
+        let mut shaker = TreeShaker::new(vec!["main".to_string()]);
 
         let code = r#"
-import foo from './foo';
-import { bar } from './bar';
-const x = require('./baz');
-"#;
+            import foo from './foo';
+            import { bar } from './bar';
+            import * as baz from './baz';
+            export { qux } from './qux';
+        "#;
 
-        let imports = shaper.analyze_imports(code);
-        assert!(imports.iter().any(|s| s == "./foo"));
-        assert!(imports.iter().any(|s| s == "./bar"));
+        let imports = shaker.analyze_imports(code);
+        assert!(imports.contains("./foo"));
+        assert!(imports.contains("./bar"));
+        assert!(imports.contains("./baz"));
+        assert!(imports.contains("./qux"));
     }
 
     #[test]
-    fn test_tree_shaker_analyze_exports() {
-        let shaper = TreeShaker::new(vec![]);
+    fn test_tree_shaker_analyze_exports_ast() {
+        let shaker = TreeShaker::new(vec![]);
 
         let code = r#"
-export function test() {}
-export const x = 1;
-module.exports = {};
-"#;
+            export function testFunc() {}
+            export const x = 1, y = 2;
+            export class MyClass {}
+            export default function() {}
+        "#;
 
-        let exports = shaper.analyze_exports(code);
-        assert!(!exports.is_empty());
+        let exports = shaker.analyze_exports(code);
+        assert!(exports.contains(&"testFunc".to_string()));
+        assert!(exports.contains(&"x".to_string()));
+        assert!(exports.contains(&"y".to_string()));
+        assert!(exports.contains(&"MyClass".to_string()));
+        assert!(exports.contains(&"default".to_string()));
     }
 
     #[test]
-    fn test_dead_code_eliminator() {
+    fn test_tree_shaker_shake_ast() {
+        let mut shaker = TreeShaker::new(vec![]);
+        
+        let code = r#"
+            export function used() { return 1; }
+            export function unused() { return 2; }
+            export const keep = true;
+        "#;
+        
+        let mut used = HashSet::new();
+        used.insert("used".to_string());
+        used.insert("keep".to_string());
+
+        let result = shaker.shake(code, &used);
+        
+        assert!(result.contains("used()"));
+        assert!(result.contains("keep"));
+        assert!(!result.contains("unused()"), "Unused export should be removed");
+    }
+
+    #[test]
+    fn test_dead_code_eliminator_ast() {
         let elim = DeadCodeEliminator::new();
 
         let code = r#"
-const a = 1;
-if (false) {
-    const dead = 2;
-}
-const b = 3;
-"#;
+            const a = 1;
+            if (false) {
+                const dead = 2;
+            }
+            if (true) {
+                const alive = 3;
+            }
+            function test() {
+                if(false){ console.log("nested dead"); }
+            }
+        "#;
 
         let result = elim.eliminate(code);
-        assert!(!result.contains("if (false)"));
+        
+        assert!(!result.contains("dead = 2"));
+        assert!(!result.contains("nested dead"));
+        assert!(result.contains("alive = 3"));
+        assert!(result.contains("const a = 1"));
     }
 }
+

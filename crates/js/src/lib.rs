@@ -8,11 +8,24 @@ use std::path::Path;
 use std::rc::Rc;
 use vvva_permissions::PermissionState;
 
-/// Heuristic: check for top-level import/export statements indicating ESM.
+/// Heuristic: detect ESM by scanning all lines for top-level import/export.
+/// Skips blank lines and single-line comments. Handles files where exports
+/// appear after other code (e.g. `export default fn` at end of file).
 fn is_esm_source(code: &str) -> bool {
+    let mut in_block_comment = false;
     for line in code.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+        if in_block_comment {
+            if trimmed.contains("*/") {
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("/*") {
+            in_block_comment = true;
             continue;
         }
         if trimmed.starts_with("import ")
@@ -23,8 +36,6 @@ fn is_esm_source(code: &str) -> bool {
         {
             return true;
         }
-        // Stop at first non-comment, non-blank, non-import/export line
-        break;
     }
     false
 }
@@ -40,6 +51,13 @@ pub struct JsEngine {
 impl JsEngine {
     pub fn new(permissions: &PermissionState) -> anyhow::Result<Self> {
         let runtime = Runtime::new()?;
+
+        // Wire the ESM module loader so cross-file imports resolve correctly.
+        runtime.set_loader(
+            esm::EsmResolver,
+            esm::EsmLoader { permissions: permissions.clone() },
+        );
+
         let context = Context::full(&runtime)?;
 
         let perms = Rc::new(RefCell::new(permissions.clone()));
@@ -104,9 +122,7 @@ impl JsEngine {
 
         self.context.with(|ctx| {
             if is_esm {
-                // Evaluate as ECMAScript Module
                 let module = Module::declare(ctx.clone(), filename.as_str(), code.as_str())?;
-                // eval() returns (Module<Evaluated>, Promise) — we only need to drive evaluation
                 let (_module_eval, _promise) = module.eval()?;
                 Ok::<(), rquickjs::Error>(())
             } else {
@@ -121,6 +137,15 @@ impl JsEngine {
                 Ok::<(), rquickjs::Error>(())
             }
         })?;
+
+        // Drive QuickJS pending jobs (module evaluation, promise microtasks).
+        loop {
+            match self.runtime.execute_pending_job() {
+                Ok(true) => continue,
+                Ok(false) => break,
+                Err(e) => return Err(anyhow::anyhow!("JS job error: {:?}", e)),
+            }
+        }
 
         Ok(())
     }

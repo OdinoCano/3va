@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/*",
     "crates/bundler",
+    "crates/crypto",
     "crates/test"
 ]
 

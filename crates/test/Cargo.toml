@@ -14,3 +14,8 @@ vvva_permissions = { path = "../permissions" }
 tokio.workspace = true
 notify = "8.0"
 lazy_static = "1.4"
+oxc_allocator = "0.132"
+oxc_parser = "0.132"
+oxc_span = "0.132"
+oxc_ast = "0.132"
+oxc_ast_visit = "0.132"
