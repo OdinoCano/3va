@@ -4,8 +4,11 @@ pub mod lockfile;
 pub mod malware_scanner;
 pub mod manifest;
 pub mod resolver;
+pub mod secrets;
 pub mod semver;
 pub mod signature_verifier;
+
+pub use secrets::{SecretFinding, Severity as SecretSeverity, SecretsScanner};
 
 pub use auditor::{
     AuditReport, VulnFinding, VulnSeverity, Vulnerability, print_audit_report, run_audit,

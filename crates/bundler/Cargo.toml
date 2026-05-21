@@ -11,3 +11,8 @@ anyhow.workspace = true
 tracing.workspace = true
 regex-lite = "0.1"
 vvva_pm = { path = "../pm" }
+oxc_allocator = "0.132.0"
+oxc_parser = "0.132.0"
+oxc_ast = "0.132.0"
+oxc_codegen = "0.132.0"
+oxc_span = "0.132.0"
