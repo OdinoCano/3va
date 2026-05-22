@@ -3056,6 +3056,7 @@ dependencies = [
  "clap",
  "notify 6.1.1",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

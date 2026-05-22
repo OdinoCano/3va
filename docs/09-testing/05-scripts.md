@@ -18,16 +18,18 @@ scripts/integration_tests.sh
 
 | Phase | Description | Verifies |
 |------|-------------|----------|
-| PHASE 1 | NPM Registry | lodash from registry.npmjs.org |
-| PHASE 2 | Yarn Registry | axios from registry.yarnpkg.com |
-| PHASE 3 | JSR Registry | @std/path from jsr.io |
-| PHASE 4 | Import Verification | Package coexistence |
-| PHASE 5 | Basic Execution | Pure JS/TypeScript |
-| PHASE 6 | Diagnostics | doctor, help, version |
-| PHASE 7 | Bundle | basic, minify, split |
-| PHASE 8 | Test Runner | runner and --watch |
-| PHASE 9 | Update/Reinstall | available commands |
-| PHASE 10 | Sandbox Security | secure-by-default |
+| FASE 1 | NPM Registry | lodash from registry.npmjs.org |
+| FASE 2 | Yarn Registry | axios from registry.yarnpkg.com |
+| FASE 3 | JSR Registry | @std/path from jsr.io |
+| FASE 4 | Import Verification | Package coexistence |
+| FASE 5 | Basic Execution | Pure JS/TypeScript |
+| FASE 6 | Diagnostics | doctor, help, version |
+| FASE 7 | Bundle | basic, minify, split, source-map |
+| FASE 8 | Test Runner | runner, --watch, --coverage, snapshots |
+| FASE 9 | Update/Reinstall | update, reinstall commands |
+| FASE 10 | Sandbox Mode | secure-by-default, REPL commands |
+| FASE 11 | Audit | malware scan, OSV CVE query, secrets, --json |
+| FASE 12 | Dev Server | HTTP serving, HMR SSE endpoint, static files |
 
 ### Requirements
 - Binary compiled at `target/debug/3va`
@@ -42,8 +44,8 @@ scripts/integration_tests.sh
 ║                         FINAL SUMMARY                        ║
 ╚════════════════════════════════════════════════════════════════╝
 
-  Total Tests:   25
-  Passed:        25
+  Total Tests:   58
+  Passed:        58
   Failed:        0
   Success Rate: 100.0%
 

@@ -11,6 +11,25 @@ const TEST_FRAMEWORK_JS: &str = r#"
   var __suites = [];
   var __tests  = [];
 
+  // Lifecycle hooks: { suite: string[], fn: function }
+  // suite[] is a snapshot of __suites at registration time, used for scope matching.
+  var __hooksBeforeAll  = [];
+  var __hooksAfterAll   = [];
+  var __hooksBeforeEach = [];
+  var __hooksAfterEach  = [];
+
+  // Build a stable string key from a suite array.
+  function _key(suite) { return suite.join('\x1f'); }
+
+  // True when hookSuite is an ancestor scope of testSuites (prefix match).
+  function _ancestorOf(hookSuite, testSuites) {
+    if (hookSuite.length > testSuites.length) return false;
+    for (var i = 0; i < hookSuite.length; i++) {
+      if (hookSuite[i] !== testSuites[i]) return false;
+    }
+    return true;
+  }
+
   globalThis.describe = function(name, fn) {
     __suites.push(name);
     try { fn(); } finally { __suites.pop(); }
@@ -18,13 +37,13 @@ const TEST_FRAMEWORK_JS: &str = r#"
 
   globalThis.it = globalThis.test = function(name, fn) {
     var prefix = __suites.length > 0 ? __suites.join(' > ') + ' > ' : '';
-    __tests.push({ name: prefix + name, fn: fn });
+    __tests.push({ name: prefix + name, fn: fn, suites: __suites.slice() });
   };
 
-  globalThis.beforeEach = function() {};
-  globalThis.afterEach  = function() {};
-  globalThis.beforeAll  = function() {};
-  globalThis.afterAll   = function() {};
+  globalThis.beforeAll  = function(fn) { __hooksBeforeAll.push({ suite: __suites.slice(), fn: fn }); };
+  globalThis.afterAll   = function(fn) { __hooksAfterAll.push({ suite: __suites.slice(), fn: fn }); };
+  globalThis.beforeEach = function(fn) { __hooksBeforeEach.push({ suite: __suites.slice(), fn: fn }); };
+  globalThis.afterEach  = function(fn) { __hooksAfterEach.push({ suite: __suites.slice(), fn: fn }); };
 
   function makeExpect(actual, negated) {
     var inv = negated ? ' not' : '';
@@ -178,14 +197,111 @@ const TEST_FRAMEWORK_JS: &str = r#"
 
   globalThis.__3va_run_tests = function() {
     var results = [];
+
+    // Count how many tests belong to each scope so we know when to fire afterAll.
+    var remaining = {};
     for (var i = 0; i < __tests.length; i++) {
-      var t = __tests[i];
-      var start = Date.now();
-      var status = 'passed';
-      var error  = null;
-      try { t.fn(); } catch(e) { status = 'failed'; error = (e && e.message) ? e.message : String(e); }
-      results.push({ name: t.name, status: status, duration_ms: Date.now() - start, error: error });
+      var ts = __tests[i].suites;
+      for (var d = 0; d <= ts.length; d++) {
+        var k = _key(ts.slice(0, d));
+        remaining[k] = (remaining[k] || 0) + 1;
+      }
     }
+
+    // Track which scopes have already had their beforeAll fired.
+    var beforeAllDone = {};
+    // Track scopes whose beforeAll threw, so we skip their tests.
+    var scopeFailed   = {};
+
+    for (var i = 0; i < __tests.length; i++) {
+      var t  = __tests[i];
+      var ts = t.suites;
+
+      // ── beforeAll (outer→inner, once per scope) ───────────────────────────
+      var setupErr = null;
+      for (var d = 0; d <= ts.length && !setupErr; d++) {
+        var scope = ts.slice(0, d);
+        var k     = _key(scope);
+        if (!beforeAllDone[k]) {
+          beforeAllDone[k] = true;
+          for (var h = 0; h < __hooksBeforeAll.length && !setupErr; h++) {
+            var hook = __hooksBeforeAll[h];
+            if (_key(hook.suite) === k) {
+              try { hook.fn(); } catch(e) {
+                setupErr = 'beforeAll failed: ' + ((e && e.message) ? e.message : String(e));
+                // Mark this scope and all children as failed.
+                scopeFailed[k] = setupErr;
+              }
+            }
+          }
+        } else if (scopeFailed[k]) {
+          setupErr = scopeFailed[k];
+        }
+      }
+
+      var start  = Date.now();
+      var status, error;
+
+      if (setupErr) {
+        status = 'failed';
+        error  = setupErr;
+      } else {
+        // ── beforeEach (outer→inner) ─────────────────────────────────────────
+        var eachErr = null;
+        for (var d = 0; d <= ts.length && !eachErr; d++) {
+          var k = _key(ts.slice(0, d));
+          for (var h = 0; h < __hooksBeforeEach.length && !eachErr; h++) {
+            var hook = __hooksBeforeEach[h];
+            if (_key(hook.suite) === k) {
+              try { hook.fn(); } catch(e) {
+                eachErr = 'beforeEach failed: ' + ((e && e.message) ? e.message : String(e));
+              }
+            }
+          }
+        }
+
+        if (eachErr) {
+          status = 'failed';
+          error  = eachErr;
+        } else {
+          // ── test body ──────────────────────────────────────────────────────
+          status = 'passed';
+          error  = null;
+          try { t.fn(); } catch(e) {
+            status = 'failed';
+            error  = (e && e.message) ? e.message : String(e);
+          }
+        }
+
+        // ── afterEach (inner→outer, always runs) ─────────────────────────────
+        for (var d = ts.length; d >= 0; d--) {
+          var k = _key(ts.slice(0, d));
+          for (var h = 0; h < __hooksAfterEach.length; h++) {
+            var hook = __hooksAfterEach[h];
+            if (_key(hook.suite) === k) {
+              try { hook.fn(); } catch(e) { /* swallow — don't mask test failure */ }
+            }
+          }
+        }
+      }
+
+      results.push({ name: t.name, status: status, duration_ms: Date.now() - start, error: error });
+
+      // ── afterAll (inner→outer, when scope is exhausted) ───────────────────
+      for (var d = ts.length; d >= 0; d--) {
+        var k = _key(ts.slice(0, d));
+        remaining[k]--;
+        if (remaining[k] === 0) {
+          for (var h = __hooksAfterAll.length - 1; h >= 0; h--) {
+            var hook = __hooksAfterAll[h];
+            if (_key(hook.suite) === k) {
+              try { hook.fn(); } catch(e) { /* swallow */ }
+            }
+          }
+        }
+      }
+    }
+
     return JSON.stringify(results);
   };
 })();

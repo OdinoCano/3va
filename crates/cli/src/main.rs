@@ -1520,4 +1520,119 @@ mod tests {
         assert!(!state.check(&Capability::SpawnProcess));
         assert!(!state.check(&Capability::FileWrite(PathBuf::from("/app/out.js"))));
     }
+
+    // ── Dev server: mime_type ─────────────────────────────────────────────────
+
+    #[test]
+    fn mime_type_returns_correct_types() {
+        use std::path::Path;
+        assert_eq!(mime_type(Path::new("app.js")),   "application/javascript; charset=utf-8");
+        assert_eq!(mime_type(Path::new("app.mjs")),  "application/javascript; charset=utf-8");
+        assert_eq!(mime_type(Path::new("style.css")), "text/css; charset=utf-8");
+        assert_eq!(mime_type(Path::new("index.html")), "text/html; charset=utf-8");
+        assert_eq!(mime_type(Path::new("data.json")), "application/json");
+        assert_eq!(mime_type(Path::new("logo.png")),  "image/png");
+        assert_eq!(mime_type(Path::new("icon.svg")),  "image/svg+xml");
+        assert_eq!(mime_type(Path::new("font.woff2")), "font/woff2");
+        assert_eq!(mime_type(Path::new("module.wasm")), "application/wasm");
+        assert_eq!(mime_type(Path::new("unknown.xyz")), "application/octet-stream");
+    }
+
+    // ── Dev server: serve_file via in-process TCP pair ────────────────────────
+
+    #[tokio::test]
+    async fn serve_file_returns_200_for_existing_file() {
+        use std::fs;
+        use tempfile::TempDir;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hello.css");
+        fs::write(&path, "body { color: red; }").unwrap();
+
+        // serve_file writes the response and closes; no read from client needed.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let path_clone = path.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            serve_file(&mut stream, &path_clone, false).await.unwrap();
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut response = Vec::new();
+        // Drop the write half so the server's unread buffer doesn't cause RST
+        let (mut read_half, write_half) = client.split();
+        drop(write_half);
+        read_half.read_to_end(&mut response).await.unwrap();
+        server.await.unwrap();
+
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 200 OK"), "debe devolver 200: {}", &text[..text.len().min(120)]);
+        assert!(text.contains("text/css"), "debe incluir Content-Type CSS");
+        assert!(text.contains("body { color: red; }"), "debe incluir el cuerpo del archivo");
+    }
+
+    #[tokio::test]
+    async fn serve_file_returns_404_for_missing_file() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            serve_file(&mut stream, std::path::Path::new("/nonexistent/file.js"), false)
+                .await
+                .unwrap();
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut read_half, write_half) = client.split();
+        drop(write_half);
+        let mut response = Vec::new();
+        read_half.read_to_end(&mut response).await.unwrap();
+        server.await.unwrap();
+
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 404"), "debe devolver 404: {}", &text[..text.len().min(80)]);
+    }
+
+    #[tokio::test]
+    async fn serve_html_with_hmr_injects_hmr_script() {
+        use std::fs;
+        use tempfile::TempDir;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let dir = TempDir::new().unwrap();
+        let html_path = dir.path().join("index.html");
+        fs::write(
+            &html_path,
+            "<html><head></head><body><h1>App</h1></body></html>",
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let path_clone = html_path.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            serve_html_with_hmr(&mut stream, &path_clone).await.unwrap();
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        server.await.unwrap();
+
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.contains("HTTP/1.1 200"), "debe devolver 200");
+        assert!(text.contains("__hmr"), "debe inyectar el cliente HMR");
+        assert!(text.contains("<h1>App</h1>"), "debe incluir el HTML original");
+    }
 }
