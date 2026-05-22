@@ -11,11 +11,20 @@ APIs available to JavaScript/TypeScript code running inside the 3va runtime. All
 | `console` | `builtins/console.rs` | `log`, `error`, `warn`, `info`, `debug`, `trace`, `dir`, `table`, `time`, `timeEnd`, `group`, `groupEnd` |
 | `setTimeout` / `clearTimeout` | `builtins/timers.rs` | Returns numeric `TimerId` |
 | `setInterval` / `clearInterval` | `builtins/timers.rs` | Returns numeric `TimerId` |
-| `fetch` | `builtins/fetch.rs` | HTTP via `ureq`; requires `--allow-net` |
+| `fetch` | `builtins/fetch.rs` | HTTP via `ureq`; requires `--allow-net`; supports `AbortController` signal |
 | `WebSocket` | `builtins/websocket.rs` | Requires `--allow-net` |
 | `TextEncoder` / `TextDecoder` | `builtins/buffer.rs` | UTF-8 encode/decode |
 | `process` | `builtins/process.rs` | `argv`, `env`, `exit()`, `cwd()`, `pid`, `version`, `platform` |
 | `Buffer` | `builtins/buffer.rs` | `Buffer.from()`, `Buffer.alloc()`, `Buffer.concat()`, `.toString(encoding)` |
+| `URL` | `builtins/modules.rs` | Full URL parsing + relative resolution; `.protocol`, `.host`, `.pathname`, `.searchParams`, `URL.canParse()` |
+| `URLSearchParams` | `builtins/modules.rs` | `append`, `set`, `get`, `getAll`, `has`, `delete`, `forEach`, iteration, `.size` |
+| `FileReader` | `builtins/modules.rs` | `readAsText`, `readAsDataURL`, `readAsArrayBuffer`, `abort`; `onload`, `onerror`, `onabort` callbacks |
+| `AbortController` / `AbortSignal` | `builtins/modules.rs` | `abort()`, `addEventListener('abort', ...)`, `AbortSignal.timeout()`, `AbortSignal.abort()` |
+| `Blob` / `File` | `builtins/modules.rs` | `text()`, `arrayBuffer()`, `bytes()`, `slice()`, `stream()`; `File` extends `Blob` |
+| `FormData` | `builtins/modules.rs` | `append`, `set`, `get`, `getAll`, `has`, `delete`, `forEach`, `Symbol.iterator` |
+| `ReadableStream` | `builtins/modules.rs` | `getReader()`, `pipeTo()`, `pipeThrough()`, `tee()` |
+| `WritableStream` | `builtins/modules.rs` | `getWriter()`, `write()`, `close()` |
+| `TransformStream` | `builtins/modules.rs` | `.readable` + `.writable` pair; custom `transform()` and `flush()` |
 
 ## 1.3 `require()` / ESM Modules
 
@@ -113,15 +122,6 @@ const str = dec.decode(bytes);       // 'hello'
 // PLANNED — security introspection from JS
 3va.security.checkPermission('fs', 'read', '/path')
 3va.security.getAuditLog()
-```
-
-### `AbortController` support in `fetch`
-
-```javascript
-// PLANNED — AbortController is not yet implemented
-const controller = new AbortController();
-fetch('/api', { signal: controller.signal });
-controller.abort();
 ```
 
 ### `crypto.subtle` (Web Crypto API)

@@ -116,26 +116,57 @@ pub fn inject_fetch(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> 
             var method  = (options.method  || 'GET').toUpperCase();
             var headers = options.headers  || {};
             var body    = (options.body != null) ? String(options.body) : undefined;
+            var signal  = options.signal || null;
 
-            return __fetchAsync(url, method, JSON.stringify(headers), body)
-                .then(function(raw) {
-                    var data = JSON.parse(raw);
-                    return {
-                        ok:         data.ok,
-                        status:     data.status,
-                        statusText: data.statusText,
-                        headers:    data.headers,
-                        _body:      data.body,
-                        url:        url,
-                        text:        function() { return Promise.resolve(this._body); },
-                        json:        function() {
-                            try { return Promise.resolve(JSON.parse(this._body)); }
-                            catch(e) { return Promise.reject(new SyntaxError('Invalid JSON: ' + e.message)); }
-                        },
-                        arrayBuffer: function() { return Promise.resolve(this._body); },
-                        clone:       function() { return Object.assign({}, this); },
-                    };
+            // Check AbortSignal before issuing the request
+            if (signal && signal.aborted) {
+                var reason = signal.reason || new Error('AbortError');
+                return Promise.reject(reason);
+            }
+
+            var req = __fetchAsync(url, method, JSON.stringify(headers), body);
+
+            // If a signal is provided, race against abort
+            if (signal) {
+                var abortPromise = new Promise(function(_, reject) {
+                    signal.addEventListener('abort', function() {
+                        reject(signal.reason || new Error('AbortError'));
+                    });
                 });
+                req = Promise.race([req, abortPromise]);
+            }
+
+            return req.then(function(raw) {
+                var data = JSON.parse(raw);
+                return {
+                    ok:          data.ok,
+                    status:      data.status,
+                    statusText:  data.statusText,
+                    headers:     data.headers,
+                    _body:       data.body,
+                    url:         url,
+                    redirected:  false,
+                    type:        'basic',
+                    text:        function() { return Promise.resolve(this._body); },
+                    json:        function() {
+                        try { return Promise.resolve(JSON.parse(this._body)); }
+                        catch(e) { return Promise.reject(new SyntaxError('Invalid JSON: ' + e.message)); }
+                    },
+                    arrayBuffer: function() {
+                        var s = this._body;
+                        var buf = new ArrayBuffer(s.length);
+                        var view = new Uint8Array(buf);
+                        for (var i = 0; i < s.length; i++) view[i] = s.charCodeAt(i);
+                        return Promise.resolve(buf);
+                    },
+                    bytes: function() {
+                        return this.arrayBuffer().then(function(b) { return new Uint8Array(b); });
+                    },
+                    blob: function() { return Promise.resolve(new Blob([this._body], { type: this.headers['content-type'] || '' })); },
+                    formData: function() { return Promise.reject(new Error('formData() not implemented')); },
+                    clone:  function() { return Object.assign({}, this); },
+                };
+            });
         };
         "#,
     )?;

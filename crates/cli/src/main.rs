@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -950,6 +950,14 @@ enum Commands {
         /// Allow spawning child processes
         #[arg(long = "allow-child-process")]
         allow_child_process: bool,
+
+        /// Write a JSON audit log to this file after execution
+        #[arg(long = "audit-log")]
+        audit_log: Option<PathBuf>,
+
+        /// Audit level: "deny" logs only denied checks (default), "all" logs every check
+        #[arg(long = "audit-level", default_value = "deny")]
+        audit_level: String,
     },
     /// Install dependencies from 3va registry
     Install {
@@ -1283,9 +1291,11 @@ async fn main() -> anyhow::Result<()> {
             allow_write,
             allow_env,
             allow_child_process,
+            audit_log,
+            audit_level,
         } => {
             info!("Running {:?} (Sandboxed)", file);
-            let permissions = build_permissions(
+            let mut permissions = build_permissions(
                 allow_read.as_deref(),
                 allow_write.as_deref(),
                 allow_net.as_deref(),
@@ -1294,6 +1304,16 @@ async fn main() -> anyhow::Result<()> {
                 std::io::stderr().is_terminal(), // solo prompt si stderr es visible (no capturado)
             );
 
+            // Wire in audit logging if --audit-log was specified
+            let audit_log_data = if let Some(log_path) = audit_log {
+                let denied_only = audit_level != "all";
+                let log = Arc::new(Mutex::new(vvva_permissions::AuditLog::new()));
+                permissions.enable_audit(log.clone(), denied_only);
+                Some((log_path.clone(), log))
+            } else {
+                None
+            };
+
             let permissions = Arc::new(permissions);
             let engine = vvva_js::JsEngine::new(permissions.clone()).await?;
             info!("3va Runtime initialized securely.");
@@ -1301,6 +1321,15 @@ async fn main() -> anyhow::Result<()> {
             // Execute file (transpiles TypeScript automatically); event loop runs inside eval_file
             engine.eval_file(file).await?;
             info!("Execution finished.");
+
+            // Write audit log to file if requested
+            if let Some((log_path, log)) = audit_log_data {
+                let log = log.lock().unwrap();
+                log.write_to_file(&log_path).unwrap_or_else(|e| {
+                    eprintln!("[AUDIT] Failed to write audit log to {}: {}", log_path.display(), e);
+                });
+                info!("Audit log written to {:?}", log_path);
+            }
         }
         Commands::Install { package, allow_net } => {
             if let Some(pkg) = package {

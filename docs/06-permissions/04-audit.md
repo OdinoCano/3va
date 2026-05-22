@@ -62,6 +62,7 @@ impl AuditLog {
     pub fn log_file_access(&mut self, path: &Path, operation: &str, allowed: bool)
     pub fn log_network_access(&mut self, host: &str, port: u16, allowed: bool)
     pub fn to_json(&self) -> String
+    pub fn write_to_file(&self, path: &Path) -> std::io::Result<()>
 }
 ```
 
@@ -111,26 +112,42 @@ impl AuditLogger {
 ]
 ```
 
-## 4.4 Planned Features (not yet implemented)
+## 4.4 CLI Integration
+
+`PermissionState` integrates with the audit log automatically via `check()`. Every permission decision fires an `AuditEvent` when audit logging is enabled.
+
+```bash
+# Write denied-checks only (default)
+3va run app.ts --audit-log=./audit.json
+
+# Write all checks (allowed + denied)
+3va run app.ts --audit-log=./audit.json --audit-level=all
+```
+
+The log is written as JSON to the specified path after execution completes.
+
+### Enabling from Rust
+
+```rust
+use std::sync::{Arc, Mutex};
+use vvva_permissions::{PermissionState, AuditLog};
+
+let log = Arc::new(Mutex::new(AuditLog::new()));
+let mut permissions = PermissionState::new();
+permissions.enable_audit(log.clone(), /* denied_only */ true);
+
+// ... run code ...
+
+let log = log.lock().unwrap();
+log.write_to_file(std::path::Path::new("audit.json")).unwrap();
+println!("{}", log.to_json());
+```
+
+## 4.5 Planned Features (not yet implemented)
 
 > **Status: PENDING** — the following are planned design, not current behavior.
 
-### 4.4.1 CLI integration
-
-```bash
-# PLANNED — flags do not exist yet
-3va run app.ts --audit-log=/var/log/3va/audit.log
-3va run app.ts --audit-log=stdout
-3va run app.ts --audit-level=errors
-
-# PLANNED — sub-commands do not exist yet
-3va audit view --file /var/log/3va/audit.log
-3va audit view --category=denied --since="2026-05-18T10:00:00Z"
-3va audit report --output=audit-report.html
-3va audit stats --period=24h
-```
-
-### 4.4.2 Log rotation config
+### 4.5.1 Log rotation config
 
 ```rust
 // PLANNED — AuditConfig does not exist yet
@@ -143,11 +160,7 @@ pub struct AuditConfig {
 }
 ```
 
-### 4.4.3 Automatic integration with `PermissionState`
-
-Currently `AuditLogger` must be driven manually. Planned: `PermissionState::check` will fire audit events automatically on every allow/deny decision.
-
-### 4.4.4 GDPR / ISO 27001
+### 4.5.2 GDPR / ISO 27001
 
 ```rust
 // PLANNED — not implemented

@@ -1,5 +1,8 @@
+use crate::audit::{AuditEvent, AuditLog};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// Un permiso explícito para realizar una operación específica sobre un recurso.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,6 +47,11 @@ pub struct PermissionState {
     deny_all_net: bool,
     deny_all_env: bool,
     deny_all_process: bool,
+
+    /// Shared audit log; when Some, every check() call appends an AuditEvent.
+    pub audit_log: Option<Arc<Mutex<AuditLog>>>,
+    /// When true, only denied checks are logged; when false, all checks are logged.
+    pub audit_denied_only: bool,
 }
 
 impl PermissionState {
@@ -92,6 +100,13 @@ impl PermissionState {
         self.deny_all_process = true;
     }
 
+    /// Attach a shared AuditLog. Every subsequent check() call appends an event.
+    /// Set `denied_only = true` to only record checks that were denied.
+    pub fn enable_audit(&mut self, log: Arc<Mutex<AuditLog>>, denied_only: bool) {
+        self.audit_log = Some(log);
+        self.audit_denied_only = denied_only;
+    }
+
     /// Retorna una copia de todas las capabilities concedidas actualmente.
     pub fn list_granted(&self) -> Vec<Capability> {
         self.granted.read().unwrap().clone()
@@ -102,6 +117,12 @@ impl PermissionState {
     /// Para paths de archivo y hosts de red, el matching es por prefijo/subdominio,
     /// no por igualdad exacta, reflejando el comportamiento documentado.
     pub fn check(&self, required: &Capability) -> bool {
+        let result = self.check_inner(required);
+        self.record_audit(required, result);
+        result
+    }
+
+    fn check_inner(&self, required: &Capability) -> bool {
         // Paso 1: deny_all global por categoría
         match required {
             Capability::FileRead(_) | Capability::FileWrite(_) if self.deny_all_fs => {
@@ -141,6 +162,59 @@ impl PermissionState {
         }
 
         false
+    }
+
+    fn record_audit(&self, cap: &Capability, allowed: bool) {
+        let log = match &self.audit_log {
+            Some(l) => l,
+            None => return,
+        };
+        if self.audit_denied_only && allowed {
+            return;
+        }
+        let event = match cap {
+            Capability::FileRead(p) => AuditEvent::FileAccess {
+                timestamp: Utc::now(),
+                path: p.clone(),
+                operation: "read".to_string(),
+                allowed,
+            },
+            Capability::FileWrite(p) => AuditEvent::FileAccess {
+                timestamp: Utc::now(),
+                path: p.clone(),
+                operation: "write".to_string(),
+                allowed,
+            },
+            Capability::Network(h) => AuditEvent::NetworkAccess {
+                timestamp: Utc::now(),
+                host: h.clone(),
+                port: 0,
+                allowed,
+            },
+            Capability::SpawnProcess => AuditEvent::ProcessSpawn {
+                timestamp: Utc::now(),
+                command: "*".to_string(),
+                allowed,
+            },
+            Capability::EnvAccess => AuditEvent::EnvAccess {
+                timestamp: Utc::now(),
+                variable: "*".to_string(),
+                allowed,
+            },
+            Capability::FFI => AuditEvent::PermissionDenied {
+                timestamp: Utc::now(),
+                capability: "FFI".to_string(),
+                resource: "native".to_string(),
+                reason: if allowed {
+                    "allowed".to_string()
+                } else {
+                    "not granted".to_string()
+                },
+            },
+        };
+        if let Ok(mut l) = log.lock() {
+            l.add_event(event);
+        }
     }
 
     fn prompt_user(&self, required: &Capability) -> bool {
@@ -194,6 +268,8 @@ impl Clone for PermissionState {
             deny_all_net: self.deny_all_net,
             deny_all_env: self.deny_all_env,
             deny_all_process: self.deny_all_process,
+            audit_log: self.audit_log.clone(),
+            audit_denied_only: self.audit_denied_only,
         }
     }
 }
