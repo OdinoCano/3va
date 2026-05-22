@@ -1,260 +1,180 @@
 # 03 - POLYFILLS AND SHIMS
 
-## 3.1 Polyfill System
+## 3.1 Overview
 
-3va implements polyfills for Node.js and browser APIs that are not natively available in QuickJS.
+3va registers Node.js-compatible built-ins and JS stubs at engine startup so that packages can `require()` them without throwing. There is no `PolyfillRegistry` type; stubs are injected inline from `crates/js/src/builtins/modules.rs`.
 
-## 3.2 Node.js Polyfills
+For the complete status table see [04-core/02-modulo-system.md](../04-core/02-modulo-system.md).
 
-### 3.2.1 Built-in Modules
+## 3.2 Rust Builtins (full implementations)
 
-| Module | Type | Description |
-|--------|------|-------------|
-| buffer | Built-in | Binary data buffer |
-| console | Built-in | Console (with audit) |
-| crypto | Built-in | Basic cryptography |
-| events | Built-in | EventEmitter |
-| fs | Built-in (partial) | File system |
-| http | Built-in (partial) | HTTP client/server |
-| os | Built-in | System information |
-| path | Built-in | Path utilities |
-| process | Built-in | Current process |
-| stream | Built-in (partial) | Streams |
-| url | Built-in | URL parsing |
-| util | Built-in | Utilities |
-
-### 3.2.2 Buffer
+### Buffer (global + `require('buffer')`)
 
 ```javascript
-// Buffer polyfill available globally
 const buf = Buffer.from('Hello World');
-const buf = Buffer.alloc(8);
-const buf = Buffer.allocUnsafe(8);
-
-// Supported encodings
-buf.toString('utf8')
-buf.toString('base64')
-buf.toString('hex')
-buf.toString('latin1')
-
-// Methods
-Buffer.isBuffer(obj)
-Buffer.byteLength(string, encoding)
-Buffer.concat(buffers)
+const buf2 = Buffer.alloc(8);
+buf.toString('utf8');
+buf.toString('base64');
+buf.toString('hex');
+Buffer.concat([buf, buf2]);
+Buffer.isBuffer(buf);   // true
 ```
 
-### 3.2.3 crypto
+### `fs` (`require('fs')`)
+
+Permission-gated (`--allow-read` / `--allow-write`).
 
 ```javascript
-const crypto = require('crypto');
-
-// Hash
-const hash = crypto.createHash('sha256');
-hash.update('data');
-console.log(hash.digest('hex'));
-
-// HMAC
-const hmac = crypto.createHmac('sha256', 'key');
-hmac.update('data');
-console.log(hmac.digest('hex'));
-
-// Random
-const bytes = crypto.randomBytes(16);
-
-// Utilities
-crypto.createCipheriv()
-crypto.createDecipheriv()
-crypto.sign()
-crypto.verify()
+const fs = require('fs');
+fs.readFileSync('/path/file', 'utf8');
+fs.writeFileSync('/path/file', 'content');
+fs.existsSync('/path/file');
+fs.mkdirSync('/path/dir', { recursive: true });
+fs.readdirSync('/path/dir');
+fs.statSync('/path/file');
+fs.unlinkSync('/path/file');
 ```
 
-### 3.2.4 Events
+### `events` (`require('events')`)
+
+Full JS EventEmitter:
 
 ```javascript
 const EventEmitter = require('events');
 
 class MyEmitter extends EventEmitter {}
-
 const emitter = new MyEmitter();
 
-emitter.on('event', (arg) => {
-    console.log('event:', arg);
-});
-
-emitter.emit('event', { data: 'value' });
-
-// Methods
-emitter.on(event, listener)
-emitter.once(event, listener)
-emitter.off(event, listener)
-emitter.emit(event, ...args)
-emitter.removeAllListeners(event)
+emitter.on('data', (chunk) => console.log(chunk));
+emitter.once('end', () => console.log('done'));
+emitter.emit('data', 'hello');
+emitter.off('data', handler);
+emitter.removeAllListeners('data');
 ```
 
-## 3.3 Web APIs Polyfills
+## 3.3 JS Stubs (compatibility shims)
 
-### 3.3.1 fetch
+These allow packages to `require()` the module without throwing, but provide minimal or no real I/O.
+
+### `crypto` (minimal stub)
 
 ```javascript
-// fetch available globally
-const response = await fetch('https://api.example.com/data');
-const json = await response.json();
+const crypto = require('crypto');
 
-// Request
-const req = new Request('/api', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key: 'value' })
-});
+// randomBytes — uses Math.random(), NOT cryptographically secure
+crypto.randomBytes(16);   // Uint8Array
 
-// Response
-new Response(JSON.stringify(data), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' }
-});
+// createHash — returns base64 of input, NOT a real hash
+const h = crypto.createHash('sha256');
+h.update('data');
+h.digest('hex');  // returns btoa(data), not SHA-256
 
-// AbortController
-const controller = new AbortController();
-fetch('/api', { signal: controller.signal });
-controller.abort();
+// createHmac — returns empty string
+const hmac = crypto.createHmac('sha256', 'key');
+hmac.update('data').digest('hex');  // ''
 ```
 
-### 3.3.2 TextEncoder/TextDecoder
+**Note:** `crypto.createHash` and `crypto.createHmac` are stubs — they do not produce correct cryptographic output. Use the `vvva_crypto` Rust crate for real hashing.
+
+### `http` / `https` (stub)
+
+`request()` and `get()` return a no-op emitter. No real HTTP is performed.
+
+### `net` / `tls` (stub)
+
+`createConnection()` returns an emitter. No real TCP connection.
+
+### `zlib` (stub)
+
+`gzip`/`gunzip`/`deflate`/`inflate` callbacks fire synchronously with identity (unchanged data).
+
+### `child_process` (stub)
+
+`exec(cmd, cb)` calls `cb(null, '', '')`. No real process is spawned.
+
+### `perf_hooks`
 
 ```javascript
-// TextEncoder
-const encoder = new TextEncoder();
-const encoded = encoder.encode('Hello');  // Uint8Array
-
-// TextDecoder
-const decoder = new TextDecoder('utf-8');
-const decoded = decoder.decode(encoded);  // "Hello"
-
-// With stream
-const transform = encoder.encodeStreaming(data);
+const { performance } = require('perf_hooks');
+performance.now();  // Date.now() — millisecond precision, not high-resolution
 ```
 
-### 3.3.3 URL and URLSearchParams
+## 3.4 `fetch` (global, Rust implementation)
 
 ```javascript
-// URL
-const url = new URL('https://user:pass@example.com:8080/path?query=1#hash');
-
-console.log(url.protocol);   // "https:"
-console.log(url.host);       // "example.com:8080"
-console.log(url.pathname);   // "/path"
-console.log(url.search);     // "?query=1"
-console.log(url.hash);       // "#hash"
-console.log(url.username);   // "user"
-console.log(url.password);   // "pass"
-
-// URLSearchParams
-const params = new URLSearchParams('foo=bar&baz=qux');
-params.get('foo');           // "bar"
-params.set('foo', 'new');
-params.append('extra', 'value');
-params.delete('baz');
+const res = await fetch('https://api.example.com/data');
+const json = await res.json();
 ```
 
-### 3.3.4 Performance
+Permission-gated (`--allow-net`). Implemented in `builtins/fetch.rs` via `ureq`. Does not support `AbortController`.
+
+## 3.5 `TextEncoder` / `TextDecoder` (global)
 
 ```javascript
-// Performance
-const start = performance.now();
+const enc = new TextEncoder();
+const bytes = enc.encode('hello');   // Uint8Array, UTF-8
 
-// ... code ...
-
-const end = performance.now();
-console.log(`Time: ${end - start}ms`);
-
-// Marks and measures
-performance.mark('start');
-// ... code ...
-performance.mark('end');
-performance.measure('total', 'start', 'end');
-
-// Navigation timing (partial)
-performance.timing;
-performance.navigation;
-```
-
-## 3.4 Security Polyfills
-
-### 3.4.1 Secure Fetch
-
-```rust
-// 3va's fetch implements:
-// 1. Permission verification
-// 2. URL validation
-// 3. Header sanitization
-// 4. Response size limits
-
-pub struct SecureFetch {
-    permissions: PermissionState,
-    max_response_size: usize,
-}
-
-impl SecureFetch {
-    pub async fn fetch(&self, url: &str, init: RequestInit) -> Result<Response> {
-        // Check network permission
-        let url_parsed = Url::parse(url)?;
-        if !self.permissions.check(&Capability::Network(url_parsed.host_str().unwrap_or(""))) {
-            return Err(Error::PermissionDenied);
-        }
-
-        // Check URL is not malicious
-        if url_parsed.username().is_some() && url_parsed.password().is_some() {
-            return Err(Error::SecurityError("URL with embedded credentials"));
-        }
-
-        // Fetch with limits
-        let response = self.raw_fetch(url, init).await?;
-
-        // Check size
-        if let Some(len) = response.content_length() {
-            if len > self.max_response_size {
-                return Err(Error::ResponseTooLarge);
-            }
-        }
-
-        Ok(response)
-    }
-}
-```
-
-## 3.5 Polyfill Registration
-
-### 3.5.1 PolyfillRegistry
-
-```rust
-pub struct PolyfillRegistry {
-    builtins: HashMap<String, Polyfill>,
-    globals: HashMap<String, Value>,
-}
-
-impl PolyfillRegistry {
-    pub fn init(context: &Context) -> anyhow::Result<()> {
-        // 1. Load built-in modules in context
-        // 2. Define globals
-        // 3. Configure resolveHook
-
-        Ok(())
-    }
-
-    pub fn register_builtin(&mut self, name: &str, module: Polyfill) {
-        self.builtins.insert(name.to_string(), module);
-    }
-}
-```
-
-### 3.5.2 Polyfill Configuration
-
-```javascript
-// In JavaScript: disable specific polyfills
-3va run app.ts --no-polyfill=fetch
-3va run app.ts --no-polyfill=stream
+const dec = new TextDecoder();
+const str = dec.decode(bytes);       // 'hello'
 ```
 
 ---
 
-*Polyfills conforming to Node.js API and WHATWG standards.*
+## 3.6 Planned Polyfills (not yet implemented)
+
+> **Status: PENDING** — these APIs appear in the compatibility roadmap. Using them currently throws `ReferenceError` or silently no-ops.
+
+### `AbortController` / `AbortSignal`
+
+```javascript
+// PLANNED
+const controller = new AbortController();
+fetch('/api', { signal: controller.signal });
+controller.abort(); // fires 'abort' on signal
+```
+
+### `ReadableStream` / `WritableStream` / `TransformStream`
+
+```javascript
+// PLANNED — streams pipeline
+const readable = new ReadableStream({ start(c) { c.enqueue('chunk'); c.close(); } });
+const writable = new WritableStream({ write(chunk) { console.log(chunk); } });
+await readable.pipeTo(writable);
+```
+
+### `Blob` / `File` / `FileReader`
+
+```javascript
+// PLANNED
+const blob = new Blob(['content'], { type: 'text/plain' });
+const text = await blob.text();
+
+const reader = new FileReader();
+reader.onload = (e) => console.log(e.target.result);
+reader.readAsText(blob);
+```
+
+### `URL` / `URLSearchParams` (global constructors)
+
+Currently accessible only via `require('url')` and `require('querystring')`. Planned as global constructors:
+
+```javascript
+// PLANNED as globals (currently: require('url').parse())
+const url = new URL('https://example.com/path?q=1');
+const params = new URLSearchParams('foo=bar&baz=qux');
+params.get('foo'); // 'bar'
+```
+
+### Real `crypto` (Web Crypto API)
+
+The current `crypto` stub uses `Math.random()` and `btoa()`. Full Web Crypto API planned for v0.3.0:
+
+```javascript
+// PLANNED — requires ml-kem + ml-dsa crates
+const bytes = crypto.getRandomValues(new Uint8Array(16)); // real CSPRNG
+const hash = await crypto.subtle.digest('SHA-256', data);
+```
+
+---
+
+*Rust builtins in `crates/js/src/builtins/`. JS stubs in `crates/js/src/builtins/modules.rs`.*

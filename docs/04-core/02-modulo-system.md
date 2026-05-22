@@ -6,179 +6,124 @@
 
 ## 2.2 Built-in Modules
 
-### 2.2.1 Available Core Modules
+### 2.2.1 Module Status
 
 | Module | Description | Status |
 |--------|-------------|--------|
-| buffer | Binary data buffer | Implemented |
-| console | Output console | Implemented |
-| crypto | Cryptography | Partial |
-| events | EventEmitter | Implemented |
-| fs | File system | Partial |
-| http | HTTP client/server | Partial |
-| https | HTTP with TLS | To implement |
-| net | TCP/UDP sockets | To implement |
-| os | System information | Implemented |
-| path | Path utilities | Implemented |
-| process | Current process | Implemented |
-| querystring | Query string parsing | Implemented |
-| stream | Data streams | Partial |
-| tls | TLS/SSL | To implement |
-| url | URL parsing | Implemented |
-| util | Various utilities | Implemented |
-| zlib | Compression | To implement |
+| `buffer` | Binary data buffer | Rust builtin (`builtins/buffer.rs`) |
+| `console` | Output console | Rust builtin (`builtins/console.rs`) |
+| `crypto` | Hashing, random | JS stub (SHA-256 via WebCrypto, `Math.random`) |
+| `events` | EventEmitter | JS implementation (in `modules.rs`) |
+| `fs` | File system | Rust builtin (`builtins/fs.rs`, permission-gated) |
+| `http` / `https` | HTTP client/server | JS stub — `request()` returns no-op emitter |
+| `net` / `tls` | TCP/UDP sockets | JS stub — `createConnection()` returns emitter |
+| `os` | System information | JS stub (static values: `platform`, `hostname`) |
+| `path` | Path utilities | JS implementation (in `modules.rs`) |
+| `process` | Current process | Rust builtin (`builtins/process.rs`) |
+| `querystring` | Query string parsing | JS implementation (in `modules.rs`) |
+| `stream` | Data streams | JS stub (Readable/Writable/Transform classes) |
+| `tls` | TLS/SSL | JS stub — same as `net` |
+| `url` | URL parsing | JS implementation (in `modules.rs`) |
+| `util` | Various utilities | JS implementation (`inherits`, `promisify`, etc.) |
+| `zlib` | Compression | JS stub — callbacks fire synchronously with identity |
+| `child_process` | Process spawning | JS stub — `exec` cb returns empty stdout |
+| `http2` | HTTP/2 | JS stub — `connect()` returns emitter |
 
-### 2.2.2 Module Implementation
+**Rust builtins** are implemented as native Rust functions exposed to QuickJS via `rquickjs`.
 
-#### console
-```rust
-// Implementation in crates/js/src/builtins/console.rs
-pub struct Console;
+**JS stubs** exist in the inline JS block inside `crates/js/src/builtins/modules.rs`. They allow packages that `require()` these modules to load without throwing, while not providing real I/O. Full implementations require exposing TCP/filesystem primitives directly in QuickJS and are planned after the QuickJS+Tokio event loop integration.
 
-impl Console {
-    pub fn log(&self, args: Vec<Value>) { ... }
-    pub fn error(&self, args: Vec<Value>) { ... }
-    pub fn warn(&self, args: Vec<Value>) { ... }
-    pub fn info(&self, args: Vec<Value>) { ... }
-    pub fn debug(&self, args: Vec<Value>) { ... }
-    pub fn trace(&self, args: Vec<Value>) { ... }
-    pub fn dir(&self, obj: Value) { ... }
-    pub fn table(&self, data: Value) { ... }
-    pub fn time(&self, label: String) { ... }
-    pub fn timeEnd(&self, label: String) { ... }
-    pub fn group(&self) { ... }
-    pub fn groupEnd(&self) { ... }
-}
-```
+### 2.2.2 Notable Implementations
 
-#### buffer
-```rust
-// Implementation in crates/js/src/builtins/buffer.rs
-pub struct Buffer;
+#### console (`builtins/console.rs`)
 
-impl Buffer {
-    pub fn from(data: &[u8]) -> Buffer { ... }
-    pub fn to_string(&self, encoding: &str) -> String { ... }
-    pub fn write(&mut self, data: &[u8]) -> usize { ... }
-    pub fn concat(&self, buffers: &[Buffer]) -> Buffer { ... }
-}
-```
+Rust implementation. Supports: `log`, `error`, `warn`, `info`, `debug`, `trace`, `dir`, `table`, `time`, `timeEnd`, `group`, `groupEnd`.
 
-#### events
-```rust
-// Implementation in crates/js/src/builtins/events.rs
-pub struct EventEmitter {
-    listeners: HashMap<String, Vec<Function>>,
-}
+#### buffer (`builtins/buffer.rs`)
 
-impl EventEmitter {
-    pub fn on(&mut self, event: String, handler: Function) { ... }
-    pub fn once(&mut self, event: String, handler: Function) { ... }
-    pub fn emit(&mut self, event: String, args: Vec<Value>) -> bool { ... }
-    pub fn off(&mut self, event: String, handler: Option<Function>) { ... }
-    pub fn removeAllListeners(&mut self, event: Option<String>) { ... }
-}
-```
+Rust implementation. Supports: `Buffer.from()`, `Buffer.alloc()`, `Buffer.concat()`, `buf.toString(encoding)`.
+
+#### events (JS in `modules.rs`)
+
+JS `EventEmitter` class with: `on`, `once`, `emit`, `off`, `removeAllListeners`, `listeners`, `listenerCount`.
+
+#### fs (`builtins/fs.rs`)
+
+Permission-gated. Requires `--allow-read` / `--allow-write`. Supports: `readFileSync`, `writeFileSync`, `existsSync`, `mkdirSync`, `readdirSync`, `statSync`, `unlinkSync`.
+
+---
 
 ## 2.3 Module Loading
 
 ### 2.3.1 Resolution Algorithm
 
 ```
-1. If absolute or relative URL:
+1. Check __requireCache (built-in stubs registered at startup)
+2. If absolute or relative path:
    - Resolve against __dirname
-2. If package lookup:
-   - Search in node_modules
-   - Resolve main in package.json
-   - Search index.js, index.ts
-3. If built-in:
-   - Return native module
-4. If not found:
-   - Throw MODULE_NOT_FOUND
+   - Try: exact path, + .js, + .ts, + /index.js, + /index.ts
+3. If bare specifier (package name):
+   - Search node_modules/
+   - Resolve main/exports in package.json
+   - Try index.js, index.ts
+4. If not found → throw MODULE_NOT_FOUND
 ```
 
-### 2.3.2 Extension Mapping
+### 2.3.2 Extension Handling
 
 | Extension | Action |
 |-----------|--------|
-| .mjs | Treat as ESM |
-| .cjs | Treat as CJS |
-| .js | According to package.json type |
-| .ts | Transpile to JS |
-| .tsx | Transpile to JSX |
-| .jsx | Transpile to JS |
+| `.mjs` | Treated as ESM |
+| `.cjs` | Treated as CJS |
+| `.js` | ESM or CJS depending on `package.json "type"` |
+| `.ts` | Transpiled to JS via Oxc |
+| `.tsx` | Transpiled (TSX → JS) |
+| `.jsx` | Transpiled (JSX → JS) |
 
 ### 2.3.3 Module Cache
 
-```rust
-pub struct ModuleCache {
-    modules: HashMap<PathBuf, Module>,
-    esm_cache: HashMap<Url, Module>,
-}
+All loaded modules are cached in `globalThis.__requireCache` (for CJS stubs) and via QuickJS's internal module registry (for ESM). This prevents double-evaluation and ensures singleton semantics.
 
-impl ModuleCache {
-    pub fn get(&self, key: &ModuleKey) -> Option<&Module> { ... }
-    pub fn set(&mut self, key: ModuleKey, module: Module) { ... }
-    pub fn clear(&mut self) { ... }
-}
-```
+---
 
-## 2.4 CommonJS
-
-### 2.4.1 require() Implementation
+## 2.4 CommonJS (`require()`)
 
 ```javascript
-// In 3va environment
 const fs = require('fs');
 const _ = require('lodash');
 
-// With exports
 module.exports = { foo: 'bar' };
 module.exports.foo = 'bar';
 ```
 
-### 2.4.2 Module Wrapping
+CJS modules are wrapped in the standard envelope:
 
-All CJS code is wrapped in:
 ```javascript
 (function(exports, require, module, __filename, __dirname) {
-    // user code
+    // module code
 })(exports, require, module, filename, dirname);
 ```
 
-## 2.5 ESM
+---
 
-### 2.5.1 Import/Export
+## 2.5 ECMAScript Modules (ESM)
 
 ```javascript
-// Named imports
-import { foo, bar } from './module';
-
-// Default import
+import { foo } from './module';
 import defaultExport from './module';
+import * as ns from './module';
 
-// Namespace import
-import * as namespace from './module';
-
-// Named exports
 export const foo = 'bar';
-export function test() { }
-
-// Default export
-export default function() { }
+export default function() {}
 ```
 
-### 2.5.2 Top-level await
+Top-level `await` is supported in ESM context.
 
-```javascript
-// Available in ESM modules
-const data = await fetch('/api/data');
-export default data;
-```
+---
 
-## 2.6 Package.json Integration
+## 2.6 `package.json` Integration
 
-### 2.6.1 main Resolution
+### 2.6.1 `main` and `exports` fields
 
 ```json
 {
@@ -205,4 +150,4 @@ export default data;
 
 ---
 
-*Modules conforming to Node.js specifications and ECMAScript standards.*
+*Built-in stubs implemented in `crates/js/src/builtins/modules.rs`. Rust builtins in `crates/js/src/builtins/`.*

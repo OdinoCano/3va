@@ -5,14 +5,13 @@
 - [01-resumen-ejecutivo.md](01-intro/01-resumen-ejecutivo.md) - Executive summary of the project
 - [02-alcance.md](01-intro/02-alcance.md) - Scope and objectives
 - [03-definiciones.md](01-intro/03-definiciones.md) - Definitions and abbreviations
-- [04-referencias.md](01-intro/04-referencias.md) - Normative references
 
 ## Volume 2: System Architecture
 
 - [01-arquitectura-general.md](02-arquitectura/01-arquitectura-general.md) - General system architecture
 - [02-diseno-componentes.md](02-arquitectura/02-diseno-componentes.md) - Component design
 - [03-interfaces.md](02-arquitectura/03-interfaces.md) - Interfaces and communication
-- [04-flujos-datos.md](02-arquitectura/04-flujos-datos.md) - Data flows
+- [04-execucion-del-script.md](02-arquitectura/04-execucion-del-script.md) - Script execution flow
 
 ## Volume 3: CLI Specification
 
@@ -52,14 +51,16 @@
 ## Volume 8: Bundler
 
 - [01-especificacion-bundler.md](08-bundler/01-especificacion-bundler.md) - Bundler specification
-- [02-transpilation.md](08-bundler/02-transpilation.md) - TS/JSX transpilation
-- [03-tree-shaking.md](08-bundler/03-tree-shaking.md) - Tree shaking
-- [04-code-splitting.md](08-bundler/04-code-splitting.md) - Code splitting
+- [02-arquitectura.md](08-bundler/02-arquitectura.md) - Internal architecture and output formats
+- [03-transpilation.md](08-bundler/03-transpilation.md) - TS/JSX transpilation
+- [04-tree-shaking.md](08-bundler/04-tree-shaking.md) - Tree shaking
+- [05-code-splitting.md](08-bundler/05-code-splitting.md) - Code splitting
 
 ## Volume 9: Test Runner
 
 - [01-especificacion-tests.md](09-testing/01-especificacion-tests.md) - Test specification
 - [02-matchers.md](09-testing/02-matchers.md) - Matchers and assertions
+- [03-coverage.md](09-testing/03-coverage.md) - Coverage report
 - [03-snapshots.md](09-testing/03-snapshots.md) - Snapshots
 - [04-watch-mode.md](09-testing/04-watch-mode.md) - Watch mode
 - [05-scripts.md](09-testing/05-scripts.md) - Test and verification scripts
@@ -94,7 +95,7 @@
 
 **Document Identifier:** 3VA-SPEC-2026-001
 **Version:** 1.1.0
-**Date:** 2026-05-19
+**Date:** 2026-05-22
 **Classification:** Public
 **Status:** Draft
 

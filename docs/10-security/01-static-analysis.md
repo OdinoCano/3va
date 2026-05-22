@@ -1,68 +1,103 @@
-# 01 - STATIC ANALYSIS
+# 01 - STATIC SECURITY ANALYSIS
 
-## 1.1 Code Analysis
+## 1.1 Overview
 
-The static analysis module examines JavaScript/TypeScript code for vulnerabilities.
+3va performs static security analysis on package code during installation and via the `audit` command. Analysis runs entirely in Rust — no external tools required.
 
-## 1.2 Vulnerability Detection
+Two analyzers are implemented:
 
-| Type | Description | Severity |
-|------|-------------|-----------|
-| XSS | Cross-site scripting | Critical |
-| SQLi | SQL injection | Critical |
-| RCE | Remote code execution | Critical |
-| Path Traversal | Path traversal | High |
-| Command Injection | Command injection | Critical |
-| XXE | XML external entity | High |
-| Insecure Deserialization | Insecure deserialization | High |
-| Weak Crypto | Weak cryptography | Medium |
+| Analyzer | Crate | Command |
+|----------|-------|---------|
+| Malware scanner | `vvva_pm::MalwareScanner` | `3va audit` (Phase 1) |
+| Secrets scanner | `vvva_pm::SecretsScanner` | `3va audit --secrets` (Phase 3) |
 
-## 1.3 Rules
+## 1.2 Malware Scanner
 
-```javascript
-// Detected: eval() with user input
-eval(userInput); // ALERT: Code injection
+Scans installed code in `node_modules/` for known malicious patterns using both raw text matching and AST traversal (via Oxc).
 
-// Detected: innerHTML with input
-element.innerHTML = userData; // ALERT: XSS
+### Detected patterns
 
-// Detected: SQL concatenation
-query("SELECT * FROM " + table); // ALERT: SQLi
-```
+| Pattern | Description | Severity |
+|---------|-------------|----------|
+| `rm -rf /` | Destructive recursive delete | Critical |
+| `rm -rf $` | Recursive delete with variable | High |
+| `> /etc/passwd` | Overwriting system files | Critical |
+| `chmod 777` | World-writable permissions | High |
+| `curl \| sh` | Pipe to shell execution | Critical |
+| `wget \| sh` | Wget pipe to shell | Critical |
+| `:(){ :\|:& };:` | Fork bomb | Critical |
+| `exfiltrat` | Data exfiltration attempt | High |
+| `eval(atob` | Base64-decode eval | High |
+| `fromCharCode` | Character-code obfuscation | Medium |
+| `cryptonight` / `coinhive` | Cryptocurrency mining | High |
+| `backdoor` | Backdoor reference | Critical |
+| `remote code execution` | RCE reference | High |
 
-## 1.4 Integration
+### Usage
 
 ```bash
-# Run analysis
-3va analyze
+# Runs automatically during install
+3va install axios --allow-net=registry.npmjs.org
 
-# In build
-3va build --security-scan
-
-# Configuration
-// 3va.config.js
-module.exports = {
-  security: {
-    scan: true,
-    rules: ["xss", "sqli", "rce"],
-    severityThreshold: "medium"
-  }
-};
+# Explicit audit (malware is Phase 1)
+3va audit
+3va audit --json
 ```
 
-## 1.5 Output
+## 1.3 Secrets Scanner
 
-```json
-{
-  "file": "src/user.js",
-  "line": 10,
-  "rule": "xss",
-  "severity": "critical",
-  "message": "Potential XSS: innerHTML",
-  "suggestion": "Use textContent instead"
-}
+Scans source files for hardcoded secrets using 16 regex patterns.
+
+### Detected secret types
+
+| Pattern | Example match |
+|---------|--------------|
+| AWS access key | `AKIA[0-9A-Z]{16}` |
+| GitHub PAT (classic) | `ghp_[A-Za-z0-9]{36}` |
+| GitHub App token | `ghs_`, `gho_` |
+| GitLab token | `glpat-` |
+| Stripe secret key | `sk_live_` |
+| Slack token | `xox[baprs]-` |
+| SendGrid key | `SG\.` |
+| Twilio token | `SK[0-9a-f]{32}` |
+| PEM private key | `-----BEGIN ... PRIVATE KEY-----` |
+| JWT | `eyJ[A-Za-z0-9_-]+\.eyJ` |
+| npm token | `npm_[A-Za-z0-9]{36}` |
+| Generic password | `password\s*=\s*"[^"]{8,}"` |
+| Generic API key | `api[_-]?key\s*=\s*"[^"]{16,}"` |
+| DB connection string | `(postgres\|mysql\|mongodb):\/\/` |
+
+### Severity levels
+
+| Severity | Examples |
+|----------|---------|
+| Critical | PEM private key, AWS key |
+| High | GitHub token, Stripe key, JWT |
+| Medium | Generic password, API key |
+| Low | DB connection string (may be dev) |
+
+### Usage
+
+```bash
+# Secrets scan is Phase 3 of audit (requires --secrets)
+3va audit --secrets
+3va audit --secrets --json
+3va audit --secrets --deny   # exit 9 on findings
 ```
+
+## 1.4 Scope
+
+**What static analysis covers:**
+- Installed packages in `node_modules/`
+- Code extracted from tarballs during `install`
+
+**What it does NOT cover:**
+- General-purpose SAST for user code (XSS, SQLi, path traversal detection in application code)
+- Runtime sandboxing (handled by the permission system — see `06-permissions/`)
+- Binary analysis
+
+Advanced SAST (XSS, SQLi, RCE detection in user application code) is planned for a future version.
 
 ---
 
-*Static analysis based on OWASP and ESLint security.*
+*Malware scanner in `crates/pm/src/malware_scanner.rs`. Secrets scanner in `crates/pm/src/secrets.rs`.*

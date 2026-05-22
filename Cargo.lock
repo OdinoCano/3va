@@ -3044,6 +3044,7 @@ dependencies = [
  "regex-lite",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "vvva_pm",
 ]

@@ -85,4 +85,4 @@ This mode is used internally by `3va dev` and is not intended to be invoked dire
 
 ---
 
-*Bundler implemented in `crates/bundler/src/` (`bundler.rs`, `tree_shaker.rs`, `code_splitter.rs`, `minifier.rs`).*
+*Bundler implemented in `crates/bundler/src/` (`lib.rs`, `generator.rs`, `tree_shaker.rs`, `resolver.rs`).*
