@@ -14,23 +14,10 @@ The 3va command line interface (CLI) is the primary entry point for all system o
 ### 1.2.2 Global Options
 Global options are available for all commands:
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| --help, -h | Shows help | - |
-| --version, -v | Shows version | - |
-| --verbose, -V | Verbose output | false |
-| --quiet, -q | Suppresses output | false |
-| --json | JSON-formatted output | false |
-| --config | Configuration file | ~/.3va/config.json |
-
-### 1.2.3 Verbosity Level
-```
-0: error      - Only critical errors
-1: warn       - Warnings and errors
-2: info       - General information (default)
-3: debug      - Detailed debugging
-4: trace      - Full traces
-```
+| Option | Description |
+|--------|-------------|
+| --help, -h | Shows help |
+| --version, -v | Shows version |
 
 ## 1.3 Subcommands
 
@@ -38,16 +25,17 @@ Global options are available for all commands:
 Executes a JavaScript or TypeScript file with the 3va runtime.
 
 ```
-3va run [OPTIONS] <FILE> [-- <SCRIPT_ARGS>...]
+3va run [OPTIONS] <FILE>
 ```
 
-**Specific options:**
-| Option | Description |
-|--------|-------------|
-| --inspect | Enables Chrome inspector |
-| --inspect-brk | Inspector with initial breakpoint |
-| --watch | Auto-reload on changes |
-| --env | Environment variables as JSON |
+**Permission flags:**
+| Flag | Description |
+|------|-------------|
+| --allow-read[=PATH] | Allow file read access |
+| --allow-write[=PATH] | Allow file write access |
+| --allow-net[=HOST] | Allow network access |
+| --allow-env | Allow environment variable access |
+| --allow-child-process | Allow spawning child processes |
 
 **Example:**
 ```bash
@@ -58,82 +46,138 @@ Executes a JavaScript or TypeScript file with the 3va runtime.
 Installs one or more packages from the registry.
 
 ```
-3va install [OPTIONS] <PACKAGE>[@<VERSION>]...
+3va install [<PACKAGE[@VERSION]>] [--allow-net=HOST]
 ```
 
-**Specific options:**
+If no package is specified, installs all dependencies listed in `package.json`.
+
+**Options:**
 | Option | Description |
 |--------|-------------|
-| --save | Adds to dependencies |
-| --save-dev | Adds to devDependencies |
-| --save-peer | Adds to peerDependencies |
-| --global | Global installation |
-| --allow-net | Allow network access |
+| --allow-net | Registry host(s) to allow (e.g. `registry.npmjs.org`) |
 
 **Example:**
 ```bash
-3va install axios lodash --save
+3va install axios
+3va install axios@1.7.9 --allow-net=registry.npmjs.org
 ```
 
 ### 1.3.3 Command: test
 Runs the test suite.
 
 ```
-3va test [OPTIONS] [FILES_OR_PATTERNS]...
+3va test [OPTIONS] [FILES_OR_DIRS]...
 ```
 
-**Specific options:**
+**Options:**
 | Option | Description |
 |--------|-------------|
-| --watch | Watch mode |
-| --coverage | Generate coverage |
-| --update-snapshots | Update snapshots |
-| --bail | Stop on first failure |
-| --test-name-pattern | Filter by name |
+| --watch, -w | Watch mode — re-runs on file changes |
+| --coverage | Generate statement-level coverage report |
+| --update-snapshots, -u | Update snapshots instead of failing on mismatch |
+
+No support for `--bail` or `--test-name-pattern`.
 
 **Example:**
 ```bash
-3va test --coverage --bail
+3va test
+3va test tests/ --coverage
+3va test --watch
 ```
 
-### 1.3.4 Command: build
+### 1.3.4 Command: bundle
 Bundles code for distribution.
 
 ```
-3va build [OPTIONS] <ENTRY_FILE>
+3va bundle [OPTIONS] <ENTRY_FILE>
 ```
 
-**Specific options:**
+**Options:**
 | Option | Description |
 |--------|-------------|
-| --out-dir | Output directory |
-| --format | Format: esm, cjs, iife |
-| --target | Target: node, browser, webworker |
+| --output, -o | Output file path (default: `dist/bundle.js`) |
+| --split | Enable code splitting (creates separate chunks) |
 | --minify | Minify output |
-| --source-map | Generate source maps |
+| --source-map | Generate source map |
 
 **Example:**
 ```bash
-3va build index.ts --out-dir ./dist --minify
+3va bundle index.ts --output dist/app.js --minify --source-map
 ```
 
-### 1.3.5 Command: eval
-Evaluates inline JavaScript code.
+### 1.3.5 Command: dev
+Development server with hot module replacement.
 
 ```
-3va eval [OPTIONS] <CODE>
+3va dev [OPTIONS]
 ```
 
-**Specific options:**
+**Options:**
 | Option | Description |
 |--------|-------------|
-| --print | Prints the result |
-| --json | JSON output |
+| --port, -p | Port to listen on (default: 3000) |
+| --host | Host to bind to (default: 127.0.0.1) |
+| --open | Open browser automatically |
+| --public-dir | Public directory for static assets (default: `public`) |
 
 **Example:**
 ```bash
-3va eval "console.log('Hello ' + 3va')"
+3va dev --port 8080 --open
 ```
+
+### 1.3.6 Command: audit
+Runs a 3-phase security audit (malware + CVE + secrets) on installed packages.
+
+```
+3va audit [OPTIONS]
+```
+
+**Options:**
+| Option | Description |
+|--------|-------------|
+| --deny | Exit with error code 9 if vulnerabilities are found |
+| --json | JSON-formatted output |
+| --secrets | Include secrets scan in output |
+| --update-cache | Force refresh of the OSV advisory cache |
+
+**Example:**
+```bash
+3va audit --deny
+3va audit --json --secrets
+```
+
+### 1.3.7 Command: sandbox
+Opens an interactive JavaScript REPL with isolated permissions.
+
+```
+3va sandbox
+```
+
+**REPL commands:**
+| Command | Description |
+|---------|-------------|
+| .help | Show available commands |
+| .exit / .quit | Exit the sandbox |
+| .clear | Clear the current buffer |
+| .allow-read | Grant read permission |
+| .allow-net | Grant network permission |
+| .permissions | Show current permissions |
+
+### 1.3.8 Command: doctor
+Checks the environment and reports missing dependencies or misconfigurations.
+
+```
+3va doctor
+```
+
+### 1.3.9 Commands: update / reinstall
+
+```
+3va update [PACKAGES...] [--allow-net=HOST]
+3va reinstall <PACKAGE[@VERSION]> [--allow-net=HOST]
+```
+
+`update` upgrades all packages in the lockfile (or specified packages) while preserving their original registry. `reinstall` force-reinstalls a single package.
 
 ## 1.4 Permission Flags
 
@@ -146,26 +190,16 @@ Permissions follow the "deny by default" principle. Permission flags allow granu
 | Flag | Resource | Description |
 |------|----------|-------------|
 | --allow-read | File system | Allows reading files |
-| --allow-read= | Specific path | Allows reading a specific path |
+| --allow-read=PATH | Specific path | Allows reading a specific path |
 | --allow-write | File system | Allows writing files |
-| --allow-write= | Specific path | Allows writing to a specific path |
+| --allow-write=PATH | Specific path | Allows writing to a specific path |
 | --allow-net | Network | Allows network connections |
-| --allow-net= | Hostname/IP | Allows connecting to a specific host |
+| --allow-net=HOST | Hostname/IP | Allows connecting to a specific host |
 | --allow-env | Environment | Allows accessing environment variables |
 | --allow-child-process | Processes | Allows creating child processes |
 | --allow-ffi | FFI | Allows native function calls |
 
-### 1.4.3 Deny Flags
-
-| Flag | Description |
-|------|-------------|
-| --deny-read | Denies file read |
-| --deny-write | Denies file write |
-| --deny-net | Denies network connections |
-| --deny-env | Denies environment access |
-| --deny-child-process | Denies process creation |
-
-### 1.4.4 Permission Examples
+### 1.4.3 Permission Examples
 
 ```bash
 # Allow read-only access to current directory
@@ -177,8 +211,8 @@ Permissions follow the "deny by default" principle. Permission flags allow granu
 # Full permissions for development
 3va run dev.ts --allow-read --allow-write --allow-net --allow-env --allow-child-process
 
-# Deny environment but allow network
-3va run app.ts --deny-env --allow-net
+# Install from npm
+3va install express --allow-net=registry.npmjs.org
 ```
 
 ## 1.5 Error Management
@@ -190,34 +224,12 @@ Permissions follow the "deny by default" principle. Permission flags allow granu
 | 0 | Success | Execution completed |
 | 1 | General error | Unknown failure |
 | 2 | Usage error | Invalid arguments |
-| 3 | Configuration error | Invalid config |
 | 4 | Permission error | Permission denied |
 | 5 | Module error | Module not found |
 | 6 | Runtime error | JS error |
 | 7 | Bundle error | Build error |
 | 8 | Test error | Test failed |
 | 9 | Security error | Vulnerability detected |
-
-### 1.5.2 Error Message Format
-
-**Text mode:**
-```
-Error: Permission denied: FileRead(/etc/passwd)
-  --> app.ts:5:1
-```
-
-**JSON mode:**
-```json
-{
-  "error": "permission_denied",
-  "message": "Permission denied: FileRead(/etc/passwd)",
-  "location": {
-    "file": "app.ts",
-    "line": 5,
-    "column": 1
-  }
-}
-```
 
 ---
 

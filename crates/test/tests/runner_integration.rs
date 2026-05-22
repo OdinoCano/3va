@@ -345,3 +345,221 @@ async fn runner_reports_syntax_error_as_failed_test() {
         "error de sintaxis debe reportarse como test fallido"
     );
 }
+
+// ── Watch mode (biblioteca) ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn watch_mode_reruns_produce_consistent_results() {
+    // Simulates what --watch does: run tests, source changes, run again.
+    // Validates that TestRunner is stateless enough to reuse across runs.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("watch.test.js");
+
+    fs::write(&path, "test('v1', () => { expect(1 + 1).toBe(2); });").unwrap();
+
+    // Primera pasada (archivo pasa)
+    let mut runner1 = TestRunner::new(TestConfig::default());
+    runner1.run_file(&path).await.unwrap();
+    assert_eq!(runner1.get_results()[0].status, TestStatus::Passed);
+
+    // Simula cambio de archivo: introduce un fallo
+    fs::write(&path, "test('v2', () => { expect(1).toBe(99); });").unwrap();
+
+    // Segunda pasada (archivo falla)
+    let mut runner2 = TestRunner::new(TestConfig::default());
+    runner2.run_file(&path).await.unwrap();
+    assert_eq!(runner2.get_results()[0].status, TestStatus::Failed);
+
+    // Simula corrección: vuelve a pasar
+    fs::write(&path, "test('v3', () => { expect('ok').toBe('ok'); });").unwrap();
+
+    let mut runner3 = TestRunner::new(TestConfig::default());
+    runner3.run_file(&path).await.unwrap();
+    assert_eq!(runner3.get_results()[0].status, TestStatus::Passed);
+}
+
+#[tokio::test]
+async fn watch_mode_directory_reruns_pick_up_new_files() {
+    // Verifica que run_directory puede ejecutarse varias veces sobre el mismo
+    // directorio y detectar archivos añadidos entre pasadas.
+    let dir = TempDir::new().unwrap();
+
+    fs::write(
+        dir.path().join("existing.test.js"),
+        "test('existente', () => { expect(true).toBe(true); });",
+    )
+    .unwrap();
+
+    let mut runner1 = TestRunner::new(TestConfig::default());
+    runner1.run_directory(dir.path()).await.unwrap();
+    assert_eq!(runner1.get_results().len(), 1);
+
+    // Añade un segundo archivo (simula creación durante watch)
+    fs::write(
+        dir.path().join("nuevo.test.js"),
+        "test('nuevo', () => { expect(42).toBeGreaterThan(0); });",
+    )
+    .unwrap();
+
+    let mut runner2 = TestRunner::new(TestConfig::default());
+    runner2.run_directory(dir.path()).await.unwrap();
+    assert_eq!(runner2.get_results().len(), 2);
+    assert!(runner2.get_results().iter().all(|r| r.status == TestStatus::Passed));
+}
+
+// ── Lifecycle hooks ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn hooks_beforeeach_and_aftereach_run_per_test() {
+    let (_dir, path) = temp_test(
+        r#"
+        var log = [];
+        beforeEach(() => { log.push('before'); });
+        afterEach(()  => { log.push('after');  });
+
+        test('primero', () => {
+            expect(log).toEqual(['before']);
+        });
+        test('segundo', () => {
+            // after del primero + before del segundo
+            expect(log).toEqual(['before', 'after', 'before']);
+        });
+        "#,
+        "lifecycle_each.test.js",
+    );
+
+    let mut runner = TestRunner::new(TestConfig::default());
+    runner.run_file(&path).await.unwrap();
+
+    let results = runner.get_results();
+    assert_eq!(results.len(), 2);
+    assert!(
+        results.iter().all(|r| r.status == TestStatus::Passed),
+        "ambos tests deben pasar: {:?}",
+        results.iter().filter(|r| r.status != TestStatus::Passed).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn hooks_beforeall_and_afterall_run_once() {
+    let (_dir, path) = temp_test(
+        r#"
+        var calls = [];
+        beforeAll(() => { calls.push('beforeAll'); });
+        afterAll(()  => { calls.push('afterAll');  });
+
+        test('a', () => {
+            expect(calls).toEqual(['beforeAll']);
+        });
+        test('b', () => {
+            expect(calls).toEqual(['beforeAll']);
+        });
+        "#,
+        "lifecycle_all.test.js",
+    );
+
+    let mut runner = TestRunner::new(TestConfig::default());
+    runner.run_file(&path).await.unwrap();
+
+    let results = runner.get_results();
+    assert_eq!(results.len(), 2);
+    assert!(
+        results.iter().all(|r| r.status == TestStatus::Passed),
+        "beforeAll debe ejecutarse una sola vez antes de todos los tests: {:?}",
+        results.iter().filter(|r| r.status != TestStatus::Passed).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn hooks_scoped_to_describe_block() {
+    let (_dir, path) = temp_test(
+        r#"
+        var outer = [];
+
+        beforeEach(() => { outer.push('outer-before'); });
+
+        describe('Grupo', () => {
+            var inner = [];
+            beforeEach(() => { inner.push('inner-before'); });
+            afterEach(()  => { inner.push('inner-after');  });
+
+            test('dentro del describe', () => {
+                // outer beforeEach + inner beforeEach both ran
+                expect(outer).toEqual(['outer-before']);
+                expect(inner).toEqual(['inner-before']);
+            });
+        });
+
+        test('fuera del describe', () => {
+            // inner hooks must NOT run here
+            expect(outer).toEqual(['outer-before', 'outer-before']);
+        });
+        "#,
+        "lifecycle_scoped.test.js",
+    );
+
+    let mut runner = TestRunner::new(TestConfig::default());
+    runner.run_file(&path).await.unwrap();
+
+    let results = runner.get_results();
+    assert_eq!(results.len(), 2);
+    assert!(
+        results.iter().all(|r| r.status == TestStatus::Passed),
+        "hooks deben estar correctamente acotados al describe: {:?}",
+        results.iter().filter(|r| r.status != TestStatus::Passed).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn hooks_beforeall_failure_fails_all_tests_in_scope() {
+    let (_dir, path) = temp_test(
+        r#"
+        beforeAll(() => { throw new Error('setup roto'); });
+
+        test('test 1', () => { expect(1).toBe(1); });
+        test('test 2', () => { expect(2).toBe(2); });
+        "#,
+        "lifecycle_beforeall_fail.test.js",
+    );
+
+    let mut runner = TestRunner::new(TestConfig::default());
+    runner.run_file(&path).await.unwrap();
+
+    let results = runner.get_results();
+    assert_eq!(results.len(), 2);
+    assert!(
+        results.iter().all(|r| r.status == TestStatus::Failed),
+        "si beforeAll falla, todos los tests del scope deben fallar"
+    );
+    assert!(
+        results[0].error.as_deref().unwrap_or("").contains("setup roto"),
+        "el error debe mencionar la causa"
+    );
+}
+
+#[tokio::test]
+async fn hooks_beforeeach_failure_fails_only_that_test() {
+    let (_dir, path) = temp_test(
+        r#"
+        var count = 0;
+        beforeEach(() => {
+            count++;
+            if (count === 2) throw new Error('beforeEach en test 2');
+        });
+
+        test('test 1', () => { expect(1).toBe(1); });
+        test('test 2 falla en setup', () => { expect(2).toBe(2); });
+        test('test 3', () => { expect(3).toBe(3); });
+        "#,
+        "lifecycle_beforeeach_fail.test.js",
+    );
+
+    let mut runner = TestRunner::new(TestConfig::default());
+    runner.run_file(&path).await.unwrap();
+
+    let results = runner.get_results();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].status, TestStatus::Passed, "test 1 debe pasar");
+    assert_eq!(results[1].status, TestStatus::Failed,  "test 2 debe fallar por beforeEach");
+    assert_eq!(results[2].status, TestStatus::Passed, "test 3 debe pasar");
+}

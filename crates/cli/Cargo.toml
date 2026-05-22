@@ -22,3 +22,6 @@ vvva_js = { path = "../js" }
 vvva_permissions = { path = "../permissions" }
 vvva_bundler = { version = "0.1.0", path = "../bundler" }
 vvva_test = { version = "0.1.0", path = "../test" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -40,4 +40,4 @@ Watch mode monitors the filesystem and automatically re-runs all tests when it d
 
 ---
 
-*Watch mode implemented in `crates/test/src/runner.rs` using the `notify` crate.*
+*Watch mode implemented in `crates/cli/src/main.rs` (`run_test_watch_mode`) using the `notify` crate. The `TestRunner` from `crates/test/src/runner.rs` is invoked on each re-run.*
