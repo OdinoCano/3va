@@ -208,7 +208,9 @@ pub struct SecretsScanner {
 
 impl SecretsScanner {
     pub fn new() -> Self {
-        Self { patterns: build_patterns() }
+        Self {
+            patterns: build_patterns(),
+        }
     }
 
     /// Scan a single source string.
@@ -256,8 +258,23 @@ impl SecretsScanner {
         // Only scan text-based source files.
         if !matches!(
             ext,
-            "js" | "ts" | "mjs" | "cjs" | "jsx" | "tsx" | "json" | "env" | "yaml" | "yml"
-                | "toml" | "sh" | "bash" | "zsh" | "py" | "rb" | "go" | "rs"
+            "js" | "ts"
+                | "mjs"
+                | "cjs"
+                | "jsx"
+                | "tsx"
+                | "json"
+                | "env"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "sh"
+                | "bash"
+                | "zsh"
+                | "py"
+                | "rb"
+                | "go"
+                | "rs"
         ) {
             return Vec::new();
         }
@@ -278,7 +295,9 @@ impl SecretsScanner {
     }
 
     fn scan_dir_recursive(&self, dir: &Path, out: &mut Vec<SecretFinding>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -316,7 +335,14 @@ fn redact(line: &str) -> String {
         format!("{}[REDACTED]", visible)
     } else {
         let prefix: String = line.chars().take(16).collect();
-        let suffix: String = line.chars().rev().take(6).collect::<String>().chars().rev().collect();
+        let suffix: String = line
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         format!("{}...[REDACTED]...{}", prefix, suffix)
     }
 }
@@ -439,7 +465,10 @@ mod tests {
             // The GitHub token looks like: ghp_abcdefghijklmnopqrstuvwxyz0123456789
             // Use process.env.GITHUB_TOKEN instead.
         "#;
-        assert!(scanner().is_clean(src), "comment lines must not trigger findings");
+        assert!(
+            scanner().is_clean(src),
+            "comment lines must not trigger findings"
+        );
     }
 
     // ── Suggestion is always set ──────────────────────────────────────────────
@@ -458,7 +487,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.js");
         let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(file, r#"const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";"#).unwrap();
+        writeln!(
+            file,
+            r#"const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";"#
+        )
+        .unwrap();
 
         let f = scanner().scan_file(&path);
         assert!(!f.is_empty());
@@ -479,8 +512,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let sub = dir.path().join("src");
         std::fs::create_dir(&sub).unwrap();
-        std::fs::write(sub.join("db.js"), r#"const pw = "postgresql://u:password123@host/db";"#)
-            .unwrap();
+        std::fs::write(
+            sub.join("db.js"),
+            r#"const pw = "postgresql://u:password123@host/db";"#,
+        )
+        .unwrap();
         std::fs::write(sub.join("clean.js"), "module.exports = {};").unwrap();
 
         let f = scanner().scan_directory(dir.path());

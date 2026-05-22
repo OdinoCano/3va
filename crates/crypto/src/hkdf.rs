@@ -15,9 +15,12 @@ type HmacSha256 = Hmac<Sha256>;
 /// HKDF-Extract: combine `ikm` (input key material) and `salt` to produce a
 /// pseudorandom key (PRK) suitable for HKDF-Expand.
 pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> [u8; 32] {
-    let effective_salt = if salt.is_empty() { &[0u8; 32][..] } else { salt };
-    let mut mac = HmacSha256::new_from_slice(effective_salt)
-        .expect("HMAC accepts any key length");
+    let effective_salt = if salt.is_empty() {
+        &[0u8; 32][..]
+    } else {
+        salt
+    };
+    let mut mac = HmacSha256::new_from_slice(effective_salt).expect("HMAC accepts any key length");
     mac.update(ikm);
     mac.finalize().into_bytes().into()
 }
@@ -40,8 +43,7 @@ pub fn hkdf_expand(prk: &[u8], info: &[u8], length: usize) -> Vec<u8> {
     let mut t_prev: Vec<u8> = Vec::new();
 
     for counter in 1u8..=(n as u8) {
-        let mut mac =
-            HmacSha256::new_from_slice(prk).expect("HMAC accepts any key length");
+        let mut mac = HmacSha256::new_from_slice(prk).expect("HMAC accepts any key length");
         mac.update(&t_prev);
         mac.update(info);
         mac.update(&[counter]);
@@ -73,12 +75,12 @@ mod tests {
         let info = hex::decode("f0f1f2f3f4f5f6f7f8f9").unwrap();
 
         let prk = hkdf_extract(&salt, &ikm);
-        let expected_prk =
-            "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5";
+        let expected_prk = "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5";
         assert_eq!(hex::encode(prk), expected_prk);
 
         let okm = hkdf_expand(&prk, &info, 42);
-        let expected_okm = "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865";
+        let expected_okm =
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865";
         assert_eq!(hex::encode(&okm), expected_okm);
     }
 
@@ -87,8 +89,7 @@ mod tests {
     fn rfc5869_test_vector_3() {
         let ikm = hex::decode("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b").unwrap();
         let prk = hkdf_extract(&[], &ikm);
-        let expected_prk =
-            "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04";
+        let expected_prk = "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04";
         assert_eq!(hex::encode(prk), expected_prk);
 
         let okm = hkdf_expand(&prk, &[], 42);

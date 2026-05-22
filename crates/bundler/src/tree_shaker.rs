@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
 use oxc_allocator::Allocator;
+use oxc_ast::ast::{Declaration, Expression, ModuleDeclaration, Statement};
+use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
-use oxc_ast::ast::{Statement, ModuleDeclaration, Expression, Declaration, BindingPattern};
-use oxc_codegen::{Codegen, CodegenOptions};
+use std::collections::{HashMap, HashSet};
 
 /// A robust, AST-based Tree Shaker for JavaScript/TypeScript modules.
 pub struct TreeShaker {
@@ -27,9 +27,9 @@ impl TreeShaker {
         let allocator = Allocator::default();
         let source_type = SourceType::mjs();
         let ret = Parser::new(&allocator, code, source_type).parse();
-        
+
         let mut imports = HashSet::new();
-        
+
         for stmt in &ret.program.body {
             if let Some(module_decl) = stmt.as_module_declaration() {
                 match module_decl {
@@ -48,7 +48,7 @@ impl TreeShaker {
                 }
             }
         }
-        
+
         imports
     }
 
@@ -57,9 +57,9 @@ impl TreeShaker {
         let allocator = Allocator::default();
         let source_type = SourceType::mjs();
         let ret = Parser::new(&allocator, code, source_type).parse();
-        
+
         let mut exports = Vec::new();
-        
+
         for stmt in &ret.program.body {
             if let Some(module_decl) = stmt.as_module_declaration() {
                 match module_decl {
@@ -73,7 +73,9 @@ impl TreeShaker {
                                 }
                                 Declaration::VariableDeclaration(var) => {
                                     for d in &var.declarations {
-                                        if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &d.id {
+                                        if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) =
+                                            &d.id
+                                        {
                                             exports.push(id.name.to_string());
                                         }
                                     }
@@ -97,7 +99,7 @@ impl TreeShaker {
                 }
             }
         }
-        
+
         exports
     }
 
@@ -118,7 +120,7 @@ impl TreeShaker {
     }
 
     /// Performs tree shaking on the provided code by removing unused exports.
-    /// 
+    ///
     /// Note: `module_code` is the source to shake, and `used_exports` is the set
     /// of exports that MUST NOT be removed. Any export not in `used_exports` will
     /// be stripped.
@@ -126,61 +128,60 @@ impl TreeShaker {
         let allocator = Allocator::default();
         let source_type = SourceType::mjs();
         let mut ret = Parser::new(&allocator, module_code, source_type).parse();
-        
+
         // Mutate AST: Retain only statements that are NOT unused exports.
         ret.program.body.retain(|stmt| {
-            if let Some(module_decl) = stmt.as_module_declaration() {
-                if let ModuleDeclaration::ExportNamedDeclaration(export) = module_decl {
-                    if used_exports.is_empty() {
-                        return true;
-                    }
-                    
-                    let mut has_used = false;
-                    
-                    if let Some(declaration) = &export.declaration {
-                        match declaration {
-                            Declaration::FunctionDeclaration(func) => {
-                                if let Some(id) = &func.id {
-                                    if used_exports.contains(id.name.as_str()) {
-                                        has_used = true;
-                                    }
-                                }
-                            }
-                            Declaration::VariableDeclaration(var) => {
-                                for d in &var.declarations {
-                                    if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &d.id {
-                                        if used_exports.contains(id.name.as_str()) {
-                                            has_used = true;
-                                        }
-                                    }
-                                }
-                            }
-                            Declaration::ClassDeclaration(cls) => {
-                                if let Some(id) = &cls.id {
-                                    if used_exports.contains(id.name.as_str()) {
-                                        has_used = true;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    
-                    for spec in &export.specifiers {
-                        if used_exports.contains(spec.exported.name().as_str()) {
-                            has_used = true;
-                        }
-                    }
-                    
-                    return has_used;
+            if let Some(ModuleDeclaration::ExportNamedDeclaration(export)) =
+                stmt.as_module_declaration()
+            {
+                if used_exports.is_empty() {
+                    return true;
                 }
+
+                let mut has_used = false;
+
+                if let Some(declaration) = &export.declaration {
+                    match declaration {
+                        Declaration::FunctionDeclaration(func) => {
+                            has_used |= func
+                                .id
+                                .as_ref()
+                                .is_some_and(|id| used_exports.contains(id.name.as_str()));
+                        }
+                        Declaration::VariableDeclaration(var) => {
+                            for d in &var.declarations {
+                                if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &d.id
+                                    && used_exports.contains(id.name.as_str())
+                                {
+                                    has_used = true;
+                                }
+                            }
+                        }
+                        Declaration::ClassDeclaration(cls) => {
+                            has_used |= cls
+                                .id
+                                .as_ref()
+                                .is_some_and(|id| used_exports.contains(id.name.as_str()));
+                        }
+                        _ => {}
+                    }
+                }
+
+                for spec in &export.specifiers {
+                    if used_exports.contains(spec.exported.name().as_str()) {
+                        has_used = true;
+                    }
+                }
+
+                return has_used;
             }
             true
         });
-        
-        let mut codegen_options = CodegenOptions::default();
-        codegen_options.minify = false;
-        let codegen = Codegen::new().with_options(codegen_options);
+
+        let codegen = Codegen::new().with_options(CodegenOptions {
+            minify: false,
+            ..Default::default()
+        });
         codegen.build(&ret.program).code
     }
 }
@@ -205,23 +206,22 @@ impl DeadCodeEliminator {
         let allocator = Allocator::default();
         let source_type = SourceType::mjs();
         let mut ret = Parser::new(&allocator, code, source_type).parse();
-        
+
         self.eliminate_dead_code_recursive(&mut ret.program.body);
-        
-        let mut codegen_options = CodegenOptions::default();
-        codegen_options.minify = false;
-        let codegen = Codegen::new().with_options(codegen_options);
+
+        let codegen = Codegen::new().with_options(CodegenOptions {
+            minify: false,
+            ..Default::default()
+        });
         codegen.build(&ret.program).code
     }
 
     fn eliminate_dead_code_recursive(&self, stmts: &mut oxc_allocator::Vec<'_, Statement<'_>>) {
         stmts.retain(|stmt| {
-            if let Statement::IfStatement(if_stmt) = stmt {
-                if let Expression::BooleanLiteral(b) = &if_stmt.test {
-                    if !b.value && if_stmt.alternate.is_none() {
-                        return false;
-                    }
-                }
+            if let Statement::IfStatement(if_stmt) = stmt
+                && let Expression::BooleanLiteral(b) = &if_stmt.test
+            {
+                return b.value || if_stmt.alternate.is_some();
             }
             true
         });
@@ -310,22 +310,25 @@ mod tests {
     #[test]
     fn test_tree_shaker_shake_ast() {
         let mut shaker = TreeShaker::new(vec![]);
-        
+
         let code = r#"
             export function used() { return 1; }
             export function unused() { return 2; }
             export const keep = true;
         "#;
-        
+
         let mut used = HashSet::new();
         used.insert("used".to_string());
         used.insert("keep".to_string());
 
         let result = shaker.shake(code, &used);
-        
+
         assert!(result.contains("used()"));
         assert!(result.contains("keep"));
-        assert!(!result.contains("unused()"), "Unused export should be removed");
+        assert!(
+            !result.contains("unused()"),
+            "Unused export should be removed"
+        );
     }
 
     #[test]
@@ -346,11 +349,10 @@ mod tests {
         "#;
 
         let result = elim.eliminate(code);
-        
+
         assert!(!result.contains("dead = 2"));
         assert!(!result.contains("nested dead"));
         assert!(result.contains("alive = 3"));
         assert!(result.contains("const a = 1"));
     }
 }
-

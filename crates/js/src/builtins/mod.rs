@@ -5,6 +5,7 @@ pub mod fs;
 pub mod modules;
 pub mod process;
 pub mod timers;
+pub mod websocket;
 
 use rquickjs::Ctx;
 use std::cell::RefCell;
@@ -18,6 +19,7 @@ pub fn inject_all(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> rquic
     process::inject_process(ctx)?;
     fetch::inject_fetch(ctx, permissions.clone())?;
     fs::inject_fs(ctx, permissions.clone())?;
-    modules::inject_require(ctx, permissions)?;
+    modules::inject_require(ctx, permissions.clone())?;
+    websocket::inject_websocket(ctx, permissions)?;
     Ok(())
 }

@@ -236,14 +236,22 @@ pub fn bundle_file(
 /// Start a file-watching build loop. Bundles `input` → `output` immediately,
 /// then re-bundles whenever a `.js`, `.ts`, `.jsx`, or `.tsx` file changes
 /// under the input's parent directory. Blocks until the process is killed.
-pub fn start_watch_mode(input: &Path, output: &Path, options: Option<BundlerOptions>) -> anyhow::Result<()> {
+pub fn start_watch_mode(
+    input: &Path,
+    output: &Path,
+    options: Option<BundlerOptions>,
+) -> anyhow::Result<()> {
     use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     let watch_dir = input.parent().unwrap_or(Path::new("."));
 
-    println!("[bundler] Watch mode: {} → {}", input.display(), output.display());
+    println!(
+        "[bundler] Watch mode: {} → {}",
+        input.display(),
+        output.display()
+    );
     println!("[bundler] Watching: {}", watch_dir.display());
 
     // Initial build
@@ -251,7 +259,9 @@ pub fn start_watch_mode(input: &Path, output: &Path, options: Option<BundlerOpti
 
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
     let mut watcher = RecommendedWatcher::new(
-        move |res| { let _ = tx.send(res); },
+        move |res| {
+            let _ = tx.send(res);
+        },
         Config::default().with_poll_interval(Duration::from_millis(500)),
     )?;
     watcher.watch(watch_dir, RecursiveMode::Recursive)?;

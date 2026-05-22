@@ -844,19 +844,28 @@ mod tests {
     #[test]
     fn print_audit_report_critical_deny_returns_false() {
         let r = report_with_critical();
-        assert!(!print_audit_report(&r, true), "CRITICAL + --deny must return false");
+        assert!(
+            !print_audit_report(&r, true),
+            "CRITICAL + --deny must return false"
+        );
     }
 
     #[test]
     fn print_audit_report_critical_no_deny_returns_true() {
         let r = report_with_critical();
-        assert!(print_audit_report(&r, false), "CRITICAL without --deny warns but returns true");
+        assert!(
+            print_audit_report(&r, false),
+            "CRITICAL without --deny warns but returns true"
+        );
     }
 
     #[test]
     fn print_audit_report_high_deny_returns_false() {
         let r = report_with_high_only();
-        assert!(!print_audit_report(&r, true), "HIGH + --deny must return false");
+        assert!(
+            !print_audit_report(&r, true),
+            "HIGH + --deny must return false"
+        );
     }
 
     #[test]

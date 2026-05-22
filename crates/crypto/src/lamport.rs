@@ -20,8 +20,8 @@
 //! All artifacts are hex-encoded for easy transport.
 
 use rand::RngCore;
-use rand_chacha::ChaCha20Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -79,7 +79,11 @@ impl LamportKeypair {
         }
 
         let public_key = LamportPublicKey { data: pk_data };
-        LamportKeypair { sk, public_key, used: false }
+        LamportKeypair {
+            sk,
+            public_key,
+            used: false,
+        }
     }
 
     // ── Signing ───────────────────────────────────────────────────────────────
@@ -149,8 +153,7 @@ impl LamportPublicKey {
 
     /// Decode a public key from hex.
     pub fn from_hex(s: &str) -> Result<Self, CryptoError> {
-        let bytes =
-            hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        let bytes = hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
         let expected = SK_COUNT * HASH_LEN;
         if bytes.len() != expected {
             return Err(CryptoError::InvalidKey(format!(
@@ -177,8 +180,7 @@ impl LamportSignature {
 
     /// Decode a signature from hex.
     pub fn from_hex(s: &str) -> Result<Self, CryptoError> {
-        let bytes =
-            hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        let bytes = hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
         let expected = N * HASH_LEN;
         if bytes.len() != expected {
             return Err(CryptoError::InvalidKey(format!(
@@ -266,7 +268,9 @@ mod tests {
         let hex = sig.to_hex();
         let sig2 = LamportSignature::from_hex(&hex).expect("decode must succeed");
         // Verify the decoded signature works.
-        kp.public_key.verify(b"round-trip test", &sig2).expect("decoded sig must verify");
+        kp.public_key
+            .verify(b"round-trip test", &sig2)
+            .expect("decoded sig must verify");
     }
 
     #[test]

@@ -67,6 +67,5 @@ pub enum CryptoError {
 
 /// Canonical error message shown when a NIST PQC algorithm is requested but
 /// the required crate has not been compiled in.
-pub const NOT_AVAILABLE_MSG: &str =
-    "ML-KEM and ML-DSA require the `ml-kem`/`ml-dsa` RustCrypto crates. \
+pub const NOT_AVAILABLE_MSG: &str = "ML-KEM and ML-DSA require the `ml-kem`/`ml-dsa` RustCrypto crates. \
      Add them to your Cargo.toml: ml-kem = \"0.3\", ml-dsa = \"0.1\"";
