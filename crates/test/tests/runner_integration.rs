@@ -16,8 +16,8 @@ fn temp_test(content: &str, filename: &str) -> (TempDir, std::path::PathBuf) {
 
 // ── Casos básicos ─────────────────────────────────────────────────────────────
 
-#[test]
-fn runner_passes_simple_test() {
+#[tokio::test]
+async fn runner_passes_simple_test() {
     let (_dir, path) = temp_test(
         r#"
         test('suma básica', () => {
@@ -28,7 +28,7 @@ fn runner_passes_simple_test() {
     );
 
     let mut runner = TestRunner::new(TestConfig::default());
-    runner.run_file(&path).unwrap();
+    runner.run_file(&path).await.unwrap();
 
     let results = runner.get_results();
     assert_eq!(results.len(), 1);
@@ -36,8 +36,8 @@ fn runner_passes_simple_test() {
     assert_eq!(results[0].name, "suma básica");
 }
 
-#[test]
-fn runner_reports_failing_test() {
+#[tokio::test]
+async fn runner_reports_failing_test() {
     let (_dir, path) = temp_test(
         r#"
         test('falla intencional', () => {
@@ -48,7 +48,7 @@ fn runner_reports_failing_test() {
     );
 
     let mut runner = TestRunner::new(TestConfig::default());
-    runner.run_file(&path).unwrap();
+    runner.run_file(&path).await.unwrap();
 
     let results = runner.get_results();
     assert_eq!(results.len(), 1);
@@ -56,8 +56,8 @@ fn runner_reports_failing_test() {
     assert!(results[0].error.is_some(), "debe incluir mensaje de error");
 }
 
-#[test]
-fn runner_handles_multiple_tests_in_one_file() {
+#[tokio::test]
+async fn runner_handles_multiple_tests_in_one_file() {
     let (_dir, path) = temp_test(
         r#"
         test('pasa', () => { expect(true).toBeTruthy(); });
@@ -68,7 +68,7 @@ fn runner_handles_multiple_tests_in_one_file() {
     );
 
     let mut runner = TestRunner::new(TestConfig::default());
-    runner.run_file(&path).unwrap();
+    runner.run_file(&path).await.unwrap();
 
     let results = runner.get_results();
     assert_eq!(results.len(), 3);
@@ -87,8 +87,8 @@ fn runner_handles_multiple_tests_in_one_file() {
 
 // ── describe / it ─────────────────────────────────────────────────────────────
 
-#[test]
-fn runner_supports_describe_blocks() {
+#[tokio::test]
+async fn runner_supports_describe_blocks() {
     let (_dir, path) = temp_test(
         r#"
         describe('Matemáticas', () => {
@@ -100,7 +100,7 @@ fn runner_supports_describe_blocks() {
     );
 
     let mut runner = TestRunner::new(TestConfig::default());
-    runner.run_file(&path).unwrap();
+    runner.run_file(&path).await.unwrap();
 
     let results = runner.get_results();
     assert_eq!(results.len(), 2);
@@ -114,8 +114,8 @@ fn runner_supports_describe_blocks() {
 
 // ── TypeScript ────────────────────────────────────────────────────────────────
 
-#[test]
-fn runner_runs_typescript_test_file() {
+#[tokio::test]
+async fn runner_runs_typescript_test_file() {
     let (_dir, path) = temp_test(
         r#"
         function add(a: number, b: number): number {
@@ -130,7 +130,7 @@ fn runner_runs_typescript_test_file() {
     );
 
     let mut runner = TestRunner::new(TestConfig::default());
-    runner.run_file(&path).unwrap();
+    runner.run_file(&path).await.unwrap();
 
     let results = runner.get_results();
     assert_eq!(results.len(), 1);
@@ -139,8 +139,8 @@ fn runner_runs_typescript_test_file() {
 
 // ── Matchers ─────────────────────────────────────────────────────────────────
 
-#[test]
-fn runner_supports_all_core_matchers() {
+#[tokio::test]
+async fn runner_supports_all_core_matchers() {
     let (_dir, path) = temp_test(
         r#"
         test('toEqual con objeto', () => {
@@ -169,7 +169,7 @@ fn runner_supports_all_core_matchers() {
     );
 
     let mut runner = TestRunner::new(TestConfig::default());
-    runner.run_file(&path).unwrap();
+    runner.run_file(&path).await.unwrap();
 
     let results = runner.get_results();
     assert_eq!(results.len(), 7);
@@ -185,8 +185,8 @@ fn runner_supports_all_core_matchers() {
 
 // ── run_directory ─────────────────────────────────────────────────────────────
 
-#[test]
-fn runner_discovers_test_files_in_directory() {
+#[tokio::test]
+async fn runner_discovers_test_files_in_directory() {
     let dir = TempDir::new().unwrap();
 
     fs::write(
@@ -203,7 +203,7 @@ fn runner_discovers_test_files_in_directory() {
     fs::write(dir.path().join("helper.js"), "const x = 1;").unwrap();
 
     let mut runner = TestRunner::new(TestConfig::default());
-    runner.run_directory(dir.path()).unwrap();
+    runner.run_directory(dir.path()).await.unwrap();
 
     let results = runner.get_results();
     assert_eq!(
@@ -216,8 +216,8 @@ fn runner_discovers_test_files_in_directory() {
 
 // ── Snapshots ────────────────────────────────────────────────────────────────
 
-#[test]
-fn runner_creates_snapshot_on_first_run() {
+#[tokio::test]
+async fn runner_creates_snapshot_on_first_run() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("snap.test.js");
 
@@ -232,7 +232,7 @@ fn runner_creates_snapshot_on_first_run() {
     .unwrap();
 
     let mut runner = TestRunner::new(TestConfig::default());
-    runner.run_file(&path).unwrap();
+    runner.run_file(&path).await.unwrap();
 
     // First run always creates snapshot → should pass
     let results = runner.get_results();
@@ -252,8 +252,8 @@ fn runner_creates_snapshot_on_first_run() {
     );
 }
 
-#[test]
-fn runner_snapshot_fails_on_mismatch() {
+#[tokio::test]
+async fn runner_snapshot_fails_on_mismatch() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("mismatch.test.js");
 
@@ -265,7 +265,7 @@ fn runner_snapshot_fails_on_mismatch() {
 
     // First run: creates snapshot with "valor_a"
     let mut runner = TestRunner::new(TestConfig::default());
-    runner.run_file(&path).unwrap();
+    runner.run_file(&path).await.unwrap();
     assert_eq!(runner.get_results()[0].status, TestStatus::Passed);
 
     // Mutate test to produce different value
@@ -277,7 +277,7 @@ fn runner_snapshot_fails_on_mismatch() {
 
     // Second run: should fail due to mismatch
     let mut runner2 = TestRunner::new(TestConfig::default());
-    runner2.run_file(&path).unwrap();
+    runner2.run_file(&path).await.unwrap();
     assert_eq!(
         runner2.get_results()[0].status,
         TestStatus::Failed,
@@ -285,8 +285,8 @@ fn runner_snapshot_fails_on_mismatch() {
     );
 }
 
-#[test]
-fn runner_update_snapshots_flag_rewrites_stored_value() {
+#[tokio::test]
+async fn runner_update_snapshots_flag_rewrites_stored_value() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("update.test.js");
 
@@ -299,6 +299,7 @@ fn runner_update_snapshots_flag_rewrites_stored_value() {
     // First run: create
     TestRunner::new(TestConfig::default())
         .run_file(&path)
+        .await
         .unwrap();
 
     // Change value
@@ -314,7 +315,7 @@ fn runner_update_snapshots_flag_rewrites_stored_value() {
         ..Default::default()
     };
     let mut runner = TestRunner::new(cfg);
-    runner.run_file(&path).unwrap();
+    runner.run_file(&path).await.unwrap();
     assert_eq!(
         runner.get_results()[0].status,
         TestStatus::Passed,
@@ -323,18 +324,18 @@ fn runner_update_snapshots_flag_rewrites_stored_value() {
 
     // Next run without flag: should now pass with new value
     let mut runner2 = TestRunner::new(TestConfig::default());
-    runner2.run_file(&path).unwrap();
+    runner2.run_file(&path).await.unwrap();
     assert_eq!(runner2.get_results()[0].status, TestStatus::Passed);
 }
 
 // ── Syntax errors ────────────────────────────────────────────────────────────
 
-#[test]
-fn runner_reports_syntax_error_as_failed_test() {
+#[tokio::test]
+async fn runner_reports_syntax_error_as_failed_test() {
     let (_dir, path) = temp_test("const x = ;;;  // syntax error", "broken.test.js");
 
     let mut runner = TestRunner::new(TestConfig::default());
-    runner.run_file(&path).unwrap();
+    runner.run_file(&path).await.unwrap();
 
     let results = runner.get_results();
     assert_eq!(results.len(), 1);

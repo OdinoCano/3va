@@ -60,11 +60,10 @@ total_warnings=0
 log_info "=== NIVEL 1: CARGO HARDENING ==="
 
 step "1. Cargo Format Check"
-FMT_OUTPUT=$(cargo fmt --check 2>&1) || true
-if [ -z "$FMT_OUTPUT" ]; then
+if FMT_OUTPUT=$(cargo fmt --check 2>/dev/null); then
     log_success "Format OK"
 else
-    echo "$FMT_OUTPUT" | head -40
+    [ -n "$FMT_OUTPUT" ] && echo "$FMT_OUTPUT" | head -40
     log_error "Format falló. Ejecutar: cargo fmt"
     total_failures=$((total_failures + 1))
 fi

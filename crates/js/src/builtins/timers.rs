@@ -139,42 +139,31 @@ impl Default for TimerManager {
     }
 }
 
-// Thread-local storage for the timer manager so native functions can access it.
-thread_local! {
-    pub static TIMER_MANAGER: Arc<TimerManager> = TimerManager::new();
-}
-
-#[allow(dead_code)]
-fn value_to_u64(v: &Value) -> u64 {
-    match v.type_of() {
-        rquickjs::Type::Int => v.as_int().unwrap_or(0) as u64,
-        rquickjs::Type::Float => v.as_float().unwrap_or(0.0) as u64,
-        _ => 0,
-    }
-}
-
 /// Inject timer globals into the QuickJS context.
-pub fn inject_timers(ctx: &Ctx) -> Result<()> {
+pub fn inject_timers(ctx: &Ctx, manager: Arc<TimerManager>) -> Result<()> {
     // __nativeSetTimeout(id, ms) — returns nothing (JS side stores the id)
-    let native_set_timeout = Function::new(ctx.clone(), |args: Rest<i32>| {
+    let mgr = manager.clone();
+    let native_set_timeout = Function::new(ctx.clone(), move |args: Rest<i32>| {
         let mut iter = args.0.iter();
         let id = iter.next().copied().unwrap_or(0) as u64;
         let ms = iter.next().copied().unwrap_or(0) as u64;
-        TIMER_MANAGER.with(|m| m.set_timeout(id, ms));
+        mgr.set_timeout(id, ms);
     })?;
 
     // __nativeSetInterval(id, ms)
-    let native_set_interval = Function::new(ctx.clone(), |args: Rest<i32>| {
+    let mgr = manager.clone();
+    let native_set_interval = Function::new(ctx.clone(), move |args: Rest<i32>| {
         let mut iter = args.0.iter();
         let id = iter.next().copied().unwrap_or(0) as u64;
         let ms = iter.next().copied().unwrap_or(0) as u64;
-        TIMER_MANAGER.with(|m| m.set_interval(id, ms));
+        mgr.set_interval(id, ms);
     })?;
 
     // __nativeClearTimer(id)
-    let native_clear_timer = Function::new(ctx.clone(), |args: Rest<i32>| {
+    let mgr = manager.clone();
+    let native_clear_timer = Function::new(ctx.clone(), move |args: Rest<i32>| {
         let id = args.0.first().copied().unwrap_or(0) as u64;
-        TIMER_MANAGER.with(|m| m.cancel(id));
+        mgr.cancel(id);
     })?;
 
     let globals = ctx.globals();
