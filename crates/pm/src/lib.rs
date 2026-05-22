@@ -8,7 +8,7 @@ pub mod secrets;
 pub mod semver;
 pub mod signature_verifier;
 
-pub use secrets::{SecretFinding, Severity as SecretSeverity, SecretsScanner};
+pub use secrets::{SecretFinding, SecretsScanner, Severity as SecretSeverity};
 
 pub use auditor::{
     AuditReport, VulnFinding, VulnSeverity, Vulnerability, print_audit_report, run_audit,
@@ -618,11 +618,18 @@ pub fn audit_packages_silent() -> anyhow::Result<bool> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     if name.starts_with('@') {
                         if let Ok(sub) = std::fs::read_dir(&path) {
                             for sub_entry in sub.flatten() {
-                                pkgs.push((format!("{}/{}", name, sub_entry.file_name().to_string_lossy()), "unknown".to_string()));
+                                pkgs.push((
+                                    format!("{}/{}", name, sub_entry.file_name().to_string_lossy()),
+                                    "unknown".to_string(),
+                                ));
                             }
                         }
                     } else {
@@ -638,7 +645,9 @@ pub fn audit_packages_silent() -> anyhow::Result<bool> {
     let mut any_critical = false;
     for (pkg_name, _version) in &installed {
         let pkg_dir = node_modules.join(pkg_name);
-        if !pkg_dir.exists() { continue; }
+        if !pkg_dir.exists() {
+            continue;
+        }
         let results = scanner.scan_directory(&pkg_dir);
         for result in &results {
             for threat in &result.threats {

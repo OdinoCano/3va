@@ -113,11 +113,17 @@ fn is_incomplete(src: &str) -> bool {
 
     for ch in src.chars() {
         if in_single {
-            if ch == '\'' && prev != '\\' { in_single = false; }
+            if ch == '\'' && prev != '\\' {
+                in_single = false;
+            }
         } else if in_double {
-            if ch == '"' && prev != '\\' { in_double = false; }
+            if ch == '"' && prev != '\\' {
+                in_double = false;
+            }
         } else if in_template {
-            if ch == '`' && prev != '\\' { in_template = false; }
+            if ch == '`' && prev != '\\' {
+                in_template = false;
+            }
         } else {
             match ch {
                 '\'' => in_single = true,
@@ -168,7 +174,7 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
     use std::io::{self, BufRead, Write};
     use vvva_permissions::Capability;
 
-    let is_tty = atty::is(atty::Stream::Stdin);
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
 
     if is_tty {
         println!("\n=== 3VA Interactive Sandbox ===");
@@ -209,7 +215,9 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
                 // flush remaining buffer
                 eval_and_print(&engine, buffer.trim(), is_tty);
             }
-            if is_tty { println!("\nLeaving sandbox..."); }
+            if is_tty {
+                println!("\nLeaving sandbox...");
+            }
             break;
         }
 
@@ -218,7 +226,9 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
         // ── Meta-commands ─────────────────────────────────────────────────
         match trimmed.trim() {
             "exit" | "quit" => {
-                if is_tty { println!("Leaving sandbox..."); }
+                if is_tty {
+                    println!("Leaving sandbox...");
+                }
                 break;
             }
             ".help" => {
@@ -246,30 +256,40 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
             ".clear" => {
                 engine = vvva_js::JsEngine::new(&permissions)?;
                 buffer.clear();
-                if is_tty { println!("Context cleared."); }
+                if is_tty {
+                    println!("Context cleared.");
+                }
                 continue;
             }
             cmd if cmd.starts_with(".allow-read=") => {
                 let path = PathBuf::from(cmd.trim_start_matches(".allow-read="));
                 permissions.grant(Capability::FileRead(path.clone()));
-                if is_tty { println!("  ✓ FileRead granted: {}", path.display()); }
+                if is_tty {
+                    println!("  ✓ FileRead granted: {}", path.display());
+                }
                 continue;
             }
             cmd if cmd.starts_with(".allow-write=") => {
                 let path = PathBuf::from(cmd.trim_start_matches(".allow-write="));
                 permissions.grant(Capability::FileWrite(path.clone()));
-                if is_tty { println!("  ✓ FileWrite granted: {}", path.display()); }
+                if is_tty {
+                    println!("  ✓ FileWrite granted: {}", path.display());
+                }
                 continue;
             }
             cmd if cmd.starts_with(".allow-net=") => {
                 let host = cmd.trim_start_matches(".allow-net=").to_string();
                 permissions.grant(Capability::Network(host.clone()));
-                if is_tty { println!("  ✓ Network granted: {}", host); }
+                if is_tty {
+                    println!("  ✓ Network granted: {}", host);
+                }
                 continue;
             }
             ".allow-env" => {
                 permissions.grant(Capability::EnvAccess);
-                if is_tty { println!("  ✓ Env access granted"); }
+                if is_tty {
+                    println!("  ✓ Env access granted");
+                }
                 continue;
             }
             "" if buffer.is_empty() => continue,
@@ -442,11 +462,16 @@ async fn run_dev_server(
 
         let (file_tx, file_rx) = mpsc::channel::<Result<Event, notify::Error>>();
         let mut watcher = match RecommendedWatcher::new(
-            move |res| { let _ = file_tx.send(res); },
+            move |res| {
+                let _ = file_tx.send(res);
+            },
             Config::default().with_poll_interval(Duration::from_millis(300)),
         ) {
             Ok(w) => w,
-            Err(e) => { eprintln!("[bundler] Watcher init error: {}", e); return; }
+            Err(e) => {
+                eprintln!("[bundler] Watcher init error: {}", e);
+                return;
+            }
         };
         let watch_root = entry_clone.parent().unwrap_or(std::path::Path::new("."));
         let _ = watcher.watch(watch_root, RecursiveMode::Recursive);
@@ -458,31 +483,37 @@ async fn run_dev_server(
             if let Ok(Ok(event)) = file_rx.recv_timeout(Duration::from_millis(200)) {
                 let is_source = event.paths.iter().any(|p| {
                     matches!(
-                        p.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref(),
+                        p.extension()
+                            .map(|e| e.to_string_lossy().to_lowercase())
+                            .as_deref(),
                         Some("js") | Some("ts") | Some("jsx") | Some("tsx")
                     )
                 });
-                let changed: Vec<_> = event.paths.iter()
+                let changed: Vec<_> = event
+                    .paths
+                    .iter()
                     .filter(|p| !p.ends_with(&output_clone))
                     .collect();
 
-                if is_source && !changed.is_empty() && last_rebuild.elapsed() > debounce {
-                    if !matches!(event.kind, EventKind::Access(_)) {
-                        last_rebuild = Instant::now();
-                        let t = Instant::now();
-                        match vvva_bundler::bundle_file(
-                            &entry_clone.to_string_lossy(),
-                            &output_clone.to_string_lossy(),
-                            None,
-                        ) {
-                            Ok(()) => {
-                                println!("[dev] Rebuilt in {}ms", t.elapsed().as_millis());
-                                let _ = tx_watcher.send(BuildEvent::Reload);
-                            }
-                            Err(e) => {
-                                eprintln!("[dev] Build error: {}", e);
-                                let _ = tx_watcher.send(BuildEvent::Error(e.to_string()));
-                            }
+                if is_source
+                    && !changed.is_empty()
+                    && last_rebuild.elapsed() > debounce
+                    && !matches!(event.kind, EventKind::Access(_))
+                {
+                    last_rebuild = Instant::now();
+                    let t = Instant::now();
+                    match vvva_bundler::bundle_file(
+                        &entry_clone.to_string_lossy(),
+                        &output_clone.to_string_lossy(),
+                        None,
+                    ) {
+                        Ok(()) => {
+                            println!("[dev] Rebuilt in {}ms", t.elapsed().as_millis());
+                            let _ = tx_watcher.send(BuildEvent::Reload);
+                        }
+                        Err(e) => {
+                            eprintln!("[dev] Build error: {}", e);
+                            let _ = tx_watcher.send(BuildEvent::Error(e.to_string()));
                         }
                     }
                 }
@@ -524,11 +555,19 @@ async fn run_dev_server(
 
 /// Try to open the given URL in the system default browser.
 fn open_browser(url: &str) {
-    let _ = std::process::Command::new(if cfg!(target_os = "macos") { "open" }
-        else if cfg!(target_os = "windows") { "cmd" }
-        else { "xdg-open" })
-        .args(if cfg!(target_os = "windows") { vec!["/c", "start", url] } else { vec![url] })
-        .spawn();
+    let _ = std::process::Command::new(if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "xdg-open"
+    })
+    .args(if cfg!(target_os = "windows") {
+        vec!["/c", "start", url]
+    } else {
+        vec![url]
+    })
+    .spawn();
 }
 
 /// Tiny HMR client injected into every HTML response.
@@ -562,14 +601,18 @@ async fn handle_dev_connection(
 
     let mut buffer = vec![0u8; 4096];
     let n = stream.read(&mut buffer).await?;
-    if n == 0 { return Ok(()); }
+    if n == 0 {
+        return Ok(());
+    }
 
     let request = String::from_utf8_lossy(&buffer[..n]);
     let first_line = request.lines().next().unwrap_or("");
     let parts: Vec<&str> = first_line.split_whitespace().collect();
 
     if parts.len() < 2 {
-        stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n").await?;
+        stream
+            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            .await?;
         return Ok(());
     }
 
@@ -597,7 +640,10 @@ async fn handle_dev_connection(
                 }
                 Ok(BuildEvent::Error(msg)) => {
                     let escaped = msg.replace('"', "\\\"").replace('\n', "\\n");
-                    let payload = format!("data: {{\"type\":\"error\",\"message\":\"{}\"}}\n\n", escaped);
+                    let payload = format!(
+                        "data: {{\"type\":\"error\",\"message\":\"{}\"}}\n\n",
+                        escaped
+                    );
                     stream.write_all(payload.as_bytes()).await?;
                 }
                 Err(_) => break,
@@ -680,7 +726,11 @@ async fn serve_file(
             stream.write_all(&bytes).await?;
         }
         Err(_) => {
-            stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
         }
     }
     Ok(())
@@ -694,7 +744,11 @@ async fn serve_html_with_hmr(
     let html = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => {
-            stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
             return Ok(());
         }
     };
@@ -831,7 +885,6 @@ fn build_permissions(
 
     permissions
 }
-
 
 #[derive(Parser)]
 #[command(name = "3va")]
@@ -1050,8 +1103,14 @@ fn run_secrets_scan_human() -> bool {
     }
 
     // Group by severity
-    let critical: Vec<_> = findings.iter().filter(|f| f.severity == vvva_pm::SecretSeverity::Critical).collect();
-    let high: Vec<_> = findings.iter().filter(|f| f.severity == vvva_pm::SecretSeverity::High).collect();
+    let critical: Vec<_> = findings
+        .iter()
+        .filter(|f| f.severity == vvva_pm::SecretSeverity::Critical)
+        .collect();
+    let high: Vec<_> = findings
+        .iter()
+        .filter(|f| f.severity == vvva_pm::SecretSeverity::High)
+        .collect();
 
     for f in &findings {
         let sev = format!("{:?}", f.severity).to_uppercase();
@@ -1067,7 +1126,12 @@ fn run_secrets_scan_human() -> bool {
     }
 
     println!();
-    eprintln!("  Secrets found: {} ({} critical, {} high)", findings.len(), critical.len(), high.len());
+    eprintln!(
+        "  Secrets found: {} ({} critical, {} high)",
+        findings.len(),
+        critical.len(),
+        high.len()
+    );
 
     if !critical.is_empty() {
         eprintln!("✗ Critical secrets detected. Remove them immediately.");
@@ -1100,23 +1164,29 @@ async fn run_audit_json(deny: bool, update_cache: bool, scan_secrets: bool) -> a
     let secrets_findings: Vec<serde_json::Value> = if scan_secrets {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let scanner = vvva_pm::SecretsScanner::new();
-        scanner.scan_directory(&cwd).iter().map(|f| {
-            serde_json::json!({
-                "file": f.file.display().to_string(),
-                "line": f.line,
-                "type": f.secret_type,
-                "severity": format!("{:?}", f.severity),
-                "suggestion": f.suggestion,
+        scanner
+            .scan_directory(&cwd)
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "file": f.file.display().to_string(),
+                    "line": f.line,
+                    "type": f.secret_type,
+                    "severity": format!("{:?}", f.severity),
+                    "suggestion": f.suggestion,
+                })
             })
-        }).collect()
+            .collect()
     } else {
         vec![]
     };
 
     let has_severe_vulns = osv_report.critical_count > 0 || osv_report.high_count > 0;
-    let passed = malware_ok && (!deny || !has_severe_vulns) && secrets_findings.iter().all(|f| {
-        f["severity"].as_str() != Some("Critical")
-    });
+    let passed = malware_ok
+        && (!deny || !has_severe_vulns)
+        && secrets_findings
+            .iter()
+            .all(|f| f["severity"].as_str() != Some("Critical"));
 
     let output = serde_json::json!({
         "passed": passed,
@@ -1312,7 +1382,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Audit { deny, update_cache, secrets, json } => {
+        Commands::Audit {
+            deny,
+            update_cache,
+            secrets,
+            json,
+        } => {
             if *json {
                 run_audit_json(*deny, *update_cache, *secrets).await?;
             } else {
@@ -1325,7 +1400,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::Sandbox => {
             run_sandbox_shell().await?;
         }
-        Commands::Dev { port, host, open, public_dir } => {
+        Commands::Dev {
+            port,
+            host,
+            open,
+            public_dir,
+        } => {
             run_dev_server(*port, host.clone(), *open, public_dir.clone()).await?;
         }
     }

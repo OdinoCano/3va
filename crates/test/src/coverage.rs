@@ -125,18 +125,19 @@ pub fn instrument_source(source: &str, file_id: &str) -> (String, Vec<StmtInfo>)
         .filter(|(_, b)| *b == b'\n')
         .map(|(i, _)| i as u32)
         .collect();
-    let offset_to_line = |off: u32| -> u32 {
-        newlines.partition_point(|&nl| nl < off) as u32 + 1
-    };
+    let offset_to_line = |off: u32| -> u32 { newlines.partition_point(|&nl| nl < off) as u32 + 1 };
 
     // Build StmtInfo list (index + line) ordered by byte offset.
-    let safe_id = file_id.replace('"', "_").replace('\\', "_");
+    let safe_id = file_id.replace(['"', '\\'], "_");
     let mut items: Vec<(u32, usize)> = collector.items; // (byte_offset, index)
     items.sort_by_key(|&(off, _)| off);
 
     let stmt_infos: Vec<StmtInfo> = items
         .iter()
-        .map(|&(off, idx)| StmtInfo { index: idx, line: offset_to_line(off) })
+        .map(|&(off, idx)| StmtInfo {
+            index: idx,
+            line: offset_to_line(off),
+        })
         .collect();
 
     // Preamble: initialise the counter objects once.
@@ -254,8 +255,14 @@ pub fn generate_coverage_report(test_results: &[TestResult], root: &Path) -> Cov
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
             let total = results.len();
-            let passed = results.iter().filter(|r| r.status == TestStatus::Passed).count();
-            let failed = results.iter().filter(|r| r.status == TestStatus::Failed).count();
+            let passed = results
+                .iter()
+                .filter(|r| r.status == TestStatus::Passed)
+                .count();
+            let failed = results
+                .iter()
+                .filter(|r| r.status == TestStatus::Failed)
+                .count();
             (total, passed, failed)
         } else {
             (0, 0, 0)
@@ -308,8 +315,11 @@ pub fn print_coverage_report(report: &CoverageReport) {
         report.passed_tests, report.total_tests, pass_pct
     );
 
-    let stmt_files: Vec<&FileCoverage> =
-        report.files.iter().filter(|f| f.statement_coverage.is_some()).collect();
+    let stmt_files: Vec<&FileCoverage> = report
+        .files
+        .iter()
+        .filter(|f| f.statement_coverage.is_some())
+        .collect();
     if !stmt_files.is_empty() {
         let total_s: usize = stmt_files
             .iter()
@@ -321,10 +331,12 @@ pub fn print_coverage_report(report: &CoverageReport) {
             .filter_map(|f| f.statement_coverage.as_ref())
             .map(|c| c.covered_statements)
             .sum();
-        let pct = if total_s == 0 { 100.0 } else { cov_s as f64 / total_s as f64 * 100.0 };
-        println!(
-            "  Statement coverage:  {cov_s}/{total_s} statements executed ({pct:.1}%)"
-        );
+        let pct = if total_s == 0 {
+            100.0
+        } else {
+            cov_s as f64 / total_s as f64 * 100.0
+        };
+        println!("  Statement coverage:  {cov_s}/{total_s} statements executed ({pct:.1}%)");
     }
 
     println!();
@@ -333,8 +345,11 @@ pub fn print_coverage_report(report: &CoverageReport) {
 
     for f in &report.files {
         let src = shorten_path(&f.source_file, 48);
-        let test_indicator =
-            f.test_file.as_deref().map(|p| shorten_path(p, 18)).unwrap_or_else(|| "(no test)".into());
+        let test_indicator = f
+            .test_file
+            .as_deref()
+            .map(|p| shorten_path(p, 18))
+            .unwrap_or_else(|| "(no test)".into());
         let stats = if let Some(cov) = &f.statement_coverage {
             format!(
                 "{}/{} stmts ({:.0}%)",
@@ -352,7 +367,9 @@ pub fn print_coverage_report(report: &CoverageReport) {
         let marker = if f.test_file.is_none() {
             "✗"
         } else if f.tests_failed > 0
-            || f.statement_coverage.as_ref().is_some_and(|c| !c.uncovered_stmts.is_empty())
+            || f.statement_coverage
+                .as_ref()
+                .is_some_and(|c| !c.uncovered_stmts.is_empty())
         {
             "!"
         } else {
@@ -365,7 +382,11 @@ pub fn print_coverage_report(report: &CoverageReport) {
             if !lines.is_empty() {
                 println!(
                     "       Uncovered lines: {}",
-                    lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
+                    lines
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
         }
@@ -389,7 +410,9 @@ fn collect_source_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -468,7 +491,9 @@ mod tests {
     fn run_and_collect(source: &str, file_id: &str) -> CoverageResult {
         let (instrumented, stmts) = instrument_source(source, file_id);
         let engine = bare_engine();
-        engine.eval(&instrumented).expect("instrumented code must evaluate");
+        engine
+            .eval(&instrumented)
+            .expect("instrumented code must evaluate");
         let json = engine
             .eval_to_string(&format!(
                 r#"JSON.stringify(globalThis.__cov["{file_id}"] || {{}})"#
@@ -496,7 +521,11 @@ mod tests {
         // Both the function declaration AND the return are instrumented independently.
         let source = "function add(a, b) {\n  return a + b;\n}";
         let (_instrumented, stmts) = instrument_source(source, "fn_test");
-        assert!(stmts.len() >= 2, "expected ≥2 stmts (decl + return), got {}", stmts.len());
+        assert!(
+            stmts.len() >= 2,
+            "expected ≥2 stmts (decl + return), got {}",
+            stmts.len()
+        );
     }
 
     #[test]
@@ -509,10 +538,7 @@ mod tests {
 
     #[test]
     fn coverage_roundtrip_all_statements_executed() {
-        let result = run_and_collect(
-            "const a = 1;\nconst b = 2;\nconst c = a + b;",
-            "rt_all",
-        );
+        let result = run_and_collect("const a = 1;\nconst b = 2;\nconst c = a + b;", "rt_all");
         assert_eq!(
             result.covered_statements, result.total_statements,
             "all three top-level statements should be hit"
@@ -562,7 +588,12 @@ mod tests {
         let source = "interface Foo { x: number; }\ntype Bar = string;\nconst z = 1;";
         let (_instrumented, stmts) = instrument_source(source, "ts_types");
         // Only `const z = 1` should be coverable.
-        assert_eq!(stmts.len(), 1, "only the const stmt is executable, got {:?}", stmts);
+        assert_eq!(
+            stmts.len(),
+            1,
+            "only the const stmt is executable, got {:?}",
+            stmts
+        );
         assert_eq!(stmts[0].line, 3);
     }
 

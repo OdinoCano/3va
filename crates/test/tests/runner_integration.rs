@@ -73,8 +73,14 @@ fn runner_handles_multiple_tests_in_one_file() {
     let results = runner.get_results();
     assert_eq!(results.len(), 3);
 
-    let passed = results.iter().filter(|r| r.status == TestStatus::Passed).count();
-    let failed = results.iter().filter(|r| r.status == TestStatus::Failed).count();
+    let passed = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Passed)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Failed)
+        .count();
     assert_eq!(passed, 2);
     assert_eq!(failed, 1);
 }
@@ -98,7 +104,10 @@ fn runner_supports_describe_blocks() {
 
     let results = runner.get_results();
     assert_eq!(results.len(), 2);
-    assert!(results[0].name.contains("Matemáticas"), "nombre debe incluir suite");
+    assert!(
+        results[0].name.contains("Matemáticas"),
+        "nombre debe incluir suite"
+    );
     assert!(results[0].name.contains("suma"));
     assert!(results.iter().all(|r| r.status == TestStatus::Passed));
 }
@@ -167,7 +176,10 @@ fn runner_supports_all_core_matchers() {
     assert!(
         results.iter().all(|r| r.status == TestStatus::Passed),
         "todos los matchers deben pasar: {:?}",
-        results.iter().filter(|r| r.status != TestStatus::Passed).collect::<Vec<_>>()
+        results
+            .iter()
+            .filter(|r| r.status != TestStatus::Passed)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -194,7 +206,11 @@ fn runner_discovers_test_files_in_directory() {
     runner.run_directory(dir.path()).unwrap();
 
     let results = runner.get_results();
-    assert_eq!(results.len(), 2, "debe encontrar exactamente 2 tests (a y b)");
+    assert_eq!(
+        results.len(),
+        2,
+        "debe encontrar exactamente 2 tests (a y b)"
+    );
     assert!(results.iter().all(|r| r.status == TestStatus::Passed));
 }
 
@@ -281,7 +297,9 @@ fn runner_update_snapshots_flag_rewrites_stored_value() {
     .unwrap();
 
     // First run: create
-    TestRunner::new(TestConfig::default()).run_file(&path).unwrap();
+    TestRunner::new(TestConfig::default())
+        .run_file(&path)
+        .unwrap();
 
     // Change value
     fs::write(
@@ -291,7 +309,10 @@ fn runner_update_snapshots_flag_rewrites_stored_value() {
     .unwrap();
 
     // Run with update flag: should pass and update
-    let cfg = TestConfig { update_snapshots: true, ..Default::default() };
+    let cfg = TestConfig {
+        update_snapshots: true,
+        ..Default::default()
+    };
     let mut runner = TestRunner::new(cfg);
     runner.run_file(&path).unwrap();
     assert_eq!(
@@ -310,10 +331,7 @@ fn runner_update_snapshots_flag_rewrites_stored_value() {
 
 #[test]
 fn runner_reports_syntax_error_as_failed_test() {
-    let (_dir, path) = temp_test(
-        "const x = ;;;  // syntax error",
-        "broken.test.js",
-    );
+    let (_dir, path) = temp_test("const x = ;;;  // syntax error", "broken.test.js");
 
     let mut runner = TestRunner::new(TestConfig::default());
     runner.run_file(&path).unwrap();

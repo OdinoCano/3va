@@ -55,7 +55,9 @@ impl JsEngine {
         // Wire the ESM module loader so cross-file imports resolve correctly.
         runtime.set_loader(
             esm::EsmResolver,
-            esm::EsmLoader { permissions: permissions.clone() },
+            esm::EsmLoader {
+                permissions: permissions.clone(),
+            },
         );
 
         let context = Context::full(&runtime)?;

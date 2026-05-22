@@ -7,12 +7,14 @@ pub fn inject_console(ctx: &Ctx) -> Result<()> {
     // All multi-arg formatting and type coercion happens in the JS polyfill below.
     globals.set(
         "__console_write",
-        Function::new(ctx.clone(), |level: String, msg: String| match level.as_str() {
-            "warn" => eprintln!("[WARN] {msg}"),
-            "error" => eprintln!("[ERROR] {msg}"),
-            "info" => println!("[INFO] {msg}"),
-            "debug" => println!("[DEBUG] {msg}"),
-            _ => println!("{msg}"),
+        Function::new(ctx.clone(), |level: String, msg: String| {
+            match level.as_str() {
+                "warn" => eprintln!("[WARN] {msg}"),
+                "error" => eprintln!("[ERROR] {msg}"),
+                "info" => println!("[INFO] {msg}"),
+                "debug" => println!("[DEBUG] {msg}"),
+                _ => println!("{msg}"),
+            }
         })?,
     )?;
 

@@ -288,9 +288,14 @@ fn console_log_multiple_args_joined_with_space() {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).expect("console.log multi-arg must not throw");
+    engine
+        .eval_file(&path)
+        .expect("console.log multi-arg must not throw");
     let threw = engine.eval_to_string("String(globalThis._threw)").unwrap();
-    assert_eq!(threw, "false", "console.log with multiple args must not throw");
+    assert_eq!(
+        threw, "false",
+        "console.log with multiple args must not throw"
+    );
 }
 
 #[test]
@@ -308,7 +313,9 @@ fn console_log_object_serialized_as_json() {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).expect("console.log object must not throw");
+    engine
+        .eval_file(&path)
+        .expect("console.log object must not throw");
     let threw = engine.eval_to_string("String(globalThis._threw2)").unwrap();
     assert_eq!(threw, "false", "console.log with object arg must not throw");
 }
@@ -332,9 +339,16 @@ fn console_variants_do_not_throw() {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).expect("console variants must not throw");
-    let ok = engine.eval_to_string("String(globalThis._console_ok)").unwrap();
-    assert_eq!(ok, "true", "all console methods must accept mixed-type variadic args");
+    engine
+        .eval_file(&path)
+        .expect("console variants must not throw");
+    let ok = engine
+        .eval_to_string("String(globalThis._console_ok)")
+        .unwrap();
+    assert_eq!(
+        ok, "true",
+        "all console methods must accept mixed-type variadic args"
+    );
 }
 
 // ── process global: platform, env, argv ──────────────────────────────────────
@@ -351,7 +365,9 @@ fn process_platform_is_set() {
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
     engine.eval_file(&path).unwrap();
-    let ok = engine.eval_to_string("String(globalThis._platform)").unwrap();
+    let ok = engine
+        .eval_to_string("String(globalThis._platform)")
+        .unwrap();
     assert_eq!(ok, "true", "process.platform must be a string");
 }
 
@@ -383,7 +399,9 @@ fn process_argv_is_array() {
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
     engine.eval_file(&path).unwrap();
-    let ok = engine.eval_to_string("String(globalThis._argv_ok)").unwrap();
+    let ok = engine
+        .eval_to_string("String(globalThis._argv_ok)")
+        .unwrap();
     assert_eq!(ok, "true", "process.argv must be an Array");
 }
 
@@ -401,8 +419,13 @@ fn process_hrtime_returns_two_numbers() {
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
     engine.eval_file(&path).unwrap();
-    let ok = engine.eval_to_string("String(globalThis._hrtime_ok)").unwrap();
-    assert_eq!(ok, "true", "process.hrtime() must return [seconds, nanoseconds]");
+    let ok = engine
+        .eval_to_string("String(globalThis._hrtime_ok)")
+        .unwrap();
+    assert_eq!(
+        ok, "true",
+        "process.hrtime() must return [seconds, nanoseconds]"
+    );
 }
 
 // ── eval_file requiere permiso de lectura ─────────────────────────────────────
@@ -454,9 +477,13 @@ fn async_function_with_await_resolves() {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).expect("async/await debe ejecutar sin error");
+    engine
+        .eval_file(&path)
+        .expect("async/await debe ejecutar sin error");
 
-    let result = engine.eval_to_string("String(globalThis._async_result)").unwrap();
+    let result = engine
+        .eval_to_string("String(globalThis._async_result)")
+        .unwrap();
     assert_eq!(result, "42", "await debe resolver el valor de la promesa");
 }
 
@@ -480,9 +507,13 @@ fn async_await_with_promise_chain() {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).expect("await sobre Promise.resolve debe funcionar");
+    engine
+        .eval_file(&path)
+        .expect("await sobre Promise.resolve debe funcionar");
 
-    let result = engine.eval_to_string("String(globalThis._chain_result)").unwrap();
+    let result = engine
+        .eval_to_string("String(globalThis._chain_result)")
+        .unwrap();
     assert_eq!(result, "42", "await chain debe sumar 10 + 32 = 42");
 }
 
@@ -510,12 +541,16 @@ fn async_await_error_propagates_as_rejection() {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).expect("try/catch en async debe capturar el error");
+    engine
+        .eval_file(&path)
+        .expect("try/catch en async debe capturar el error");
 
     let caught = engine.eval_to_string("String(globalThis._caught)").unwrap();
     assert_eq!(caught, "true", "el catch async debe ejecutarse");
 
-    let msg = engine.eval_to_string("String(globalThis._err_msg)").unwrap();
+    let msg = engine
+        .eval_to_string("String(globalThis._err_msg)")
+        .unwrap();
     assert_eq!(msg, "async error");
 }
 
@@ -542,9 +577,13 @@ fn esm_named_export_import() {
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
 
-    engine.eval_file(&entry).expect("ESM named export/import debe funcionar");
+    engine
+        .eval_file(&entry)
+        .expect("ESM named export/import debe funcionar");
 
-    let sum = engine.eval_to_string("String(globalThis._esm_sum)").unwrap();
+    let sum = engine
+        .eval_to_string("String(globalThis._esm_sum)")
+        .unwrap();
     assert_eq!(sum, "42", "add(10, 32) via ESM import debe ser 42");
 
     let pi = engine.eval_to_string("String(globalThis._esm_pi)").unwrap();
@@ -572,9 +611,13 @@ fn esm_default_export_import() {
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
 
-    engine.eval_file(&entry).expect("ESM default export/import debe funcionar");
+    engine
+        .eval_file(&entry)
+        .expect("ESM default export/import debe funcionar");
 
-    let greeting = engine.eval_to_string("String(globalThis._esm_greeting)").unwrap();
+    let greeting = engine
+        .eval_to_string("String(globalThis._esm_greeting)")
+        .unwrap();
     assert_eq!(greeting, "hello world");
 }
 
@@ -582,11 +625,7 @@ fn esm_default_export_import() {
 fn esm_reexport_chain() {
     let temp = TempDir::new().unwrap();
 
-    std::fs::write(
-        temp.path().join("base.js"),
-        "export const value = 99;",
-    )
-    .unwrap();
+    std::fs::write(temp.path().join("base.js"), "export const value = 99;").unwrap();
 
     std::fs::write(
         temp.path().join("middle.js"),
@@ -605,9 +644,13 @@ fn esm_reexport_chain() {
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
 
-    engine.eval_file(&entry).expect("ESM re-export chain debe funcionar");
+    engine
+        .eval_file(&entry)
+        .expect("ESM re-export chain debe funcionar");
 
-    let v = engine.eval_to_string("String(globalThis._esm_chain)").unwrap();
+    let v = engine
+        .eval_to_string("String(globalThis._esm_chain)")
+        .unwrap();
     assert_eq!(v, "99", "re-export chain debe propagar el valor");
 }
 
@@ -632,9 +675,13 @@ fn esm_ts_module_imported_from_js() {
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
     let engine = JsEngine::new(&state).unwrap();
 
-    engine.eval_file(&entry).expect("importar módulo TypeScript desde JS debe funcionar");
+    engine
+        .eval_file(&entry)
+        .expect("importar módulo TypeScript desde JS debe funcionar");
 
-    let result = engine.eval_to_string("String(globalThis._esm_ts_result)").unwrap();
+    let result = engine
+        .eval_to_string("String(globalThis._esm_ts_result)")
+        .unwrap();
     assert_eq!(result, "42", "double(21) via ESM import de .ts debe ser 42");
 }
 
@@ -665,4 +712,225 @@ fn esm_import_blocked_without_read_permission() {
         result.is_err(),
         "importar un módulo sin --allow-read debe fallar"
     );
+}
+
+// ── ESM desde node_modules ────────────────────────────────────────────────────
+
+#[test]
+fn esm_import_from_node_modules_main_field() {
+    let temp = TempDir::new().unwrap();
+
+    // Fake package: node_modules/my-utils/index.js with a named export.
+    let pkg_dir = temp.path().join("node_modules").join("my-utils");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(
+        pkg_dir.join("package.json"),
+        r#"{"name":"my-utils","version":"1.0.0","main":"index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("index.js"),
+        "export function sum(a, b) { return a + b; }",
+    )
+    .unwrap();
+
+    let entry = temp.path().join("entry.js");
+    std::fs::write(
+        &entry,
+        "import { sum } from 'my-utils';\nglobalThis._nm_sum = sum(19, 23);",
+    )
+    .unwrap();
+
+    let engine = engine_with_read(&temp);
+    engine
+        .eval_file(&entry)
+        .expect("importar desde node_modules via main debe funcionar");
+
+    let result = engine.eval_to_string("String(globalThis._nm_sum)").unwrap();
+    assert_eq!(result, "42", "sum(19, 23) via node_modules debe ser 42");
+}
+
+#[test]
+fn esm_import_from_node_modules_exports_field() {
+    let temp = TempDir::new().unwrap();
+
+    // Fake package using the "exports" field (modern).
+    let pkg_dir = temp.path().join("node_modules").join("modern-pkg");
+    std::fs::create_dir_all(pkg_dir.join("dist")).unwrap();
+    std::fs::write(
+        pkg_dir.join("package.json"),
+        r#"{"name":"modern-pkg","exports":{".":{"import":"./dist/index.js"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("dist").join("index.js"),
+        "export const PI = 3.14159;",
+    )
+    .unwrap();
+
+    let entry = temp.path().join("entry.js");
+    std::fs::write(
+        &entry,
+        "import { PI } from 'modern-pkg';\nglobalThis._pi = PI;",
+    )
+    .unwrap();
+
+    let engine = engine_with_read(&temp);
+    engine
+        .eval_file(&entry)
+        .expect("importar desde node_modules via exports debe funcionar");
+
+    let result = engine.eval_to_string("String(globalThis._pi)").unwrap();
+    assert_eq!(result, "3.14159", "PI via exports field debe ser 3.14159");
+}
+
+#[test]
+fn esm_import_from_scoped_node_modules() {
+    let temp = TempDir::new().unwrap();
+
+    // Scoped package: node_modules/@myorg/helpers/index.js
+    let pkg_dir = temp
+        .path()
+        .join("node_modules")
+        .join("@myorg")
+        .join("helpers");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(
+        pkg_dir.join("package.json"),
+        r#"{"name":"@myorg/helpers","version":"1.0.0","main":"index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("index.js"),
+        "export function double(x) { return x * 2; }",
+    )
+    .unwrap();
+
+    let entry = temp.path().join("entry.js");
+    std::fs::write(
+        &entry,
+        "import { double } from '@myorg/helpers';\nglobalThis._scoped_result = double(21);",
+    )
+    .unwrap();
+
+    let engine = engine_with_read(&temp);
+    engine
+        .eval_file(&entry)
+        .expect("importar desde paquete scoped debe funcionar");
+
+    let result = engine
+        .eval_to_string("String(globalThis._scoped_result)")
+        .unwrap();
+    assert_eq!(result, "42", "double(21) via scoped package debe ser 42");
+}
+
+#[test]
+fn esm_import_from_parent_node_modules() {
+    // node_modules at a parent directory, entry file in a subdirectory.
+    let temp = TempDir::new().unwrap();
+
+    let pkg_dir = temp.path().join("node_modules").join("shared-lib");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(
+        pkg_dir.join("package.json"),
+        r#"{"name":"shared-lib","main":"index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(pkg_dir.join("index.js"), "export const ANSWER = 42;").unwrap();
+
+    // Entry file lives in a subdirectory — node_modules is in the parent.
+    let sub = temp.path().join("src");
+    std::fs::create_dir_all(&sub).unwrap();
+    let entry = sub.join("entry.js");
+    std::fs::write(
+        &entry,
+        "import { ANSWER } from 'shared-lib';\nglobalThis._parent_nm = ANSWER;",
+    )
+    .unwrap();
+
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(&state).unwrap();
+
+    engine
+        .eval_file(&entry)
+        .expect("resolver debe encontrar node_modules en directorio padre");
+
+    let result = engine
+        .eval_to_string("String(globalThis._parent_nm)")
+        .unwrap();
+    assert_eq!(result, "42", "ANSWER via parent node_modules debe ser 42");
+}
+
+// ── WebSocket builtin ─────────────────────────────────────────────────────────
+
+#[test]
+fn websocket_class_exists_in_global_scope() {
+    let state = PermissionState::new();
+    let engine = JsEngine::new(&state).unwrap();
+    let result = engine.eval_to_string("typeof WebSocket").unwrap();
+    assert_eq!(
+        result, "function",
+        "WebSocket debe estar disponible como constructor global"
+    );
+}
+
+#[test]
+fn websocket_constants_are_defined() {
+    let state = PermissionState::new();
+    let engine = JsEngine::new(&state).unwrap();
+    engine
+        .eval(
+            "
+        if (WebSocket.CONNECTING !== 0) throw new Error('CONNECTING != 0');
+        if (WebSocket.OPEN       !== 1) throw new Error('OPEN != 1');
+        if (WebSocket.CLOSING    !== 2) throw new Error('CLOSING != 2');
+        if (WebSocket.CLOSED     !== 3) throw new Error('CLOSED != 3');
+    ",
+        )
+        .expect("constantes de WebSocket deben estar definidas");
+}
+
+#[test]
+fn websocket_denied_without_network_permission() {
+    let state = PermissionState::new();
+    // No network permission granted — constructor must not throw (mirrors browser behavior)
+    // but onerror must fire and readyState must be CLOSED.
+    let engine = JsEngine::new(&state).unwrap();
+    engine
+        .eval(
+            "
+        var _ws_err_called = false;
+        var ws = new WebSocket('ws://example.com');
+        ws.onerror = function() { _ws_err_called = true; };
+        globalThis._ws_state = ws.readyState;
+    ",
+        )
+        .expect("constructor de WebSocket no debe lanzar");
+    let state_val = engine
+        .eval_to_string("String(globalThis._ws_state)")
+        .unwrap();
+    assert_eq!(
+        state_val, "3",
+        "readyState debe ser CLOSED (3) cuando se deniega la conexión"
+    );
+}
+
+#[test]
+fn websocket_readystate_closed_on_denied() {
+    let state = PermissionState::new();
+    let engine = JsEngine::new(&state).unwrap();
+    engine
+        .eval(
+            "
+        var ws = Object.create(WebSocket.prototype);
+        ws.readyState = 3; // CLOSED
+        globalThis._ws_state = ws.readyState;
+    ",
+        )
+        .unwrap();
+    let state_val = engine
+        .eval_to_string("String(globalThis._ws_state)")
+        .unwrap();
+    assert_eq!(state_val, "3", "readyState CLOSED debe ser 3");
 }

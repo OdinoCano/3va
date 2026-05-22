@@ -241,7 +241,9 @@ impl TestRunner {
         perms.grant(vvva_permissions::Capability::FileRead(cwd.clone()));
         perms.grant(vvva_permissions::Capability::FileWrite(cwd.clone()));
         if let Some(test_dir) = path.parent() {
-            let canonical = test_dir.canonicalize().unwrap_or_else(|_| test_dir.to_path_buf());
+            let canonical = test_dir
+                .canonicalize()
+                .unwrap_or_else(|_| test_dir.to_path_buf());
             perms.grant(vvva_permissions::Capability::FileRead(canonical.clone()));
             perms.grant(vvva_permissions::Capability::FileWrite(canonical));
         }
