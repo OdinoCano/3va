@@ -1,23 +1,23 @@
-# 02 - RESOLUCIÓN DE DEPENDENCIAS
+# 02 - DEPENDENCY RESOLUTION
 
-## 2.1 Algoritmo de Resolución
+## 2.1 Resolution Algorithm
 
-El resolvedor de dependencias de 3va implementa un algoritmo compatible con npm para resolver el árbol de dependencias.
+3va's dependency resolver implements an npm-compatible algorithm to resolve the dependency tree.
 
-## 2.2 Proceso de Resolución
+## 2.2 Resolution Process
 
-### 2.2.1 Pasos
+### 2.2.1 Steps
 
 ```
-1. Parsear package.json del proyecto
-2. Obtener metadata de paquetes del registry
-3. Resolver conflictos de versiones
-4. Construir árbol de dependencias
-5. Verificar lockfile
-6. Generar nuevo lockfile si es necesario
+1. Parse project package.json
+2. Get package metadata from registry
+3. Resolve version conflicts
+4. Build dependency tree
+5. Verify lockfile
+6. Generate new lockfile if necessary
 ```
 
-### 2.2.2 Diagrama de Flujo
+### 2.2.2 Flow Diagram
 
 ```
 ┌──────────────┐
@@ -26,37 +26,37 @@ El resolvedor de dependencias de 3va implementa un algoritmo compatible con npm 
        │
        ▼
 ┌──────────────┐
-│   Parsear   │
+│   Parse    │
 │ dependencies│
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│   Consultar │ ───► Fetch package metadata
+│   Query    │ ───► Fetch package metadata
 │   Registry  │       from npm registry
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│   Resolver  │ ───► Algoritmo de version matching
-│  Versiones  │       (semver)
+│   Resolve  │ ───► Version matching algorithm
+│  Versions  │       (semver)
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│   Detectar  │ ───► peerDependencies conflicts
-│  Conflictos │       duplicates, mismatches
+│   Detect   │ ───► peerDependencies conflicts
+│  Conflicts │       duplicates, mismatches
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│  Construir  │
-│   Árbol     │
+│  Build    │
+│   Tree     │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│  Comparar   │ ───► Si diff, regenera lockfile
+│  Compare   │ ───► If diff, regenerate lockfile
 │  lockfile   │
 └──────────────┘
 ```
@@ -79,7 +79,7 @@ pub enum SemverMatch {
 }
 ```
 
-### 2.3.2 Algoritmo de Resolución
+### 2.3.2 Resolution Algorithm
 
 ```rust
 pub struct Resolver {
@@ -95,13 +95,13 @@ impl Resolver {
             // 1. Fetch package metadata
             let metadata = self.registry.fetch(name, version);
 
-            // 2. Resolver versión
+            // 2. Resolve version
             let resolved = self.resolve_version(&metadata, version);
 
-            // 3. Añadir al grafo
+            // 3. Add to graph
             graph.add(name, resolved);
 
-            // 4. Recursivamente resolver dependencias
+            // 4. Recursively resolve dependencies
             if let Some(sub_deps) = resolved.dependencies {
                 for (sub_name, sub_version) in sub_deps {
                     self.resolve_dep(&mut graph, &sub_name, &sub_version);
@@ -109,32 +109,32 @@ impl Resolver {
             }
         }
 
-        // 5. Resolver conflictos
+        // 5. Resolve conflicts
         self.resolve_conflicts(&mut graph);
 
         graph
     }
 
     fn resolve_conflicts(&self, graph: &mut DependencyGraph) {
-        // Detectar y resolver conflictos de versiones
-        // - Mismo paquete con diferentes versiones
+        // Detect and resolve version conflicts
+        // - Same package with different versions
         // - peerDependencies conflicts
     }
 }
 ```
 
-### 2.3.3 Manejo de Conflicts
+### 2.3.3 Conflict Handling
 
-| Scenario | Estrategia |
-|----------|------------|
-| A → B@1, C → B@2 | Usar B@2 (dupes allowed) |
-| A → B@1, peer: B@2 | Resolver a versión compatible |
-| A → C@1, B → C@1 | Optimizar (dedupe) |
-| Circular | Resolver hasta profundidad máxima |
+| Scenario | Strategy |
+|----------|----------|
+| A → B@1, C → B@2 | Use B@2 (dupes allowed) |
+| A → B@1, peer: B@2 | Resolve to compatible version |
+| A → C@1, B → C@1 | Optimize (dedupe) |
+| Circular | Resolve up to maximum depth |
 
-## 2.4 Fetch de Paquetes
+## 2.4 Package Fetch
 
-### 2.4.1 Descarga
+### 2.4.1 Download
 
 ```rust
 pub struct PackageFetcher {
@@ -145,18 +145,18 @@ pub struct PackageFetcher {
 
 impl PackageFetcher {
     pub async fn fetch(&self, package: &str, version: &str) -> anyhow::Result<Package> {
-        // 1. Verificar cache
+        // 1. Check cache
         if let Some(cached) = self.cache.get(package, version) {
             return Ok(cached);
         }
 
-        // 2. Descargar del registry
+        // 2. Download from registry
         let tarball = self.client.download(&format!(
             "{}/{}/-/{}-{}.tgz",
             self.registry, package, package, version
         )).await?;
 
-        // 3. Verificar hash
+        // 3. Verify hash
         let expected_hash = self.get_hash_from_metadata(package, version)?;
         let actual_hash = sha256(&tarball);
 
@@ -164,10 +164,10 @@ impl PackageFetcher {
             anyhow::bail!("Hash mismatch for {}@{}", package, version);
         }
 
-        // 4. Extraer
+        // 4. Extract
         let extracted = self.extract(tarball)?;
 
-        // 5. Cachear
+        // 5. Cache
         self.cache.put(package, version, &extracted);
 
         Ok(extracted)
@@ -177,7 +177,7 @@ impl PackageFetcher {
 
 ## 2.5 Lockfile
 
-### 2.5.1 Formato
+### 2.5.1 Format
 
 ```json
 {
@@ -210,7 +210,7 @@ impl PackageFetcher {
 }
 ```
 
-### 2.5.2 Generación
+### 2.5.2 Generation
 
 ```rust
 pub fn generate_lockfile(graph: &DependencyGraph) -> Lockfile {
@@ -247,7 +247,7 @@ pub fn generate_lockfile(graph: &DependencyGraph) -> Lockfile {
 
 ## 2.6 Cache
 
-### 2.6.1 Estructura
+### 2.6.1 Structure
 
 ```
 ~/.3va/cache/
@@ -261,18 +261,18 @@ pub fn generate_lockfile(graph: &DependencyGraph) -> Lockfile {
         └── package/
 ```
 
-### 2.6.2 Política de Cache
+### 2.6.2 Cache Policy
 
 ```rust
 pub struct CacheConfig {
     pub max_size: u64,           // 1GB default
-    pub ttl: Duration,          // 7 días
-    pub prune_on_install: bool, // Limpiar al instalar
+    pub ttl: Duration,          // 7 days
+    pub prune_on_install: bool, // Clean on install
 }
 
 impl Cache {
     pub fn get_or_fetch(&mut self, package: &str) -> anyhow::Result<Package> {
-        // 1. Check内存 cache
+        // 1. Check in-memory cache
         // 2. Check disk cache
         // 3. Fetch if not found
     }
@@ -281,4 +281,4 @@ impl Cache {
 
 ---
 
-*Resolución conforme a npm algorithm y semver specification.*
+*Resolution compliant with npm algorithm and semver specification.*

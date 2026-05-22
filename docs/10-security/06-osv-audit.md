@@ -1,62 +1,62 @@
-# 06 - AUDITORÍA DE VULNERABILIDADES (OSV)
+# 06 - VULNERABILITY AUDIT (OSV)
 
-## 6.1 Visión General
+## 6.1 Overview
 
-`3va audit` detecta vulnerabilidades conocidas en las dependencias instaladas consultando la [Open Source Vulnerabilities API (OSV)](https://osv.dev). OSV agrega datos de NVD, GitHub Advisory Database (GHSA), RustSec, PyPI Advisory y otros, por lo que una sola consulta cubre múltiples fuentes autoritativas.
+`3va audit` detects known vulnerabilities in installed dependencies by querying the [Open Source Vulnerabilities API (OSV)](https://osv.dev). OSV aggregates data from NVD, GitHub Advisory Database (GHSA), RustSec, PyPI Advisory, and others, so a single query covers multiple authoritative sources.
 
-El auditor opera en dos fases secuenciales:
+The auditor operates in two sequential phases:
 
-| Fase | Módulo | Qué detecta |
+| Phase | Module | What it detects |
 |------|--------|-------------|
-| 1 | `MalwareScanner` | Patrones de malware en el código extraído de `node_modules/` |
-| 2 | `auditor::run_audit` | CVEs, GHSAs y advisories conocidos para cada `paquete@versión` |
+| 1 | `MalwareScanner` | Malware patterns in code extracted from `node_modules/` |
+| 2 | `auditor::run_audit` | Known CVEs, GHSAs, and advisories for each `package@version` |
 
 ---
 
-## 6.2 Arquitectura del Auditor OSV
+## 6.2 OSV Auditor Architecture
 
-### 6.2.1 Flujo de datos
+### 6.2.1 Data flow
 
 ```
 3va-lock.json
      │
      ▼
-Lista de (nombre, versión)
+List of (name, version)
      │
-     ├── Hit de caché (~/.cache/3va/audit/) ──► resultado en memoria
+     ├── Cache hit (~/.cache/3va/audit/) ──► result in memory
      │
-     └── Miss de caché
+     └── Cache miss
               │
               ▼
      OSV Batch API (POST /v1/querybatch)
-     hasta 100 paquetes por petición
+     up to 100 packages per request
               │
               ▼
-     Guardar en caché + resultado en memoria
+     Save to cache + result in memory
               │
               ▼
-     Parsear severidad CVSS v3 / etiqueta GHSA
+     Parse CVSS v3 severity / GHSA tag
               │
               ▼
      AuditReport { findings, critical_count, high_count, ... }
 ```
 
-### 6.2.2 Elección de arquitectura: API + caché vs base de datos local
+### 6.2.2 Architecture choice: API + cache vs local database
 
-Se eligió **API-first con caché por paquete** frente a descargar la base de datos OSV completa (~600 MB comprimida) por las siguientes razones:
+**API-first with per-package cache** was chosen over downloading the full OSV database (~600 MB compressed) for the following reasons:
 
-- Los datos siempre son los más recientes sin ningún paso manual.
-- No requiere daemon ni scheduler para mantener la DB actualizada.
-- Solo se descarga información de los paquetes realmente instalados.
-- La caché por `paquete@versión` es granular: una nueva instalación solo fetcha lo nuevo.
+- Data is always up to date with no manual steps.
+- No daemon or scheduler required to keep the DB updated.
+- Only information about actually installed packages is downloaded.
+- Per-`package@version` cache is granular: a new install only fetches what is new.
 
 ---
 
-## 6.3 API OSV: Consulta Batch
+## 6.3 OSV API: Batch Query
 
 **Endpoint:** `POST https://api.osv.dev/v1/querybatch`
 
-**Petición:**
+**Request:**
 ```json
 {
   "queries": [
@@ -72,7 +72,7 @@ Se eligió **API-first con caché por paquete** frente a descargar la base de da
 }
 ```
 
-**Respuesta:**
+**Response:**
 ```json
 {
   "results": [
@@ -99,23 +99,23 @@ Se eligió **API-first con caché por paquete** frente a descargar la base de da
 }
 ```
 
-El array `results` tiene la misma longitud y orden que `queries`, lo que permite correlacionar resultados en O(1).
+The `results` array has the same length and order as `queries`, enabling O(1) result correlation.
 
 ---
 
-## 6.4 Caché Local
+## 6.4 Local Cache
 
-### 6.4.1 Ubicación
+### 6.4.1 Location
 
 ```
 ~/.cache/3va/audit/
 ```
 
-### 6.4.2 Formato de cada entrada
+### 6.4.2 Entry format
 
-Archivo: `<pkg_sanitizado>@<version>.json`
+File: `<pkg_sanitized>@<version>.json`
 
-- Los paquetes con scope se sanitizan: `@scope/name` → `scope__name@1.0.0.json`
+- Scoped packages are sanitized: `@scope/name` → `scope__name@1.0.0.json`
 
 ```json
 {
@@ -124,32 +124,32 @@ Archivo: `<pkg_sanitizado>@<version>.json`
 }
 ```
 
-### 6.4.3 TTL y refresco
+### 6.4.3 TTL and Refresh
 
-| Situación | Comportamiento |
+| Situation | Behavior |
 |-----------|---------------|
-| Entrada < 24 h de antigüedad | Usada directamente (0 peticiones a OSV) |
-| Entrada ≥ 24 h | Re-fetch automático en background del comando |
-| `--update-cache` pasado | TTL ignorado, todos los paquetes re-fetched |
-| Red no disponible y caché existe | Caché stale usada con advertencia al usuario |
-| Red no disponible y sin caché | Paquete omitido del análisis (warning visible) |
+| Entry < 24 h old | Used directly (0 requests to OSV) |
+| Entry ≥ 24 h | Auto re-fetch in background of the command |
+| `--update-cache` passed | TTL ignored, all packages re-fetched |
+| Network unavailable and cache exists | Stale cache used with user warning |
+| Network unavailable and no cache | Package omitted from analysis (visible warning) |
 
-El comando **nunca falla con error** por problemas de conectividad.
+The command **never fails with an error** due to connectivity issues.
 
 ---
 
-## 6.5 Cálculo de Severidad
+## 6.5 Severity Calculation
 
-La severidad se determina en orden de preferencia:
+Severity is determined in order of preference:
 
-1. **CVSS v3.1 vector** — se calcula la base score según la fórmula NVD completa.
-2. **CVSS v2 numeric score** — para advisories más antiguos.
-3. **`database_specific.severity`** — etiqueta string de GitHub Advisory (`CRITICAL`, `HIGH`, `MODERATE`, `LOW`).
-4. **`affected[].database_specific.severity`** — mismo campo a nivel de paquete afectado.
+1. **CVSS v3.1 vector** — base score calculated per full NVD formula.
+2. **CVSS v2 numeric score** — for older advisories.
+3. **`database_specific.severity`** — GitHub Advisory string tag (`CRITICAL`, `HIGH`, `MODERATE`, `LOW`).
+4. **`affected[].database_specific.severity`** — same field at the affected package level.
 
-### Umbrales CVSS v3
+### CVSS v3 Thresholds
 
-| Score | Severidad |
+| Score | Severity |
 |-------|-----------|
 | 9.0 – 10.0 | **CRITICAL** |
 | 7.0 – 8.9  | **HIGH** |
@@ -159,60 +159,60 @@ La severidad se determina en orden de preferencia:
 
 ---
 
-## 6.6 Manejo de Errores de Red y Rate Limiting
+## 6.6 Network Error and Rate Limiting Handling
 
 ```
-petición → HTTP 429 → esperar 5s → reintentar una vez
+request → HTTP 429 → wait 5s → retry once
                                          │
                               ┌──────────┴──────────┐
-                           éxito                  fallo
+                           success                failure
                               │                      │
-                         guardar caché         caché stale
-                                                (con warning)
+                         save cache           stale cache
+                                                (with warning)
 ```
 
-- Un solo retry automático tras HTTP 429 (rate limit).
-- Todos los errores de red (timeout, DNS, TLS) son recuperables: se usa la caché stale.
-- Los errores se reportan como warnings, nunca como errores fatales.
+- Single automatic retry after HTTP 429 (rate limit).
+- All network errors (timeout, DNS, TLS) are recoverable: stale cache is used.
+- Errors are reported as warnings, never as fatal errors.
 
 ---
 
-## 6.7 Privacidad
+## 6.7 Privacy
 
-Solo se envía a la API OSV:
-- Nombre del paquete
-- Versión exacta
-- Ecosistema (`"npm"`)
+Only the following is sent to the OSV API:
+- Package name
+- Exact version
+- Ecosystem (`"npm"`)
 
-**No se envía:** rutas de archivos, contenido del código, nombre del proyecto, variables de entorno ni ningún otro metadato del sistema.
+**Not sent:** file paths, code content, project name, environment variables, or any other system metadata.
 
 ---
 
-## 6.8 Uso en CI/CD
+## 6.8 CI/CD Usage
 
 ```yaml
-# GitHub Actions — bloquear merge si hay HIGH/CRITICAL
+# GitHub Actions — block merge if HIGH/CRITICAL
 - name: Security audit
   run: 3va audit --deny
 ```
 
 ```bash
-# Pipeline local
+# Local pipeline
 3va audit --deny && echo "OK" || exit 1
 ```
 
-El flag `--deny` hace que el comando salga con código ≠ 0 si y solo si se encuentra al menos una vulnerabilidad CRITICAL o HIGH. Las vulnerabilidades MEDIUM y LOW producen una advertencia pero no bloquean el pipeline.
+The `--deny` flag causes the command to exit with code ≠ 0 if and only if at least one CRITICAL or HIGH vulnerability is found. MEDIUM and LOW vulnerabilities produce a warning but do not block the pipeline.
 
 ---
 
-## 6.9 Relación con el Scanner de Malware
+## 6.9 Relationship with the Malware Scanner
 
-Las dos fases son complementarias, no redundantes:
+The two phases are complementary, not redundant:
 
-| | Malware Scanner (Fase 1) | Auditor OSV (Fase 2) |
+| | Malware Scanner (Phase 1) | OSV Auditor (Phase 2) |
 |---|---|---|
-| **Fuente de verdad** | Heurísticas + patrones propios | Base de datos pública OSV |
-| **Qué detecta** | Código malicioso no reportado, obfuscación, exfiltración | CVEs y advisories conocidos y publicados |
-| **Requiere red** | No | Sí (con caché offline) |
-| **Falsos positivos** | Posibles (heurístico) | Bajos (datos autoritativos) |
-| **Cobertura** | 0-day y malware nuevo | Vulnerabilidades catalogadas |
+| **Source of truth** | Heuristics + custom patterns | Public OSV database |
+| **What it detects** | Unreported malicious code, obfuscation, exfiltration | Known and published CVEs and advisories |
+| **Requires network** | No | Yes (with offline cache) |
+| **False positives** | Possible (heuristic) | Low (authoritative data) |
+| **Coverage** | 0-day and novel malware | Cataloged vulnerabilities |

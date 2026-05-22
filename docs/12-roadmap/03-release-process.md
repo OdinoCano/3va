@@ -1,34 +1,34 @@
-# 03 - PROCESO DE RELEASE
+# 03 - RELEASE PROCESS
 
-## 3.1 Versionado
+## 3.1 Versioning
 
-3va sigue Semantic Versioning (SemVer).
+3va follows Semantic Versioning (SemVer).
 
-## 3.2 Tipos de Release
+## 3.2 Release Types
 
-| Tipo | Descripcion | Ejemplo |
+| Type | Description | Example |
 |------|-------------|---------|
-| Major | Cambios incompatibles | 1.0.0 → 2.0.0 |
-| Minor | Features compatibles | 1.0.0 → 1.1.0 |
+| Major | Incompatible changes | 1.0.0 → 2.0.0 |
+| Minor | Compatible features | 1.0.0 → 1.1.0 |
 | Patch | Bug fixes | 1.0.0 → 1.0.1 |
 
-## 3.3 Canales
+## 3.3 Channels
 
-| Canal | Descripcion | Frecuencia |
+| Channel | Description | Frequency |
 |-------|-------------|------------|
-| stable | Producción | Cada 2 meses |
-| beta | Testing | Cada 2 semanas |
-| alpha | Desarrollo | Weekly |
+| stable | Production | Every 2 months |
+| beta | Testing | Every 2 weeks |
+| alpha | Development | Weekly |
 
-## 3.4 Proceso
+## 3.4 Process
 
 ### 3.4.1 Release Checklist
 
 ```
-1. Feature freeze (2 semanas antes)
-2. Bug fix freeze (1 semana antes)
+1. Feature freeze (2 weeks before)
+2. Bug fix freeze (1 week before)
 3. RC build
-4. Testing (1 semana)
+4. Testing (1 week)
 5. Release notes
 6. Publication
 7. Announcement
@@ -50,9 +50,9 @@ git tag v1.0.0-rc.1
 git tag v1.0.0
 ```
 
-## 3.5 Distribución
+## 3.5 Distribution
 
-| Canal | Destino |
+| Channel | Destination |
 |-------|---------|
 | Homebrew | brew install 3va |
 | npm | npm i -g 3va |
@@ -80,4 +80,4 @@ git tag v1.0.0
 
 ---
 
-*Release process conforme a maintainers guide.*
+*Release process compliant with maintainers guide.*

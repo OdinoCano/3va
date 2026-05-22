@@ -1,45 +1,45 @@
-# 01 - ANÁLISIS ESTÁTICO
+# 01 - STATIC ANALYSIS
 
-## 1.1 Análisis de Código
+## 1.1 Code Analysis
 
-El módulo de análisis estático examina código JavaScript/TypeScript en busca de vulnerabilidades.
+The static analysis module examines JavaScript/TypeScript code for vulnerabilities.
 
-## 1.2 Detección de Vulnerabilidades
+## 1.2 Vulnerability Detection
 
-| Tipo | Descripcion | Severidad |
+| Type | Description | Severity |
 |------|-------------|-----------|
 | XSS | Cross-site scripting | Critical |
 | SQLi | SQL injection | Critical |
 | RCE | Remote code execution | Critical |
 | Path Traversal | Path traversal | High |
-| Command Injection | Inyección de comandos | Critical |
+| Command Injection | Command injection | Critical |
 | XXE | XML external entity | High |
-| Insecure Deserialization | Deserialización insegura | High |
-| Weak Crypto | Criptografía débil | Medium |
+| Insecure Deserialization | Insecure deserialization | High |
+| Weak Crypto | Weak cryptography | Medium |
 
-## 1.3 Reglas
+## 1.3 Rules
 
 ```javascript
-// Detectado: eval() con entrada de usuario
+// Detected: eval() with user input
 eval(userInput); // ALERT: Code injection
 
-// Detectado: innerHTML con entrada
+// Detected: innerHTML with input
 element.innerHTML = userData; // ALERT: XSS
 
-// Detectado: concatenación en SQL
+// Detected: SQL concatenation
 query("SELECT * FROM " + table); // ALERT: SQLi
 ```
 
-## 1.4 Integración
+## 1.4 Integration
 
 ```bash
-# Ejecutar análisis
+# Run analysis
 3va analyze
 
-# En build
+# In build
 3va build --security-scan
 
-# Configuración
+# Configuration
 // 3va.config.js
 module.exports = {
   security: {
@@ -65,4 +65,4 @@ module.exports = {
 
 ---
 
-*Análisis estático basado en OWASP y ESLint security.*
+*Static analysis based on OWASP and ESLint security.*

@@ -1,17 +1,17 @@
-# 02 - APLICACIÓN DE POLÍTICAS
+# 02 - POLICY ENFORCEMENT
 
-## 2.1 Sistema de Enforcement
+## 2.1 Enforcement System
 
-El sistema de enforcement aplica las políticas de permisos en tiempo de ejecución, interceptando operaciones sensibles y verificando contra el PermissionState.
+The enforcement system applies permission policies at runtime, intercepting sensitive operations and checking against PermissionState.
 
-## 2.2 Puntos de Intercepción
+## 2.2 Interception Points
 
-### 2.2.1 Puntos de Verificación
+### 2.2.1 Verification Points
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Usuario Code                            │
-│         (JavaScript/TypeScript en el runtime)                 │
+│                        User Code                              │
+│         (JavaScript/TypeScript running in the runtime)        │
 └─────────────────────────┬───────────────────────────────────────┘
                           │
     ┌─────────────────────┴─────────────────────┐
@@ -31,33 +31,33 @@ El sistema de enforcement aplica las políticas de permisos en tiempo de ejecuci
        ▼                                        ▼
 ┌───────────────────────────────────────────────────────────────┐
 │                   PermissionState                             │
-│              (verificación de capabilities)                   │
+│              (capability verification)                        │
 └───────────────────────────────────────────────────────────────┘
                           │
                      ┌────┴────┐
                      │ ALLOW   │ DENY
                      ▼         ▼
               ┌─────────┐  ┌─────────┐
-              │ ejecutar│  │ throw   │
-              │ operación│  │ Security│
+               │ execute │  │ throw   │
+               │ operation│  │ Security│
               └─────────┘  └─────────┘
 ```
 
-### 2.2.2 Operaciones Interceptadas
+### 2.2.2 Intercepted Operations
 
-| Módulo | Operación | Capability Requerida |
+| Module | Operation | Required Capability |
 |--------|-----------|---------------------|
-| fs.readFile | Leer archivo | FileRead |
-| fs.writeFile | Escribir archivo | FileWrite |
-| fs.readDir | Listar directorio | FileRead |
+| fs.readFile | Read file | FileRead |
+| fs.writeFile | Write file | FileWrite |
+| fs.readDir | List directory | FileRead |
 | fetch | HTTP request | Network |
 | net.connect | TCP/UDP | Network |
-| process.env | Leer entorno | EnvAccess |
-| child_process.spawn | Crear proceso | SpawnProcess |
+| process.env | Read environment | EnvAccess |
+| child_process.spawn | Create process | SpawnProcess |
 
 ## 2.3 FileSystem Enforcement
 
-### 2.3.1 Implementación del Hook
+### 2.3.1 Hook Implementation
 
 ```rust
 pub struct FsEnforcer {
@@ -96,8 +96,8 @@ impl FsEnforcer {
     }
 
     pub fn check_read_recursive(&self, path: &Path) -> Result<(), PermissionError> {
-        // Para operaciones que leen recursively
-        // Verificar el path base
+        // For operations that read recursively
+        // Verify the base path
         for cap in &self.permission_state.granted {
             if let Capability::FileRead(allowed) = cap {
                 if path.starts_with(allowed) || allowed.starts_with(path) {
@@ -113,22 +113,22 @@ impl FsEnforcer {
 }
 ```
 
-### 2.3.2 Integración con Polyfills
+### 2.3.2 Polyfill Integration
 
 ```rust
-// En el polyfill de fs
+// In the fs polyfill
 pub fn read_file_sync(path: &str) -> Result<String, Error> {
-    // 1. Verificar permisos
+    // 1. Check permissions
     enforcer.check_read(Path::new(path))?;
 
-    // 2. Si está permitido, ejecutar operación
+    // 2. If allowed, execute operation
     std::fs::read_to_string(path)
 }
 ```
 
 ## 2.4 Network Enforcement
 
-### 2.4.1 Verificación de Red
+### 2.4.1 Network Verification
 
 ```rust
 pub struct NetEnforcer {
@@ -162,25 +162,25 @@ impl NetEnforcer {
 ### 2.4.2 fetch Interception
 
 ```rust
-// Polyfill de fetch con verificación
+// Fetch polyfill with verification
 pub async fn secure_fetch(url: &str, init: RequestInit) -> Result<Response> {
     let parsed_url = Url::parse(url)?;
 
-    // Verificar permiso
+    // Check permission
     enforcer.check_url(&parsed_url)?;
 
-    // Validaciones de seguridad adicionales
+    // Additional security validations
     validate_no_malicious_redirects(&parsed_url)?;
     validate_content_length(init.body)?;
 
-    // Ejecutar fetch real
+    // Execute real fetch
     native_fetch(url, init).await
 }
 ```
 
 ## 2.5 Environment Enforcement
 
-### 2.5.1 Acceso a Variables de Entorno
+### 2.5.1 Environment Variable Access
 
 ```rust
 pub struct EnvEnforcer {
@@ -194,7 +194,7 @@ impl EnvEnforcer {
             return Err(PermissionError::EnvAccessDenied);
         }
 
-        // Opcional:限制 allowed_vars
+        // Optional: restrict allowed_vars
         if !self.allowed_vars.is_empty() && !self.allowed_vars.contains(key) {
             return Err(PermissionError::EnvVarNotAllowed(key.to_string()));
         }
@@ -214,7 +214,7 @@ impl EnvEnforcer {
 
 ## 2.6 Proceso Enforcement
 
-### 2.6.1 Spawn de Procesos
+### 2.6.1 Process Spawn
 
 ```rust
 pub struct ProcessEnforcer {
@@ -228,7 +228,7 @@ impl ProcessEnforcer {
             return Err(PermissionError::ProcessSpawnDenied);
         }
 
-        // Verificar si el comando está en lista blanca
+        // Check if the command is on the whitelist
         if !self.allowed_commands.is_empty() && !self.allowed_commands.contains(cmd) {
             return Err(PermissionError::CommandNotAllowed(cmd.to_string()));
         }
@@ -240,7 +240,7 @@ impl ProcessEnforcer {
 
 ## 2.7 Manejo de Errores
 
-### 2.7.1 Tipos de Errores
+### 2.7.1 Error Types
 
 ```rust
 #[derive(Error, Debug)]
@@ -271,10 +271,10 @@ pub enum PermissionError {
 }
 ```
 
-### 2.7.2 Throw en JavaScript
+### 2.7.2 Throw in JavaScript
 
 ```rust
-// Convertir error de permisos a error JavaScript
+// Convert permission error to JavaScript error
 pub fn throw_permission_error(ctx: &Context, error: PermissionError) {
     ctx.with(|ctx| {
         let error_msg = error.to_string();
@@ -287,13 +287,13 @@ pub fn throw_permission_error(ctx: &Context, error: PermissionError) {
 }
 ```
 
-## 2.8 Cumplimiento Normativo (ISO/IEC)
+## 2.8 Regulatory Compliance (ISO/IEC)
 
-Este diseño de Enforcers se alinea estrictamente con los controles de seguridad de la información **ISO/IEC 27002**:
-- Las políticas de segmentación de red (`NetEnforcer`) garantizan la protección contra exposición no autorizada.
-- La interceptación del sistema de archivos (`FsEnforcer`) apoya el cumplimiento de protección de medios de almacenamiento.
-- El modelo basado en capacidades asegura una implementación rigurosa del **Mínimo Privilegio (Least Privilege)** y **Defensa en Profundidad (Defense in Depth)** requeridos por la norma.
+This Enforcers design is strictly aligned with **ISO/IEC 27002** information security controls:
+- Network segmentation policies (`NetEnforcer`) ensure protection against unauthorized exposure.
+- Filesystem interception (`FsEnforcer`) supports storage media protection compliance.
+- The capability-based model ensures rigorous implementation of **Least Privilege** and **Defense in Depth** required by the standard.
 
 ---
 
-*Implementado íntegramente en `crates/permissions/src/enforcement.rs`.*
+*Fully implemented in `crates/permissions/src/enforcement.rs`.*

@@ -1,42 +1,42 @@
 # 03 - TREE SHAKING
 
-## 3.1 Eliminación de Código Muerto
+## 3.1 Dead Code Elimination
 
-Tree shaking elimina código no utilizado del bundle final.
+Tree shaking removes unused code from the final bundle.
 
-## 3.2 Algoritmo
+## 3.2 Algorithm
 
-### 3.2.1 Análisis de Exportaciones
+### 3.2.1 Export Analysis
 
 ```
-1. Parsear todos los módulos
-2. Construir grafo de dependencias
-3. Identificar exports utilizados
-4. Marcar imports como "usados"
-5. Recursivamente marcar dependencias
-6. Eliminar código no marcado
+1. Parse all modules
+2. Build dependency graph
+3. Identify used exports
+4. Mark imports as "used"
+5. Recursively mark dependencies
+6. Remove unmarked code
 ```
 
-### 3.2.2 Efectos Secundarios
+### 3.2.2 Side Effects
 
 ```javascript
-// Este código tiene efectos secundarios
-// no puede ser eliminado
+// This code has side effects
+// cannot be removed
 import { something } from "module";
 
-// Marcar como no eliminable
+// Mark as non-removable
 /* @__PURE__ */ something();
 ```
 
-## 3.3 Configuración
+## 3.3 Configuration
 
-| Opcion | Descripcion |
+| Option | Description |
 |--------|-------------|
-| treeShaking: true | Habilitar por defecto |
-| sideEffects: false | Todo es puro |
-| sideEffects: ["*.css"] | Solo CSS tiene efectos |
+| treeShaking: true | Enabled by default |
+| sideEffects: false | Everything is pure |
+| sideEffects: ["*.css"] | Only CSS has side effects |
 
-## 3.4 Ejemplo
+## 3.4 Example
 
 ```javascript
 // module.js
@@ -47,10 +47,10 @@ export function unused() { return 2; }
 import { used } from "./module.js";
 console.log(used());
 
-// Output - unused() eliminado
+// Output - unused() removed
 console.log(1);
 ```
 
 ---
 
-*Tree shaking conforme a Rollup spec.*
+*Tree shaking conforming to Rollup spec.*

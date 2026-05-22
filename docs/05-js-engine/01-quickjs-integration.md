@@ -1,41 +1,41 @@
-# 01 - INTEGRACIÓN CON QUICKJS
+# 01 - QUICKJS INTEGRATION
 
-## 1.1 Descripción General
+## 1.1 Overview
 
-3va utiliza QuickJS como motor JavaScript, integrado mediante la librería `rquickjs` de Rust. QuickJS es una implementación ligera y rápida de JavaScript escrita por Fabrice Bellard, con licencia MIT.
+3va uses QuickJS as its JavaScript engine, integrated via the `rquickjs` Rust library. QuickJS is a lightweight and fast JavaScript implementation written by Fabrice Bellard, licensed under MIT.
 
-## 1.2 Selección de QuickJS
+## 1.2 QuickJS Selection
 
-### 1.2.1 Justificación Técnica
+### 1.2.1 Technical Justification
 
-| Característica | V8 (Node) | JavaScriptCore (Bun) | QuickJS (3va) |
-|----------------|-----------|----------------------|---------------|
-| Tamaño binario | ~30MB | ~15MB | ~1MB |
-| Tiempo de inicio | ~25ms | ~12ms | ~5ms |
-| Soporte ES2024 | Sí | Sí | Parcial |
-| WASM embeddable | Limitado | Limitado | Nativo |
-| Threads isolates | Limitado | Sí | Sí (limitado) |
-| Licencia | BSD | Apple | MIT |
+| Feature | V8 (Node) | JavaScriptCore (Bun) | QuickJS (3va) |
+|---------|-----------|----------------------|---------------|
+| Binary size | ~30MB | ~15MB | ~1MB |
+| Startup time | ~25ms | ~12ms | ~5ms |
+| ES2024 support | Yes | Yes | Partial |
+| WASM embeddable | Limited | Limited | Native |
+| Thread isolates | Limited | Yes | Yes (limited) |
+| License | BSD | Apple | MIT |
 
-### 1.2.2 Ventajas para 3va
+### 1.2.2 Advantages for 3va
 
-1. **Licencia MIT**: Compatible con distribución comercial
-2. **WASM nativo**: Fácil compilación a WebAssembly
-3. **Código fuente pequeño**: Fácil auditoría de seguridad
-4. **Sin dependencias externas**: Binario autocontenido
-5. **Rápido inicio**: Ideal para serverless/edge
+1. **MIT License**: Compatible with commercial distribution
+2. **Native WASM**: Easy compilation to WebAssembly
+3. **Small source code**: Easy security audit
+4. **No external dependencies**: Self-contained binary
+5. **Fast startup**: Ideal for serverless/edge
 
-### 1.2.3 Limitaciones y Mitigaciones
+### 1.2.3 Limitations and Mitigations
 
-| Limitación | Mitigación |
+| Limitation | Mitigation |
 |------------|------------|
-| GC menos sofisticado | Transpilación optimizada |
-| Sin JIT | Pre-compilación de módulos frecuentes |
-| ES2024 parcial | Polyfills selectivos |
+| Less sophisticated GC | Optimized transpilation |
+| No JIT | Pre-compilation of frequent modules |
+| Partial ES2024 | Selective polyfills |
 
-## 1.3 Integración con rquickjs
+## 1.3 Integration with rquickjs
 
-### 1.3.1 Estructura de Integración
+### 1.3.1 Integration Structure
 
 ```rust
 // crates/js/src/lib.rs
@@ -51,16 +51,16 @@ pub struct JsEngine {
 
 impl JsEngine {
     pub fn new(permissions: &PermissionState) -> anyhow::Result<Self> {
-        // 1. Crear runtime de QuickJS
+        // 1. Create QuickJS runtime
         let runtime = Runtime::new();
 
-        // 2. Configurar límite de memoria (default: 256MB)
+        // 2. Set memory limit (default: 256MB)
         runtime.set_memory_limit(256 * 1024 * 1024);
 
-        // 3. Crear contexto
+        // 3. Create context
         let context = Context::full(&runtime)?;
 
-        // 4. Inicializar módulos y polyfills
+        // 4. Initialize modules and polyfills
         let module_loader = ModuleLoader::new(permissions);
         let polyfills = PolyfillRegistry::new();
 
@@ -74,39 +74,39 @@ impl JsEngine {
 }
 ```
 
-### 1.3.2 Ciclo de Vida
+### 1.3.2 Lifecycle
 
 ```
-1. Crear Runtime
+1. Create Runtime
        │
        ▼
-2. Configurar límites (memoria, stack)
+2. Configure limits (memory, stack)
        │
        ▼
-3. Crear Context
+3. Create Context
        │
        ▼
-4. Cargar globals y polyfills
+4. Load globals and polyfills
        │
        ▼
-5. Evaluar código / cargar módulos
+5. Evaluate code / load modules
        │
        ▼
-6. Recolectar recursos
+6. Collect resources
        │
        ▼
-7. Destruir Context
+7. Destroy Context
        │
        ▼
-8. Destruir Runtime
+8. Destroy Runtime
 ```
 
-### 1.3.3 Contexto de Ejecución
+### 1.3.3 Execution Context
 
 ```rust
 pub fn eval(&self, code: &str) -> anyhow::Result<Value> {
     self.context.with(|ctx| {
-        // Evaluar código en el contexto
+        // Evaluate code in context
         let result = ctx.eval(code)?;
         Ok(result)
     })
@@ -114,26 +114,26 @@ pub fn eval(&self, code: &str) -> anyhow::Result<Value> {
 
 pub fn eval_module(&self, code: &str, path: &str) -> anyhow::Result<Value> {
     self.context.with(|ctx| {
-        // Crear módulo desde código
+        // Create module from code
         let module = ctx.compile(path, code)?;
-        // Evaluar módulo (para efectos secundarios)
+        // Evaluate module (for side effects)
         module.evaluate()?;
-        // Devolver exports
+        // Return exports
         module.get("default").unwrap_or(Value::undefined())
     })
 }
 ```
 
-## 1.4 Gestión de Memoria
+## 1.4 Memory Management
 
-### 1.4.1 Límites de Memoria
+### 1.4.1 Memory Limits
 
 ```rust
-// Configuración de límites de memoria
+// Memory limits configuration
 pub struct MemoryLimits {
     pub heap_max: usize,      // 256MB default
     pub stack_limit: usize,   // 1MB default
-    pub memory_warning: usize, // 80% del máximo
+    pub memory_warning: usize, // 80% of maximum
 }
 
 impl Default for MemoryLimits {
@@ -147,25 +147,25 @@ impl Default for MemoryLimits {
 }
 ```
 
-### 1.4.2 Manejo de Memoria Excedida
+### 1.4.2 Exceeded Memory Handling
 
 ```rust
-// Callback cuando se excede la memoria
+// Callback when memory is exceeded
 runtime.set_memory_limit_callback(|| {
-    // Opciones:
-    // 1. Forzar GC
-    // 2. Throwing error
-    // 3. Terminar proceso
+    // Options:
+    // 1. Force GC
+    // 2. Throw error
+    // 3. Terminate process
     rquickjs::Error::new_error("Memory limit exceeded")
 });
 ```
 
 ## 1.5 thread_isolate (WASM)
 
-### 1.5.1 Aislamiento para WebAssembly
+### 1.5.1 WebAssembly Isolation
 
 ```rust
-// Para futuro soporte WASM-first
+// For future WASM-first support
 pub struct WasmIsolate {
     runtime: Runtime,
     isolate: Isolates,
@@ -173,19 +173,19 @@ pub struct WasmIsolate {
 
 impl WasmIsolate {
     pub fn new() -> Self {
-        // QuickJS puede compilarse a WASM
-        // permitiendo múltiples isolate en el mismo proceso
+        // QuickJS can be compiled to WASM
+        // allowing multiple isolates in the same process
     }
 
     pub fn spawn(&self) -> WasmInstance {
-        // Crear nueva instancia aislada
+        // Create new isolated instance
     }
 }
 ```
 
-## 1.6 Configuración de Opciones
+## 1.6 Options Configuration
 
-### 1.6.1 Opciones del Runtime
+### 1.6.1 Runtime Options
 
 ```rust
 let runtime = Runtime::new()
@@ -194,10 +194,10 @@ let runtime = Runtime::new()
     .set_unhandled_promise_rejection_mode(
         UnhandledPromiseRejection::Throw
     )
-    .set_optimizer(false)  // Desactivar optimize para debugging
-    .set_strict(true);    // Modo estricto por defecto
+    .set_optimizer(false)  // Disable optimizer for debugging
+    .set_strict(true);    // Strict mode by default
 ```
 
 ---
 
-*Integración conforme a documentación de rquickjs y QuickJS.*
+*Integration conforming to rquickjs and QuickJS documentation.*

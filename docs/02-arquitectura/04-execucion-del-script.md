@@ -1,72 +1,72 @@
-# 04 - EJECUCIÓN DEL SCRIPT
+# 04 - SCRIPT EXECUTION
 
-## 4.1 Flujo Principal: Ejecución de Script
-### 4.1.1 Diagrama de Flujo
+## 4.1 Main Flow: Script Execution
+### 4.1.1 Flow Diagram
 ┌──────────────┐
-│    Usuario   │
-│ invoca CLI   │
+│    User      │
+│ invokes CLI  │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│   Parseo    │ ──► Validación de argumentos
-│  argumentos │
+│   Argument  │ ──► Argument validation
+│   Parsing   │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│   Build     │ ──► Construcción de PermissionState
+│   Build     │ ──► PermissionState construction
 │ Permissions │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│  Inicializar│ ──► Creación de Runtime + JsEngine
+│  Initialize │ ──► Runtime + JsEngine creation
 │   Runtime   │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│ Cargar Módulo│ ──► Verificar FileRead permission
+│ Load Module  │ ──► Check FileRead permission
 │   (require) │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│  Verificar  │ ──► Matching contra PermissionState
-│  Permiso    │
+│  Check       │ ──► Matching against PermissionState
+│  Permission  │
 └──────┬───────┘
        │
    ┌───┴───┐
    │ALLOW  │DENY
    ▼       ▼
 ┌─────┐ ┌─────┐
-│Ejecutar│ │Error│
-│Código │ │403  │
+│Execute│ │Error│
+│ Code │ │403  │
 └─────┘ └─────┘
    │
    ▼
 ┌──────────────┐
-│   Output    │
-│  al stdout  │
+│   Output     │
+│  to stdout   │
 └─────────────┘
-### 4.1.2 Descripción de Pasos
+### 4.1.2 Step Description
 1. 
-Parseo de argumentos: CLI valida y normaliza los argumentos
+Argument Parsing: CLI validates and normalizes arguments
 2. 
-Build Permissions: Construye el estado de permisos desde flags
+Build Permissions: Builds permission state from flags
 3. 
-Inicializar Runtime: Crea el event loop y motor JS
+Initialize Runtime: Creates the event loop and JS engine
 4. 
-Cargar Módulo: Lee el archivo y verifica permisos de lectura
+Load Module: Reads the file and checks read permissions
 5. 
-Verificar Permiso: Compara la operación contra capabilities granted
+Check Permission: Compares the operation against granted capabilities
 6. 
-Ejecutar Código: Ejecuta en QuickJS con polyfills
+Execute Code: Executes in QuickJS with polyfills
 7. 
-Output: Escribe resultado a stdout/stderr
-## 4.2 Flujo: Instalación de Paquete
-### 4.2.1 Diagrama de Flujo
+Output: Writes result to stdout/stderr
+## 4.2 Flow: Package Installation
+### 4.2.1 Flow Diagram
 ┌──────────────┐
 │  3va install │
 │   <package>  │
@@ -74,118 +74,118 @@ Output: Escribe resultado a stdout/stderr
        │
        ▼
 ┌──────────────┐
-│  Verificar   │ ──► Permiso --allow-net para registry
-│  Permiso Net │
+│  Check Net   │ ──► --allow-net permission for registry
+│  Permission  │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│   Consultar  │ ──► API del registry (npm/yarn)
+│   Query      │ ──► Registry API (npm/yarn)
 │   Registry   │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│  Resolver    │ ──► Árbol de dependencias
-│ Dependencias │
+│  Resolve     │ ──► Dependency tree
+│ Dependencies │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│  Verificar  │ ──► Checksum, firma digital
-│  Firma      │
+│  Verify      │ ──► Checksum, digital signature
+│  Signature   │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│  Escanear    │ ──► Análisis de malware/vulnerabilidades
-│  Seguridad   │
+│  Security    │ ──► Malware/vulnerability analysis
+│  Scan        │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│  Descargar  │ ──► Cache local + verificación hash
-│   Paquetes  │
+│  Download    │ ──► Local cache + hash verification
+│  Packages    │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│  Instalar    │ ──► Copia a node_modules (SIN post-install)
+│  Install     │ ──► Copy to node_modules (WITHOUT post-install)
 │  Sandbox    │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│  Generar     │ ──► lockfile con versiones exactas
+│  Generate    │ ──► Lockfile with exact versions
 │  Lockfile   │
 └─────────────┘
-## 4.3 Flujo: Verificación de Permisos
-### 4.3.1 Algoritmo de Verificación
+## 4.3 Flow: Permission Verification
+### 4.3.1 Verification Algorithm
 fn verify_permission(
     operation: &Operation,
     resources: &[Resource],
     permissions: &PermissionState
 ) -> Result<Decision> {
     
-    // 1. Verificar si es una operación denegada explícitamente
+    // 1. Check if it is an explicitly denied operation
     if permissions.is_denied(operation) {
         return Ok(Denied::Explicit);
     }
     
-    // 2. Buscar capability que permita la operación
+    // 2. Find capability that allows the operation
     for cap in &permissions.granted {
         if matches_capability(operation, resources, cap) {
             return Ok(Allowed(cap.clone()));
         }
     }
     
-    // 3. Si no hay match, denegar (deny-by-default)
+    // 3. If no match, deny (deny-by-default)
     Ok(Denied::NoCapability)
 }
-### 4.3.2 Matriz de Decisión
-Operación	Recurso	Capability Match
+### 4.3.2 Decision Matrix
+Operation	Resource	Capability Match
 fs.read	/app/config	FileRead(/app/config)
 fs.read	/etc/passwd	FileRead(/app/config)
 net.connect	api.example.com	Network(*.example.com)
 net.connect	evil.com	Network(*.example.com)
 spawn	ls	SpawnProcess
 spawn	(none)	(none)
-## 4.4 Flujo de Datos: Módulos
-### 4.4.1 Resolución de Módulos ESM
-Archivo.ts
+## 4.4 Data Flow: Modules
+### 4.4.1 ESM Module Resolution
+File.ts
     │
     ▼
 ┌─────────────────┐
-│   Parsear       │ ──► Detectar imports/exports
+│   Parse         │ ──► Detect imports/exports
 │   imports       │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  Resolver       │ ──► node_modules, path resolution
-│  路径           │
+│  Resolve        │ ──► node_modules, path resolution
+│  Path           │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  Verificar      │ ──► FileRead permission
-│   Permiso       │
+│  Check          │ ──► FileRead permission
+│  Permission     │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│   Cargar        │ ──► Leer archivo, transpilar TS►JS
-│   Módulo        │
+│   Load          │ ──► Read file, transpile TS►JS
+│   Module        │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│   Ejecutar      │ ──► Añadir al module graph
-│   en contexto  │
+│   Execute       │ ──► Add to module graph
+│   in context    │
 └─────────────────┘
-### 4.4.2 Formato de Module Graph
+### 4.4.2 Module Graph Format
 pub struct ModuleGraph {
     pub modules: HashMap<ModuleId, Module>,
     pub edges: HashMap<ModuleId, Vec<ModuleId>>,
 }
-Flujos de datos conforme a IEEE 1012 y modelado de procesos.
+Data flows conforming to IEEE 1012 and process modeling.

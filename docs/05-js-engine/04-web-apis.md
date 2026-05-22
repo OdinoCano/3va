@@ -1,59 +1,59 @@
-# 04 - APIs WEB COMPATIBLES
+# 04 - COMPATIBLE WEB APIs
 
-## 4.1 Visión General
+## 4.1 Overview
 
-3va implementa APIs web estándar compatibles con navegadores modernos y el estándar WHATWG.
+3va implements standard web APIs compatible with modern browsers and the WHATWG standard.
 
-## 4.2 APIs Implementadas por Estado
+## 4.2 APIs Implemented by Status
 
-### 4.2.1 APIs Completas
+### 4.2.1 Complete APIs
 
-| API | Especificación | Estado |
-|-----|----------------|--------|
-| AbortController | WHATWG | Implementado |
-| AbortSignal | WHATWG | Implementado |
-| BroadcastChannel | WHATWG | Parcial |
-| Crypto | Web Crypto API | Implementado |
-| CryptoKey | Web Crypto API | Implementado |
-| EventTarget | WHATWG | Implementado |
-| Event | WHATWG | Implementado |
-| Headers | WHATWG | Implementado |
-| Request | WHATWG | Implementado |
-| Response | WHATWG | Implementado |
-| URL | WHATWG | Implementado |
-| URLSearchParams | WHATWG | Implementado |
-| TextEncoder | Encoding | Implementado |
-| TextDecoder | Encoding | Implementado |
-| Performance | Performance API | Implementado |
-| PerformanceEntry | Performance API | Implementado |
-| PerformanceMark | Performance API | Implementado |
-| PerformanceMeasure | Performance API | Implementado |
-| FormData | WHATWG | Implementado |
-| Blob | File API | Implementado |
-| File | File API | Implementado |
+| API | Specification | Status |
+|-----|---------------|--------|
+| AbortController | WHATWG | Implemented |
+| AbortSignal | WHATWG | Implemented |
+| BroadcastChannel | WHATWG | Partial |
+| Crypto | Web Crypto API | Implemented |
+| CryptoKey | Web Crypto API | Implemented |
+| EventTarget | WHATWG | Implemented |
+| Event | WHATWG | Implemented |
+| Headers | WHATWG | Implemented |
+| Request | WHATWG | Implemented |
+| Response | WHATWG | Implemented |
+| URL | WHATWG | Implemented |
+| URLSearchParams | WHATWG | Implemented |
+| TextEncoder | Encoding | Implemented |
+| TextDecoder | Encoding | Implemented |
+| Performance | Performance API | Implemented |
+| PerformanceEntry | Performance API | Implemented |
+| PerformanceMark | Performance API | Implemented |
+| PerformanceMeasure | Performance API | Implemented |
+| FormData | WHATWG | Implemented |
+| Blob | File API | Implemented |
+| File | File API | Implemented |
 
-### 4.2.2 APIs Parciales/Por Implementar
+### 4.2.2 Partial/To Be Implemented APIs
 
-| API | Estado | Notas |
+| API | Status | Notes |
 |-----|--------|-------|
-| ReadableStream | Parcial | Solo básica |
-| WritableStream | Parcial | Solo básica |
-| TransformStream | Por implementar | Roadmap |
-| WebSocket | Por implementar | Roadmap |
-| Worker | Por implementar | Roadmap |
-| MessageChannel | Implementado | Basic |
-| SharedArrayBuffer | Por implementar | Requiere headers |
+| ReadableStream | Partial | Basic only |
+| WritableStream | Partial | Basic only |
+| TransformStream | To implement | Roadmap |
+| WebSocket | To implement | Roadmap |
+| Worker | To implement | Roadmap |
+| MessageChannel | Implemented | Basic |
+| SharedArrayBuffer | To implement | Requires headers |
 
 ## 4.3 fetch API
 
-### 4.3.1 Uso Básico
+### 4.3.1 Basic Usage
 
 ```javascript
-// GET simple
+// Simple GET
 const response = await fetch('https://api.example.com/data');
 const data = await response.json();
 
-// POST con body
+// POST with body
 const response = await fetch('https://api.example.com/submit', {
     method: 'POST',
     headers: {
@@ -67,7 +67,7 @@ const response = await fetch('https://api.example.com/submit', {
     mode: 'cors',  // 'no-cors', 'cors', 'same-origin'
 });
 
-// Manejo de respuesta
+// Response handling
 if (response.ok) {
     const data = await response.json();
 } else {
@@ -78,7 +78,7 @@ if (response.ok) {
 ### 4.3.2 Request
 
 ```javascript
-// Constructor de Request
+// Request constructor
 const request = new Request('/api/data', {
     method: 'GET',
     headers: new Headers({
@@ -92,7 +92,7 @@ const request = new Request('/api/data', {
     referrer: 'no-referrer',
 });
 
-// Métodos
+// Methods
 request.url
 request.method
 request.headers
@@ -103,14 +103,14 @@ request.clone()
 ### 4.3.3 Response
 
 ```javascript
-// Crear Response
+// Create Response
 const response = new Response(JSON.stringify(data), {
     status: 200,
     statusText: 'OK',
     headers: new Headers({ 'Content-Type': 'application/json' })
 });
 
-// Propiedades
+// Properties
 response.ok
 response.status
 response.statusText
@@ -118,7 +118,7 @@ response.headers
 response.url
 response.type  // 'basic', 'cors', 'opaque', 'error'
 
-// Métodos
+// Methods
 response.text()
 response.json()
 response.blob()
@@ -129,61 +129,61 @@ response.redirect(url, status)
 
 ## 4.4 Headers
 
-### 4.4.1 Uso de Headers
+### 4.4.1 Headers Usage
 
 ```javascript
-// Crear
+// Create
 const headers = new Headers({
     'Content-Type': 'application/json',
     'Authorization': 'Bearer token'
 });
 
-// Leer
+// Read
 headers.get('content-type')
 headers.get('authorization')
 
-// Escribir
+// Write
 headers.set('Content-Type', 'text/plain')
 headers.append('Accept', 'application/json')
 headers.delete('Authorization')
 
-// Iterar
+// Iterate
 for (const [key, value] of headers) {
     console.log(`${key}: ${value}`);
 }
 
-// Verificar
+// Check
 headers.has('Content-Type')
 ```
 
 ## 4.5 Streams API
 
-### 4.5.1 ReadableStream (Parcial)
+### 4.5.1 ReadableStream (Partial)
 
 ```javascript
-// Obtener stream de response
+// Get stream from response
 const response = await fetch('https://api.example.com/data');
 const reader = response.body.getReader();
 
-// Leer chunks
+// Read chunks
 while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     console.log('Chunk:', value);
 }
 
-// Cancelar
+// Cancel
 reader.cancel();
 
-// Propiedades
+// Properties
 reader.closed
 reader.desiredSize
 ```
 
-### 4.5.2 WritableStream (Parcial)
+### 4.5.2 WritableStream (Partial)
 
 ```javascript
-// Crear writable stream
+// Create writable stream
 const stream = new WritableStream({
     start(controller) {
         console.log('Stream started');
@@ -199,47 +199,47 @@ const stream = new WritableStream({
     }
 });
 
-// Escribir
+// Write
 const writer = stream.getWriter();
 await writer.write('Hello');
 await writer.close();
 ```
 
-### 4.5.3 TransformStream (No disponible)
+### 4.5.3 TransformStream (Not available)
 
 ```javascript
-// Próximamente:
+// Coming soon:
 // const transform = new TransformStream(transformer);
 ```
 
-## 4.6 WebSocket (Por implementar)
+## 4.6 WebSocket (To be implemented)
 
 ```javascript
-// Roadmap: Implementación Planned
+// Roadmap: Implementation Planned
 // ws = new WebSocket('ws://example.com/socket');
 
-// Eventos
+// Events
 // ws.onopen = () => { };
 // ws.onmessage = (event) => { };
 // ws.onerror = (error) => { };
 // ws.onclose = (event) => { };
 
-// Métodos
+// Methods
 // ws.send(data);
 // ws.close(code, reason);
 ```
 
 ## 4.7 Performance API
 
-### 4.7.1 Medición
+### 4.7.1 Measurement
 
 ```javascript
-// Marcas
+// Marks
 performance.mark('startOperation');
-// ... operación ...
+// ... operation ...
 performance.mark('endOperation');
 
-// Medidas
+// Measures
 performance.measure('operation', 'startOperation', 'endOperation');
 
 // Entries
@@ -256,7 +256,7 @@ performance.clearResources();
 ### 4.7.2 Navigation Timing
 
 ```javascript
-// Información de navegación
+// Navigation information
 const navigation = performance.getEntriesByType('navigation')[0];
 
 console.log(navigation.domainLookupEnd - navigation.domainLookupStart);  // DNS
@@ -265,19 +265,19 @@ console.log(navigation.responseStart - navigation.requestStart);            // T
 console.log(navigation.loadEventEnd - navigation.navigationStart);           // Load
 ```
 
-## 4.8 Blob y File
+## 4.8 Blob and File
 
 ### 4.8.1 Blob
 
 ```javascript
-// Crear blob
+// Create blob
 const blob = new Blob(['Hello World'], { type: 'text/plain' });
 
-// Propiedades
+// Properties
 blob.size
 blob.type
 
-// Métodos
+// Methods
 blob.slice(start, end, contentType)
 blob.stream()
 blob.text()
@@ -287,13 +287,13 @@ blob.arrayBuffer()
 ### 4.8.2 File
 
 ```javascript
-// Crear file (generalmente de input)
+// Create file (typically from input)
 const file = new File(['content'], 'example.txt', {
     type: 'text/plain',
     lastModified: Date.now()
 });
 
-// Propiedades
+// Properties
 file.name
 file.size
 file.type
@@ -320,4 +320,4 @@ reader.readAsArrayBuffer(file);
 
 ---
 
-*APIs web conformes a WHATWG y estándares W3C.*
+*Web APIs conforming to WHATWG and W3C standards.*

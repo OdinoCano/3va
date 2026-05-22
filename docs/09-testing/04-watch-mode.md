@@ -1,43 +1,43 @@
-# 04 - MODO WATCH
+# 04 - WATCH MODE
 
-## 4.1 Descripción
+## 4.1 Description
 
-El modo watch observa el sistema de archivos y re-ejecuta automáticamente todos los tests cuando detecta cambios en archivos de código fuente. No requiere ninguna interacción del usuario durante la ejecución.
+Watch mode monitors the filesystem and automatically re-runs all tests when it detects changes in source code files. It requires no user interaction during execution.
 
-## 4.2 Uso
+## 4.2 Usage
 
 ```bash
-# Activar watch mode
+# Activate watch mode
 3va test --watch
 
-# Watch con reporte de cobertura en cada re-ejecución
+# Watch with coverage report on each re-run
 3va test --watch --coverage
 ```
 
-## 4.3 Comportamiento
+## 4.3 Behavior
 
-- Al iniciar, ejecuta todos los tests descubiertos una primera vez.
-- Monitorea cambios en archivos con extensión `.js`, `.ts`, `.jsx` y `.tsx`.
-- Aplica un **debounce de 500 ms**: si se detectan múltiples cambios en ráfaga, espera a que la actividad se detenga antes de lanzar la siguiente ejecución.
-- Al detectar un cambio, re-ejecuta la suite completa desde cero.
-- El proceso se mantiene en ejecución hasta que se interrumpe con `Ctrl+C`.
+- On startup, runs all discovered tests once.
+- Monitors changes in files with `.js`, `.ts`, `.jsx` and `.tsx` extensions.
+- Applies a **500 ms debounce**: if multiple changes are detected in a burst, it waits for activity to stop before launching the next run.
+- On detecting a change, re-runs the entire suite from scratch.
+- The process stays running until interrupted with `Ctrl+C`.
 
-## 4.4 Archivos Monitoreados
+## 4.4 Monitored Files
 
-| Extensión | Descripción |
+| Extension | Description |
 |-----------|-------------|
 | `.js` | JavaScript |
 | `.ts` | TypeScript |
 | `.jsx` | JavaScript + JSX |
 | `.tsx` | TypeScript + JSX |
 
-## 4.5 Limitaciones
+## 4.5 Limitations
 
-- No existen controles de teclado interactivos. Las teclas `a`, `f`, `p`, `t` y `q` que aparecen en la interfaz de Jest **no están implementadas**.
-- No es posible filtrar tests por nombre o ruta desde el modo watch.
-- No hay integración con Watchman; el watcher usa la crate `notify` de Rust directamente.
-- No se leen patrones de exclusión desde archivos de configuración.
+- No interactive keyboard controls. The `a`, `f`, `p`, `t` and `q` keys found in Jest's interface are **not implemented**.
+- It is not possible to filter tests by name or path from watch mode.
+- No integration with Watchman; the watcher uses the Rust `notify` crate directly.
+- No exclusion patterns are read from configuration files.
 
 ---
 
-*Watch mode implementado en `crates/test/src/runner.rs` usando la crate `notify`.*
+*Watch mode implemented in `crates/test/src/runner.rs` using the `notify` crate.*

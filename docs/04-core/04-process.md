@@ -1,29 +1,29 @@
-# 04 - GESTIÓN DE PROCESOS
+# 04 - PROCESS MANAGEMENT
 
-## 4.1 Objeto Process
+## 4.1 Process Object
 
-El objeto `process` es un objeto global que proporciona información sobre el proceso de runtime de 3va y permite controlarlo.
+The `process` object is a global object that provides information about the 3va runtime process and allows controlling it.
 
-## 4.2 Propiedades del Proceso
+## 4.2 Process Properties
 
-### 4.2.1 Información del Entorno
+### 4.2.1 Environment Information
 
 ```rust
-// Propiedades del objeto process
+// Process object properties
 pub struct ProcessInfo {
     pub version: String,           // "3va/x.x.x"
-    pub versions: Versions,         // Información detallada de versiones
-    pub platform: String,           // "linux", "darwin", "win32"
-    pub arch: String,               // "x64", "arm64", etc.
-    pub execPath: String,           // Ruta del ejecutable 3va
-    pub cwd: String,                // Directorio de trabajo actual
-    pub home: String,               // Directorio home del usuario
-    pub tmpdir: String,             // Directorio temporal
+    pub versions: Versions,        // Detailed version information
+    pub platform: String,          // "linux", "darwin", "win32"
+    pub arch: String,              // "x64", "arm64", etc.
+    pub execPath: String,          // Path to 3va executable
+    pub cwd: String,               // Current working directory
+    pub home: String,              // User home directory
+    pub tmpdir: String,            // Temporary directory
 }
 ```
 
 ```javascript
-// Acceso en JavaScript
+// Access in JavaScript
 console.log(process.version);        // "3va/1.0.0"
 console.log(process.platform);      // "linux"
 console.log(process.arch);           // "x64"
@@ -31,24 +31,24 @@ console.log(process.cwd());          // "/home/user/project"
 console.log(process.execPath);      // "/usr/local/bin/3va"
 ```
 
-### 4.2.2 Variables de Entorno
+### 4.2.2 Environment Variables
 
 ```javascript
-// Lectura de entorno
-process.env                         // Objeto con todas las variables
-process.env.PATH                    // Variable específica
-process.env.NODE_ENV                // Ambiente de ejecución
+// Reading environment
+process.env                         // Object with all variables
+process.env.PATH                    // Specific variable
+process.env.NODE_ENV                // Execution environment
 
-// Con permisos: process.env es accesible solo con --allow-env
+// With permissions: process.env is only accessible with --allow-env
 ```
 
-### 4.2.3 Información de Memoria
+### 4.2.3 Memory Information
 
 ```javascript
-// Memoria
+// Memory
 process.memoryUsage()              // Returns: rss, heapTotal, heapUsed, external
 
-// Ejemplo de salida:
+// Example output:
 {
     rss: 35287040,
     heapTotal: 20971520,
@@ -56,155 +56,155 @@ process.memoryUsage()              // Returns: rss, heapTotal, heapUsed, externa
     external: 1048576
 }
 
-// Memoria en V8 (si disponible)
+// V8 memory (if available)
 process.memoryUsage.jsHeap;
 ```
 
-### 4.2.4 Información de CPU
+### 4.2.4 CPU Information
 
 ```javascript
-// Uso de CPU
+// CPU usage
 process.cpuUsage()                  // { user: 100000, system: 50000 }
-process.cpuUsage(previous)          // Diferencial desde previous
+process.cpuUsage(previous)          // Differential from previous
 ```
 
-## 4.3 Métodos del Proceso
+## 4.3 Process Methods
 
-### 4.3.1 Control de Flujo
+### 4.3.1 Flow Control
 
 ```javascript
-// Salir del proceso
+// Exit process
 process.exit(code?: number): void
-// code: 0 = éxito, otro = error
-// Ejemplo:
-process.exit(0);   // Salida limpia
+// code: 0 = success, other = error
+// Example:
+process.exit(0);   // Clean exit
 process.exit(1);   // Error
 
-// Similar a process.exit pero ejecuta cleanup primero
+// Similar to process.exit but runs cleanup first
 process.exitCode = 1;
-process.exit();    // Usa el código seteado
+process.exit();    // Uses the set code
 
-// nextTick - ejecutar en siguiente iteración del event loop
+// nextTick - execute on next event loop iteration
 process.nextTick(callback: () => void): void
-// Mayor prioridad que setTimeout(0)
+// Higher priority than setTimeout(0)
 process.nextTick(() => console.log('nextTick'));
 
-// setImmediate - ejecutar en siguiente fase check
+// setImmediate - execute on next check phase
 process.setImmediate(callback: () => void): void
-// Equivalente a setTimeout(() => {}, 0) pero más predecible
+// Equivalent to setTimeout(() => {}, 0) but more predictable
 ```
 
-### 4.3.2 Señales
+### 4.3.2 Signals
 
 ```javascript
-// Manejo de señales
+// Signal handling
 process.on('SIGTERM', () => {
-    console.log('Recibido SIGTERM, limpiando...');
+    console.log('Received SIGTERM, cleaning up...');
     process.exit(0);
 });
 
 process.on('SIGINT', () => {
-    console.log('Recibido Ctrl+C');
+    console.log('Received Ctrl+C');
     process.exit(0);
 });
 
-// Enviar señal a proceso actual
+// Send signal to current process
 process.kill(process.pid, 'SIGTERM');
 
-// Señales disponibles:
+// Available signals:
 'SIGTERM', 'SIGINT', 'SIGUSR1', 'SIGUSR2', 'SIGWINCH'
 ```
 
 ### 4.3.3 Streams
 
 ```javascript
-// Streams estándar
-process.stdin           // Readable stream - entrada estándar
-process.stdout          // Writable stream - salida estándar
-process.stderr          // Writable stream - error estándar
+// Standard streams
+process.stdin           // Readable stream - standard input
+process.stdout          // Writable stream - standard output
+process.stderr          // Writable stream - standard error
 
-// Ejemplo: leer de stdin
+// Example: reading from stdin
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
-    console.log('Recibido:', chunk);
+    console.log('Received:', chunk);
 });
 ```
 
-### 4.3.4 IO del Proceso
+### 4.3.4 Process IO
 
 ```javascript
-// Tiempos
-process.uptime()                   // Segundos desde inicio
-process.hrtime()                    // Tiempo de alta precisión [seg, nanoseg]
-process.hrtime.bigint()             // En nanasegundos como BigInt
+// Timings
+process.uptime()                   // Seconds since start
+process.hrtime()                    // High-resolution time [sec, nanosec]
+process.hrtime.bigint()             // In nanoseconds as BigInt
 
 // Ticks
 process.uptime();                   // seconds since start
-process.resourceUsage();            // recursos del sistema
+process.resourceUsage();            // system resources
 
-// Configuración
-process.title                       // Título del proceso (setter/getter)
-process.stderr.fd                   // File descriptor de stderr
-process.stdout.fd                   // File descriptor de stdout
-process.stdin.fd                    // File descriptor de stdin
+// Configuration
+process.title                       // Process title (setter/getter)
+process.stderr.fd                   // stderr file descriptor
+process.stdout.fd                   // stdout file descriptor
+process.stdin.fd                    // stdin file descriptor
 ```
 
-## 4.4 Eventos del Proceso
+## 4.4 Process Events
 
-### 4.4.1 Eventos Disponibles
+### 4.4.1 Available Events
 
 ```javascript
-// beforeExit - antes de salir del event loop
+// beforeExit - before exiting the event loop
 process.on('beforeExit', (code) => {
-    console.log('beforeExit con código:', code);
+    console.log('beforeExit with code:', code);
 });
 
-// exit - cuando el proceso está por salir
+// exit - when the process is about to exit
 process.on('exit', (code) => {
-    console.log('Proceso saliendo con código:', code);
+    console.log('Process exiting with code:', code);
 });
 
-// uncaughtException - error no manejado
+// uncaughtException - unhandled error
 process.on('uncaughtException', (err) => {
-    console.error('Excepción no manejada:', err);
+    console.error('Unhandled exception:', err);
     process.exit(1);
 });
 
-// unhandledRejection - promesa rechazada no manejada
+// unhandledRejection - unhandled rejected promise
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('Rechazo no manejado:', reason);
+    console.error('Unhandled rejection:', reason);
 });
 
-// warning - advertencia del runtime
+// warning - runtime warning
 process.on('warning', (warning) => {
-    console.warn('Advertencia:', warning.name, warning.message);
+    console.warn('Warning:', warning.name, warning.message);
 });
 
-// message (para IPC)
+// message (for IPC)
 process.on('message', (message, sendHandle) => { });
 ```
 
-### 4.4.2 Flujo de Eventos de Salida
+### 4.4.2 Exit Event Flow
 
 ```
-1. Usuario llama process.exit(code)
-2. Emitir evento 'beforeExit' con código
-3. Ejecutar tareas del event loop (incluyendo 'exit')
-4. Emitir evento 'exit' con código
-5. Limpiar recursos
-6. Terminar proceso con código
+1. User calls process.exit(code)
+2. Emit 'beforeExit' event with code
+3. Execute event loop tasks (including 'exit')
+4. Emit 'exit' event with code
+5. Clean up resources
+6. Terminate process with code
 ```
 
 ## 4.5 child_process
 
-### 4.5.1 Spawn de Procesos
+### 4.5.1 Process Spawning
 
 ```javascript
-// Solo disponible con --allow-child-process
+// Only available with --allow-child-process
 
 const { spawn } = require('child_process');
 
-// Ejecutar comando
+// Execute command
 const child = spawn('ls', ['-la', '/tmp']);
 
 // Stdout
@@ -219,11 +219,11 @@ child.stderr.on('data', (data) => {
 
 // Exit
 child.on('close', (code) => {
-    console.log('Proceso hijo salió con código:', code);
+    console.log('Child process exited with code:', code);
 });
 ```
 
-### 4.5.2 exec - Ejecución de Comandos
+### 4.5.2 exec - Command Execution
 
 ```javascript
 const { exec } = require('child_process');
@@ -237,35 +237,35 @@ exec('ls -la', (error, stdout, stderr) => {
     console.log('stderr:', stderr);
 });
 
-// Con promise (si disponível)
+// With promise (if available)
 const { execSync } = require('child_process');
 const output = execSync('ls -la', { encoding: 'utf8' });
 ```
 
-## 4.6 Permisos de Proceso
+## 4.6 Process Permissions
 
-### 4.6.1 Flags de Permisos Relacionados
+### 4.6.1 Related Permission Flags
 
-| Flag | Permite |
-|------|---------|
+| Flag | Allows |
+|------|--------|
 | --allow-child-process | spawn, exec, execSync |
 | --allow-env | process.env |
 | --allow-read | process.cwd, fs |
 | --allow-write | fs write |
 
-### 4.6.2 Ejemplo de Seguridad
+### 4.6.2 Security Example
 
 ```bash
-# Permitir procesos hijos específicos
+# Allow specific child processes
 3va run app.ts --allow-child-process
 
-# Denegar procesos pero permitir entorno
+# Deny processes but allow environment
 3va run app.ts --allow-env --deny-child-process
 
-# Proceso solo con stdin/stdout
+# Process with stdin/stdout only
 3va run app.ts --allow-child-process
 ```
 
 ---
 
-*Gestión de procesos conforme a Node.js API y estándares POSIX.*
+*Process management conforming to Node.js API and POSIX standards.*

@@ -1,137 +1,186 @@
-# 03 - OBJETOS GLOBALES
-3.1 Globals del Entorno JavaScript
-3va expone un conjunto de objetos globales compatible con Node.js y navegadores, siguiendo la especificación ECMAScript y APIs web estándar.
-3.2 Globals Estándar ECMAScript
-3.2.1 Objetos Fundamentales
-Global	Descripción
-Object	Constructor de objetos
-Function	Constructor de funciones
-Array	Constructor de arrays
-Boolean	Constructor booleano
-Number	Constructor numérico
-BigInt	Enteros grandes
-String	Constructor de strings
-Symbol	Símbolos únicos
-Date	Fechas
-RegExp	Expresiones regulares
-Error	Clase de errores
-Map	Colección clave-valor
-Set	Colección de valores únicos
-WeakMap	Map debil
-WeakSet	Set debil
-ArrayBuffer	Buffer binario
-Promise	Promesas
-Proxy	Metaprogramación
-Reflect	Reflexión
-3.2.2 Funciones Globales
-Función
-eval()
-isFinite()
-isNaN()
-parseFloat()
-parseInt()
-decodeURI()
-encodeURI()
-decodeURIComponent()
-encodeURIComponent()
-3.2.3 Constructores de Tipos
+# 03 - GLOBAL OBJECTS
+
+## 3.1 JavaScript Environment Globals
+
+3va exposes a set of global objects compatible with Node.js and browsers, following the ECMAScript specification and standard web APIs.
+
+## 3.2 Standard ECMAScript Globals
+
+### 3.2.1 Core Objects
+
+| Global | Description |
+|--------|-------------|
+| Object | Object constructor |
+| Function | Function constructor |
+| Array | Array constructor |
+| Boolean | Boolean constructor |
+| Number | Number constructor |
+| BigInt | Big integers |
+| String | String constructor |
+| Symbol | Unique symbols |
+| Date | Dates |
+| RegExp | Regular expressions |
+| Error | Error class |
+| Map | Key-value collection |
+| Set | Unique values collection |
+| WeakMap | Weak Map |
+| WeakSet | Weak Set |
+| ArrayBuffer | Binary buffer |
+| Promise | Promises |
+| Proxy | Metaprogramming |
+| Reflect | Reflection |
+
+### 3.2.2 Global Functions
+
+| Function |
+|----------|
+| eval() |
+| isFinite() |
+| isNaN() |
+| parseFloat() |
+| parseInt() |
+| decodeURI() |
+| encodeURI() |
+| decodeURIComponent() |
+| encodeURIComponent() |
+
+### 3.2.3 Type Constructors
+
+```javascript
 // Typed Arrays
 Int8Array, Uint8Array, Uint8ClampedArray
 Int16Array, Uint16Array
 Int32Array, Uint32Array
 Float32Array, Float64Array
 BigInt64Array, BigUint64Array
-// Estructured Clone
+
+// Structured Clone
 SharedArrayBuffer
 Atomics
-3.3 Globals de Node.js
-3.3.1 Objetos Node
-// Proceso
+```
+
+## 3.3 Node.js Globals
+
+### 3.3.1 Node Objects
+
+```javascript
+// Process
 process          // global process object
 global           // global namespace
+
 // Console
 console          // console object
-// Timers (funciones)
-setTimeout       // ejecutar después de delay
-setInterval      // ejecutar repetidamente
-setImmediate     // ejecutar en siguiente fase
-clearTimeout     // cancelar timeout
-clearInterval    // cancelar intervalo
-clearImmediate   // cancelar inmediato
-// Módulos
+
+// Timers (functions)
+setTimeout       // execute after delay
+setInterval      // execute repeatedly
+setImmediate     // execute in next phase
+clearTimeout     // cancel timeout
+clearInterval    // cancel interval
+clearImmediate   // cancel immediate
+
+// Modules
 module           // current module
 exports          // module exports
 require          // require function
 __dirname        // directory of current module
 __filename       // filename of current module
-3.3.2 Buffer Global
-// Buffer global
-Buffer           // Clase Buffer disponible globalmente
-// Crear buffer
-Buffer.from('hello')      // desde string
+```
+
+### 3.3.2 Global Buffer
+
+```javascript
+// Global buffer
+Buffer           // Buffer class available globally
+
+// Create buffer
+Buffer.from('hello')      // from string
 Buffer.alloc(8)            // allocation
-Buffer.allocUnsafe(8)      // sin inicializar
-3.3.3 URL y Utils
+Buffer.allocUnsafe(8)      // uninitialized
+```
+
+### 3.3.3 URL and Utils
+
+```javascript
 // URL
-URL              // Constructor de URLs
-URLSearchParams // Parámetros de query
-// Utilidades
-3.4 APIs Web Compatibles
+URL              // URL constructor
+URLSearchParams  // Query parameters
+
+// Utilities
+```
+
+## 3.4 Compatible Web APIs
+
 ### 3.4.1 fetch API
-// fetch polyfill (implementado en QuickJS)
+
+```javascript
+// fetch polyfill (implemented in QuickJS)
 const response = await fetch('https://api.example.com/data');
 const data = await response.json();
-// Opciones
+
+// Options
 await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key: 'value' }),
 });
+```
+
 ### 3.4.2 Web APIs
-API	Descripción
-AbortController	Control de abortos
-AbortSignal	Señal de abortado
-BroadcastChannel	Comunicación entre tabs
-Crypto	Operaciones criptográficas
-CryptoKey	Claves criptográficas
-Performance	Medición de rendimiento
-PerformanceEntry	Entrada de rendimiento
-PerformanceMark	Marca de rendimiento
-PerformanceMeasure	Medida de rendimiento
-TextEncoder	Codificador de texto
-TextDecoder	Decodificador de texto
-TransformStream	Streams de transformación
-ReadableStream	Streams legibles
-WritableStream	Streams escribibles
-Headers	Cabeceras HTTP
-Request	Solicitud HTTP
-Response	Respuesta HTTP
-FormData	Datos de formulario
-URLSearchParams	Parámetros URL
-WebSocket	WebSockets
-3.5 Polyfills de Seguridad
-3.5.1 Fetch con Verificación
-// El fetch de 3va incluye verificación de permisos
+
+| API | Description |
+|-----|-------------|
+| AbortController | Abort control |
+| AbortSignal | Abort signal |
+| BroadcastChannel | Cross-tab communication |
+| Crypto | Cryptographic operations |
+| CryptoKey | Cryptographic keys |
+| Performance | Performance measurement |
+| PerformanceEntry | Performance entry |
+| PerformanceMark | Performance mark |
+| PerformanceMeasure | Performance measure |
+| TextEncoder | Text encoder |
+| TextDecoder | Text decoder |
+| TransformStream | Transform streams |
+| ReadableStream | Readable streams |
+| WritableStream | Writable streams |
+| Headers | HTTP headers |
+| Request | HTTP request |
+| Response | HTTP response |
+| FormData | Form data |
+| URLSearchParams | URL parameters |
+| WebSocket | WebSockets |
+
+## 3.5 Security Polyfills
+
+### 3.5.1 Verified Fetch
+
+```rust
+// 3va's fetch includes permission verification
 pub async fn secure_fetch(url: &str, options: RequestInit) -> Result<Response> {
-    // 1. Verificar permiso de red
+    // 1. Check network permission
     if !permissions.check(&Capability::Network(url)) {
         return Err(Error::PermissionDenied);
     }
-    // 2. Validar URL
+    // 2. Validate URL
     let parsed = Url::parse(url)?;
     validate_no_malicious_redirect(&parsed)?;
-    // 3. Ejecutar fetch
+    // 3. Execute fetch
     let response = native_fetch(url, options).await?;
-    // 4. Verificar respuesta
+    // 4. Validate response
     validate_response(&response)?;
     Ok(response)
 }
-3.5.2 Console con Logging de Auditoría
-// Console escribe a log de auditoría
+```
+
+### 3.5.2 Console with Audit Logging
+
+```rust
+// Console writes to audit log
 pub fn log(&self, level: Level, args: Vec<Value>) {
-    // Output normal
+    // Normal output
     self.output.write(args);
-    // Log de auditoría
+    // Audit log
     audit::log(AuditEvent {
         event_type: "console".to_string(),
         level: level.to_string(),
@@ -139,4 +188,6 @@ pub fn log(&self, level: Level, args: Vec<Value>) {
         data: args.clone(),
     });
 }
-Globals conforme a Node.js API y WHATWG standards.
+```
+
+Globals conforming to Node.js API and WHATWG standards.

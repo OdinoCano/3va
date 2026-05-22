@@ -1,100 +1,100 @@
-# 02 - CARGA DE MÓDULOS
+# 02 - MODULE LOADING
 
-## 2.1 Sistemas de Módulos Soportados
+## 2.1 Supported Module Systems
 
-`vvva_js` soporta dos sistemas de módulos de forma simultánea:
+`vvva_js` supports two module systems simultaneously:
 
-| Sistema | Sintaxis | Soporte |
-|---------|----------|---------|
-| ESM | `import` / `export` | ✅ Completo |
-| CommonJS | `require()` | ✅ Completo |
+| System | Syntax | Support |
+|--------|--------|---------|
+| ESM | `import` / `export` | ✅ Complete |
+| CommonJS | `require()` | ✅ Complete |
 
-La detección es automática: si el archivo contiene sentencias `import` o `export` estáticas en cualquier línea (ignorando comentarios de bloque), se carga como módulo ESM. En caso contrario, se evalúa como script CommonJS.
+Detection is automatic: if the file contains static `import` or `export` statements on any line (ignoring block comments), it is loaded as an ESM module. Otherwise, it is evaluated as a CommonJS script.
 
 ---
 
-## 2.2 ESM — Módulos ECMAScript
+## 2.2 ESM — ECMAScript Modules
 
-### 2.2.1 Implementación
+### 2.2.1 Implementation
 
-El soporte ESM se implementa mediante dos structs en `crates/js/src/esm.rs` que implementan los traits `Resolver` y `Loader` de `rquickjs`:
+ESM support is implemented via two structs in `crates/js/src/esm.rs` that implement the `Resolver` and `Loader` traits from `rquickjs`:
 
 ```rust
-// Resuelve el nombre del módulo a una ruta canónica absoluta
+// Resolves the module name to an absolute canonical path
 pub struct EsmResolver;
 
-// Carga el contenido del módulo desde disco aplicando permisos
+// Loads module content from disk applying permissions
 pub struct EsmLoader {
     pub permissions: PermissionState,
 }
 ```
 
-Se registran en el `Runtime` al crear el motor:
+They are registered in the `Runtime` when creating the engine:
 
 ```rust
 runtime.set_loader(EsmResolver, EsmLoader { permissions: permissions.clone() });
 ```
 
-### 2.2.2 Algoritmo de resolución (`EsmResolver`)
+### 2.2.2 Resolution Algorithm (`EsmResolver`)
 
-1. Si `name` comienza con `./` o `../`: resolver relativo al directorio del módulo base (`base`).
-2. Probar extensiones en orden: sin cambio → `.js` → `.ts` → `.jsx` → `.tsx`.
-3. Canonicalizar la ruta resultante (`fs::canonicalize`) para eliminar symlinks y `..`.
-4. Devolver la ruta canónica como identificador único del módulo.
+1. If `name` starts with `./` or `../`: resolve relative to the base module directory (`base`).
+2. Try extensions in order: unchanged → `.js` → `.ts` → `.jsx` → `.tsx`.
+3. Canonicalize the resulting path (`fs::canonicalize`) to remove symlinks and `..`.
+4. Return the canonical path as the module's unique identifier.
 
 ```
 resolve("./utils", "/app/src/index.ts")
-  → prueba /app/src/utils
-  → prueba /app/src/utils.js     ← no existe
-  → prueba /app/src/utils.ts     ← existe → canonicalizar → "/app/src/utils.ts"
+  → try /app/src/utils
+  → try /app/src/utils.js     ← doesn't exist
+  → try /app/src/utils.ts     ← exists → canonicalize → "/app/src/utils.ts"
 ```
 
-### 2.2.3 Algoritmo de carga (`EsmLoader`)
+### 2.2.3 Loading Algorithm (`EsmLoader`)
 
-1. Verificar `Capability::FileRead(path)` en `PermissionState`. Si se deniega → error de permiso.
-2. Leer el archivo con `fs::read_to_string`.
-3. Si la extensión es `.ts` o `.tsx`: transpilar con el transpilador TypeScript integrado.
-4. Entregar el source a QuickJS via `Module::declare(ctx, name, source)`.
+1. Check `Capability::FileRead(path)` in `PermissionState`. If denied → permission error.
+2. Read the file with `fs::read_to_string`.
+3. If the extension is `.ts` or `.tsx`: transpile with the built-in TypeScript transpiler.
+4. Deliver the source to QuickJS via `Module::declare(ctx, name, source)`.
 
-### 2.2.4 Sintaxis soportada
+### 2.2.4 Supported Syntax
 
 ```javascript
-// Exportación nombrada
+// Named export
 export const PI = 3.14159;
 export function add(a, b) { return a + b; }
 
-// Exportación por defecto
+// Default export
 export default class Calculator { ... }
 
-// Importación nombrada
+// Named import
 import { add, PI } from './math.js';
 
-// Importación por defecto
+// Default import
 import Calculator from './Calculator.ts';
 
-// Re-exportación
+// Re-export
 export { add } from './math.js';
 export * from './utils.js';
 
-// Módulo TypeScript importado desde JavaScript
+// TypeScript module imported from JavaScript
 import { format } from './formatter.ts';
 ```
 
-### 2.2.5 Async/await y Promises
+### 2.2.5 Async/await and Promises
 
-Las Promises y el código asíncrono funcionan gracias al bucle de microtareas ejecutado al finalizar cada archivo:
+Promises and async code work thanks to the microtask loop executed at the end of each file:
 
 ```rust
 loop {
     match self.runtime.execute_pending_job() {
-        Ok(true)  => continue,   // hay más jobs pendientes
-        Ok(false) => break,      // cola vacía
+        Ok(true)  => continue,   // more jobs pending
+        Ok(false) => break,      // empty queue
         Err(e)    => return Err(anyhow::anyhow!("JS job error: {:?}", e)),
     }
 }
 ```
 
-Esto permite:
+This enables:
 
 ```javascript
 // async/await
@@ -103,54 +103,54 @@ async function fetchData() {
     return result;
 }
 
-// Cadenas Promise
+// Promise chains
 Promise.resolve(42)
     .then(n => n * 2)
-    .then(n => console.log(n)); // imprime 84
+    .then(n => console.log(n)); // prints 84
 ```
 
 ---
 
 ## 2.3 CommonJS
 
-Los archivos que no contienen `import`/`export` estáticos se evalúan como scripts planos. `require()` no está disponible en modo ESM y viceversa.
+Files that do not contain static `import`/`export` are evaluated as plain scripts. `require()` is not available in ESM mode and vice versa.
 
 ---
 
-## 2.4 Transpilación TypeScript
+## 2.4 TypeScript Transpilation
 
-El transpilador TypeScript (`crates/js/src/transpiler.rs`) es una implementación pura en Rust que elimina anotaciones de tipo sin necesidad de `tsc` ni Node.js:
+The TypeScript transpiler (`crates/js/src/transpiler.rs`) is a pure Rust implementation that removes type annotations without needing `tsc` or Node.js:
 
-- Elimina declaraciones de tipo: `type`, `interface`, `enum`
-- Elimina anotaciones en parámetros, retornos y variables
-- Maneja genéricos, decoradores y modificadores de visibilidad (`public`, `private`, `readonly`)
-- Se aplica automáticamente a archivos `.ts` y `.tsx` tanto en `run` como en `import`
-
----
-
-## 2.5 Detección de módulo ESM
-
-La función `is_esm_source(source: &str) -> bool` determina si un archivo debe tratarse como ESM:
-
-- Escanea **todas** las líneas del archivo (no se detiene en la primera línea no-import).
-- Ignora líneas dentro de comentarios de bloque `/* ... */`.
-- Considera ESM si encuentra alguna línea que comience con `import `, `export `, `export default` o `export {`.
+- Removes type declarations: `type`, `interface`, `enum`
+- Removes annotations on parameters, return types, and variables
+- Handles generics, decorators, and visibility modifiers (`public`, `private`, `readonly`)
+- Applies automatically to `.ts` and `.tsx` files in both `run` and `import`
 
 ---
 
-## 2.6 Permisos y Módulos
+## 2.5 ESM Module Detection
 
-Cada `import` pasa por la verificación de permisos antes de leer el archivo:
+The function `is_esm_source(source: &str) -> bool` determines whether a file should be treated as ESM:
+
+- Scans **all** lines of the file (does not stop at the first non-import line).
+- Ignores lines within block comments `/* ... */`.
+- Considers ESM if it finds any line starting with `import `, `export `, `export default` or `export {`.
+
+---
+
+## 2.6 Permissions and Modules
+
+Each `import` goes through permission verification before reading the file:
 
 ```
 import { x } from './lib.ts'
   → EsmLoader::load("/app/lib.ts")
     → PermissionState::check(FileRead("/app/lib.ts"))
-      → Denegado si no hay --allow-read=/app o superior
+      → Denied if there is no --allow-read=/app or broader
 ```
 
-Esto garantiza que un módulo no pueda leer archivos fuera de las rutas autorizadas incluso si el código JS intenta importarlos.
+This ensures that a module cannot read files outside authorized paths even if the JS code tries to import them.
 
 ---
 
-*ESM implementado en `crates/js/src/esm.rs`. Transpilador en `crates/js/src/transpiler.rs`. Tests en `crates/js/tests/pipeline.rs` (28 tests).*
+*ESM implemented in `crates/js/src/esm.rs`. Transpiler in `crates/js/src/transpiler.rs`. Tests in `crates/js/tests/pipeline.rs` (28 tests).*

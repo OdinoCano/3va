@@ -1,32 +1,32 @@
-# 04 - EJEMPLOS DE USO
+# 04 - USAGE EXAMPLES
 
-## 4.1 Ejecución de Scripts
+## 4.1 Script Execution
 
-### 4.1.1 Ejecución Básica
+### 4.1.1 Basic Execution
 
 ```bash
 # JavaScript
 3va run hello.js
 
-# TypeScript (transpilación automática)
+# TypeScript (automatic transpilation)
 3va run app.ts
 ```
 
-### 4.1.2 Con Permisos Granulares
+### 4.1.2 With Granular Permissions
 
-Los permisos son denegados por defecto. Se conceden explícitamente:
+Permissions are denied by default. They are granted explicitly:
 
 ```bash
-# Acceso de lectura a un directorio específico
+# Read access to a specific directory
 3va run app.ts --allow-read=/app/data
 
-# Acceso de red a un host específico
+# Network access to a specific host
 3va run app.ts --allow-net=api.example.com
 
-# Combinación de permisos
+# Combining permissions
 3va run app.ts --allow-read=/app/config --allow-net=api.example.com --allow-env
 
-# Acceso de escritura
+# Write access
 3va run app.ts --allow-write=/tmp/output
 ```
 
@@ -34,17 +34,17 @@ Los permisos son denegados por defecto. Se conceden explícitamente:
 
 ## 4.2 Package Manager
 
-### 4.2.1 Conceptos Clave
+### 4.2.1 Key Concepts
 
-**El host en `--allow-net` define el registry.** No existe un flag `--registry` separado.
+**The host in `--allow-net` defines the registry.** There is no separate `--registry` flag.
 
-| Comando | Registry usado |
+| Command | Registry used |
 |---------|---------------|
 | `--allow-net=registry.npmjs.org` | npm |
 | `--allow-net=registry.yarnpkg.com` | Yarn |
 | `--allow-net=jsr.io` | JSR |
 
-**Sin `--allow-net` la red está denegada:**
+**Without `--allow-net` the network is denied:**
 ```bash
 3va install axios
 # ✗ Network access denied.
@@ -53,16 +53,16 @@ Los permisos son denegados por defecto. Se conceden explícitamente:
 #   3va install axios --allow-net=jsr.io
 ```
 
-### 4.2.2 Instalación desde npm
+### 4.2.2 Installation from npm
 
 ```bash
-# Última versión
+# Latest version
 3va install axios --allow-net=registry.npmjs.org
 
-# Versión específica
+# Specific version
 3va install axios@1.7.2 --allow-net=registry.npmjs.org
 
-# Versión no existente → muestra alternativas
+# Non-existent version → shows alternatives
 3va install axios@99.0.0 --allow-net=registry.npmjs.org
 # ✗ Version axios@99.0.0 not found in registry.
 #
@@ -74,39 +74,39 @@ Los permisos son denegados por defecto. Se conceden explícitamente:
 #     axios@1.7.5
 ```
 
-### 4.2.3 Instalación desde Yarn
+### 4.2.3 Installation from Yarn
 
 ```bash
 3va install axios --allow-net=registry.yarnpkg.com
 3va install react@18.3.1 --allow-net=registry.yarnpkg.com
 ```
 
-### 4.2.4 Instalación desde JSR
+### 4.2.4 Installation from JSR
 
-JSR solo acepta paquetes con scope (`@scope/name`):
+JSR only accepts scoped packages (`@scope/name`):
 
 ```bash
-# Correcto — paquete con scope
+# Correct — scoped package
 3va install @std/path --allow-net=jsr.io
 3va install @std/path@0.196.0 --allow-net=jsr.io
 
-# Error — paquete sin scope no válido en JSR
+# Error — unscoped package not valid on JSR
 3va install axios --allow-net=jsr.io
 # ✗ JSR only supports scoped packages (e.g. @scope/name)
 ```
 
-### 4.2.5 Proyecto Multi-Registry
+### 4.2.5 Multi-Registry Project
 
-En un mismo proyecto pueden convivir dependencias de distintos registries:
+Dependencies from different registries can coexist in the same project:
 
 ```bash
-# axios desde npm, react desde Yarn, @std/path desde JSR
+# axios from npm, react from Yarn, @std/path from JSR
 3va install axios --allow-net=registry.npmjs.org
 3va install react --allow-net=registry.yarnpkg.com
 3va install @std/path --allow-net=jsr.io
 ```
 
-El lockfile `3va-lock.json` registra el origen de cada uno:
+The lockfile `3va-lock.json` records the origin of each one:
 
 ```json
 {
@@ -118,19 +118,19 @@ El lockfile `3va-lock.json` registra el origen de cada uno:
 }
 ```
 
-### 4.2.6 Reinstalación
+### 4.2.6 Reinstallation
 
 ```bash
 3va reinstall axios --allow-net=registry.npmjs.org
 3va reinstall @std/path --allow-net=jsr.io
 ```
 
-### 4.2.7 Actualización
+### 4.2.7 Update
 
-`update` respeta el registry registrado en el lockfile para cada paquete:
+`update` respects the registry recorded in the lockfile for each package:
 
 ```bash
-# Sin --allow-net: el CLI informa qué hosts se necesitan
+# Without --allow-net: the CLI informs which hosts are needed
 3va update
 # ✗ Update requires network access to:
 #
@@ -140,20 +140,20 @@ El lockfile `3va-lock.json` registra el origen de cada uno:
 #
 # Run: 3va update --allow-net=registry.npmjs.org,registry.yarnpkg.com,jsr.io
 
-# Actualizar todo
+# Update all
 3va update --allow-net=registry.npmjs.org,registry.yarnpkg.com,jsr.io
 
-# Actualizar un solo paquete
+# Update a single package
 3va update axios --allow-net=registry.npmjs.org
 
-# Actualizar paquetes específicos de distintos registries
+# Update specific packages from different registries
 3va update axios @std/path --allow-net=registry.npmjs.org,jsr.io
 ```
 
-**Migrar un paquete a otro registry** (acción explícita, queda registrada en el lockfile):
+**Migrating a package to another registry** (explicit action, recorded in the lockfile):
 
 ```bash
-# axios pasará a actualizarse desde Yarn en el futuro
+# axios will be updated from Yarn going forward
 3va install axios --allow-net=registry.yarnpkg.com
 ```
 
@@ -162,13 +162,13 @@ El lockfile `3va-lock.json` registra el origen de cada uno:
 ## 4.3 Testing
 
 ```bash
-# Todos los tests en el directorio actual
+# All tests in the current directory
 3va test
 
-# Directorio específico
+# Specific directory
 3va test tests/
 
-# Archivo específico
+# Specific file
 3va test tests/auth.test.ts
 ```
 
@@ -177,21 +177,21 @@ El lockfile `3va-lock.json` registra el origen de cada uno:
 ## 4.4 Bundler
 
 ```bash
-# Bundle con output por defecto (dist/bundle.js)
+# Bundle with default output (dist/bundle.js)
 3va bundle src/index.ts
 
-# Output personalizado
+# Custom output
 3va bundle src/index.ts --output dist/app.js
 
-# Ejecutar el bundle resultante
+# Run the resulting bundle
 3va run dist/bundle.js --allow-net=api.example.com
 ```
 
 ---
 
-## 4.5 Accesibilidad
+## 4.5 Accessibility
 
-Desactiva colores y animaciones para lectores de pantalla y terminales Braille (EN 301 549):
+Disables colors and animations for screen readers and Braille terminals (EN 301 549):
 
 ```bash
 3va --accessible run app.ts
@@ -201,7 +201,7 @@ Desactiva colores y animaciones para lectores de pantalla y terminales Braille (
 
 ---
 
-## 4.6 Scripts en `package.json`
+## 4.6 Scripts in `package.json`
 
 ```json
 {
@@ -217,4 +217,4 @@ Desactiva colores y animaciones para lectores de pantalla y terminales Braille (
 
 ---
 
-*Ejemplos conformes a IEEE 829 y al modelo de capacidades de 3va.*
+*Examples compliant with IEEE 829 and 3va's capability model.*

@@ -1,88 +1,88 @@
-# 01 - ESPECIFICACIÓN DEL BUNDLER
+# 01 - BUNDLER SPECIFICATION
 
-## 1.1 Visión General
+## 1.1 Overview
 
-El bundler de 3va transpila y empaqueta código TypeScript, JavaScript y JSX en un único archivo listo para distribución. Realiza eliminación de código muerto (tree shaking) mediante análisis AST con OXC.
+3va's bundler transpiles and packages TypeScript, JavaScript, and JSX code into a single file ready for distribution. It performs dead code elimination (tree shaking) via AST analysis with OXC.
 
-## 1.2 Características
+## 1.2 Features
 
-| Característica | Descripción |
+| Feature | Description |
 |----------------|-------------|
-| Transpilación TypeScript | Eliminación de tipos en Rust puro; no requiere `tsc` |
-| Tree shaking | Eliminación de exportaciones no utilizadas basada en análisis OXC |
-| Code splitting | División en chunks para importaciones dinámicas (`--split`) |
-| Minificación | Eliminación de espacios en blanco y comentarios (`--minify`) |
-| Source maps | Emisión de archivo `.map` para depuración (`--source-map`) |
+| TypeScript Transpilation | Type stripping in pure Rust; no `tsc` required |
+| Tree shaking | Removal of unused exports based on OXC analysis |
+| Code splitting | Division into chunks for dynamic imports (`--split`) |
+| Minification | Whitespace and comment removal (`--minify`) |
+| Source maps | `.map` file emission for debugging (`--source-map`) |
 
-## 1.3 Uso
+## 1.3 Usage
 
 ```bash
-# Empaquetar un archivo de entrada (salida por defecto: dist/bundle.js)
+# Bundle an entry file (default output: dist/bundle.js)
 3va bundle index.ts
 
-# Especificar archivo de salida
-3va bundle index.ts -o salida/app.js
+# Specify output file
+3va bundle index.ts -o output/app.js
 
-# Habilitar code splitting para importaciones dinámicas
+# Enable code splitting for dynamic imports
 3va bundle index.ts --split
 
-# Minificar la salida
+# Minify output
 3va bundle index.ts --minify
 
-# Emitir source map (genera salida/app.js.map)
-3va bundle index.ts -o salida/app.js --source-map
+# Emit source map (generates output/app.js.map)
+3va bundle index.ts -o output/app.js --source-map
 
-# Combinar opciones
+# Combine options
 3va bundle index.ts -o dist/app.js --split --minify --source-map
 ```
 
-Flags no implementados: no existe `--out-dir`, `--format` ni `--target`.
+Flags not implemented: no `--out-dir`, `--format` or `--target`.
 
-## 1.4 Opciones de CLI
+## 1.4 CLI Options
 
-| Flag | Descripción | Valor por defecto |
-|------|-------------|-------------------|
-| `<input>` | Archivo de entrada (obligatorio) | — |
-| `-o <output>` | Archivo de salida | `dist/bundle.js` |
-| `--split` | Activa code splitting para importaciones dinámicas | desactivado |
-| `--minify` | Elimina espacios en blanco y comentarios | desactivado |
-| `--source-map` | Emite `<output>.map` junto al bundle | desactivado |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `<input>` | Entry file (required) | — |
+| `-o <output>` | Output file | `dist/bundle.js` |
+| `--split` | Enables code splitting for dynamic imports | disabled |
+| `--minify` | Removes whitespace and comments | disabled |
+| `--source-map` | Emits `<output>.map` alongside the bundle | disabled |
 
-## 1.5 Arquitectura del Pipeline
+## 1.5 Pipeline Architecture
 
 ```
-Archivo de entrada
+Entry file
        │
        ▼
-Transpilador TypeScript
-(eliminador de tipos en Rust puro)
+TypeScript Transpiler
+(pure Rust type stripper)
        │
        ▼
-Parser OXC
-(genera AST)
+OXC Parser
+(generates AST)
        │
        ▼
 Tree Shaker
-(elimina exportaciones no referenciadas)
+(removes unreferenced exports)
        │
        ▼
-Code Splitter  ◄── solo con --split
-(chunks para importaciones dinámicas)
+Code Splitter  ◄── only with --split
+(chunks for dynamic imports)
        │
        ▼
-Minificador  ◄── solo con --minify
-(elimina espacios y comentarios)
+Minifier  ◄── only with --minify
+(removes whitespace and comments)
        │
        ▼
-Salida: bundle.js  [+ bundle.js.map con --source-map]
+Output: bundle.js  [+ bundle.js.map with --source-map]
 ```
 
-## 1.6 Modo Watch (uso interno)
+## 1.6 Watch Mode (internal use)
 
-El bundler expone `start_watch_mode(input, output, options)`, una función que bloquea el hilo y reconstruye el bundle cada vez que detecta cambios en archivos `.js`, `.ts`, `.jsx` o `.tsx`. Aplica un debounce de **300 ms**.
+The bundler exposes `start_watch_mode(input, output, options)`, a blocking function that rebuilds the bundle whenever it detects changes in `.js`, `.ts`, `.jsx` or `.tsx` files. Applies a debounce of **300 ms**.
 
-Este modo es utilizado internamente por `3va dev` y no está pensado para invocarse directamente desde la CLI del bundler.
+This mode is used internally by `3va dev` and is not intended to be invoked directly from the bundler CLI.
 
 ---
 
-*Bundler implementado en `crates/bundler/src/` (`bundler.rs`, `tree_shaker.rs`, `code_splitter.rs`, `minifier.rs`).*
+*Bundler implemented in `crates/bundler/src/` (`bundler.rs`, `tree_shaker.rs`, `code_splitter.rs`, `minifier.rs`).*

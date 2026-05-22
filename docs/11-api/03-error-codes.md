@@ -1,62 +1,62 @@
-# 03 - CÓDIGOS DE ERROR
+# 03 - ERROR CODES
 
-## 3.1 Códigos de Error
+## 3.1 Error Codes
 
-3va usa códigos de error estructurados para facilitar debugging.
+3va uses structured error codes to facilitate debugging.
 
-## 3.2 Errores del Runtime
+## 3.2 Runtime Errors
 
-| Código | Descripcion |
+| Code | Description |
 |--------|-------------|
-| ERR_RUNTIME_FAILURE | Fallo interno del runtime |
-| ERR_OUT_OF_MEMORY | Memoria agotada |
+| ERR_RUNTIME_FAILURE | Internal runtime failure |
+| ERR_OUT_OF_MEMORY | Out of memory |
 | ERR_STACK_OVERFLOW | Stack overflow |
-| ERR_TIMEOUT | Timeout de ejecución |
+| ERR_TIMEOUT | Execution timeout |
 
-## 3.3 Errores de Permisos
+## 3.3 Permission Errors
 
-| Código | Descripcion |
+| Code | Description |
 |--------|-------------|
-| ERR_PERMISSION_DENIED | Permiso denegado |
-| ERR_CAPABILITY_MISSING | Capability no otorgada |
-| ERR_DENY_BY_DEFAULT | Denegado por defecto |
+| ERR_PERMISSION_DENIED | Permission denied |
+| ERR_CAPABILITY_MISSING | Capability not granted |
+| ERR_DENY_BY_DEFAULT | Denied by default |
 
-## 3.4 Errores de Módulos
+## 3.4 Module Errors
 
-| Código | Descripcion |
+| Code | Description |
 |--------|-------------|
-| ERR_MODULE_NOT_FOUND | Módulo no encontrado |
-| ERR_MODULE_PARSE | Error de parseo |
-| ERR_REQUIRE_CYCLE | Require circular |
-| ERR_INVALID_EXPORT | Export inválido |
+| ERR_MODULE_NOT_FOUND | Module not found |
+| ERR_MODULE_PARSE | Parse error |
+| ERR_REQUIRE_CYCLE | Circular require |
+| ERR_INVALID_EXPORT | Invalid export |
 
-## 3.5 Errores de Red
+## 3.5 Network Errors
 
-| Código | Descripcion |
+| Code | Description |
 |--------|-------------|
-| ERR_HOST_NOT_ALLOWED | Host no permitido |
-| ERR_DNS_RESOLVE | Error de DNS |
-| ERR_CONNECTION_REFUSED | Conexión rechazada |
-| ERR_TLS_ERROR | Error de TLS |
+| ERR_HOST_NOT_ALLOWED | Host not allowed |
+| ERR_DNS_RESOLVE | DNS error |
+| ERR_CONNECTION_REFUSED | Connection refused |
+| ERR_TLS_ERROR | TLS error |
 
-## 3.6 Errores de Sistema de Archivos
+## 3.6 File System Errors
 
-| Código | Descripcion |
+| Code | Description |
 |--------|-------------|
-| ERR_FILE_NOT_FOUND | Archivo no encontrado |
-| ERR_PERMISSION_READ | Lectura denegada |
-| ERR_PERMISSION_WRITE | Escritura denegada |
-| ERR_PATH_TRAVERSAL | Path traversal detectado |
+| ERR_FILE_NOT_FOUND | File not found |
+| ERR_PERMISSION_READ | Read denied |
+| ERR_PERMISSION_WRITE | Write denied |
+| ERR_PATH_TRAVERSAL | Path traversal detected |
 
-## 3.7 Errores de Seguridad
+## 3.7 Security Errors
 
-| Código | Descripcion |
+| Code | Description |
 |--------|-------------|
-| ERR_MALWARE_DETECTED | Malware detectado |
-| ERR_INVALID_SIGNATURE | Firma inválida |
-| ERR_SECRETS_DETECTED | Secretos en código |
+| ERR_MALWARE_DETECTED | Malware detected |
+| ERR_INVALID_SIGNATURE | Invalid signature |
+| ERR_SECRETS_DETECTED | Secrets in code |
 
-## 3.8 Formato de Error
+## 3.8 Error Format
 
 ```javascript
 {
@@ -72,4 +72,4 @@
 
 ---
 
-*Error codes conforme a Node.js error system.*
+*Error codes compliant with Node.js error system.*

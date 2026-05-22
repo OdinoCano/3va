@@ -1,14 +1,14 @@
-# 01 - ESPECIFICACIÓN DEL PACKAGE MANAGER
+# 01 - PACKAGE MANAGER SPECIFICATION
 
-## 1.1 Visión General
+## 1.1 Overview
 
-El Package Manager (PM) de 3va es un gestor de dependencias seguro por defecto. Prioriza la seguridad de la cadena de suministro sobre la comodidad: ninguna llamada de red ocurre sin permiso explícito del usuario.
+3va's Package Manager (PM) is a dependency manager that is secure by default. It prioritizes supply chain security over convenience: no network call happens without explicit user permission.
 
-## 1.2 Filosofía de Diseño
+## 1.2 Design Philosophy
 
-### 1.2.1 El Registry lo define `--allow-net`
+### 1.2.1 The Registry is Defined by `--allow-net`
 
-A diferencia de npm/yarn/pnpm, 3va **no tiene un flag `--registry`**. El host que el usuario autoriza en `--allow-net` *es* el registry. Esto es coherente con el modelo de capacidades del runtime:
+Unlike npm/yarn/pnpm, 3va **does not have a `--registry` flag**. The host the user authorizes in `--allow-net` *is* the registry. This is consistent with the runtime's capability model:
 
 ```bash
 # El host autorizado determina el registry
@@ -17,9 +17,9 @@ A diferencia de npm/yarn/pnpm, 3va **no tiene un flag `--registry`**. El host qu
 3va install @std/path --allow-net=jsr.io              # → JSR
 ```
 
-Tener un flag `--registry` separado duplicaría la autorización y rompería el modelo de seguridad.
+Having a separate `--registry` flag would duplicate authorization and break the security model.
 
-### 1.2.2 Red denegada por defecto
+### 1.2.2 Network Denied by Default
 
 ```bash
 3va install axios
@@ -29,26 +29,26 @@ Tener un flag `--registry` separado duplicaría la autorización y rompería el 
 #   3va install axios --allow-net=jsr.io
 ```
 
-### 1.2.3 Comparación con gestores tradicionales
+### 1.2.3 Comparison with Traditional Managers
 
-| Característica | npm | yarn | 3va PM |
-|----------------|-----|------|--------|
-| Red por defecto | Sí | Sí | **No** |
-| Flag de registry | `--registry` | `--registry` | `--allow-net` |
-| Post-install scripts | Por defecto | Por defecto | **Deshabilitado** |
-| Verificación de firma | Opcional | Opcional | Obligatoria |
-| Análisis de malware | No | No | **Sí** |
-| Auditoría CVE (OSV) | No | No | **Sí** |
-| Multi-registry por proyecto | No | No | **Sí** |
-| Origen por paquete en lockfile | No | No | **Sí** |
+| Feature | npm | yarn | 3va PM |
+|---------|-----|------|--------|
+| Network by default | Yes | Yes | **No** |
+| Registry flag | `--registry` | `--registry` | `--allow-net` |
+| Post-install scripts | Default | Default | **Disabled** |
+| Signature verification | Optional | Optional | **Mandatory** |
+| Malware analysis | No | No | **Yes** |
+| CVE audit (OSV) | No | No | **Yes** |
+| Multi-registry per project | No | No | **Yes** |
+| Per-package origin in lockfile | No | No | **Yes** |
 
 ---
 
-## 1.3 Registries Soportados
+## 1.3 Supported Registries
 
 ### 1.3.1 npm (`registry.npmjs.org`)
 
-API compatible con npm registry. Devuelve JSON con campos `versions` y `dist-tags.latest`.
+API compatible with npm registry. Returns JSON with `versions` and `dist-tags.latest` fields.
 
 ```bash
 3va install axios --allow-net=registry.npmjs.org
@@ -57,7 +57,7 @@ API compatible con npm registry. Devuelve JSON con campos `versions` y `dist-tag
 
 ### 1.3.2 Yarn (`registry.yarnpkg.com`)
 
-Mismo protocolo que npm. El host autorizado determina que se use Yarn como origen.
+Same protocol as npm. The authorized host determines that Yarn is used as the source.
 
 ```bash
 3va install react --allow-net=registry.yarnpkg.com
@@ -65,10 +65,10 @@ Mismo protocolo que npm. El host autorizado determina que se use Yarn como orige
 
 ### 1.3.3 JSR (`jsr.io`)
 
-Solo acepta paquetes con scope (`@scope/name`). Usa el endpoint:
+Only accepts scoped packages (`@scope/name`). Uses the endpoint:
 `GET https://jsr.io/api/scopes/{scope}/packages/{name}/versions`
 
-Respuesta: `{ "items": [{ "version": "..." }] }`
+Response: `{ "items": [{ "version": "..." }] }`
 
 ```bash
 3va install @std/path --allow-net=jsr.io
@@ -81,7 +81,7 @@ Respuesta: `{ "items": [{ "version": "..." }] }`
 
 ### 1.3.4 Registry Custom
 
-Cualquier host que no coincida con los tres anteriores se trata como registry npm-compatible:
+Any host that does not match the three above is treated as an npm-compatible registry:
 
 ```bash
 3va install my-pkg --allow-net=registry.mycompany.com
@@ -89,7 +89,7 @@ Cualquier host que no coincida con los tres anteriores se trata como registry np
 
 ---
 
-## 1.4 Subcomandos
+## 1.4 Subcommands
 
 ### 1.4.1 `install`
 
@@ -97,24 +97,24 @@ Cualquier host que no coincida con los tres anteriores se trata como registry np
 3va install <package>[@<version>] --allow-net=<registry-host>
 ```
 
-**Flujo:**
-1. Validar nombre y versión del paquete.
-2. Verificar `--allow-net` — si falta, error con sugerencia de comandos.
-3. Derivar registry del host autorizado.
-4. Consultar el registry (verificar existencia del paquete).
-5. Resolver versión: usa `latest` si no se especifica; si la versión no existe, muestra las 5 más cercanas.
-6. Verificar firma del paquete.
-7. Actualizar `package.json`.
-8. Regenerar `3va-lock.json` preservando registries previos y registrando el del nuevo paquete.
+**Flow:**
+1. Validate package name and version.
+2. Check `--allow-net` — if missing, error with command suggestions.
+3. Derive registry from authorized host.
+4. Query the registry (verify package existence).
+5. Resolve version: uses `latest` if not specified; if the version does not exist, shows the 5 closest.
+6. Verify package signature.
+7. Update `package.json`.
+8. Regenerate `3va-lock.json` preserving previous registries and recording the new package's registry.
 
-**Detección de paquete ya instalado:**
+**Already installed package detection:**
 ```bash
 3va install axios --allow-net=registry.npmjs.org
 # ✓ axios@1.7.2 is already installed.
 #   Use 'reinstall' to force reinstall.
 ```
 
-**Versión no encontrada — sugerencia de versiones cercanas:**
+**Version not found — nearby version suggestions:**
 ```bash
 3va install axios@99.0.0 --allow-net=registry.npmjs.org
 # ✗ Version axios@99.0.0 not found in registry.
@@ -129,7 +129,7 @@ Cualquier host que no coincida con los tres anteriores se trata como registry np
 
 ### 1.4.2 `reinstall`
 
-Fuerza la reinstalación aunque el paquete ya esté instalado.
+Forces reinstallation even if the package is already installed.
 
 ```bash
 3va reinstall <package>[@<version>] --allow-net=<registry-host>
@@ -137,17 +137,17 @@ Fuerza la reinstalación aunque el paquete ya esté instalado.
 
 ### 1.4.3 `update`
 
-Actualiza paquetes a su última versión, respetando el registry de origen registrado en el lockfile.
+Updates packages to their latest version, respecting the source registry recorded in the lockfile.
 
 ```bash
-# Actualizar todos los paquetes
-3va update --allow-net=<todos-los-hosts-necesarios>
+# Update all packages
+3va update --allow-net=<all-necessary-hosts>
 
-# Actualizar paquetes específicos
+# Update specific packages
 3va update axios @std/path --allow-net=registry.npmjs.org,jsr.io
 ```
 
-**Si `--allow-net` no cubre todos los registries necesarios:**
+**If `--allow-net` does not cover all required registries:**
 ```bash
 3va update
 # ✗ Update requires network access to:
@@ -158,20 +158,20 @@ Actualiza paquetes a su última versión, respetando el registry de origen regis
 # Run: 3va update --allow-net=registry.npmjs.org,jsr.io
 ```
 
-**Flujo interno:**
-1. Leer `3va-lock.json`.
-2. Determinar qué paquetes actualizar (todos o los especificados).
-3. Leer el campo `registry` de cada paquete en el lockfile.
-4. Verificar que `--allow-net` cubre todos los registries necesarios.
-5. Para cada paquete, reinstalar desde su registry original.
+**Internal flow:**
+1. Read `3va-lock.json`.
+2. Determine which packages to update (all or specified).
+3. Read the `registry` field of each package in the lockfile.
+4. Verify that `--allow-net` covers all required registries.
+5. For each package, reinstall from its original registry.
 
-**Nota:** `update` nunca cambia el registry de un paquete. Para migrar a otro registry, usar `install` explícitamente.
+**Note:** `update` never changes a package's registry. To migrate to another registry, use `install` explicitly.
 
 ---
 
-## 1.5 Multi-Registry por Proyecto
+## 1.5 Multi-Registry per Project
 
-Un proyecto puede tener dependencias de distintos registries simultáneamente. El lockfile registra el origen de cada una:
+A project can have dependencies from different registries simultaneously. The lockfile records the origin of each:
 
 ```json
 {
@@ -183,45 +183,45 @@ Un proyecto puede tener dependencias de distintos registries simultáneamente. E
 }
 ```
 
-Para actualizar este proyecto:
+To update this project:
 ```bash
 3va update --allow-net=registry.npmjs.org,registry.yarnpkg.com,jsr.io
 ```
 
 ---
 
-## 1.6 Resolución de Versiones
+## 1.6 Version Resolution
 
-### 1.6.1 Versión no especificada
+### 1.6.1 Unspecified Version
 
-Usa `dist-tags.latest` del registry (npm/Yarn) o la última entrada de `items[]` (JSR).
+Uses `dist-tags.latest` from the registry (npm/Yarn) or the last entry in `items[]` (JSR).
 
-### 1.6.2 Versión especificada y existente
+### 1.6.2 Specified and Existing Version
 
 ```bash
 3va install axios@1.7.2 --allow-net=registry.npmjs.org
 # ✓ Version axios@1.7.2 exists
 ```
 
-### 1.6.3 Versión especificada y no existente
+### 1.6.3 Specified and Non-Existent Version
 
-Calcula las 5 versiones más cercanas por distancia semver numérica:
+Calculates the 5 closest versions by numeric semver distance:
 `score = major × 1_000_000 + minor × 1_000 + patch`
 
-Las sugerencias siempre siguen el formato `name@version`.
+Suggestions always follow the `name@version` format.
 
-### 1.6.4 Formato de especificación de paquete
+### 1.6.4 Package Specification Format
 
-| Formato | Ejemplo | Resultado |
-|---------|---------|-----------|
-| Solo nombre | `axios` | Instala `latest` |
-| Nombre + versión | `axios@1.7.2` | Instala versión exacta |
-| Scoped | `@std/path` | Instala `latest` del scope |
-| Scoped + versión | `@std/path@0.196.0` | Instala versión exacta |
+| Format | Example | Result |
+|--------|---------|--------|
+| Name only | `axios` | Installs `latest` |
+| Name + version | `axios@1.7.2` | Installs exact version |
+| Scoped | `@std/path` | Installs `latest` from scope |
+| Scoped + version | `@std/path@0.196.0` | Installs exact version |
 
 ---
 
-## 1.7 Formato de `package.json`
+## 1.7 `package.json` Format
 
 ```json
 {
@@ -237,29 +237,29 @@ Las sugerencias siempre siguen el formato `name@version`.
 }
 ```
 
-3va escribe versiones exactas (sin `^` ni `~`) al instalar para garantizar reproducibilidad.
+3va writes exact versions (without `^` or `~`) when installing to ensure reproducibility.
 
 ---
 
-## 1.8 Seguridad
+## 1.8 Security
 
-### 1.8.1 Post-install scripts
+### 1.8.1 Post-install Scripts
 
-Deshabilitados por defecto. Los scripts `postinstall`, `install`, `preinstall` definidos en `package.json` de dependencias **no se ejecutan**.
+Disabled by default. The `postinstall`, `install`, `preinstall` scripts defined in dependency `package.json` files **are not executed**.
 
-### 1.8.2 Verificación de firmas
+### 1.8.2 Signature Verification
 
-Cada paquete pasa por `SignatureVerifier` (SHA-256/SHA-512) antes de registrarse en el lockfile.
+Each package goes through `SignatureVerifier` (SHA-256/SHA-512) before being registered in the lockfile.
 
-### 1.8.3 Scanner de malware
+### 1.8.3 Malware Scanner
 
-`MalwareScanner` analiza el contenido del paquete antes de instalarlo.
+`MalwareScanner` analyzes the package content before installing it.
 
-### 1.8.4 Cumplimiento Normativo
+### 1.8.4 Regulatory Compliance
 
-- **NIS2**: verificación estática de código y restricción de ejecución de binarios de terceros.
-- **eIDAS**: mecanismos de verificación de firmas criptográficas de paquetes.
+- **NIS2**: static code verification and restriction of third-party binary execution.
+- **eIDAS**: cryptographic signature verification mechanisms for packages.
 
 ---
 
-*Implementado en `crates/pm/src/` (`lib.rs`, `lockfile.rs`, `fetcher.rs`, `resolver.rs`, `signature_verifier.rs`, `malware_scanner.rs`).*
+*Implemented in `crates/pm/src/` (`lib.rs`, `lockfile.rs`, `fetcher.rs`, `resolver.rs`, `signature_verifier.rs`, `malware_scanner.rs`).*

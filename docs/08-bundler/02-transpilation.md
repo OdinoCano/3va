@@ -1,26 +1,26 @@
-# 02 - TRANSPILACIÓN TS/JSX
+# 02 - TS/JSX TRANSPILATION
 
-## 2.1 Transpilador
+## 2.1 Transpiler
 
-El transpilador convierte TypeScript y JSX a JavaScript compatible con el runtime.
+The transpiler converts TypeScript and JSX to runtime-compatible JavaScript.
 
 ## 2.2 TypeScript
 
-### 2.2.1 Soporte
+### 2.2.1 Support
 
-| Feature | Soporte |
+| Feature | Support |
 |---------|---------|
-| Tipos | Elimina en tiempo de compilación |
-| Interfaces | Elimina |
-| Enums | Convierte a objetos |
-| Generics | Elimina con verificación |
-| Decorators | Soporte parcial |
-| Namespace | Convierte a IIFE |
-| Async/await | Soportado |
-| Nullish coalescing | Soportado |
-| Optional chaining | Soportado |
+| Types | Stripped at compile time |
+| Interfaces | Stripped |
+| Enums | Converted to objects |
+| Generics | Stripped with verification |
+| Decorators | Partial support |
+| Namespace | Converted to IIFE |
+| Async/await | Supported |
+| Nullish coalescing | Supported |
+| Optional chaining | Supported |
 
-### 2.2.2 Ejemplo
+### 2.2.2 Example
 
 ```typescript
 // Input
@@ -39,7 +39,7 @@ const age = user.age !== null && user.age !== void 0 ? user.age : 0;
 
 ## 2.3 JSX
 
-### 2.3.1 Transformaciones
+### 2.3.1 Transformations
 
 | JSX | Output |
 |-----|--------|
@@ -47,24 +47,24 @@ const age = user.age !== null && user.age !== void 0 ? user.age : 0;
 | <div className="x" /> | React.createElement("div", { className: "x" }) |
 | <div>{text}</div> | React.createElement("div", null, text) |
 
-### 2.3.2 Configuración
+### 2.3.2 Configuration
 
 ```javascript
 // 3va.config.js
 module.exports = {
   jsx: "react",           // react, react-jsx, preserve
-  jsxImportSource: "react", // package para jsx
+  jsxImportSource: "react", // package for jsx
 };
 ```
 
 ## 2.4 Plugins
 
-| Plugin | Descripcion |
+| Plugin | Description |
 |--------|-------------|
-| @3va/plugin-react | Soporte React |
-| @3va/plugin-node | Polyfills Node.js |
+| @3va/plugin-react | React support |
+| @3va/plugin-node | Node.js polyfills |
 | @3va/plugin-paths | Resolve paths |
 
 ---
 
-*Transpilación conforme a TypeScript compiler API.*
+*Transpilation conforming to TypeScript compiler API.*

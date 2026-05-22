@@ -1,38 +1,38 @@
-# 02 - MÓDULOS DEL SISTEMA
+# 02 - SYSTEM MODULES
 
-## 2.1 Sistema de Módulos
+## 2.1 Module System
 
-3va soporta tanto ECMAScript Modules (ESM) como CommonJS (CJS), priorizando ESM pero manteniendo compatibilidad con el ecosistema npm.
+3va supports both ECMAScript Modules (ESM) and CommonJS (CJS), prioritizing ESM while maintaining compatibility with the npm ecosystem.
 
-## 2.2 Módulos Built-in
+## 2.2 Built-in Modules
 
-### 2.2.1 Módulos Core Disponibles
+### 2.2.1 Available Core Modules
 
-| Módulo | Descripción | Status |
+| Module | Description | Status |
 |--------|-------------|--------|
-| buffer | Buffer de datos binarios | Implementado |
-| console | Consola de salida | Implementado |
-| crypto | Criptografía | Parcial |
-| events | EventEmitter | Implementado |
-| fs | Sistema de archivos | Parcial |
-| http | Cliente/servidor HTTP | Parcial |
-| https | HTTP con TLS | Por implementar |
-| net | TCP/UDP sockets | Por implementar |
-| os | Información del sistema | Implementado |
-| path | Utilidades de rutas | Implementado |
-| process | Proceso actual | Implementado |
-| querystring | Parseo de query strings | Implementado |
-| stream | Streams de datos | Parcial |
-| tls | TLS/SSL | Por implementar |
-| url | Parseo de URLs | Implementado |
-| util | Utilidades varias | Implementado |
-| zlib | Compresión | Por implementar |
+| buffer | Binary data buffer | Implemented |
+| console | Output console | Implemented |
+| crypto | Cryptography | Partial |
+| events | EventEmitter | Implemented |
+| fs | File system | Partial |
+| http | HTTP client/server | Partial |
+| https | HTTP with TLS | To implement |
+| net | TCP/UDP sockets | To implement |
+| os | System information | Implemented |
+| path | Path utilities | Implemented |
+| process | Current process | Implemented |
+| querystring | Query string parsing | Implemented |
+| stream | Data streams | Partial |
+| tls | TLS/SSL | To implement |
+| url | URL parsing | Implemented |
+| util | Various utilities | Implemented |
+| zlib | Compression | To implement |
 
-### 2.2.2 Implementación de Módulos
+### 2.2.2 Module Implementation
 
 #### console
 ```rust
-// Implementación en crates/js/src/builtins/console.rs
+// Implementation in crates/js/src/builtins/console.rs
 pub struct Console;
 
 impl Console {
@@ -53,7 +53,7 @@ impl Console {
 
 #### buffer
 ```rust
-// Implementación en crates/js/src/builtins/buffer.rs
+// Implementation in crates/js/src/builtins/buffer.rs
 pub struct Buffer;
 
 impl Buffer {
@@ -66,7 +66,7 @@ impl Buffer {
 
 #### events
 ```rust
-// Implementación en crates/js/src/builtins/events.rs
+// Implementation in crates/js/src/builtins/events.rs
 pub struct EventEmitter {
     listeners: HashMap<String, Vec<Function>>,
 }
@@ -80,35 +80,35 @@ impl EventEmitter {
 }
 ```
 
-## 2.3 Carga de Módulos
+## 2.3 Module Loading
 
 ### 2.3.1 Resolution Algorithm
 
 ```
-1. Si es URL absoluta o relativa:
-   - Resolver contra __dirname
-2. Si es package lookup:
-   - Buscar en node_modules
-   - Resolver main en package.json
-   - Buscar index.js, index.ts
-3. Si es built-in:
-   - Devolver módulo nativo
-4. Si no se encuentra:
+1. If absolute or relative URL:
+   - Resolve against __dirname
+2. If package lookup:
+   - Search in node_modules
+   - Resolve main in package.json
+   - Search index.js, index.ts
+3. If built-in:
+   - Return native module
+4. If not found:
    - Throw MODULE_NOT_FOUND
 ```
 
-### 2.3.2 Mapeo de Extensiones
+### 2.3.2 Extension Mapping
 
-| Extensión | Acción |
+| Extension | Action |
 |-----------|--------|
-| .mjs | Tratar como ESM |
-| .cjs | Tratar como CJS |
-| .js | Según package.json type |
-| .ts | Transpilar a JS |
-| .tsx | Transpilar a JSX |
-| .jsx | Transpilar a JS |
+| .mjs | Treat as ESM |
+| .cjs | Treat as CJS |
+| .js | According to package.json type |
+| .ts | Transpile to JS |
+| .tsx | Transpile to JSX |
+| .jsx | Transpile to JS |
 
-### 2.3.3 Cache de Módulos
+### 2.3.3 Module Cache
 
 ```rust
 pub struct ModuleCache {
@@ -125,24 +125,24 @@ impl ModuleCache {
 
 ## 2.4 CommonJS
 
-### 2.4.1 Implementación de require()
+### 2.4.1 require() Implementation
 
 ```javascript
-// En entorno 3va
+// In 3va environment
 const fs = require('fs');
 const _ = require('lodash');
 
-// Con exports
+// With exports
 module.exports = { foo: 'bar' };
 module.exports.foo = 'bar';
 ```
 
-### 2.4.2 Wrapping de Módulos
+### 2.4.2 Module Wrapping
 
-Todo código CJS se envuelve en:
+All CJS code is wrapped in:
 ```javascript
 (function(exports, require, module, __filename, __dirname) {
-    // código del usuario
+    // user code
 })(exports, require, module, filename, dirname);
 ```
 
@@ -171,14 +171,14 @@ export default function() { }
 ### 2.5.2 Top-level await
 
 ```javascript
-// Disponible en módulos ESM
+// Available in ESM modules
 const data = await fetch('/api/data');
 export default data;
 ```
 
 ## 2.6 Package.json Integration
 
-### 2.6.1 Resolution de main
+### 2.6.1 main Resolution
 
 ```json
 {
@@ -190,7 +190,7 @@ export default data;
 }
 ```
 
-### 2.6.2 Exports Conditional
+### 2.6.2 Conditional Exports
 
 ```json
 {
@@ -205,4 +205,4 @@ export default data;
 
 ---
 
-*Módulos conforme a especificaciones Node.js y estándares ECMAScript.*
+*Modules conforming to Node.js specifications and ECMAScript standards.*

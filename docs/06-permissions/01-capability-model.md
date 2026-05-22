@@ -1,12 +1,12 @@
-# 01 - MODELO DE CAPACIDADES
+# 01 - CAPABILITY MODEL
 
-## 1.1 Filosofía del Modelo
+## 1.1 Model Philosophy
 
-El sistema de permisos de 3va implementa un modelo de capacidades basado en el principio de "denegar por defecto" (deny-by-default), donde ningún proceso tiene acceso a recursos del sistema sin una Capability explícitamente otorgada por el usuario.
+3va's permission system implements a capability model based on the "deny-by-default" principle, where no process has access to system resources without an explicitly user-granted Capability.
 
-## 1.2 Arquitectura del Sistema de Permisos
+## 1.2 Permission System Architecture
 
-### 1.2.1 Diagrama de Componentes
+### 1.2.1 Component Diagram
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -18,11 +18,11 @@ El sistema de permisos de 3va implementa un modelo de capacidades basado en el p
 ┌────────────────────────────────────────────────────────────────┐
 │                    PermissionState                            │
 │  ┌─────────────────────────────────────────────────────────┐  │
-│  │ Capabilities Concedidas:                                 │  │
+│  │ Granted Capabilities:                                    │  │
 │  │   - FileRead(PathBuf)                                   │  │
 │  │   - Network(String)                                     │  │
 │  │   - EnvAccess                                           │  │
-│  │   - (deny-list vacía)                                   │  │
+│   │   - (empty deny-list)                                   │  │
 │  └─────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────┬──────────────────────────────┘
                                   │
@@ -36,50 +36,50 @@ El sistema de permisos de 3va implementa un modelo de capacidades basado en el p
 
 ## 1.3 Enum Capability
 
-### 1.3.1 Definición
+### 1.3.1 Definition
 
 ```rust
 // crates/permissions/src/capability.rs
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Capability {
-    /// Permite lectura de archivos en el path especificado
+    /// Allows reading files at the specified path
     FileRead(PathBuf),
-    /// Permite escritura de archivos en el path especificado
+    /// Allows writing files at the specified path
     FileWrite(PathBuf),
-    /// Permite conexiones de red al host/IP especificado
+    /// Allows network connections to the specified host/IP
     Network(String),
-    /// Permite acceso a variables de entorno
+    /// Allows access to environment variables
     EnvAccess,
-    /// Permite crear procesos hijos
+    /// Allows creating child processes
     SpawnProcess,
-    /// Permite acceso a APIs nativas/FFI
+    /// Allows access to native APIs/FFI
     FFI,
 }
 ```
 
-### 1.3.2 Descripción de Capacidades
+### 1.3.2 Capability Descriptions
 
-| Capability | Recurso | Descripción |
-|------------|---------|-------------|
-| FileRead | PathBuf | Permite leer archivos/directorios |
-| FileWrite | PathBuf | Permite escribir/crear archivos |
-| Network | String | Permite conexiones TCP/UDP |
-| EnvAccess | - | Permite leer variables de entorno |
-| SpawnProcess | - | Permite crear procesos hijos |
-| FFI | - | Permite llamadas a funciones nativas |
+| Capability | Resource | Description |
+|------------|----------|-------------|
+| FileRead | PathBuf | Allows reading files/directories |
+| FileWrite | PathBuf | Allows writing/creating files |
+| Network | String | Allows TCP/UDP connections |
+| EnvAccess | - | Allows reading environment variables |
+| SpawnProcess | - | Allows creating child processes |
+| FFI | - | Allows native function calls |
 
 ## 1.4 PermissionState
 
-### 1.4.1 Estructura
+### 1.4.1 Structure
 
 ```rust
 #[derive(Debug, Default)]
 pub struct PermissionState {
-    /// Lista de capabilities concedidas
+    /// List of granted capabilities
     pub granted: Vec<Capability>,
-    /// Lista de capacidades explícitamente denegadas
+    /// List of explicitly denied capabilities
     pub denied: Vec<Capability>,
-    /// Flags de denegación global
+    /// Global denial flags
     deny_all_fs: bool,
     deny_all_net: bool,
     deny_all_env: bool,
@@ -89,47 +89,47 @@ pub struct PermissionState {
 impl PermissionState {
     pub fn new() -> Self { ... }
 
-    /// Conceder una capability
+    /// Grant a capability
     pub fn grant(&mut self, cap: Capability) { ... }
 
-    /// Denegar una capability específica
+    /// Deny a specific capability
     pub fn deny(&mut self, cap: Capability) { ... }
 
-    /// Verificar si una operación está permitida
+    /// Check if an operation is allowed
     pub fn check(&self, required: &Capability) -> bool { ... }
 }
 ```
 
-### 1.4.2 Algoritmo de Verificación
+### 1.4.2 Verification Algorithm
 
 ```
 check(required_capability):
-    1. SI deny_all_<tipo> ES true:
+    1. IF deny_all_<type> IS true:
        RETURN false
 
-    2. SI required_capability ESTÁ en denied:
+    2. IF required_capability IS IN denied:
        RETURN false
 
-    3. PARA cada cap EN granted:
-       4. SI cap MATCHES required_capability:
-          RETURN true
+    3. FOR each cap IN granted:
+        4. IF cap MATCHES required_capability:
+           RETURN true
 
     5. RETURN false  (deny-by-default)
 ```
 
-## 1.5 Matching de Patrones
+## 1.5 Pattern Matching
 
 ### 1.5.1 File Patterns
 
 ```rust
-// Soporte para patrones glob en paths
+// Glob pattern support for paths
 impl Capability {
     pub fn matches_path(&self, path: &PathBuf) -> bool {
         match self {
             Capability::FileRead(allowed) => {
                 // Exact match
                 path.starts_with(allowed) ||
-                // Glob patterns (futuro)
+                // Glob patterns (future)
                 matches_glob(path, allowed)
             }
             _ => false
@@ -137,7 +137,7 @@ impl Capability {
     }
 
     pub fn matches_glob(path: &Path, pattern: &Path) -> bool {
-        // Implementación de glob matching
+        // Glob matching implementation
         // *.js -> matches any .js file
         // /app/* -> matches anything in /app
         // /app/**/*.ts -> recursive .ts files
@@ -148,7 +148,7 @@ impl Capability {
 ### 1.5.2 Network Patterns
 
 ```rust
-// Soporte para patrones de red
+// Network pattern support
 impl Capability {
     pub fn matches_host(&self, host: &str) -> bool {
         match self {
@@ -158,7 +158,7 @@ impl Capability {
                 // Wildcard: *.example.com
                 allowed.starts_with("*.") &&
                     host.ends_with(&allowed[1..]) ||
-                // CIDR: 192.168.0.0/16 (futuro)
+                // CIDR: 192.168.0.0/16 (future)
                 matches_cidr(host, allowed)
             }
             _ => false
@@ -167,7 +167,7 @@ impl Capability {
 }
 ```
 
-### 1.5.3 Ejemplos de Matching
+### 1.5.3 Matching Examples
 
 | Pattern | Match | No Match |
 |---------|-------|----------|
@@ -176,9 +176,9 @@ impl Capability {
 | `*.example.com` | `api.example.com` | `example.com`, `evil.com` |
 | `api.example.com` | `api.example.com` | `other.example.com` |
 
-## 1.6 Construcción desde CLI
+## 1.6 CLI Construction
 
-### 1.6.1 Parseo de Flags
+### 1.6.1 Flag Parsing
 
 ```rust
 pub fn from_args(args: &Args) -> PermissionState {
@@ -186,7 +186,7 @@ pub fn from_args(args: &Args) -> PermissionState {
 
     // --allow-read
     if args.flag_allow_read {
-        // Permitir todo
+        // Allow all
         state.grant(Capability::FileRead(PathBuf::from("/")));
     } else if let Some(paths) = &args.flag_allow_read_paths {
         for path in paths {
@@ -213,7 +213,7 @@ pub fn from_args(args: &Args) -> PermissionState {
         state.grant(Capability::SpawnProcess);
     }
 
-    // --deny-* (revocar permisos específicos)
+    // --deny-* (revoke specific permissions)
     if args.flag_deny_env {
         state.deny(Capability::EnvAccess);
     }
@@ -226,13 +226,13 @@ pub fn from_args(args: &Args) -> PermissionState {
 
 ```rust
 pub enum PermissionPreset {
-    /// Sin permisos (deny-all)
+    /// No permissions (deny-all)
     None,
-    /// Equivalente a Node.js (permite todo)
+    /// Equivalent to Node.js (allows everything)
     Node,
-    /// Simula navegador
+    /// Simulates browser
     Browser,
-    /// Entorno restringido
+    /// Restricted environment
     Minimal,
 }
 
@@ -240,7 +240,7 @@ impl PermissionPreset {
     pub fn apply(&self, state: &mut PermissionState) {
         match self {
             PermissionPreset::None => {
-                // deny-by-default, sin grants
+                // deny-by-default, no grants
             }
             PermissionPreset::Node => {
                 state.grant(Capability::FileRead(PathBuf::from("/")));
@@ -255,7 +255,7 @@ impl PermissionPreset {
                 state.grant(Capability::FileWrite(PathBuf::from("./.cache")));
             }
             PermissionPreset::Minimal => {
-                // Solo stdio
+                // Stdio only
             }
         }
     }
@@ -264,4 +264,4 @@ impl PermissionPreset {
 
 ---
 
-*Modelo de capacidades conforme a principios de seguridad de Chrome Sandbox y QubesOS.*
+*Capability model based on Chrome Sandbox and QubesOS security principles.*

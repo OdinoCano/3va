@@ -1,35 +1,35 @@
-# 01 - API JAVASCRIPT PÚBLICA
+# 01 - PUBLIC JAVASCRIPT API
 
-## 1.1 APIs Disponibles
+## 1.1 Available APIs
 
-El runtime 3va expone APIs compatibles con Node.js y navegador.
+The 3va runtime exposes APIs compatible with Node.js and the browser.
 
-## 1.2 Módulos Integrados
+## 1.2 Built-in Modules
 
-| Módulo | Descripcion |
+| Module | Description |
 |--------|-------------|
-| 3va | Información del runtime |
-| buffer | Buffer de datos |
-| console | Consola con auditoría |
-| crypto | Criptografía |
+| 3va | Runtime information |
+| buffer | Data buffer |
+| console | Console with auditing |
+| crypto | Cryptography |
 | events | EventEmitter |
-| fs | Sistema de archivos |
-| http | Cliente HTTP |
+| fs | File system |
+| http | HTTP client |
 | net | TCP/UDP sockets |
-| os | Información del sistema |
-| path | Utilidades de rutas |
-| process | Proceso actual |
+| os | System information |
+| path | Path utilities |
+| process | Current process |
 | stream | Streams |
-| url | Parseo de URLs |
-| util | Utilidades |
+| url | URL parsing |
+| util | Utilities |
 
 ## 1.3 3va API
 
 ```javascript
-// Información de versión
+// Version information
 3va.version          // "1.0.0"
-3va.versions.node    // Versión de Node.js
-3va.versions.v8      // Versión de V8
+3va.versions.node    // Node.js version
+3va.versions.v8      // V8 version
 
 // Runtime
 3va.gc()            // Force garbage collection
@@ -44,14 +44,14 @@ El runtime 3va expone APIs compatibles con Node.js y navegador.
 
 ## 1.4 Global APIs
 
-| API | Descripcion |
+| API | Description |
 |-----|-------------|
 | fetch | HTTP requests |
 | WebSocket | WebSockets |
-| AbortController | Control de abortos |
-| Performance | Medición |
-| TextEncoder/Decoder | Codificación |
+| AbortController | Abort control |
+| Performance | Measurement |
+| TextEncoder/Decoder | Encoding |
 
 ---
 
-*API conforme a Node.js y WHATWG standards.*
+*API compliant with Node.js and WHATWG standards.*

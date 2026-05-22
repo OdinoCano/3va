@@ -1,98 +1,98 @@
-# 01 - ESPECIFICACIÓN DE TESTS
+# 01 - TEST SPECIFICATION
 
 ## 1.1 Test Runner
 
-El test runner de 3va ejecuta pruebas escritas en JavaScript o TypeScript, inyectando una API global compatible con la convención Jest en cada archivo de test. Cada archivo se ejecuta en su propia instancia aislada del motor JS con permisos de lectura y escritura limitados al directorio del archivo.
+3va's test runner executes tests written in JavaScript or TypeScript, injecting a Jest-compatible global API into each test file. Each file runs in its own isolated JS engine instance with read and write permissions limited to the file's directory.
 
-## 1.2 Uso
+## 1.2 Usage
 
 ```bash
-# Descubrir y ejecutar todos los tests en el directorio actual
+# Discover and run all tests in the current directory
 3va test
 
-# Ejecutar tests en rutas específicas
+# Run tests in specific paths
 3va test tests/ src/lib/
 
-# Modo watch: re-ejecuta al detectar cambios
+# Watch mode: re-runs on file changes
 3va test --watch
 
-# Reporte de cobertura de líneas y ramas
+# Line and branch coverage report
 3va test --coverage
 
-# Actualizar snapshots existentes en disco
+# Update existing snapshots on disk
 3va test --update-snapshots
 ```
 
-No existe soporte para `--bail`, `--test-name-pattern` ni ningún archivo de configuración `jest.config.js`.
+No support for `--bail`, `--test-name-pattern`, or any `jest.config.js` configuration file.
 
-## 1.3 Descubrimiento de Archivos
+## 1.3 File Discovery
 
-El runner busca recursivamente archivos con los siguientes patrones de nombre:
+The runner recursively searches for files matching the following name patterns:
 
-| Patrón | Descripción |
+| Pattern | Description |
 |--------|-------------|
-| `*.test.js` | Test JavaScript |
-| `*.test.ts` | Test TypeScript |
-| `*.spec.js` | Spec JavaScript |
-| `*.spec.ts` | Spec TypeScript |
+| `*.test.js` | JavaScript test |
+| `*.test.ts` | TypeScript test |
+| `*.spec.js` | JavaScript spec |
+| `*.spec.ts` | TypeScript spec |
 
-## 1.4 API Global Inyectada
+## 1.4 Injected Global API
 
-Las siguientes funciones están disponibles como globales dentro de cada archivo de test; no es necesario importarlas.
+The following functions are available as globals within each test file; they do not need to be imported.
 
 ```javascript
-// Agrupa tests relacionados; es anidable
-describe("nombre del suite", () => {
-  // Registra un test individual
-  test("nombre del test", () => {
+// Groups related tests; is nestable
+describe("suite name", () => {
+  // Registers an individual test
+  test("test name", () => {
     expect(1 + 1).toBe(2);
   });
 
-  // Alias exacto de test
-  it("también registra un test", () => {
-    expect("hola").toHaveLength(4);
+  // Exact alias of test
+  it("also registers a test", () => {
+    expect("hello").toHaveLength(5);
   });
 });
 ```
 
-## 1.5 expect y Matchers
+## 1.5 expect and Matchers
 
-`expect(valor)` crea una cadena de aserciones. Todos los matchers admiten negación mediante `.not`:
+`expect(value)` creates an assertion chain. All matchers support negation via `.not`:
 
 ```javascript
-expect(valor).toBe(esperado);
-expect(valor).not.toBe(noEsperado);
+expect(value).toBe(expected);
+expect(value).not.toBe(unexpected);
 ```
 
-La lista completa de matchers implementados se documenta en `02-matchers.md`.
+The full list of implemented matchers is documented in `02-matchers.md`.
 
 ## 1.6 Snapshots
 
-La primera vez que un test llama a `.toMatchSnapshot()`, el valor serializado se guarda en disco. Las ejecuciones posteriores comparan contra ese valor guardado.
+The first time a test calls `.toMatchSnapshot()`, the serialized value is saved to disk. Subsequent runs compare against that saved value.
 
-- Ubicación del archivo: `__snapshots__/<nombre-del-test>.snap` junto al archivo de test.
-- Formato: JSON plano con la estructura `{ "nombre del test": <valor serializado>, ... }`.
-- Para actualizar snapshots desactualizados: `3va test --update-snapshots`.
+- File location: `__snapshots__/<test-name>.snap` alongside the test file.
+- Format: Plain JSON with the structure `{ "test name": <serialized value>, ... }`.
+- To update outdated snapshots: `3va test --update-snapshots`.
 
 ```javascript
-test("el objeto tiene la forma esperada", () => {
-  const resultado = { id: 1, activo: true };
-  expect(resultado).toMatchSnapshot();
+test("object has the expected shape", () => {
+  const result = { id: 1, active: true };
+  expect(result).toMatchSnapshot();
 });
 ```
 
-## 1.7 Comportamiento del Runner
+## 1.7 Runner Behavior
 
-- Cada archivo de test se ejecuta en su propia instancia de `JsEngine` con `PermissionState` aislado.
-- Se conceden permisos de `FileRead` y `FileWrite` al directorio del archivo (necesario para leer y escribir snapshots).
-- La salida reporta `PASS` / `FAIL`, el nombre del suite, el mensaje de aserción y el tiempo transcurrido.
-- Los errores de sintaxis en el archivo de test se capturan y se reportan como un test fallido.
-- `run_directory(path)` descubre y ejecuta recursivamente todos los archivos de test en un directorio.
+- Each test file runs in its own `JsEngine` instance with isolated `PermissionState`.
+- `FileRead` and `FileWrite` permissions are granted to the file's directory (needed for reading and writing snapshots).
+- Output reports `PASS` / `FAIL`, the suite name, the assertion message, and elapsed time.
+- Syntax errors in the test file are caught and reported as a failed test.
+- `run_directory(path)` discovers and recursively executes all test files in a directory.
 
-## 1.8 Cobertura
+## 1.8 Coverage
 
-El flag `--coverage` genera un reporte de cobertura de **líneas** y **ramas**. Ver `03-coverage.md` para detalles.
+The `--coverage` flag generates a **line** and **branch** coverage report. See `03-coverage.md` for details.
 
 ---
 
-*Implementado en `crates/test/src/` (`runner.rs`, `framework.rs`, `matchers.rs`, `coverage.rs`).*
+*Implemented in `crates/test/src/` (`runner.rs`, `framework.rs`, `matchers.rs`, `coverage.rs`).*

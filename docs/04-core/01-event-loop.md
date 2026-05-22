@@ -1,12 +1,12 @@
-# 01 - EVENT LOOP Y SCHEDULER
+# 01 - EVENT LOOP AND SCHEDULER
 
-## 1.1 Visión General
+## 1.1 Overview
 
-El event loop de 3va está implementado sobre el runtime asíncrono Tokio de Rust, proporcionando un rendimiento superior al de Node.js gracias a la eficiencia del modelo de actores y la ejecución cooperativo.
+3va's event loop is implemented on top of Rust's Tokio async runtime, providing superior performance compared to Node.js thanks to the efficiency of the actor model and cooperative execution.
 
-## 1.2 Arquitectura del Event Loop
+## 1.2 Event Loop Architecture
 
-### 1.2.1 Componentes Principales
+### 1.2.1 Main Components
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -14,7 +14,7 @@ El event loop de 3va está implementado sobre el runtime asíncrono Tokio de Rus
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
 │  │  Scheduler  │  │   Reactor   │  │    Timer    │        │
-│  │  (Waker)    │  │  (IO Ops)    │  │  (Delayed)  │        │
+│  │  (Waker)    │  │  (IO Ops)   │  │  (Delayed)  │        │
 │  └─────────────┘  └─────────────┘  └─────────────┘        │
 ├─────────────────────────────────────────────────────────────┤
 │                      3va Event Loop                         │
@@ -26,7 +26,7 @@ El event loop de 3va está implementado sobre el runtime asíncrono Tokio de Rus
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 1.2.2 Ciclo de Ejecución
+### 1.2.2 Execution Cycle
 
 ```
 ┌────────────────┐
@@ -60,39 +60,39 @@ El event loop de 3va está implementado sobre el runtime asíncrono Tokio de Rus
 
 ## 1.3 Task Scheduler
 
-### 1.3.1 Tipos de Tareas
+### 1.3.1 Task Types
 
 ```rust
 pub enum TaskType {
-    /// Tareas de usuario JavaScript
+    /// JavaScript user tasks
     UserTask,
-    /// Tareas internas del runtime
+    /// Runtime internal tasks
     InternalTask,
-    /// Tareas de I/O asíncrono
+    /// Async I/O tasks
     IoTask,
-    /// Tareas diferidas (setTimeout)
+    /// Delayed tasks (setTimeout)
     DelayedTask,
-    /// Tareas de promesas
+    /// Promise tasks
     PromiseTask,
 }
 ```
 
-### 1.3.2 Cola de Prioridades
+### 1.3.2 Priority Queue
 
 ```rust
 pub struct TaskQueue {
-    // Alta prioridad: Promesas (microtasks)
+    // High priority: Promises (microtasks)
     high_priority: VecDeque<Task>,
-    // Prioridad normal: I/O callbacks
+    // Normal priority: I/O callbacks
     normal_priority: VecDeque<Task>,
-    // Baja prioridad: setTimeout (macrotasks)
+    // Low priority: setTimeout (macrotasks)
     low_priority: VecDeque<Task>,
-    // Tareas diferidas
+    // Delayed tasks
     delayed: BinaryHeap<DelayedTask>,
 }
 ```
 
-### 1.3.3 Algoritmo de Scheduling
+### 1.3.3 Scheduling Algorithm
 
 ```
 1. Receive new task
@@ -105,15 +105,15 @@ pub struct TaskQueue {
 5. Execute in FIFO order within queue
 ```
 
-## 1.4 Gestión de timers
+## 1.4 Timer Management
 
 ### 1.4.1 Timer Wheel
 
-Implementación optimizada de timers usando "timer wheel" para complejidad O(1):
+Optimized timer implementation using "timer wheel" for O(1) complexity:
 
 ```rust
 pub struct TimerWheel {
-    // 6 wheels para diferentes granularidades
+    // 6 wheels for different granularities
     wheel_ms: VecDeque<Timer>,      // 1ms - 64ms
     wheel_s: VecDeque<Timer>,       // 64ms - 4s
     wheel_m: VecDeque<Timer>,       // 4s - 4min
@@ -123,7 +123,7 @@ pub struct TimerWheel {
 }
 ```
 
-### 1.4.2 API de Timers
+### 1.4.2 Timer API
 
 ```javascript
 // setTimeout
@@ -139,11 +139,11 @@ setImmediate(callback)
 process.nextTick(callback)
 ```
 
-## 1.5 Reactor de I/O
+## 1.5 I/O Reactor
 
-### 1.5.1 Operaciones Asíncronas
+### 1.5.1 Async Operations
 
-| Operacion | Rust Async | JS API |
+| Operation | Rust Async | JS API |
 |-----------|------------|--------|
 | File I/O | tokio::fs | fs promisified |
 | TCP | tokio::net | net, http |
@@ -161,32 +161,32 @@ pub struct IoReactor {
 }
 ```
 
-## 1.6 Métricas de Rendimiento
+## 1.6 Performance Metrics
 
-### 1.6.1 Benchmarks Esperados
+### 1.6.1 Expected Benchmarks
 
-| Métrica | Node.js | Bun | 3va Target |
-|---------|---------|-----|------------|
+| Metric | Node.js | Bun | 3va Target |
+|--------|---------|-----|------------|
 | Cold start | 50ms | 12ms | <15ms |
 | Hello world | 25ms | 6ms | <10ms |
 | Eval 1M ops | 180ms | 45ms | <40ms |
 | Memory baseline | 30MB | 17MB | <20MB |
 
-### 1.6.2 Monitoreo
+### 1.6.2 Monitoring
 
 ```javascript
-// Métricas del runtime
+// Runtime metrics
 console.performance.memory;  // JS heap
 process.resourceUsage();     // CPU, memory, IO
-process.uptime();            // Tiempo de ejecución
+process.uptime();            // Runtime
 ```
 
-## 1.7 Cumplimiento Normativo (ISO/IEC)
+## 1.7 Regulatory Compliance (ISO/IEC)
 
-El diseño e implementación del Event Loop asíncrono y la gestión de tareas respeta los principios definidos en:
-- **ISO/IEC 24765:2017** (Vocabulario de Ingeniería de Sistemas y Software), garantizando el determinismo en la ejecución de concurrencia y prevención de *race conditions* a nivel de runtime.
-- **RFC 7230**, operando las conexiones y tareas asíncronas bajo semántica de streams de baja latencia.
+The design and implementation of the async Event Loop and task management respects the principles defined in:
+- **ISO/IEC 24765:2017** (Systems and Software Engineering Vocabulary), guaranteeing determinism in concurrent execution and prevention of race conditions at the runtime level.
+- **RFC 7230**, operating connections and async tasks under low-latency stream semantics.
 
 ---
 
-*Implementado en `crates/core/src/task_queue.rs` y `crates/core/src/timer.rs`.*
+*Implemented in `crates/core/src/task_queue.rs` and `crates/core/src/timer.rs`.*

@@ -1,65 +1,65 @@
-# 01 - RESUMEN EJECUTIVO
+# 01 - EXECUTIVE SUMMARY
 
-## 1.1 Propósito
+## 1.1 Purpose
 
-Este documento establece la especificación técnica completa del proyecto 3va (Veni, Vidi, Vici, Abiit), un runtime de JavaScript/TypeScript moderno, seguro por defecto y basado en WebAssembly, escrito en Rust. El documento sirve como referencia técnica para desarrolladores, arquitectos de software y equipos de control de calidad.
+This document establishes the complete technical specification for the 3va project (Veni, Vidi, Vici, Abiit), a modern JavaScript/TypeScript runtime that is secure by default and WebAssembly-based, written in Rust. This document serves as a technical reference for developers, software architects, and quality assurance teams.
 
-## 1.2 Alcance del Proyecto
+## 1.2 Project Scope
 
-3va es un ecosistema completo de herramientas de desarrollo que compite directamente con Bun, ofreciendo ventajas significativas en el ámbito de la ciberseguridad. El proyecto abarca:
+3va is a complete development tool ecosystem that directly competes with Bun, offering significant advantages in the cybersecurity domain. The project encompasses:
 
-- **Runtime**: Motor de ejecución de JavaScript/TypeScript con rendimiento comparable o superior a Bun
-- **Package Manager**: Gestor de paquetes con análisis de seguridad integrado
-- **Bundler**: Empaquetador de código con optimización y análisis de vulnerabilidades
-- **Test Runner**: Marco de pruebas compatible con Jest con capacidades de seguridad adicionales
-- **CLI**: Interfaz de línea de comandos unificada
+- **Runtime**: JavaScript/TypeScript execution engine with performance comparable to or exceeding Bun
+- **Package Manager**: Package manager with integrated security analysis
+- **Bundler**: Code bundler with optimization and vulnerability analysis
+- **Test Runner**: Jest-compatible test framework with additional security capabilities
+- **CLI**: Unified command-line interface
 
-## 1.3 Diferenciación Competitiva
+## 1.3 Competitive Differentiation
 
-A diferencia de Bun, 3va incorpora de manera nativa:
+Unlike Bun, 3va natively incorporates:
 
-| Característica | Bun | 3va |
+| Feature | Bun | 3va |
 |----------------|-----|-----|
-| Sandboxing automático | Limitado | Completo |
-| Análisis estático de código | No | Sí |
-| Scanner de malware en paquetes | No | Sí |
-| Detección de secretos | No | Sí |
-| Fuzzing integrado | No | Sí |
-| Criptografía post-cuántica | No | Planeado |
-| Auditoría de supply chain | Manual | Automática |
+| Automatic sandboxing | Limited | Full |
+| Static code analysis | No | Yes |
+| Malware scanner in packages | No | Yes |
+| Secrets detection | No | Yes |
+| Integrated fuzzing | No | Yes |
+| Post-quantum cryptography | No | Planned |
+| Supply chain audit | Manual | Automatic |
 
-## 1.4 Filosofía de Diseño
+## 1.4 Design Philosophy
 
-3va sigue los principios de diseño de sistemas operativos seguros como QubesOS y Chrome Sandbox:
+3va follows the design principles of secure operating systems like QubesOS and Chrome Sandbox:
 
-1. **Seguridad por defecto**: Sin acceso automático al sistema de archivos, red, variables de entorno o procesos hijos
-2. **Modelo de capacidades**: Permisos granulares explícitos mediante flags de CLI
-3. **Paquetes tratados como no confiables**: Todos los paquetes se ejecutan en sandbox
-4. **WASM-first**: Arquitectura preparada para WebAssembly y computación en edge
-5. **Post-cuántico listo**: Capacidad de integración de criptografía híbrida
+1. **Security by default**: No automatic access to filesystem, network, environment variables, or child processes
+2. **Capability model**: Explicit granular permissions via CLI flags
+3. **Packages treated as untrusted**: All packages run in a sandbox
+4. **WASM-first**: Architecture prepared for WebAssembly and edge computing
+5. **Post-quantum ready**: Hybrid cryptography integration capability
 
-## 1.5 Objetivos de Calidad
+## 1.5 Quality Objectives
 
-El producto debe cumplir con los siguientes objetivos medibles:
+The product must meet the following measurable objectives:
 
-- **Rendimiento**: Tiempo de inicio 4x menor que Node.js, comparable a Bun
-- **Seguridad**: Cumplimiento con ISO/IEC 27001 y criterios Common Criteria
-- **Estabilidad**: Compatibilidad del 99.9% con APIs de Node.js
-- **Mantenibilidad**: Documentación completa conforme a IEEE 829
+- **Performance**: Startup time 4x faster than Node.js, comparable to Bun
+- **Security**: Compliance with ISO/IEC 27001 and Common Criteria
+- **Stability**: 99.9% compatibility with Node.js APIs
+- **Maintainability**: Complete documentation conforming to IEEE 829
 
-## 1.6 Público Objetivo
+## 1.6 Target Audience
 
-- Desarrolladores que requieren entornos de ejecución seguros
-- Equipos de ciberseguridad que necesitan análisis automático de código
-- Organizaciones con requisitos regulatorios de seguridad (GDPR, HIPAA)
-- Proyectos de código abierto que necesitan verificación de dependencias
+- Developers requiring secure execution environments
+- Cybersecurity teams needing automated code analysis
+- Organizations with regulatory security requirements (GDPR, HIPAA)
+- Open source projects needing dependency verification
 
 ---
 
-**Historial de revisiones:**
+**Revision history:**
 
-| Revisión | Fecha | Autor | Descripción |
+| Revision | Date | Author | Description |
 |----------|-------|-------|-------------|
-| 1.0.0 | 2026-05-18 | Equipo 3va | Versión inicial |
+| 1.0.0 | 2026-05-18 | 3va Team | Initial version |
 
-*Documento conforme a ISO/IEC/IEEE 29148 y estándares europeos de documentación técnica.*
+*Document conforming to ISO/IEC/IEEE 29148 and European technical documentation standards.*

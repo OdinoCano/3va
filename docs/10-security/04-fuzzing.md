@@ -1,18 +1,18 @@
-# 04 - FUZZING INTEGRADO
+# 04 - INTEGRATED FUZZING
 
 ## 4.1 Fuzz Testing
 
-El fuzzing genera datos aleatorios para encontrar vulnerabilidades y bugs.
+Fuzzing generates random data to find vulnerabilities and bugs.
 
-## 4.2 Tipos de Fuzzing
+## 4.2 Fuzzing Types
 
-| Tipo | Descripcion |
+| Type | Description |
 |------|-------------|
-| Dumb fuzzing | Entradas aleatorias |
-| Guided fuzzing |Mutation basada en coverage |
-| Semantic fuzzing | Entradas con estructura |
+| Dumb fuzzing | Random inputs |
+| Guided fuzzing | Coverage-based mutation |
+| Semantic fuzzing | Structured inputs |
 
-## 4.3 Integración
+## 4.3 Integration
 
 ```javascript
 // test/fuzz.test.js
@@ -31,31 +31,31 @@ fuzz(myFunction, {
 # Fuzz function
 3va fuzz test/fuzz.js
 
-# Fuzz con coverage
+# Fuzz with coverage
 3va fuzz --coverage
 
-# Fuzz conmutidad
+# Fuzz with concurrency
 3va fuzz --parallel
 ```
 
 ## 4.5 Coverage
 
-| Métrica | Descripcion |
+| Metric | Description |
 |---------|-------------|
-| Line coverage | Porcentaje de líneas ejecutadas |
-| Branch coverage | Porcentaje de ramas |
-| Function coverage | Funciones llamadas |
+| Line coverage | Percentage of lines executed |
+| Branch coverage | Percentage of branches |
+| Function coverage | Functions called |
 
 ## 4.6 Mutators
 
-| Mutator | Descripcion |
+| Mutator | Description |
 |---------|-------------|
-| byteFlip | Flip bits aleatorios |
-| arithmetic | Modificar números |
-| empty | Input vacío |
-| unicode | Caracteres Unicode |
-| trim | Spaces extra |
+| byteFlip | Random bit flips |
+| arithmetic | Modify numbers |
+| empty | Empty input |
+| unicode | Unicode characters |
+| trim | Extra spaces |
 
 ---
 
-*Fuzzing basado en AFL y libFuzzer.*
+*Fuzzing based on AFL and libFuzzer.*

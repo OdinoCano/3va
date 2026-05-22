@@ -1,11 +1,11 @@
-# 02 - DISEÑO DE COMPONENTES
+# 02 - COMPONENT DESIGN
 
-## 2.1 Componente: vvva_core
+## 2.1 Component: vvva_core
 
-### 2.1.1 Descripción
-El componente core proporciona el runtime asíncrono basado en Tokio, gestionando el event loop principal, el scheduling de tareas y la coordinación entre componentes.
+### 2.1.1 Description
+The core component provides the async runtime based on Tokio, managing the main event loop, task scheduling, and coordination between components.
 
-### 2.1.2 Estructura
+### 2.1.2 Structure
 
 ```rust
 pub struct Runtime {
@@ -16,11 +16,11 @@ pub struct Runtime {
 }
 ```
 
-### 2.1.3 Responsabilidades
-- Inicialización y gestión del event loop asíncrono
-- Scheduling de tareas concurrentes
-- Coordinación de módulos cargados
-- Gestión del ciclo de vida del proceso
+### 2.1.3 Responsibilities
+- Initialization and management of the async event loop
+- Concurrent task scheduling
+- Coordination of loaded modules
+- Process lifecycle management
 
 ### 2.1.4 Interfaces
 
@@ -28,25 +28,25 @@ pub struct Runtime {
 ```rust
 pub async fn run(&self) -> anyhow::Result<()>
 ```
-Inicia el event loop principal y espera la finalización de tareas.
+Starts the main event loop and waits for tasks to complete.
 
 #### spawn_task()
 ```rust
 pub fn spawn_task(&self, task: Task) -> Handle
 ```
-Crea una nueva tarea asíncrona y devuelve un handle para controlarla.
+Creates a new async task and returns a handle to control it.
 
-### 2.1.5 Dependencias
+### 2.1.5 Dependencies
 - tokio (async runtime)
-- vvva_permissions (verificación de capacidades)
-- vvva_js (ejecución de código)
+- vvva_permissions (capability verification)
+- vvva_js (code execution)
 
-## 2.2 Componente: vvva_cli
+## 2.2 Component: vvva_cli
 
-### 2.2.1 Descripción
-El componente CLI proporciona la interfaz de línea de comandos, parseando argumentos y enrutando comandos a los componentes apropiados.
+### 2.2.1 Description
+The CLI component provides the command line interface, parsing arguments and routing commands to the appropriate components.
 
-### 2.2.2 Estructura
+### 2.2.2 Structure
 
 ```rust
 pub struct Cli {
@@ -56,40 +56,40 @@ pub struct Cli {
 }
 ```
 
-### 2.2.3 Subcomandos Soportados
+### 2.2.3 Supported Subcommands
 
-| Comando | Descripción | Ejemplo |
+| Command | Description | Example |
 |---------|-------------|---------|
-| run | Ejecuta un archivo JS/TS | `3va run app.ts` |
-| install | Instala un paquete | `3va install axios` |
-| test | Ejecuta tests | `3va test` |
-| build | Empaqueta código | `3va build index.ts` |
-| eval | Evalúa código inline | `3va eval "console.log(1)"` |
+| run | Executes a JS/TS file | `3va run app.ts` |
+| install | Installs a package | `3va install axios` |
+| test | Runs tests | `3va test` |
+| build | Bundles code | `3va build index.ts` |
+| eval | Evaluates inline code | `3va eval "console.log(1)"` |
 
-### 2.2.4 Flags de Permisos
+### 2.2.4 Permission Flags
 
-| Flag | Descripción | Ejemplo |
+| Flag | Description | Example |
 |------|-------------|---------|
-| --allow-read | Permite lectura de archivos | `--allow-read=/app` |
-| --allow-write | Permite escritura de archivos | `--allow-write=/tmp` |
-| --allow-net | Permite acceso a red | `--allow-net=api.example.com` |
-| --allow-env | Permite acceso a variables de entorno | `--allow-env` |
-| --allow-child-process | Permite spawn de procesos | `--allow-child-process` |
-| --deny-* | Deniega un permiso específico | `--deny-env` |
+| --allow-read | Allows file reading | `--allow-read=/app` |
+| --allow-write | Allows file writing | `--allow-write=/tmp` |
+| --allow-net | Allows network access | `--allow-net=api.example.com` |
+| --allow-env | Allows environment variable access | `--allow-env` |
+| --allow-child-process | Allows process spawning | `--allow-child-process` |
+| --deny-* | Denies a specific permission | `--deny-env` |
 
-## 2.3 Componente: vvva_permissions
+## 2.3 Component: vvva_permissions
 
-### 2.3.1 Descripción
-El sistema de permisos implementa el modelo de capabilities, almacenando y verificando los permisos granted por el usuario.
+### 2.3.1 Description
+The permission system implements the capability model, storing and verifying the permissions granted by the user.
 
-### 2.3.2 Estructura
+### 2.3.2 Structure
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Capability {
     FileRead(PathBuf),
     FileWrite(PathBuf),
-    Network(String), // Hostname o IP
+    Network(String), // Hostname or IP
     SpawnProcess,
     EnvAccess,
 }
@@ -99,29 +99,29 @@ pub struct PermissionState {
 }
 ```
 
-### 2.3.3 Algoritmo de Verificación
+### 2.3.3 Verification Algorithm
 
 ```
 1. Receive operation request (op_type, resource)
 2. FOR each capability IN granted:
-   3. IF capability matches op_type AND resource:
-      4. RETURN ALLOW
+    3. IF capability matches op_type AND resource:
+       4. RETURN ALLOW
 5. RETURN DENY
 ```
 
-### 2.3.4 Matching de Patrones
+### 2.3.4 Pattern Matching
 
-Los permisos de red y archivo soportan patrones glob:
-- `*.example.com` - cualquier subdominio
-- `/app/*` - cualquier archivo en /app
-- `192.168.*` - cualquier IP en el rango
+Network and file permissions support glob patterns:
+- `*.example.com` - any subdomain
+- `/app/*` - any file in /app
+- `192.168.*` - any IP in the range
 
-## 2.4 Componente: vvva_js
+## 2.4 Component: vvva_js
 
-### 2.4.1 Descripción
-El componente JS integra QuickJS, proporcionando la ejecución de JavaScript y TypeScript con soporte para módulos y APIs web.
+### 2.4.1 Description
+The JS component integrates QuickJS, providing JavaScript and TypeScript execution with support for modules and web APIs.
 
-### 2.4.2 Estructura
+### 2.4.2 Structure
 
 ```rust
 pub struct JsEngine {
@@ -132,18 +132,18 @@ pub struct JsEngine {
 }
 ```
 
-### 2.4.3 Funcionalidades
-- Ejecución de código JavaScript/TypeScript
-- Soporte ESM y CommonJS
-- Polyfills para Node.js APIs
-- APIs web estándar (fetch, WebSocket, etc.)
+### 2.4.3 Features
+- JavaScript/TypeScript code execution
+- ESM and CommonJS support
+- Polyfills for Node.js APIs
+- Standard web APIs (fetch, WebSocket, etc.)
 
-## 2.5 Componente: vvva_pm
+## 2.5 Component: vvva_pm
 
-### 2.5.1 Descripción
-El gestor de paquetes maneja la instalación de dependencias con verificación de seguridad.
+### 2.5.1 Description
+The package manager handles dependency installation with security verification.
 
-### 2.5.2 Estructura
+### 2.5.2 Structure
 
 ```rust
 pub struct PackageManager {
@@ -154,22 +154,22 @@ pub struct PackageManager {
 }
 ```
 
-### 2.5.3 Políticas de Seguridad
-- Post-install scripts: Deshabilitados por defecto
-- Paquetes no confiables hasta verificación
-- Ejecución en sandbox aislado
+### 2.5.3 Security Policies
+- Post-install scripts: Disabled by default
+- Packages untrusted until verification
+- Execution in isolated sandbox
 
-## 2.6 Componente: vvva_bundler [POR IMPLEMENTAR]
+## 2.6 Component: vvva_bundler [TO BE IMPLEMENTED]
 
-### 2.6.1 Descripción
-El bundler transpila y empaqueta código TypeScript/JSX para distribución.
+### 2.6.1 Description
+The bundler transpiles and packages TypeScript/JSX code for distribution.
 
-### 2.6.2 Funcionalidades Planeadas
-- Transpilación TSX/TS a JS
+### 2.6.2 Planned Features
+- TSX/TS to JS transpilation
 - Tree shaking
 - Code splitting
 - Source maps
 
 ---
 
-*Diseño conforme a IEEE 1012 y arquitectura de componentes.*
+*Design conforming to IEEE 1012 and component architecture.*

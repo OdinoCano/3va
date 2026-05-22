@@ -1178,21 +1178,21 @@ async fn main() -> anyhow::Result<()> {
         use std::thread::sleep;
         use std::time::Duration;
 
-        eprintln!("\x1b[1;34m[*] Iniciando cálculo de optimización cuántica...\x1b[0m");
-        sleep(Duration::from_millis(800)); // Pausa dramática para simular carga
+        eprintln!("\x1b[1;34m[*] Initiating quantum optimization calculation...\x1b[0m");
+        sleep(Duration::from_millis(800)); // Dramatic pause to simulate loading
 
-        eprintln!("\x1b[1;33m=================== ACCESO RESTRINGIDO ===================\x1b[0m");
-        eprintln!("Has desbloqueado la constante de densidad matemática máxima.");
+        eprintln!("\x1b[1;33m=================== RESTRICTED ACCESS ===================\x1b[0m");
+        eprintln!("You have unlocked the maximum mathematical density constant.");
         sleep(Duration::from_millis(600));
 
-        eprintln!("\x1b[1;36m(Σ((6⁹)!) ↑⁶ Σ((6⁹)!)) ↑³ (Σ((6⁹)!) ↑⁶ Σ((6⁹)!)) = ∞ + 1\x1b[0m");
-        sleep(Duration::from_millis(1200)); // Pausa larga mientras el "universo colapsa"
+        eprintln!("\x1b[1;36m(Σ((6⁹)!) ↑⁶ Σ((6⁹)!)) ↑³ (Σ((6⁹)!) ↑⁶ Σ((6⁹)!))\x1b[0m");
+        sleep(Duration::from_millis(2000)); // Long pause while the "universe collapses"
 
-        eprintln!("\x1b[1;31m[ERROR GRAVE] Memoria insuficiente en el multiverso.\x1b[0m");
-        eprintln!("El runtime se cerrará para evitar que tu computadora se derrita.");
+        eprintln!("\x1b[1;31m[CRITICAL ERROR] Insufficient memory in the multiverse.\x1b[0m");
+        eprintln!("The runtime will shut down to prevent your computer from melting.");
         eprintln!();
 
-        eprintln!("Ejecutando programa estándar...");
+        eprintln!("Running standard program...");
     }
 
     match &cli.command {

@@ -1,124 +1,124 @@
-# 02 - ALCANCE Y OBJETIVOS DEL PROYECTO
+# 02 - SCOPE AND OBJECTIVES OF THE PROJECT
 
-## 2.1 Alcance Funcional
+## 2.1 Functional Scope
 
-### 2.1.1 Componentes Incluidos
+### 2.1.1 Included Components
 
-El alcance de 3va comprende los siguientes componentes principales:
+The scope of 3va comprises the following main components:
 
 #### 2.1.1.1 Runtime (vvva_core)
-- Event loop asíncrono basado en Tokio
-- Integración con motor JavaScript (QuickJS vía rquickjs)
-- Soporte para ESM y CommonJS
-- Implementación de APIs web estándar (fetch, WebSocket, ReadableStream)
-- Gestión de módulos y require/import
+- Asynchronous event loop based on Tokio
+- JavaScript engine integration (QuickJS via rquickjs)
+- Support for ESM and CommonJS
+- Implementation of standard web APIs (fetch, WebSocket, ReadableStream)
+- Module management and require/import
 
 #### 2.1.1.2 CLI (vvva_cli)
-- Interfaz de línea de comandos con clap
-- Subcomandos: run, install, test, build, eval
-- Flags de permisos: --allow-read, --allow-write, --allow-net, --allow-env, --allow-child-process
-- Flags de denegación: --deny-* (para revocar permisos específicos)
+- Command-line interface with clap
+- Subcommands: run, install, test, build, eval
+- Permission flags: --allow-read, --allow-write, --allow-net, --allow-env, --allow-child-process
+- Deny flags: --deny-* (to revoke specific permissions)
 
-#### 2.1.1.3 Sistema de Permisos (vvva_permissions)
-- Modelo de capacidades basado en deny-by-default
-- Matching de patrones glob para hostnames y paths
-- Enforcement de políticas en tiempo de ejecución
-- Auditoría de sensibilidad operativa
+#### 2.1.1.3 Permissions System (vvva_permissions)
+- Capability model based on deny-by-default
+- Glob pattern matching for hostnames and paths
+- Runtime policy enforcement
+- Operational sensitivity auditing
 
 #### 2.1.1.4 Package Manager (vvva_pm)
-- Resolución de dependencias compatible con npm
-- Verificación de firmas criptográficas
-- Ejecución de post-install scripts deshabilitada por defecto
-- Sandboxing de paquetes instalados
-- Formato de lockfile propietario
+- npm-compatible dependency resolution
+- Cryptographic signature verification
+- Post-install script execution disabled by default
+- Installed package sandboxing
+- Proprietary lockfile format
 
-#### 2.1.1.5 Motor JavaScript (vvva_js)
-- Integración con QuickJS
-- Polyfills para APIs de Node.js
-- Soporte para TypeScript y JSX (transpilación en tiempo de ejecución)
-- Carga de módulos ESM y CommonJS
+#### 2.1.1.5 JavaScript Engine (vvva_js)
+- QuickJS integration
+- Polyfills for Node.js APIs
+- TypeScript and JSX support (runtime transpilation)
+- ESM and CommonJS module loading
 
-#### 2.1.1.6 Bundler (vvva_bundler) [POR IMPLEMENTAR]
-- Transpilación de TypeScript y JSX
-- Tree shaking basado en análisis estático
-- Code splitting automático
-- Generación de source maps
+#### 2.1.1.6 Bundler (vvva_bundler) [TO BE IMPLEMENTED]
+- TypeScript and JSX transpilation
+- Tree shaking based on static analysis
+- Automatic code splitting
+- Source map generation
 
-#### 2.1.1.7 Test Runner (vvva_test) [POR IMPLEMENTAR]
-- Compatibilidad con Jest
-- Matchers estándar y personalizados
-- Soporte para snapshots
-- Modo watch
-- Integración con análisis de seguridad
+#### 2.1.1.7 Test Runner (vvva_test) [TO BE IMPLEMENTED]
+- Jest compatibility
+- Standard and custom matchers
+- Snapshot support
+- Watch mode
+- Integration with security analysis
 
-### 2.1.2 Componentes Excluidos
+### 2.1.2 Excluded Components
 
-Los siguientes componentes están fuera del alcance inicial:
-- IDE plugins y extensiones
-- Depurador gráfico (solo CLI debugger)
+The following components are outside the initial scope:
+- IDE plugins and extensions
+- Graphical debugger (CLI debugger only)
 - Package registry hosting
-- Servicios de CI/CD
+- CI/CD services
 
-## 2.2 Objetivos del Proyecto
+## 2.2 Project Objectives
 
-### 2.2.1 Objetivos de Seguridad
+### 2.2.1 Security Objectives
 
-| Objetivo | Métrica | Target |
+| Objective | Metric | Target |
 |----------|---------|--------|
-| Cobertura de análisis estático | Porcentaje de vulnerabilidades detectadas | ≥95% |
-| Tiempo de escaneo de paquetes | Por paquete | <500ms |
-| Falsos positivos | Tasa | <2% |
-| Cumplimiento normativo | Estándares aplicados | ISO 27001, GDPR |
-| Auditoría | Eventos registrados | 100% |
+| Static analysis coverage | Percentage of vulnerabilities detected | ≥95% |
+| Package scanning time | Per package | <500ms |
+| False positives | Rate | <2% |
+| Regulatory compliance | Applicable standards | ISO 27001, GDPR |
+| Audit | Events logged | 100% |
 
-### 2.2.2 Objetivos de Rendimiento
+### 2.2.2 Performance Objectives
 
-| Objetivo | Métrica | Target |
+| Objective | Metric | Target |
 |----------|---------|--------|
-| Tiempo de inicio | Cold start | <100ms |
-| Ejecución de scripts | Benchmarks | Comparable a Bun |
-| Instalación de paquetes | Paquetes/segundo | ≥30x npm |
-| Uso de memoria | MB por proceso | <50MB base |
+| Startup time | Cold start | <100ms |
+| Script execution | Benchmarks | Comparable to Bun |
+| Package installation | Packages/second | ≥30x npm |
+| Memory usage | MB per process | <50MB base |
 
-### 2.2.3 Objetivos de Compatibilidad
+### 2.2.3 Compatibility Objectives
 
-| Objetivo | Métrica | Target |
+| Objective | Metric | Target |
 |----------|---------|--------|
-| Compatibilidad Node.js | APIs implementadas | 99.9% |
-| Compatibilidad npm | Paquetes funcionando | 95% |
-| Compatibilidad ESM/CJS | Módulos cargados | 100% |
+| Node.js compatibility | APIs implemented | 99.9% |
+| npm compatibility | Packages working | 95% |
+| ESM/CJS compatibility | Modules loaded | 100% |
 
-## 2.3 Fases de Desarrollo
+## 2.3 Development Phases
 
-### Fase 1: Foundation (Mes 1-3)
-- Core runtime funcional
-- CLI básico con permisos
-- Integración QuickJS operativa
+### Phase 1: Foundation (Months 1-3)
+- Functional core runtime
+- Basic CLI with permissions
+- Operational QuickJS integration
 
-### Fase 2: Package Manager (Mes 4-6)
-- Instalación de paquetes
+### Phase 2: Package Manager (Months 4-6)
+- Package installation
 - Lockfile
-- Sandbox básico
+- Basic sandbox
 
-### Fase 3: Herramientas (Mes 7-9)
+### Phase 3: Tools (Months 7-9)
 - Bundler
 - Test Runner
-- Análisis de seguridad
+- Security analysis
 
-### Fase 4: LTS (Mes 10-12)
-- Estabilización
-- Compatibilidad completa
-- Documentación final
+### Phase 4: LTS (Months 10-12)
+- Stabilization
+- Full compatibility
+- Final documentation
 
-## 2.4 Entregables
+## 2.4 Deliverables
 
-1. Runtime binario ejecutable
-2. Documentación técnica (este documento)
-3. Documentación de API
-4. Suite de pruebas de regresión
-5. Informe de seguridad
-6. Guía de contribución
+1. Executable runtime binary
+2. Technical documentation (this document)
+3. API documentation
+4. Regression test suite
+5. Security report
+6. Contribution guide
 
 ---
 
-*Documento conforme a IEEE 829 y estándares de gestión de proyectos.*
+*Document conforming to IEEE 829 and project management standards.*

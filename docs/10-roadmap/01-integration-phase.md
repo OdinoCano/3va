@@ -1,70 +1,70 @@
-# 10 - ROADMAP Y SEGUIMIENTO DE TRABAJO
+# 10 - ROADMAP AND WORK TRACKING
 
-## 10.1 Estado Actual (Completado)
-Se ha finalizado exitosamente la "Fase de Integración" (Wiring Phase). Los siguientes componentes están conectados y funcionales:
+## 10.1 Current Status (Completed)
+The "Integration Phase" (Wiring Phase) has been successfully completed. The following components are connected and functional:
 
-### ✅ CLI Conectado
-- `3va run` → Lee archivos y ejecuta con `JsEngine::eval()`
-- `3va bundle` → Invoca a `vvva_bundler::bundle_file()`
-- `3va test` → Invoca a `vvva_test::run_tests()`
-- `3va install` → Invoca a `vvva_pm::install_package()`
+### ✅ CLI Connected
+- `3va run` → Reads files and executes with `JsEngine::eval()`
+- `3va bundle` → Invokes `vvva_bundler::bundle_file()`
+- `3va test` → Invokes `vvva_test::run_tests()`
+- `3va install` → Invokes `vvva_pm::install_package()`
 
-### ✅ Motor JS Integrdo
-- **Built-ins injectados**: `console`, `timers`, `buffer`, `process`, `fetch`, `fs`
-- **Console expandido**: log, warn, error, info, debug
-- **Permisos conectados**: El motor recibe `PermissionState` y lo usa internamente
+### ✅ JS Engine Integrated
+- **Injected built-ins**: `console`, `timers`, `buffer`, `process`, `fetch`, `fs`
+- **Expanded Console**: log, warn, error, info, debug
+- **Permissions connected**: The engine receives `PermissionState` and uses it internally
 
-### ✅ Sistema de Permisos
-- `AuditLogger` implementado en `permissions/src/audit.rs`
-- APIs de `fs` y `fetch` con verificación de permisos
-- Enforcers integrados en los builtins
+### ✅ Permission System
+- `AuditLogger` implemented in `permissions/src/audit.rs`
+- `fs` and `fetch` APIs with permission verification
+- Enforcers integrated in the builtins
 
-### ✅ Seguridad de Paquetes (NIS2/eIDAS)
-- `MalwareScanner` implementado en `pm/src/malware_scanner.rs`
-- `SignatureVerifier` implementado en `pm/src/signature_verifier.rs`
-- Detección de: fork bombs, recursive deletes, curl|wget|sh, crypto mining, backdoors
+### ✅ Package Security (NIS2/eIDAS)
+- `MalwareScanner` implemented in `pm/src/malware_scanner.rs`
+- `SignatureVerifier` implemented in `pm/src/signature_verifier.rs`
+- Detection of: fork bombs, recursive deletes, curl|wget|sh, crypto mining, backdoors
 
 ### ✅ TimerWheel
-- Integración con `setTimeout`/`setInterval` en `js/src/builtins/timers.rs`
-- TimerId expuesto públicamente para uso externo
+- Integration with `setTimeout`/`setInterval` in `js/src/builtins/timers.rs`
+- TimerId publicly exposed for external use
 
 ---
 
-## 10.2 Fase de Estabilización (Completado)
+## 10.2 Stabilization Phase (Completed)
 
-### ✅ Transpilador TypeScript
-- `js/src/transpiler.rs` — stripper de tipos en puro Rust (sin deps extra)
-- Elimina: `interface`, `type`, `declare`, `import type`, `export type`
-- Elimina anotaciones inline: `const x: string` → `const x`
-- Elimina `as TypeName`, modificadores de acceso, `!` non-null, genéricos
-- Integrado en `JsEngine::eval_file()` — transpilación automática para `.ts`/`.tsx`
-- 16 tests de transpilación, todos passing
+### ✅ TypeScript Transpiler
+- `js/src/transpiler.rs` — type stripper in pure Rust (no extra deps)
+- Removes: `interface`, `type`, `declare`, `import type`, `export type`
+- Removes inline annotations: `const x: string` → `const x`
+- Removes `as TypeName`, access modifiers, `!` non-null, generics
+- Integrated in `JsEngine::eval_file()` — automatic transpilation for `.ts`/`.tsx`
+- 16 transpilation tests, all passing
 
-### ✅ Runtime Async (Event Loop)
-- `TimerManager` reimplementado en `js/src/builtins/timers.rs` con `thread_local!`
-- Nativos Rust: `__nativeSetTimeout`, `__nativeSetInterval`, `__nativeClearTimer`
-- JS wrappers reales: `setTimeout`/`setInterval` registran callbacks y llaman nativos
-- `__fireTimer(id)` ejecuta el callback cuando el timer expira
-- `JsEngine::run_event_loop()` — drena todos los timers pendientes después de `eval_file()`
-- CLI: `3va run` ahora ejecuta el event loop automáticamente tras la ejecución
+### ✅ Async Runtime (Event Loop)
+- `TimerManager` reimplemented in `js/src/builtins/timers.rs` with `thread_local!`
+- Rust natives: `__nativeSetTimeout`, `__nativeSetInterval`, `__nativeClearTimer`
+- Real JS wrappers: `setTimeout`/`setInterval` register callbacks and call natives
+- `__fireTimer(id)` executes the callback when the timer expires
+- `JsEngine::run_event_loop()` — drains all pending timers after `eval_file()`
+- CLI: `3va run` now executes the event loop automatically after execution
 
-### ✅ Módulo System (CommonJS require)
-- `js/src/builtins/modules.rs` — `require()` respaldado por Rust
-- Cache de módulos vía `global.__requireCache`
-- Wrapper CJS: `(function(exports, module, __filename, __dirname) { ... })`
-- Resolución de paths relativos con extensiones `.js` y `.ts`
-- Verificación de permisos (`Capability::FileRead`) antes de leer archivos
-- Transpilación automática de `.ts` en `require()`
+### ✅ Module System (CommonJS require)
+- `js/src/builtins/modules.rs` — `require()` backed by Rust
+- Module cache via `global.__requireCache`
+- CJS wrapper: `(function(exports, module, __filename, __dirname) { ... })`
+- Relative path resolution with `.js` and `.ts` extensions
+- Permission verification (`Capability::FileRead`) before reading files
+- Automatic `.ts` transpilation in `require()`
 
-### ✅ Lockfile y Cache
-- `install_package()` lee/crea `package.json`, resuelve deps y genera `3va-lock.json`
-- Formato compatible con npm lockfile v3 con extensiones de seguridad 3va
+### ✅ Lockfile and Cache
+- `install_package()` reads/creates `package.json`, resolves deps and generates `3va-lock.json`
+- Format compatible with npm lockfile v3 with 3va security extensions
 
 ---
 
-## 10.3 Siguientes Pasos
+## 10.3 Next Steps
 
-1. **ESM import/export** — usar `rquickjs::Module` para carga nativa de módulos ES
-2. **Async/await real** — integrar Promises de QuickJS con Tokio para I/O no bloqueante
-3. **REPL / Sandbox interactivo** — implementar `3va sandbox`
-4. **Dev server** — implementar `3va dev` con hot-reload
+1. **ESM import/export** — use `rquickjs::Module` for native ES module loading
+2. **Real async/await** — integrate QuickJS Promises with Tokio for non-blocking I/O
+3. **REPL / Interactive Sandbox** — implement `3va sandbox`
+4. **Dev server** — implement `3va dev` with hot-reload

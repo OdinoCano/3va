@@ -1,122 +1,122 @@
-# 01 - HOJA DE RUTA DE DESARROLLO
+# 01 - DEVELOPMENT ROADMAP
 
-## 1.1 Visión
+## 1.1 Vision
 
-3va busca ser el runtime de JavaScript/TypeScript más seguro, superando a Bun en características de ciberseguridad y modelo de permisos.
+3va aims to be the most secure JavaScript/TypeScript runtime, surpassing Bun in cybersecurity features and permission model.
 
 ---
 
-## 1.2 Estado Actual (v0.1.0-dev · 2026-05-21)
+## 1.2 Current Status (v0.1.0-dev · 2026-05-21)
 
-### Implementado y funcional
+### Implemented and functional
 
-| Módulo | Estado | Notas |
+| Module | Status | Notes |
 |--------|--------|-------|
-| CLI con permisos granulares | ✅ | `run`, `install`, `reinstall`, `update`, `bundle`, `test`, `audit`, `doctor`, `sandbox`, `dev` — completos |
-| Modo accesible (`--accessible`) | ✅ | Conforme EN 301 549 |
-| Motor JS (QuickJS) | ✅ | Transpilación TS automática |
-| Módulos CommonJS + ESM | ✅ | `EsmResolver` + `EsmLoader`; import/export estático y dinámico |
-| async/await y cadenas Promise | ✅ | Bucle de microtareas completo |
-| Sistema de permisos (deny-by-default) | ✅ | `FileRead`, `FileWrite`, `Network`, `EnvAccess`, `SpawnProcess`, `FFI` |
-| Prompt interactivo de permisos | ✅ | `PermissionState`; habilitado por defecto en `run` |
-| Package Manager — `install` | ✅ | npm, Yarn, JSR; versión específica; sugerencias cercanas |
-| Package Manager — `reinstall` | ✅ | Forzado |
-| Package Manager — `update` | ✅ | Registry-aware; multi-registry; validación `--allow-net` |
-| Lockfile con campo `registry` | ✅ | Trazabilidad de origen por paquete; resolución semver |
-| Verificación de firmas (SHA-256/SHA-512) | ✅ | `SignatureVerifier` |
-| Malware scanner | ✅ | Análisis estático de `node_modules` |
-| Scanner de secretos | ✅ | `SecretsScanner`; 16 patrones (AWS, GitHub, GitLab, Stripe, Slack, SendGrid, Twilio, claves privadas, JWT, tokens npm, contraseñas, API keys, cadenas de conexión DB) |
-| Auditoría OSV | ✅ | 3 fases (malware + CVE + secretos); caché 24 h; flags `--deny`/`--json`/`--secrets`/`--update-cache` |
-| Bundler | ✅ | Tree shaking, code splitting (`--split`), minificación (`--minify`), source maps (`--source-map`), watch mode con notificador real |
-| Test runner | ✅ | `describe`/`test`/`expect`; matchers completos; snapshots (`toMatchSnapshot` + `--update-snapshots`); `--watch`; `--coverage`; E/S de archivos de snapshot |
-| Sandbox REPL | ✅ | Multi-línea; `.help`/`.exit`/`.clear`/`.allow-read`/`.allow-net`/`.permissions`; detección TTY |
-| Servidor de desarrollo (`dev`) | ✅ | `--port`/`--host`/`--open`/`--public-dir`; HMR vía SSE (`/__hmr`); inyección de cliente HMR; archivos estáticos; SPA fallback; rebuild con debounce 300 ms |
-| Audit logger | ✅ | Registro de operaciones sensibles |
-| Crate `vvva_crypto` | ✅ | Utilidades de preparación post-cuántica (crate independiente) |
-| Suite de tests | ✅ | 58 tests de integración (12 fases, 100 % passing); 287 tests unitarios |
+| CLI with granular permissions | ✅ | `run`, `install`, `reinstall`, `update`, `bundle`, `test`, `audit`, `doctor`, `sandbox`, `dev` — complete |
+| Accessible mode (`--accessible`) | ✅ | EN 301 549 compliant |
+| JS Engine (QuickJS) | ✅ | Automatic TS transpilation |
+| CommonJS + ESM Modules | ✅ | `EsmResolver` + `EsmLoader`; static and dynamic import/export |
+| async/await and Promise chains | ✅ | Complete microtask loop |
+| Permission system (deny-by-default) | ✅ | `FileRead`, `FileWrite`, `Network`, `EnvAccess`, `SpawnProcess`, `FFI` |
+| Interactive permission prompt | ✅ | `PermissionState`; enabled by default in `run` |
+| Package Manager — `install` | ✅ | npm, Yarn, JSR; specific version; close suggestions |
+| Package Manager — `reinstall` | ✅ | Forced |
+| Package Manager — `update` | ✅ | Registry-aware; multi-registry; `--allow-net` validation |
+| Lockfile with `registry` field | ✅ | Source traceability per package; semver resolution |
+| Signature verification (SHA-256/SHA-512) | ✅ | `SignatureVerifier` |
+| Malware scanner | ✅ | Static analysis of `node_modules` |
+| Secrets scanner | ✅ | `SecretsScanner`; 16 patterns (AWS, GitHub, GitLab, Stripe, Slack, SendGrid, Twilio, private keys, JWT, npm tokens, passwords, API keys, DB connection strings) |
+| OSV audit | ✅ | 3 phases (malware + CVE + secrets); 24 h cache; `--deny`/`--json`/`--secrets`/`--update-cache` flags |
+| Bundler | ✅ | Tree shaking, code splitting (`--split`), minification (`--minify`), source maps (`--source-map`), watch mode with real notifier |
+| Test runner | ✅ | `describe`/`test`/`expect`; complete matchers; snapshots (`toMatchSnapshot` + `--update-snapshots`); `--watch`; `--coverage`; snapshot file I/O |
+| Sandbox REPL | ✅ | Multi-line; `.help`/`.exit`/`.clear`/`.allow-read`/`.allow-net`/`.permissions`; TTY detection |
+| Development server (`dev`) | ✅ | `--port`/`--host`/`--open`/`--public-dir`; HMR via SSE (`/__hmr`); HMR client injection; static files; SPA fallback; rebuild with 300 ms debounce |
+| Audit logger | ✅ | Sensitive operation logging |
+| Crate `vvva_crypto` | ✅ | Post-quantum readiness utilities (standalone crate) |
+| Test suite | ✅ | 58 integration tests (12 phases, 100 % passing); 287 unit tests |
 
 ---
 
-## 1.3 Fases de Desarrollo
+## 1.3 Development Phases
 
-### Fase 1: Foundation (Q2 2026) — ✅ COMPLETADO
+### Phase 1: Foundation (Q2 2026) — ✅ COMPLETED
 
-| Elemento | Estado |
+| Item | Status |
 |----------|--------|
-| CLI completo con permisos | ✅ |
-| Core runtime (event loop Tokio) | ✅ |
-| Motor JS QuickJS integrado | ✅ |
-| Transpilación TypeScript | ✅ |
-| Módulos CommonJS + ESM | ✅ |
-| async/await y cadenas Promise | ✅ |
-| Modo accesible EN 301 549 | ✅ |
+| Full CLI with permissions | ✅ |
+| Core runtime (Tokio event loop) | ✅ |
+| QuickJS JS engine integrated | ✅ |
+| TypeScript transpilation | ✅ |
+| CommonJS + ESM Modules | ✅ |
+| async/await and Promise chains | ✅ |
+| EN 301 549 accessible mode | ✅ |
 
-### Fase 2: Package Manager (Q3 2026) — ✅ COMPLETADO ANTES DE PLAZO
+### Phase 2: Package Manager (Q3 2026) — ✅ COMPLETED AHEAD OF SCHEDULE
 
-| Elemento | Estado |
+| Item | Status |
 |----------|--------|
-| PM básico funcional (install/reinstall/update) | ✅ |
+| Basic functional PM (install/reinstall/update) | ✅ |
 | Multi-registry (npm, Yarn, JSR) | ✅ |
-| Lockfile con campo `registry` y resolución semver | ✅ |
-| Verificación de firmas (SHA-256/SHA-512) | ✅ |
-| Scanner de malware (análisis estático) | ✅ |
-| Scanner de secretos (16 patrones) | ✅ |
-| Auditoría OSV 3 fases + caché 24 h | ✅ |
+| Lockfile with `registry` field and semver resolution | ✅ |
+| Signature verification (SHA-256/SHA-512) | ✅ |
+| Malware scanner (static analysis) | ✅ |
+| Secrets scanner (16 patterns) | ✅ |
+| OSV audit 3 phases + 24 h cache | ✅ |
 | Audit logger | ✅ |
-| Post-install scripts deshabilitados | ✅ |
+| Post-install scripts disabled | ✅ |
 
-### Fase 3: Herramientas (Q4 2026) — ✅ COMPLETADO ANTES DE PLAZO
+### Phase 3: Tools (Q4 2026) — ✅ COMPLETED AHEAD OF SCHEDULE
 
-| Elemento | Estado |
+| Item | Status |
 |----------|--------|
-| Bundler (tree shaking, code splitting, minificación, source maps) | ✅ Completado |
-| Watch mode en bundler (notificador real) | ✅ Completado |
-| Test runner (matchers, snapshots, coverage, watch) | ✅ Completado |
-| Sandbox REPL con detección TTY | ✅ Completado |
-| Servidor de desarrollo con HMR | ✅ Completado |
-| Inspector / debugger / breakpoints | 🔲 Pendiente |
+| Bundler (tree shaking, code splitting, minification, source maps) | ✅ Completed |
+| Watch mode in bundler (real notifier) | ✅ Completed |
+| Test runner (matchers, snapshots, coverage, watch) | ✅ Completed |
+| Sandbox REPL with TTY detection | ✅ Completed |
+| Development server with HMR | ✅ Completed |
+| Inspector / debugger / breakpoints | 🔲 Pending |
 
-### Fase 4: LTS (2027)
+### Phase 4: LTS (2027)
 
-| Elemento | Estado |
+| Item | Status |
 |----------|--------|
 | Inspector / debugger / breakpoints | 🔲 |
-| Carga de módulos WebAssembly (WASM) | 🔲 |
-| Perfilado de rendimiento / flamegraph | 🔲 |
-| Soporte de módulos nativos (NAPI) | 🔲 |
-| Criptografía post-cuántica integrada en TLS | 🔲 |
-| Estabilización API pública | 🔲 |
+| WebAssembly (WASM) module loading | 🔲 |
+| Performance profiling / flamegraph | 🔲 |
+| Native module support (NAPI) | 🔲 |
+| Post-quantum cryptography integrated in TLS | 🔲 |
+| Public API stabilization | 🔲 |
 | Release 1.0 LTS | 🔲 |
 
 ---
 
 ## 1.4 Milestones
 
-| Versión | Fecha objetivo | Features | Estado |
+| Version | Target date | Features | Status |
 |---------|----------------|----------|--------|
-| 0.1.0 | Jun 2026 | CLI + Core + JS (ESM/CJS/async) + PM + Bundler + Test runner + Dev server + Seguridad (malware + secretos + OSV) | ✅ Feature-complete; en estabilización |
-| 0.2.0 | Sep 2026 | Inspector/debugger + WASM + perfilado de rendimiento | 🔲 |
-| 0.3.0 | Nov 2026 | Soporte NAPI + post-quantum TLS + benchmarks públicos | 🔲 |
-| 1.0.0 | Mar 2027 | LTS + API estable + post-quantum crypto completamente integrada | 🔲 |
+| 0.1.0 | Jun 2026 | CLI + Core + JS (ESM/CJS/async) + PM + Bundler + Test runner + Dev server + Security (malware + secrets + OSV) | ✅ Feature-complete; stabilizing |
+| 0.2.0 | Sep 2026 | Inspector/debugger + WASM + performance profiling | 🔲 |
+| 0.3.0 | Nov 2026 | NAPI support + post-quantum TLS + public benchmarks | 🔲 |
+| 1.0.0 | Mar 2027 | LTS + stable API + post-quantum crypto fully integrated | 🔲 |
 
 ---
 
-## 1.5 Ventajas vs Competencia
+## 1.5 Advantages vs Competition
 
 | Feature | Node.js | Deno | Bun | **3va** |
 |---------|---------|------|-----|---------|
-| Permisos granulares | No | Sí | No | **Sí** |
-| Red denegada por defecto en PM | No | Sí | No | **Sí** |
-| Multi-registry con trazabilidad de origen | No | No | No | **Sí** |
-| Post-install scripts deshabilitados | No | No | No | **Sí** |
-| Análisis de malware integrado | No | No | No | **Sí** |
-| Verificación de firmas obligatoria | No | No | No | **Sí** |
-| Detección de secretos integrada | No | No | No | **Sí** |
-| Auditoría OSV 3 fases con caché | No | Parcial | No | **Sí** |
-| Servidor de desarrollo con HMR | No | Sí | Sí | **Sí** |
-| Modo accesible (EN 301 549) | No | No | No | **Sí** |
-| Criptografía post-cuántica (crate listo) | No | No | No | **Sí** |
+| Granular permissions | No | Yes | No | **Yes** |
+| Network denied by default in PM | No | Yes | No | **Yes** |
+| Multi-registry with source traceability | No | No | No | **Yes** |
+| Post-install scripts disabled | No | No | No | **Yes** |
+| Integrated malware analysis | No | No | No | **Yes** |
+| Mandatory signature verification | No | No | No | **Yes** |
+| Integrated secrets detection | No | No | No | **Yes** |
+| OSV audit 3 phases with cache | No | Partial | No | **Yes** |
+| Development server with HMR | No | Yes | Yes | **Yes** |
+| Accessible mode (EN 301 549) | No | No | No | **Yes** |
+| Post-quantum cryptography (crate ready) | No | No | No | **Yes** |
 
 ---
 
-*Roadmap sujeto a cambios según feedback y prioridades del proyecto.*
+*Roadmap subject to change based on feedback and project priorities.*
