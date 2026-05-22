@@ -1,18 +1,12 @@
 use rquickjs::{Ctx, Function, Result, function::Rest};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::TcpStream;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket as TungsteniteWs, connect};
 use vvva_permissions::{Capability, PermissionState};
 
 type WsConn = TungsteniteWs<MaybeTlsStream<TcpStream>>;
-
-thread_local! {
-    static WS_POOL: RefCell<HashMap<u32, WsConn>> = RefCell::new(HashMap::new());
-    static WS_NEXT_ID: RefCell<u32> = const { RefCell::new(0) };
-}
 
 fn js_err<'js>(ctx: &Ctx<'js>, msg: String) -> rquickjs::Error {
     let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
@@ -34,11 +28,16 @@ fn host_from_url(url: &str) -> Option<String> {
     }
 }
 
-pub fn inject_websocket(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result<()> {
+pub fn inject_websocket(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
     let globals = ctx.globals();
+
+    let pool: Arc<Mutex<HashMap<u32, WsConn>>> = Arc::new(Mutex::new(HashMap::new()));
+    let next_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
 
     // __wsConnect(url) -> id | throws
     let perms = permissions.clone();
+    let pool2 = pool.clone();
+    let nid = next_id.clone();
     globals.set(
         "__wsConnect",
         Function::new(
@@ -51,7 +50,7 @@ pub fn inject_websocket(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) ->
                     .ok_or_else(|| js_err(&ctx, "__wsConnect() requires a URL".into()))?;
                 let host = host_from_url(&url)
                     .ok_or_else(|| js_err(&ctx, format!("Invalid WebSocket URL: {}", url)))?;
-                if !perms.borrow().check(&Capability::Network(host.clone())) {
+                if !perms.check(&Capability::Network(host.clone())) {
                     return Err(js_err(
                         &ctx,
                         format!("Network access denied. Run with --allow-net={}", host),
@@ -59,19 +58,20 @@ pub fn inject_websocket(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) ->
                 }
                 let (ws, _) = connect(&url)
                     .map_err(|e| js_err(&ctx, format!("WebSocket connect failed: {}", e)))?;
-                let id = WS_NEXT_ID.with(|n| {
-                    let mut n = n.borrow_mut();
+                let id = {
+                    let mut n = nid.lock().unwrap();
                     let id = *n;
                     *n = n.wrapping_add(1);
                     id
-                });
-                WS_POOL.with(|pool| pool.borrow_mut().insert(id, ws));
+                };
+                pool2.lock().unwrap().insert(id, ws);
                 Ok(id)
             },
         ),
     )?;
 
     // __wsSend(id, data) -> undefined | throws
+    let pool2 = pool.clone();
     globals.set(
         "__wsSend",
         Function::new(
@@ -86,19 +86,18 @@ pub fn inject_websocket(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) ->
                 let data = it
                     .next()
                     .ok_or_else(|| js_err(&ctx, "__wsSend() requires message".into()))?;
-                WS_POOL.with(|pool| {
-                    let mut pool = pool.borrow_mut();
-                    let ws = pool
-                        .get_mut(&id)
-                        .ok_or_else(|| js_err(&ctx, format!("No WS {}", id)))?;
-                    ws.send(Message::Text(data.as_str().into()))
-                        .map_err(|e| js_err(&ctx, format!("send failed: {}", e)))
-                })
+                let mut guard = pool2.lock().unwrap();
+                let ws = guard
+                    .get_mut(&id)
+                    .ok_or_else(|| js_err(&ctx, format!("No WS {}", id)))?;
+                ws.send(Message::Text(data.as_str().into()))
+                    .map_err(|e| js_err(&ctx, format!("send failed: {}", e)))
             },
         ),
     )?;
 
     // __wsRecv(id) -> string | "@@CLOSED" (blocking)
+    let pool2 = pool.clone();
     globals.set(
         "__wsRecv",
         Function::new(
@@ -111,36 +110,37 @@ pub fn inject_websocket(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) ->
                     .ok_or_else(|| js_err(&ctx, "__wsRecv() requires id".into()))?
                     .parse()
                     .map_err(|_| js_err(&ctx, "invalid id".into()))?;
-                WS_POOL.with(|pool| {
-                    let mut pool = pool.borrow_mut();
-                    let ws = pool
-                        .get_mut(&id)
-                        .ok_or_else(|| js_err(&ctx, format!("No WS {}", id)))?;
-                    loop {
-                        match ws.read() {
-                            Ok(Message::Text(t)) => return Ok(t.to_string()),
-                            Ok(Message::Binary(b)) => {
-                                return Ok(String::from_utf8_lossy(&b).into_owned());
-                            }
-                            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {
-                                continue;
-                            }
-                            Ok(Message::Close(_)) => {
-                                pool.remove(&id);
-                                return Ok("@@CLOSED".into());
-                            }
-                            Err(e) => {
-                                pool.remove(&id);
-                                return Err(js_err(&ctx, format!("recv failed: {}", e)));
-                            }
+                let mut guard = pool2.lock().unwrap();
+                let ws = guard
+                    .get_mut(&id)
+                    .ok_or_else(|| js_err(&ctx, format!("No WS {}", id)))?;
+                loop {
+                    match ws.read() {
+                        Ok(Message::Text(t)) => return Ok(t.to_string()),
+                        Ok(Message::Binary(b)) => {
+                            return Ok(String::from_utf8_lossy(&b).into_owned());
+                        }
+                        Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {
+                            continue;
+                        }
+                        Ok(Message::Close(_)) => {
+                            drop(guard);
+                            pool2.lock().unwrap().remove(&id);
+                            return Ok("@@CLOSED".into());
+                        }
+                        Err(e) => {
+                            drop(guard);
+                            pool2.lock().unwrap().remove(&id);
+                            return Err(js_err(&ctx, format!("recv failed: {}", e)));
                         }
                     }
-                })
+                }
             },
         ),
     )?;
 
     // __wsClose(id) -> undefined
+    let pool2 = pool.clone();
     globals.set(
         "__wsClose",
         Function::new(
@@ -153,12 +153,10 @@ pub fn inject_websocket(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) ->
                     .ok_or_else(|| js_err(&ctx, "__wsClose() requires id".into()))?
                     .parse()
                     .map_err(|_| js_err(&ctx, "invalid id".into()))?;
-                WS_POOL.with(|pool| {
-                    let mut pool = pool.borrow_mut();
-                    if let Some(mut ws) = pool.remove(&id) {
-                        let _ = ws.close(None);
-                    }
-                });
+                let mut guard = pool2.lock().unwrap();
+                if let Some(mut ws) = guard.remove(&id) {
+                    let _ = ws.close(None);
+                }
                 Ok(())
             },
         ),

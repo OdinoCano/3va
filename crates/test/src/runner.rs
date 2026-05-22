@@ -1,5 +1,6 @@
 use crate::framework::{TestResult, TestStatus};
 use std::path::Path;
+use std::sync::Arc;
 use vvva_permissions::PermissionState;
 
 /// JS test framework injected into each test file's QuickJS context.
@@ -228,7 +229,7 @@ impl TestRunner {
         }
     }
 
-    pub fn run_file(&mut self, path: &Path) -> anyhow::Result<()> {
+    pub async fn run_file(&mut self, path: &Path) -> anyhow::Result<()> {
         let display = path.display().to_string();
         if self.config.verbose {
             println!("\n  {}", display);
@@ -248,11 +249,13 @@ impl TestRunner {
             perms.grant(vvva_permissions::Capability::FileWrite(canonical));
         }
 
-        let engine = vvva_js::JsEngine::new(&perms)
+        let engine = vvva_js::JsEngine::new(Arc::new(perms))
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to init JS engine for {}: {}", display, e))?;
 
         engine
             .eval(TEST_FRAMEWORK_JS)
+            .await
             .map_err(|e| anyhow::anyhow!("Test framework injection failed: {}", e))?;
 
         // Inject snapshot globals: file path and update flag
@@ -274,9 +277,10 @@ impl TestRunner {
                 snap_file.replace('\'', "\\'"),
                 update,
             ))
+            .await
             .ok();
 
-        if let Err(e) = engine.eval_file(path) {
+        if let Err(e) = engine.eval_file(path).await {
             // File-level syntax/runtime error — report as a single failed test
             eprintln!("  ✗ {} — {}", display, e);
             self.results.push(TestResult {
@@ -290,6 +294,7 @@ impl TestRunner {
 
         let json = engine
             .eval_to_string("globalThis.__3va_run_tests()")
+            .await
             .map_err(|e| anyhow::anyhow!("__3va_run_tests() failed: {}", e))?;
 
         let raw: Vec<RawResult> = serde_json::from_str(&json)
@@ -328,31 +333,36 @@ impl TestRunner {
         Ok(())
     }
 
-    pub fn run_directory(&mut self, dir: &Path) -> anyhow::Result<()> {
-        let mut entries: Vec<_> = std::fs::read_dir(dir)?.flatten().collect();
-        entries.sort_by_key(|e| e.path());
+    pub fn run_directory<'a>(
+        &'a mut self,
+        dir: &'a Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
+        Box::pin(async move {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)?.flatten().collect();
+            entries.sort_by_key(|e| e.path());
 
-        for entry in entries {
-            let path = entry.path();
-            if path.is_dir() {
-                // Skip node_modules and hidden directories
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                if name.starts_with('.') || name == "node_modules" {
-                    continue;
-                }
-                self.run_directory(&path)?;
-            } else {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                if name.ends_with(".test.js")
-                    || name.ends_with(".test.ts")
-                    || name.ends_with(".spec.js")
-                    || name.ends_with(".spec.ts")
-                {
-                    self.run_file(&path)?;
+            for entry in entries {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Skip node_modules and hidden directories
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if name.starts_with('.') || name == "node_modules" {
+                        continue;
+                    }
+                    self.run_directory(&path).await?;
+                } else {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if name.ends_with(".test.js")
+                        || name.ends_with(".test.ts")
+                        || name.ends_with(".spec.js")
+                        || name.ends_with(".spec.ts")
+                    {
+                        self.run_file(&path).await?;
+                    }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn get_results(&self) -> &Vec<TestResult> {

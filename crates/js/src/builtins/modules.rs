@@ -1,7 +1,6 @@
 use rquickjs::{Ctx, Function, Result, function::Rest};
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 use vvva_permissions::{Capability, PermissionState};
 
 /// Inject CommonJS `require()`, `module`, `exports`, `__filename`, `__dirname` globals.
@@ -10,7 +9,7 @@ use vvva_permissions::{Capability, PermissionState};
 /// permission checks and file I/O. The JS-side `require()` wrapper handles the
 /// module caching, wrapping, and evaluation — avoiding rquickjs `Value<'js>` lifetime
 /// issues in closures.
-pub fn inject_require(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result<()> {
+pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
     let globals = ctx.globals();
 
     // Initialize module cache and CommonJS globals
@@ -36,14 +35,11 @@ pub fn inject_require(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> R
         let full_path = PathBuf::from(&path_str);
 
         // Permission check
-        {
-            let p = perms.borrow();
-            if !p.check(&Capability::FileRead(full_path.clone())) {
-                return Err(rquickjs::Error::new_from_js(
-                    "permission",
-                    "permission denied",
-                ));
-            }
+        if !perms.check(&Capability::FileRead(full_path.clone())) {
+            return Err(rquickjs::Error::new_from_js(
+                "permission",
+                "permission denied",
+            ));
         }
 
         // Read the file

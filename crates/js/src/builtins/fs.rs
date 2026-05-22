@@ -1,7 +1,6 @@
 use rquickjs::{Ctx, Function, Result, function::Rest};
-use std::cell::RefCell;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 use vvva_permissions::{Capability, PermissionState};
 
 /// Create a JS Error exception with a dynamic message.
@@ -13,7 +12,7 @@ fn js_err<'js>(ctx: &Ctx<'js>, msg: String) -> rquickjs::Error {
     }
 }
 
-pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result<()> {
+pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
     let globals = ctx.globals();
 
     // ── __fsReadFileSync(path) -> String ──────────────────────────────────────
@@ -29,7 +28,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
                     .next()
                     .ok_or_else(|| js_err(&ctx, "__fsReadFileSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
-                if !perms.borrow().check(&Capability::FileRead(path.clone())) {
+                if !perms.check(&Capability::FileRead(path.clone())) {
                     return Err(js_err(
                         &ctx,
                         format!(
@@ -57,7 +56,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
                     .ok_or_else(|| js_err(&ctx, "__fsWriteFileSync() requires a path".into()))?;
                 let content = it.next().unwrap_or_default();
                 let path = PathBuf::from(&path_str);
-                if !perms.borrow().check(&Capability::FileWrite(path.clone())) {
+                if !perms.check(&Capability::FileWrite(path.clone())) {
                     return Err(js_err(
                         &ctx,
                         format!(
@@ -100,7 +99,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
                     .next()
                     .ok_or_else(|| js_err(&ctx, "__fsReaddirSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
-                if !perms.borrow().check(&Capability::FileRead(path.clone())) {
+                if !perms.check(&Capability::FileRead(path.clone())) {
                     return Err(js_err(
                         &ctx,
                         format!(
@@ -133,7 +132,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
                     .next()
                     .ok_or_else(|| js_err(&ctx, "__fsMkdirSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
-                if !perms.borrow().check(&Capability::FileWrite(path.clone())) {
+                if !perms.check(&Capability::FileWrite(path.clone())) {
                     return Err(js_err(
                         &ctx,
                         format!(
@@ -161,7 +160,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Rc<RefCell<PermissionState>>) -> Result
                     .next()
                     .ok_or_else(|| js_err(&ctx, "__fsRmSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
-                if !perms.borrow().check(&Capability::FileWrite(path.clone())) {
+                if !perms.check(&Capability::FileWrite(path.clone())) {
                     return Err(js_err(
                         &ctx,
                         format!(

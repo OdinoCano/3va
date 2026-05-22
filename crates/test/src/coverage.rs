@@ -481,23 +481,28 @@ fn shorten_path(p: &Path, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use vvva_js::JsEngine;
     use vvva_permissions::PermissionState;
 
-    fn bare_engine() -> JsEngine {
-        JsEngine::new(&PermissionState::new()).unwrap()
+    async fn bare_engine() -> JsEngine {
+        JsEngine::new(Arc::new(PermissionState::new()))
+            .await
+            .unwrap()
     }
 
-    fn run_and_collect(source: &str, file_id: &str) -> CoverageResult {
+    async fn run_and_collect(source: &str, file_id: &str) -> CoverageResult {
         let (instrumented, stmts) = instrument_source(source, file_id);
-        let engine = bare_engine();
+        let engine = bare_engine().await;
         engine
             .eval(&instrumented)
+            .await
             .expect("instrumented code must evaluate");
         let json = engine
             .eval_to_string(&format!(
                 r#"JSON.stringify(globalThis.__cov["{file_id}"] || {{}})"#
             ))
+            .await
             .unwrap();
         let hits = parse_hit_counts(&json);
         CoverageResult::from_hits(&stmts, &hits)
@@ -505,8 +510,8 @@ mod tests {
 
     // ── instrument_source ────────────────────────────────────────────────────
 
-    #[test]
-    fn instrument_injects_counters_and_produces_stmt_info() {
+    #[tokio::test]
+    async fn instrument_injects_counters_and_produces_stmt_info() {
         let source = "const x = 1;\nconst y = 2;\nconst z = x + y;";
         let (instrumented, stmts) = instrument_source(source, "test_file");
 
@@ -516,8 +521,8 @@ mod tests {
         assert!(instrumented.contains("const x = 1"));
     }
 
-    #[test]
-    fn instrument_covers_nested_function_body_as_separate_stmt() {
+    #[tokio::test]
+    async fn instrument_covers_nested_function_body_as_separate_stmt() {
         // Both the function declaration AND the return are instrumented independently.
         let source = "function add(a, b) {\n  return a + b;\n}";
         let (_instrumented, stmts) = instrument_source(source, "fn_test");
@@ -528,17 +533,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn instrument_empty_source_returns_empty_stmts() {
+    #[tokio::test]
+    async fn instrument_empty_source_returns_empty_stmts() {
         let (_, stmts) = instrument_source("", "empty");
         assert_eq!(stmts.len(), 0);
     }
 
     // ── Full round-trip ──────────────────────────────────────────────────────
 
-    #[test]
-    fn coverage_roundtrip_all_statements_executed() {
-        let result = run_and_collect("const a = 1;\nconst b = 2;\nconst c = a + b;", "rt_all");
+    #[tokio::test]
+    async fn coverage_roundtrip_all_statements_executed() {
+        let result =
+            run_and_collect("const a = 1;\nconst b = 2;\nconst c = a + b;", "rt_all").await;
         assert_eq!(
             result.covered_statements, result.total_statements,
             "all three top-level statements should be hit"
@@ -547,12 +553,13 @@ mod tests {
         assert!((result.coverage_percent() - 100.0).abs() < 0.01);
     }
 
-    #[test]
-    fn coverage_roundtrip_branch_not_taken_shows_uncovered() {
+    #[tokio::test]
+    async fn coverage_roundtrip_branch_not_taken_shows_uncovered() {
         let result = run_and_collect(
             "const x = 1;\nif (false) {\n  const dead = 2;\n}\nconst live = 3;",
             "rt_branch",
-        );
+        )
+        .await;
         assert!(
             !result.uncovered_stmts.is_empty(),
             "dead branch must be uncovered; covered={}/{}, uncovered lines={:?}",
@@ -563,14 +570,15 @@ mod tests {
         assert!(result.coverage_percent() < 100.0);
     }
 
-    #[test]
-    fn coverage_roundtrip_unused_function_body_is_uncovered() {
+    #[tokio::test]
+    async fn coverage_roundtrip_unused_function_body_is_uncovered() {
         // The function declarations are hoisted (covered), but the body of `unused`
         // is only executed on call — so it must appear uncovered.
         let result = run_and_collect(
             "function used() {\n  return 1;\n}\nfunction unused() {\n  return 2;\n}\nused();",
             "rt_fn",
-        );
+        )
+        .await;
         assert!(
             result.covered_statements < result.total_statements,
             "unused() body must be uncovered; covered={}/{}, uncovered lines={:?}",
@@ -580,8 +588,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn instrument_typescript_types_not_in_coverable_stmt_list() {
+    #[tokio::test]
+    async fn instrument_typescript_types_not_in_coverable_stmt_list() {
         // TS-only constructs (interface, type alias) must not appear in the
         // coverable-statement list because they generate no executable code.
         // We check instrumentation only — evaluation requires a transpiler.
@@ -597,35 +605,35 @@ mod tests {
         assert_eq!(stmts[0].line, 3);
     }
 
-    #[test]
-    fn coverage_roundtrip_js_only_variant() {
+    #[tokio::test]
+    async fn coverage_roundtrip_js_only_variant() {
         // Equivalent of the TS test using plain JS (no transpiler needed).
         // Simulates the runtime behaviour: only the live const is executable.
-        let result = run_and_collect("const z = 1;", "rt_js_only");
+        let result = run_and_collect("const z = 1;", "rt_js_only").await;
         assert_eq!(result.total_statements, 1);
         assert_eq!(result.covered_statements, 1);
     }
 
     // ── parse_hit_counts ─────────────────────────────────────────────────────
 
-    #[test]
-    fn parse_hit_counts_reads_json_correctly() {
+    #[tokio::test]
+    async fn parse_hit_counts_reads_json_correctly() {
         let hits = parse_hit_counts(r#"{"0":3,"4":1,"9":0}"#);
         assert_eq!(hits[&0], 3);
         assert_eq!(hits[&4], 1);
         assert_eq!(hits[&9], 0);
     }
 
-    #[test]
-    fn parse_hit_counts_empty_and_invalid_json() {
+    #[tokio::test]
+    async fn parse_hit_counts_empty_and_invalid_json() {
         assert!(parse_hit_counts("{}").is_empty());
         assert!(parse_hit_counts("not json").is_empty());
     }
 
     // ── CoverageResult ───────────────────────────────────────────────────────
 
-    #[test]
-    fn coverage_result_percent_is_correct() {
+    #[tokio::test]
+    async fn coverage_result_percent_is_correct() {
         let stmts = vec![
             StmtInfo { index: 0, line: 1 },
             StmtInfo { index: 1, line: 2 },
@@ -643,8 +651,8 @@ mod tests {
         assert_eq!(result.uncovered_lines(), vec![2, 4]);
     }
 
-    #[test]
-    fn coverage_result_empty_is_100_percent() {
+    #[tokio::test]
+    async fn coverage_result_empty_is_100_percent() {
         let r = CoverageResult::from_hits(&[], &HashMap::new());
         assert_eq!(r.coverage_percent(), 100.0);
     }

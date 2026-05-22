@@ -5,6 +5,7 @@
 // Ejecutar: cargo test -p vvva_js --test permission_enforcement
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use vvva_js::JsEngine;
 use vvva_permissions::{Capability, PermissionState};
 
@@ -12,7 +13,7 @@ use vvva_permissions::{Capability, PermissionState};
 
 /// Evalúa un IIFE que atrapa excepciones JS y retorna "allowed" o "denied:<mensaje>".
 /// Permite inspeccionar el mensaje de error sin que el test falle por excepción.
-fn eval_catching(engine: &JsEngine, js_call: &str) -> String {
+async fn eval_catching(engine: &JsEngine, js_call: &str) -> String {
     let code = format!(
         r#"
         (() => {{
@@ -28,17 +29,18 @@ fn eval_catching(engine: &JsEngine, js_call: &str) -> String {
     );
     engine
         .eval_to_string(&code)
+        .await
         .unwrap_or_else(|e| format!("error:{}", e))
 }
 
 // ── FileRead ─────────────────────────────────────────────────────────────────
 
-#[test]
-fn fs_read_blocked_without_allow_read() {
+#[tokio::test]
+async fn fs_read_blocked_without_allow_read() {
     let state = PermissionState::new();
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')");
+    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')").await;
 
     assert!(
         result.starts_with("denied:"),
@@ -50,13 +52,13 @@ fn fs_read_blocked_without_allow_read() {
     );
 }
 
-#[test]
-fn fs_read_allowed_with_scoped_grant() {
+#[tokio::test]
+async fn fs_read_allowed_with_scoped_grant() {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(PathBuf::from("/etc")));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')");
+    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')").await;
 
     assert_eq!(
         result, "allowed",
@@ -64,14 +66,14 @@ fn fs_read_allowed_with_scoped_grant() {
     );
 }
 
-#[test]
-fn fs_read_scoped_grant_blocks_outside_scope() {
+#[tokio::test]
+async fn fs_read_scoped_grant_blocks_outside_scope() {
     let state = PermissionState::new();
     // Solo /tmp está permitido — /etc no
     state.grant(Capability::FileRead(PathBuf::from("/tmp")));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')");
+    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')").await;
 
     assert!(
         result.starts_with("denied:"),
@@ -81,15 +83,16 @@ fn fs_read_scoped_grant_blocks_outside_scope() {
 
 // ── FileWrite ────────────────────────────────────────────────────────────────
 
-#[test]
-fn fs_write_blocked_without_allow_write() {
+#[tokio::test]
+async fn fs_write_blocked_without_allow_write() {
     let state = PermissionState::new();
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     let result = eval_catching(
         &engine,
         "__fsWriteFileSync('/tmp/3va_test_blocked.txt', 'evil')",
-    );
+    )
+    .await;
 
     assert!(
         result.starts_with("denied:"),
@@ -101,16 +104,17 @@ fn fs_write_blocked_without_allow_write() {
     );
 }
 
-#[test]
-fn fs_write_allowed_with_grant() {
+#[tokio::test]
+async fn fs_write_allowed_with_grant() {
     let state = PermissionState::new();
     state.grant(Capability::FileWrite(PathBuf::from("/tmp")));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     let result = eval_catching(
         &engine,
         "__fsWriteFileSync('/tmp/3va_test_write_ok.txt', 'hello')",
-    );
+    )
+    .await;
 
     assert_eq!(
         result, "allowed",
@@ -121,14 +125,14 @@ fn fs_write_allowed_with_grant() {
     let _ = std::fs::remove_file("/tmp/3va_test_write_ok.txt");
 }
 
-#[test]
-fn fs_write_grant_does_not_grant_read() {
+#[tokio::test]
+async fn fs_write_grant_does_not_grant_read() {
     // FileWrite no implica FileRead — permisos ortogonales
     let state = PermissionState::new();
     state.grant(Capability::FileWrite(PathBuf::from("/tmp")));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')");
+    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')").await;
 
     assert!(
         result.starts_with("denied:"),
@@ -138,12 +142,12 @@ fn fs_write_grant_does_not_grant_read() {
 
 // ── ReadDir ──────────────────────────────────────────────────────────────────
 
-#[test]
-fn fs_readdir_blocked_without_allow_read() {
+#[tokio::test]
+async fn fs_readdir_blocked_without_allow_read() {
     let state = PermissionState::new();
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsReaddirSync('/tmp')");
+    let result = eval_catching(&engine, "__fsReaddirSync('/tmp')").await;
 
     assert!(
         result.starts_with("denied:"),
@@ -151,13 +155,13 @@ fn fs_readdir_blocked_without_allow_read() {
     );
 }
 
-#[test]
-fn fs_readdir_allowed_with_grant() {
+#[tokio::test]
+async fn fs_readdir_allowed_with_grant() {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(PathBuf::from("/tmp")));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsReaddirSync('/tmp')");
+    let result = eval_catching(&engine, "__fsReaddirSync('/tmp')").await;
 
     assert_eq!(
         result, "allowed",
@@ -167,12 +171,12 @@ fn fs_readdir_allowed_with_grant() {
 
 // ── Mkdir / Rm ────────────────────────────────────────────────────────────────
 
-#[test]
-fn fs_mkdir_blocked_without_allow_write() {
+#[tokio::test]
+async fn fs_mkdir_blocked_without_allow_write() {
     let state = PermissionState::new();
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsMkdirSync('/tmp/3va_blocked_dir')");
+    let result = eval_catching(&engine, "__fsMkdirSync('/tmp/3va_blocked_dir')").await;
 
     assert!(
         result.starts_with("denied:"),
@@ -180,12 +184,12 @@ fn fs_mkdir_blocked_without_allow_write() {
     );
 }
 
-#[test]
-fn fs_rm_blocked_without_allow_write() {
+#[tokio::test]
+async fn fs_rm_blocked_without_allow_write() {
     let state = PermissionState::new();
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsRmSync('/tmp/nonexistent')");
+    let result = eval_catching(&engine, "__fsRmSync('/tmp/nonexistent')").await;
 
     assert!(
         result.starts_with("denied:"),
@@ -195,14 +199,14 @@ fn fs_rm_blocked_without_allow_write() {
 
 // ── deny_all_fs deshabilita todo el filesystem desde JS ──────────────────────
 
-#[test]
-fn deny_all_fs_blocks_js_read_even_with_root_grant() {
+#[tokio::test]
+async fn deny_all_fs_blocks_js_read_even_with_root_grant() {
     let mut state = PermissionState::new();
     state.grant(Capability::FileRead(PathBuf::from("/")));
     state.deny_all_fs();
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')");
+    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')").await;
 
     assert!(
         result.starts_with("denied:"),

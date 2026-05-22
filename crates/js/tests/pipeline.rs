@@ -4,31 +4,32 @@
 //
 // Ejecutar: cargo test -p vvva_js --test pipeline
 
+use std::sync::Arc;
 use tempfile::TempDir;
 use vvva_js::JsEngine;
 use vvva_permissions::{Capability, PermissionState};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn engine_with_read(dir: &TempDir) -> JsEngine {
+async fn engine_with_read(dir: &TempDir) -> JsEngine {
     let state = PermissionState::new();
     state.grant(Capability::FileRead(dir.path().to_path_buf()));
-    JsEngine::new(&state).unwrap()
+    JsEngine::new(Arc::new(state)).await.unwrap()
 }
 
-fn write_and_eval(content: &str, filename: &str) -> (TempDir, anyhow::Result<()>) {
+async fn write_and_eval(content: &str, filename: &str) -> (TempDir, anyhow::Result<()>) {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join(filename);
     std::fs::write(&path, content).unwrap();
-    let engine = engine_with_read(&temp);
-    let result = engine.eval_file(&path);
+    let engine = engine_with_read(&temp).await;
+    let result = engine.eval_file(&path).await;
     (temp, result)
 }
 
 // ── TypeScript: transpilación + evaluación ────────────────────────────────────
 
-#[test]
-fn ts_type_annotations_stripped_and_evaluated() {
+#[tokio::test]
+async fn ts_type_annotations_stripped_and_evaluated() {
     let ts = r#"
         const x: number = 40;
         const y: number = 2;
@@ -40,14 +41,16 @@ fn ts_type_annotations_stripped_and_evaluated() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&path)
+        .await
         .expect("TS con type annotations debe evaluar sin error");
 
     let result = engine
         .eval_to_string("String(globalThis._ts_result)")
+        .await
         .unwrap();
     assert_eq!(
         result, "42",
@@ -55,8 +58,8 @@ fn ts_type_annotations_stripped_and_evaluated() {
     );
 }
 
-#[test]
-fn ts_interface_stripped_without_error() {
+#[tokio::test]
+async fn ts_interface_stripped_without_error() {
     let ts = r#"
         interface Config {
             host: string;
@@ -71,20 +74,22 @@ fn ts_interface_stripped_without_error() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&path)
+        .await
         .expect("interface TS debe ser eliminada por el transpilador");
 
     let port = engine
         .eval_to_string("String(globalThis._cfg_port)")
+        .await
         .unwrap();
     assert_eq!(port, "3000");
 }
 
-#[test]
-fn ts_class_with_typed_members_evaluates() {
+#[tokio::test]
+async fn ts_class_with_typed_members_evaluates() {
     // Verifica que type annotations en clases se eliminan correctamente
     let ts = r#"
         class Counter {
@@ -102,20 +107,22 @@ fn ts_class_with_typed_members_evaluates() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&path)
+        .await
         .expect("clase TS con typed members debe evaluar");
 
     let result = engine
         .eval_to_string("String(globalThis._counter)")
+        .await
         .unwrap();
     assert_eq!(result, "2");
 }
 
-#[test]
-fn ts_as_cast_stripped_correctly() {
+#[tokio::test]
+async fn ts_as_cast_stripped_correctly() {
     // El transpilador debe eliminar el `as Type` sin afectar el valor
     let ts = r#"
         const raw = 42;
@@ -128,23 +135,27 @@ fn ts_as_cast_stripped_correctly() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&path)
+        .await
         .expect("TS sin as cast debe evaluar");
 
-    let result = engine.eval_to_string("String(globalThis._casted)").unwrap();
+    let result = engine
+        .eval_to_string("String(globalThis._casted)")
+        .await
+        .unwrap();
     assert_eq!(result, "42");
 }
 
 /// Documenta una limitación conocida del transpilador:
 /// los genéricos `<T>` y return type annotations en arrows no se eliminan,
 /// lo que produce JS inválido. El pipeline debe retornar Err en esos casos.
-#[test]
-fn ts_generics_not_supported_by_transpiler() {
+#[tokio::test]
+async fn ts_generics_not_supported_by_transpiler() {
     let ts = r#"function identity<T>(val: T): T { return val; }"#;
-    let (_temp, result) = write_and_eval(ts, "generic.ts");
+    let (_temp, result) = write_and_eval(ts, "generic.ts").await;
     // Si el transpilador no maneja genéricos, QuickJS falla con syntax error.
     // Este test documenta el comportamiento actual sin afirmar que es correcto.
     if result.is_err() {
@@ -156,15 +167,15 @@ fn ts_generics_not_supported_by_transpiler() {
 
 // ── JavaScript CJS: eval_file en modo script ──────────────────────────────────
 
-#[test]
-fn js_cjs_file_sets_global_variable() {
+#[tokio::test]
+async fn js_cjs_file_sets_global_variable() {
     let js = "globalThis._cjs_answer = 21 * 2;";
-    let (_temp, result) = write_and_eval(js, "answer.js");
+    let (_temp, result) = write_and_eval(js, "answer.js").await;
     result.expect("archivo JS CJS debe evaluar sin error");
 }
 
-#[test]
-fn js_file_with_require_like_pattern_evaluates() {
+#[tokio::test]
+async fn js_file_with_require_like_pattern_evaluates() {
     // No usa require real (requiere permisos de FS para node_modules),
     // pero verifica que el runtime puede evaluar código CJS básico
     let js = r#"
@@ -178,17 +189,23 @@ fn js_file_with_require_like_pattern_evaluates() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).expect("CJS básico debe evaluar");
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    engine
+        .eval_file(&path)
+        .await
+        .expect("CJS básico debe evaluar");
 
-    let sum = engine.eval_to_string("String(globalThis._sum)").unwrap();
+    let sum = engine
+        .eval_to_string("String(globalThis._sum)")
+        .await
+        .unwrap();
     assert_eq!(sum, "3");
 }
 
 // ── ESM detection: archivos con import/export al inicio ───────────────────────
 
-#[test]
-fn esm_file_evaluated_as_module() {
+#[tokio::test]
+async fn esm_file_evaluated_as_module() {
     // Un archivo con `export` al inicio se detecta como ESM y se evalúa
     // con Module::declare — no tiene acceso al globalThis del host por diseño.
     // Este test solo verifica que NO se lanza un error de compilación/evaluación.
@@ -196,27 +213,27 @@ fn esm_file_evaluated_as_module() {
         export const PI = 3.14159;
         export function add(a, b) { return a + b; }
     "#;
-    let (_temp, result) = write_and_eval(esm, "math.js");
+    let (_temp, result) = write_and_eval(esm, "math.js").await;
     // El módulo ESM debe evaluarse sin error (aunque sus exports no sean accesibles en el host)
     result.expect("archivo ESM debe evaluarse sin error");
 }
 
-#[test]
-fn esm_import_syntax_does_not_cause_syntax_error() {
+#[tokio::test]
+async fn esm_import_syntax_does_not_cause_syntax_error() {
     // Verifica que la detección ESM no produce errores de parsing en el transpilador
     let esm = r#"
         export default function main() {
             return 42;
         }
     "#;
-    let (_temp, result) = write_and_eval(esm, "main.js");
+    let (_temp, result) = write_and_eval(esm, "main.js").await;
     result.expect("ESM con export default debe evaluar");
 }
 
 // ── __filename / __dirname se inyectan en modo script ────────────────────────
 
-#[test]
-fn filename_and_dirname_injected_in_cjs_mode() {
+#[tokio::test]
+async fn filename_and_dirname_injected_in_cjs_mode() {
     let js = r#"
         globalThis._test_filename = __filename;
         globalThis._test_dirname = __dirname;
@@ -227,16 +244,19 @@ fn filename_and_dirname_injected_in_cjs_mode() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
+        .await
         .expect("CJS con __filename debe evaluar");
 
     let filename = engine
         .eval_to_string("String(globalThis._test_filename)")
+        .await
         .unwrap();
     let dirname = engine
         .eval_to_string("String(globalThis._test_dirname)")
+        .await
         .unwrap();
 
     assert!(
@@ -251,20 +271,20 @@ fn filename_and_dirname_injected_in_cjs_mode() {
 
 // ── Error de sintaxis se propaga correctamente ────────────────────────────────
 
-#[test]
-fn syntax_error_in_js_file_returns_err() {
-    let (_temp, result) = write_and_eval("const x = ;", "broken.js");
+#[tokio::test]
+async fn syntax_error_in_js_file_returns_err() {
+    let (_temp, result) = write_and_eval("const x = ;", "broken.js").await;
     assert!(
         result.is_err(),
         "archivo JS con error de sintaxis debe retornar Err"
     );
 }
 
-#[test]
-fn syntax_error_in_ts_file_returns_err_after_transpilation() {
+#[tokio::test]
+async fn syntax_error_in_ts_file_returns_err_after_transpilation() {
     // El transpilador elimina tipos pero deja el resto del código;
     // un error de sintaxis JS real debe seguir propagándose
-    let (_temp, result) = write_and_eval("const x: number = ;", "broken.ts");
+    let (_temp, result) = write_and_eval("const x: number = ;", "broken.ts").await;
     assert!(
         result.is_err(),
         "TS con error de sintaxis JS debe retornar Err"
@@ -273,8 +293,8 @@ fn syntax_error_in_ts_file_returns_err_after_transpilation() {
 
 // ── console: variadic args and type coercion ──────────────────────────────────
 
-#[test]
-fn console_log_multiple_args_joined_with_space() {
+#[tokio::test]
+async fn console_log_multiple_args_joined_with_space() {
     // console.log("a", "b", "c") must not throw — it joins with spaces.
     let js = r#"
         var threw = false;
@@ -287,19 +307,23 @@ fn console_log_multiple_args_joined_with_space() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
+        .await
         .expect("console.log multi-arg must not throw");
-    let threw = engine.eval_to_string("String(globalThis._threw)").unwrap();
+    let threw = engine
+        .eval_to_string("String(globalThis._threw)")
+        .await
+        .unwrap();
     assert_eq!(
         threw, "false",
         "console.log with multiple args must not throw"
     );
 }
 
-#[test]
-fn console_log_object_serialized_as_json() {
+#[tokio::test]
+async fn console_log_object_serialized_as_json() {
     // console.log({ x: 1 }) must serialize the object, not crash.
     let js = r#"
         var threw = false;
@@ -312,16 +336,20 @@ fn console_log_object_serialized_as_json() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
+        .await
         .expect("console.log object must not throw");
-    let threw = engine.eval_to_string("String(globalThis._threw2)").unwrap();
+    let threw = engine
+        .eval_to_string("String(globalThis._threw2)")
+        .await
+        .unwrap();
     assert_eq!(threw, "false", "console.log with object arg must not throw");
 }
 
-#[test]
-fn console_variants_do_not_throw() {
+#[tokio::test]
+async fn console_variants_do_not_throw() {
     // console.warn, .error, .info, .debug with mixed args must all work.
     let js = r#"
         var ok = true;
@@ -338,12 +366,14 @@ fn console_variants_do_not_throw() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
+        .await
         .expect("console variants must not throw");
     let ok = engine
         .eval_to_string("String(globalThis._console_ok)")
+        .await
         .unwrap();
     assert_eq!(
         ok, "true",
@@ -353,8 +383,8 @@ fn console_variants_do_not_throw() {
 
 // ── process global: platform, env, argv ──────────────────────────────────────
 
-#[test]
-fn process_platform_is_set() {
+#[tokio::test]
+async fn process_platform_is_set() {
     let js = r#"
         globalThis._platform = typeof process !== 'undefined' && typeof process.platform === 'string';
     "#;
@@ -363,16 +393,17 @@ fn process_platform_is_set() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    engine.eval_file(&path).await.unwrap();
     let ok = engine
         .eval_to_string("String(globalThis._platform)")
+        .await
         .unwrap();
     assert_eq!(ok, "true", "process.platform must be a string");
 }
 
-#[test]
-fn process_env_is_object() {
+#[tokio::test]
+async fn process_env_is_object() {
     let js = r#"
         globalThis._env_ok = typeof process.env === 'object' && process.env !== null;
     "#;
@@ -381,14 +412,17 @@ fn process_env_is_object() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).unwrap();
-    let ok = engine.eval_to_string("String(globalThis._env_ok)").unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    engine.eval_file(&path).await.unwrap();
+    let ok = engine
+        .eval_to_string("String(globalThis._env_ok)")
+        .await
+        .unwrap();
     assert_eq!(ok, "true", "process.env must be a non-null object");
 }
 
-#[test]
-fn process_argv_is_array() {
+#[tokio::test]
+async fn process_argv_is_array() {
     let js = r#"
         globalThis._argv_ok = Array.isArray(process.argv);
     "#;
@@ -397,16 +431,17 @@ fn process_argv_is_array() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    engine.eval_file(&path).await.unwrap();
     let ok = engine
         .eval_to_string("String(globalThis._argv_ok)")
+        .await
         .unwrap();
     assert_eq!(ok, "true", "process.argv must be an Array");
 }
 
-#[test]
-fn process_hrtime_returns_two_numbers() {
+#[tokio::test]
+async fn process_hrtime_returns_two_numbers() {
     let js = r#"
         var t = process.hrtime();
         globalThis._hrtime_ok = Array.isArray(t) && t.length === 2
@@ -417,10 +452,11 @@ fn process_hrtime_returns_two_numbers() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
-    engine.eval_file(&path).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    engine.eval_file(&path).await.unwrap();
     let ok = engine
         .eval_to_string("String(globalThis._hrtime_ok)")
+        .await
         .unwrap();
     assert_eq!(
         ok, "true",
@@ -430,22 +466,22 @@ fn process_hrtime_returns_two_numbers() {
 
 // ── eval_file requiere permiso de lectura ─────────────────────────────────────
 
-#[test]
-fn eval_file_blocked_without_read_permission() {
+#[tokio::test]
+async fn eval_file_blocked_without_read_permission() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("secret.js");
     std::fs::write(&path, "globalThis._secret = 42;").unwrap();
 
     // Engine sin permiso de lectura para el directorio
     let state = PermissionState::new();
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     // eval_file hace std::fs::read_to_string directamente (sin permission check),
     // pero el OS permitirá leer el archivo — el permission check es en runtime JS.
     // Lo que SÍ debe fallar es cualquier operación de FS dentro del script.
     // Este test documenta el comportamiento actual: eval_file en sí no verifica
     // permisos de Rust (lee el archivo en el host), pero las APIs JS sí lo hacen.
-    let result = engine.eval_file(&path);
+    let result = engine.eval_file(&path).await;
     // Esperamos que el archivo se lea y evalúe (sin restricción a nivel eval_file)
     assert!(
         result.is_ok(),
@@ -458,8 +494,8 @@ fn eval_file_blocked_without_read_permission() {
 
 // ── async/await ──────────────────────────────────────────────────────────────
 
-#[test]
-fn async_function_with_await_resolves() {
+#[tokio::test]
+async fn async_function_with_await_resolves() {
     let js = r#"
         async function compute() {
             return 21 * 2;
@@ -476,19 +512,21 @@ fn async_function_with_await_resolves() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
+        .await
         .expect("async/await debe ejecutar sin error");
 
     let result = engine
         .eval_to_string("String(globalThis._async_result)")
+        .await
         .unwrap();
     assert_eq!(result, "42", "await debe resolver el valor de la promesa");
 }
 
-#[test]
-fn async_await_with_promise_chain() {
+#[tokio::test]
+async fn async_await_with_promise_chain() {
     let js = r#"
         function delay(val) {
             return new Promise(resolve => resolve(val));
@@ -506,19 +544,21 @@ fn async_await_with_promise_chain() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
+        .await
         .expect("await sobre Promise.resolve debe funcionar");
 
     let result = engine
         .eval_to_string("String(globalThis._chain_result)")
+        .await
         .unwrap();
     assert_eq!(result, "42", "await chain debe sumar 10 + 32 = 42");
 }
 
-#[test]
-fn async_await_error_propagates_as_rejection() {
+#[tokio::test]
+async fn async_await_error_propagates_as_rejection() {
     let js = r#"
         async function fail() {
             throw new Error('async error');
@@ -540,24 +580,29 @@ fn async_await_error_propagates_as_rejection() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
+        .await
         .expect("try/catch en async debe capturar el error");
 
-    let caught = engine.eval_to_string("String(globalThis._caught)").unwrap();
+    let caught = engine
+        .eval_to_string("String(globalThis._caught)")
+        .await
+        .unwrap();
     assert_eq!(caught, "true", "el catch async debe ejecutarse");
 
     let msg = engine
         .eval_to_string("String(globalThis._err_msg)")
+        .await
         .unwrap();
     assert_eq!(msg, "async error");
 }
 
 // ── ESM: import/export cross-file ────────────────────────────────────────────
 
-#[test]
-fn esm_named_export_import() {
+#[tokio::test]
+async fn esm_named_export_import() {
     let temp = TempDir::new().unwrap();
 
     std::fs::write(
@@ -575,23 +620,28 @@ fn esm_named_export_import() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&entry)
+        .await
         .expect("ESM named export/import debe funcionar");
 
     let sum = engine
         .eval_to_string("String(globalThis._esm_sum)")
+        .await
         .unwrap();
     assert_eq!(sum, "42", "add(10, 32) via ESM import debe ser 42");
 
-    let pi = engine.eval_to_string("String(globalThis._esm_pi)").unwrap();
+    let pi = engine
+        .eval_to_string("String(globalThis._esm_pi)")
+        .await
+        .unwrap();
     assert_eq!(pi, "3.14", "PI via ESM import debe ser 3.14");
 }
 
-#[test]
-fn esm_default_export_import() {
+#[tokio::test]
+async fn esm_default_export_import() {
     let temp = TempDir::new().unwrap();
 
     std::fs::write(
@@ -609,20 +659,22 @@ fn esm_default_export_import() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&entry)
+        .await
         .expect("ESM default export/import debe funcionar");
 
     let greeting = engine
         .eval_to_string("String(globalThis._esm_greeting)")
+        .await
         .unwrap();
     assert_eq!(greeting, "hello world");
 }
 
-#[test]
-fn esm_reexport_chain() {
+#[tokio::test]
+async fn esm_reexport_chain() {
     let temp = TempDir::new().unwrap();
 
     std::fs::write(temp.path().join("base.js"), "export const value = 99;").unwrap();
@@ -642,20 +694,22 @@ fn esm_reexport_chain() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&entry)
+        .await
         .expect("ESM re-export chain debe funcionar");
 
     let v = engine
         .eval_to_string("String(globalThis._esm_chain)")
+        .await
         .unwrap();
     assert_eq!(v, "99", "re-export chain debe propagar el valor");
 }
 
-#[test]
-fn esm_ts_module_imported_from_js() {
+#[tokio::test]
+async fn esm_ts_module_imported_from_js() {
     let temp = TempDir::new().unwrap();
 
     std::fs::write(
@@ -673,20 +727,22 @@ fn esm_ts_module_imported_from_js() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&entry)
+        .await
         .expect("importar módulo TypeScript desde JS debe funcionar");
 
     let result = engine
         .eval_to_string("String(globalThis._esm_ts_result)")
+        .await
         .unwrap();
     assert_eq!(result, "42", "double(21) via ESM import de .ts debe ser 42");
 }
 
-#[test]
-fn esm_import_blocked_without_read_permission() {
+#[tokio::test]
+async fn esm_import_blocked_without_read_permission() {
     let temp = TempDir::new().unwrap();
 
     std::fs::write(
@@ -705,9 +761,9 @@ fn esm_import_blocked_without_read_permission() {
     // Solo otorgamos permiso de lectura al directorio padre, no al temp
     let state = PermissionState::new();
     // Sin grant: sin permisos → el loader debe rechazar la importación
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = engine.eval_file(&entry);
+    let result = engine.eval_file(&entry).await;
     assert!(
         result.is_err(),
         "importar un módulo sin --allow-read debe fallar"
@@ -716,8 +772,8 @@ fn esm_import_blocked_without_read_permission() {
 
 // ── ESM desde node_modules ────────────────────────────────────────────────────
 
-#[test]
-fn esm_import_from_node_modules_main_field() {
+#[tokio::test]
+async fn esm_import_from_node_modules_main_field() {
     let temp = TempDir::new().unwrap();
 
     // Fake package: node_modules/my-utils/index.js with a named export.
@@ -741,17 +797,21 @@ fn esm_import_from_node_modules_main_field() {
     )
     .unwrap();
 
-    let engine = engine_with_read(&temp);
+    let engine = engine_with_read(&temp).await;
     engine
         .eval_file(&entry)
+        .await
         .expect("importar desde node_modules via main debe funcionar");
 
-    let result = engine.eval_to_string("String(globalThis._nm_sum)").unwrap();
+    let result = engine
+        .eval_to_string("String(globalThis._nm_sum)")
+        .await
+        .unwrap();
     assert_eq!(result, "42", "sum(19, 23) via node_modules debe ser 42");
 }
 
-#[test]
-fn esm_import_from_node_modules_exports_field() {
+#[tokio::test]
+async fn esm_import_from_node_modules_exports_field() {
     let temp = TempDir::new().unwrap();
 
     // Fake package using the "exports" field (modern).
@@ -775,17 +835,21 @@ fn esm_import_from_node_modules_exports_field() {
     )
     .unwrap();
 
-    let engine = engine_with_read(&temp);
+    let engine = engine_with_read(&temp).await;
     engine
         .eval_file(&entry)
+        .await
         .expect("importar desde node_modules via exports debe funcionar");
 
-    let result = engine.eval_to_string("String(globalThis._pi)").unwrap();
+    let result = engine
+        .eval_to_string("String(globalThis._pi)")
+        .await
+        .unwrap();
     assert_eq!(result, "3.14159", "PI via exports field debe ser 3.14159");
 }
 
-#[test]
-fn esm_import_from_scoped_node_modules() {
+#[tokio::test]
+async fn esm_import_from_scoped_node_modules() {
     let temp = TempDir::new().unwrap();
 
     // Scoped package: node_modules/@myorg/helpers/index.js
@@ -813,19 +877,21 @@ fn esm_import_from_scoped_node_modules() {
     )
     .unwrap();
 
-    let engine = engine_with_read(&temp);
+    let engine = engine_with_read(&temp).await;
     engine
         .eval_file(&entry)
+        .await
         .expect("importar desde paquete scoped debe funcionar");
 
     let result = engine
         .eval_to_string("String(globalThis._scoped_result)")
+        .await
         .unwrap();
     assert_eq!(result, "42", "double(21) via scoped package debe ser 42");
 }
 
-#[test]
-fn esm_import_from_parent_node_modules() {
+#[tokio::test]
+async fn esm_import_from_parent_node_modules() {
     // node_modules at a parent directory, entry file in a subdirectory.
     let temp = TempDir::new().unwrap();
 
@@ -850,35 +916,37 @@ fn esm_import_from_parent_node_modules() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&entry)
+        .await
         .expect("resolver debe encontrar node_modules en directorio padre");
 
     let result = engine
         .eval_to_string("String(globalThis._parent_nm)")
+        .await
         .unwrap();
     assert_eq!(result, "42", "ANSWER via parent node_modules debe ser 42");
 }
 
 // ── WebSocket builtin ─────────────────────────────────────────────────────────
 
-#[test]
-fn websocket_class_exists_in_global_scope() {
+#[tokio::test]
+async fn websocket_class_exists_in_global_scope() {
     let state = PermissionState::new();
-    let engine = JsEngine::new(&state).unwrap();
-    let result = engine.eval_to_string("typeof WebSocket").unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let result = engine.eval_to_string("typeof WebSocket").await.unwrap();
     assert_eq!(
         result, "function",
         "WebSocket debe estar disponible como constructor global"
     );
 }
 
-#[test]
-fn websocket_constants_are_defined() {
+#[tokio::test]
+async fn websocket_constants_are_defined() {
     let state = PermissionState::new();
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval(
             "
@@ -888,15 +956,16 @@ fn websocket_constants_are_defined() {
         if (WebSocket.CLOSED     !== 3) throw new Error('CLOSED != 3');
     ",
         )
+        .await
         .expect("constantes de WebSocket deben estar definidas");
 }
 
-#[test]
-fn websocket_denied_without_network_permission() {
+#[tokio::test]
+async fn websocket_denied_without_network_permission() {
     let state = PermissionState::new();
     // No network permission granted — constructor must not throw (mirrors browser behavior)
     // but onerror must fire and readyState must be CLOSED.
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval(
             "
@@ -906,9 +975,11 @@ fn websocket_denied_without_network_permission() {
         globalThis._ws_state = ws.readyState;
     ",
         )
+        .await
         .expect("constructor de WebSocket no debe lanzar");
     let state_val = engine
         .eval_to_string("String(globalThis._ws_state)")
+        .await
         .unwrap();
     assert_eq!(
         state_val, "3",
@@ -916,10 +987,10 @@ fn websocket_denied_without_network_permission() {
     );
 }
 
-#[test]
-fn websocket_readystate_closed_on_denied() {
+#[tokio::test]
+async fn websocket_readystate_closed_on_denied() {
     let state = PermissionState::new();
-    let engine = JsEngine::new(&state).unwrap();
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval(
             "
@@ -928,9 +999,11 @@ fn websocket_readystate_closed_on_denied() {
         globalThis._ws_state = ws.readyState;
     ",
         )
+        .await
         .unwrap();
     let state_val = engine
         .eval_to_string("String(globalThis._ws_state)")
+        .await
         .unwrap();
     assert_eq!(state_val, "3", "readyState CLOSED debe ser 3");
 }

@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -44,14 +45,14 @@ fn collect_test_files(paths: &[PathBuf]) -> Vec<PathBuf> {
     files
 }
 
-fn run_tests_and_report(paths: &[PathBuf]) -> anyhow::Result<(usize, usize)> {
+async fn run_tests_and_report(paths: &[PathBuf]) -> anyhow::Result<(usize, usize)> {
     let files = collect_test_files(paths);
     if files.is_empty() {
         println!("No test files found.");
         return Ok((0, 0));
     }
 
-    let results = vvva_test::run_tests(paths.to_vec(), None)?;
+    let results = vvva_test::run_tests(paths.to_vec(), None).await?;
     let passed = results
         .iter()
         .filter(|r| r.status == vvva_test::TestStatus::Passed)
@@ -141,8 +142,11 @@ fn is_incomplete(src: &str) -> bool {
 
 /// Format the *current value* of a JS expression for REPL display.
 /// `code` is already evaluated — this only inspects its value.
-fn format_repl_result(engine: &vvva_js::JsEngine, code: &str) -> Option<String> {
-    let type_tag = engine.eval_to_string(&format!("typeof ({})", code)).ok()?;
+async fn format_repl_result(engine: &vvva_js::JsEngine, code: &str) -> Option<String> {
+    let type_tag = engine
+        .eval_to_string(&format!("typeof ({})", code))
+        .await
+        .ok()?;
 
     match type_tag.as_str() {
         "undefined" => None,
@@ -150,6 +154,7 @@ fn format_repl_result(engine: &vvva_js::JsEngine, code: &str) -> Option<String> 
             // Show [Function: name] like Node.js
             let name = engine
                 .eval_to_string(&format!("({}).name || ''", code))
+                .await
                 .unwrap_or_default();
             if name.is_empty() {
                 Some("[Function (anonymous)]".to_string())
@@ -159,14 +164,19 @@ fn format_repl_result(engine: &vvva_js::JsEngine, code: &str) -> Option<String> 
         }
         "string" => engine
             .eval_to_string(&format!("JSON.stringify({})", code))
+            .await
             .ok(),
         "object" => engine
             .eval_to_string(&format!(
                 "(function(v){{ try{{ return JSON.stringify(v,null,2); }}catch(e){{ return String(v); }} }})({})",
                 code
             ))
+            .await
             .ok(),
-        _ => engine.eval_to_string(&format!("String({})", code)).ok(),
+        _ => engine
+            .eval_to_string(&format!("String({})", code))
+            .await
+            .ok(),
     }
 }
 
@@ -191,8 +201,8 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
         println!();
     }
 
-    let permissions = vvva_permissions::PermissionState::new();
-    let mut engine = vvva_js::JsEngine::new(&permissions)?;
+    let permissions = Arc::new(vvva_permissions::PermissionState::new());
+    let mut engine = vvva_js::JsEngine::new(permissions.clone()).await?;
 
     let mut buffer = String::new(); // multi-line accumulator
     let stdin = io::stdin();
@@ -213,7 +223,7 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
             // EOF (^D or piped input exhausted)
             if !buffer.trim().is_empty() {
                 // flush remaining buffer
-                eval_and_print(&engine, buffer.trim(), is_tty);
+                eval_and_print(&engine, buffer.trim(), is_tty).await;
             }
             if is_tty {
                 println!("\nLeaving sandbox...");
@@ -254,7 +264,7 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
                 continue;
             }
             ".clear" => {
-                engine = vvva_js::JsEngine::new(&permissions)?;
+                engine = vvva_js::JsEngine::new(permissions.clone()).await?;
                 buffer.clear();
                 if is_tty {
                     println!("Context cleared.");
@@ -310,14 +320,14 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
         buffer.clear();
 
         if !src.is_empty() {
-            eval_and_print(&engine, &src, is_tty);
+            eval_and_print(&engine, &src, is_tty).await;
         }
     }
 
     Ok(())
 }
 
-fn eval_and_print(engine: &vvva_js::JsEngine, src: &str, is_tty: bool) {
+async fn eval_and_print(engine: &vvva_js::JsEngine, src: &str, is_tty: bool) {
     let trimmed = src.trim();
 
     // For object literals `{a:1}` at statement position, wrap in parens so the
@@ -329,7 +339,7 @@ fn eval_and_print(engine: &vvva_js::JsEngine, src: &str, is_tty: bool) {
     };
 
     // Step 1: always eval for side effects (defines functions, variables, etc.)
-    if let Err(e) = engine.eval(&eval_src) {
+    if let Err(e) = engine.eval(&eval_src).await {
         let msg = e.to_string();
         let clean = msg
             .trim_start_matches("Error evaluating script: ")
@@ -371,7 +381,7 @@ fn eval_and_print(engine: &vvva_js::JsEngine, src: &str, is_tty: bool) {
         trimmed.to_string()
     };
 
-    if let Some(out) = format_repl_result(engine, &as_expr) {
+    if let Some(out) = format_repl_result(engine, &as_expr).await {
         if is_tty {
             println!("\x1b[32m{}\x1b[0m", out);
         } else {
@@ -804,7 +814,7 @@ async fn run_test_watch_mode(paths: Vec<PathBuf>, _coverage: bool) -> anyhow::Re
 
     println!("\nPress 'a' to run all tests, 'f' to run failed only, 'p' to filter, 't' to search by name, 'q' to quit.\n");
 
-    let _ = run_tests_and_report(&paths);
+    let _ = run_tests_and_report(&paths).await;
 
     let mut last_run = Instant::now();
     let debounce_duration = Duration::from_millis(500);
@@ -834,7 +844,7 @@ async fn run_test_watch_mode(paths: Vec<PathBuf>, _coverage: bool) -> anyhow::Re
                     println!("\n--- File change detected ---");
                     println!("Changed: {:?}", event.paths);
                     println!();
-                    let _ = run_tests_and_report(&paths);
+                    let _ = run_tests_and_report(&paths).await;
                     last_run = Instant::now();
                 }
             }
@@ -1284,14 +1294,13 @@ async fn main() -> anyhow::Result<()> {
                 std::io::stderr().is_terminal(), // solo prompt si stderr es visible (no capturado)
             );
 
-            let engine = vvva_js::JsEngine::new(&permissions)?;
-            let _runtime = vvva_core::Runtime::new(permissions);
+            let permissions = Arc::new(permissions);
+            let engine = vvva_js::JsEngine::new(permissions.clone()).await?;
+            let _runtime = vvva_core::Runtime::new((*permissions).clone());
             info!("3va Runtime initialized securely.");
 
-            // Execute file (transpiles TypeScript automatically)
-            engine.eval_file(file)?;
-            // Run event loop to process any pending timers/callbacks
-            engine.run_event_loop()?;
+            // Execute file (transpiles TypeScript automatically); event loop runs inside eval_file
+            engine.eval_file(file).await?;
             info!("Execution finished.");
         }
         Commands::Install { package, allow_net } => {
@@ -1362,7 +1371,7 @@ async fn main() -> anyhow::Result<()> {
                     update_snapshots: *update_snapshots,
                     ..Default::default()
                 };
-                let results = vvva_test::run_tests(target_paths.clone(), Some(cfg))?;
+                let results = vvva_test::run_tests(target_paths.clone(), Some(cfg)).await?;
 
                 if *coverage {
                     let root = target_paths

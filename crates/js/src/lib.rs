@@ -2,11 +2,12 @@ pub mod builtins;
 pub mod esm;
 pub mod transpiler;
 
-use rquickjs::{Context, Module, Runtime};
-use std::cell::RefCell;
+use rquickjs::{AsyncContext, AsyncRuntime, Module};
 use std::path::Path;
-use std::rc::Rc;
+use std::sync::Arc;
 use vvva_permissions::PermissionState;
+
+use builtins::TimerManager;
 
 /// Heuristic: detect ESM by scanning all lines for top-level import/export.
 /// Skips blank lines and single-line comments. Handles files where exports
@@ -42,64 +43,79 @@ fn is_esm_source(code: &str) -> bool {
 
 pub struct JsEngine {
     #[allow(dead_code)]
-    runtime: Runtime,
-    context: Context,
-    #[allow(dead_code)]
-    permissions: Rc<RefCell<PermissionState>>,
+    runtime: AsyncRuntime,
+    context: AsyncContext,
+    _permissions: Arc<PermissionState>,
+    timer_manager: Arc<TimerManager>,
 }
 
 impl JsEngine {
-    pub fn new(permissions: &PermissionState) -> anyhow::Result<Self> {
-        let runtime = Runtime::new()?;
+    pub async fn new(permissions: Arc<PermissionState>) -> anyhow::Result<Self> {
+        let runtime = AsyncRuntime::new()?;
+        let timer_manager = TimerManager::new();
 
         // Wire the ESM module loader so cross-file imports resolve correctly.
-        runtime.set_loader(
-            esm::EsmResolver,
-            esm::EsmLoader {
-                permissions: permissions.clone(),
-            },
-        );
+        runtime
+            .set_loader(
+                esm::EsmResolver,
+                esm::EsmLoader {
+                    permissions: (*permissions).clone(),
+                },
+            )
+            .await;
 
-        let context = Context::full(&runtime)?;
+        let context = AsyncContext::full(&runtime).await?;
 
-        let perms = Rc::new(RefCell::new(permissions.clone()));
-
-        context.with(|ctx: rquickjs::Ctx| {
-            let _ = builtins::inject_all(&ctx, perms.clone());
-            Ok::<(), rquickjs::Error>(())
-        })?;
+        {
+            let perms = permissions.clone();
+            let tm = timer_manager.clone();
+            context
+                .with(|ctx: rquickjs::Ctx| {
+                    builtins::inject_all(&ctx, perms, tm)?;
+                    Ok::<(), rquickjs::Error>(())
+                })
+                .await?;
+        }
 
         Ok(Self {
             runtime,
             context,
-            permissions: perms,
+            _permissions: permissions,
+            timer_manager,
         })
     }
 
-    pub fn eval(&self, code: &str) -> anyhow::Result<()> {
-        self.context.with(|ctx| {
-            let _res: rquickjs::Value = ctx.eval(code)?;
-            Ok::<(), rquickjs::Error>(())
-        })?;
+    pub async fn eval(&self, code: &str) -> anyhow::Result<()> {
+        let code = code.to_string();
+        self.context
+            .with(|ctx| {
+                let _res: rquickjs::Value = ctx.eval(code.as_str())?;
+                Ok::<(), rquickjs::Error>(())
+            })
+            .await?;
         Ok(())
     }
 
     /// Evaluate a JS expression and return its string value.
-    pub fn eval_to_string(&self, code: &str) -> anyhow::Result<String> {
-        let result = self.context.with(|ctx| -> rquickjs::Result<String> {
-            let val: rquickjs::Value = ctx.eval(code)?;
-            if let Some(s) = val.as_string() {
-                Ok(s.to_string()?)
-            } else {
-                Ok(String::new())
-            }
-        })?;
+    pub async fn eval_to_string(&self, code: &str) -> anyhow::Result<String> {
+        let code = code.to_string();
+        let result = self
+            .context
+            .with(|ctx| -> rquickjs::Result<String> {
+                let val: rquickjs::Value = ctx.eval(code.as_str())?;
+                if let Some(s) = val.as_string() {
+                    Ok(s.to_string()?)
+                } else {
+                    Ok(String::new())
+                }
+            })
+            .await?;
         Ok(result)
     }
 
     /// Read a file, transpile if TypeScript, set `__filename`/`__dirname`, then eval.
     /// Automatically detects ESM (top-level import/export) and uses Module evaluation.
-    pub fn eval_file(&self, path: &Path) -> anyhow::Result<()> {
+    pub async fn eval_file(&self, path: &Path) -> anyhow::Result<()> {
         let source = std::fs::read_to_string(path)?;
 
         // Transpile TypeScript
@@ -119,65 +135,52 @@ impl JsEngine {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        // Detect ESM: top-level import/export statements
         let is_esm = is_esm_source(&code);
 
-        self.context.with(|ctx| {
-            if is_esm {
-                let module = Module::declare(ctx.clone(), filename.as_str(), code.as_str())?;
-                let (_module_eval, _promise) = module.eval()?;
-                Ok::<(), rquickjs::Error>(())
-            } else {
-                // CommonJS / script mode
-                let setup = format!(
-                    "globalThis.__filename = '{}'; globalThis.__dirname = '{}';",
-                    filename.replace('\'', "\\'"),
-                    dirname.replace('\'', "\\'"),
-                );
-                ctx.eval::<(), _>(setup.as_str())?;
-                let _: rquickjs::Value = ctx.eval(code.as_str())?;
-                Ok::<(), rquickjs::Error>(())
-            }
-        })?;
+        self.context
+            .with(|ctx| {
+                if is_esm {
+                    let module = Module::declare(ctx.clone(), filename.as_str(), code.as_str())?;
+                    let (_module_eval, _promise) = module.eval()?;
+                    Ok::<(), rquickjs::Error>(())
+                } else {
+                    let setup = format!(
+                        "globalThis.__filename = '{}'; globalThis.__dirname = '{}';",
+                        filename.replace('\'', "\\'"),
+                        dirname.replace('\'', "\\'"),
+                    );
+                    ctx.eval::<(), _>(setup.as_str())?;
+                    let _: rquickjs::Value = ctx.eval(code.as_str())?;
+                    Ok::<(), rquickjs::Error>(())
+                }
+            })
+            .await?;
 
-        // Drive QuickJS pending jobs (module evaluation, promise microtasks).
-        loop {
-            match self.runtime.execute_pending_job() {
-                Ok(true) => continue,
-                Ok(false) => break,
-                Err(e) => return Err(anyhow::anyhow!("JS job error: {:?}", e)),
-            }
-        }
+        // Drain pending JS microtasks / promise callbacks.
+        self.runtime.idle().await;
 
-        Ok(())
+        // Drive the event loop: timers + promise microtasks.
+        self.run_event_loop().await
     }
 
     /// Run the event loop: poll expired timers and fire callbacks until no pending timers remain.
-    /// Uses a spin-sleep approach — appropriate for short-lived scripts.
-    pub fn run_event_loop(&self) -> anyhow::Result<()> {
-        use builtins::timers::TIMER_MANAGER;
-        use std::sync::Arc;
-
-        let manager = TIMER_MANAGER.with(Arc::clone);
-
-        // Loop until no more pending timers
-        let max_iterations = 10_000; // safety limit
+    pub async fn run_event_loop(&self) -> anyhow::Result<()> {
+        let max_iterations = 10_000;
         let mut iterations = 0;
 
-        while manager.has_pending() && iterations < max_iterations {
+        while self.timer_manager.has_pending() && iterations < max_iterations {
             iterations += 1;
 
-            // If the next timer hasn't fired yet, sleep a short while
-            if let Some(wait) = manager.next_expiry()
+            if let Some(wait) = self.timer_manager.next_expiry()
                 && wait.as_millis() > 0
             {
-                std::thread::sleep(wait.min(std::time::Duration::from_millis(50)));
+                tokio::time::sleep(wait.min(std::time::Duration::from_millis(50))).await;
             }
 
-            // Fire any expired timers
-            self.context.with(|ctx| {
-                builtins::timers::TimerManager::fire_pending(&ctx, Arc::clone(&manager))
-            })?;
+            let tm = self.timer_manager.clone();
+            self.context
+                .with(|ctx| builtins::timers::TimerManager::fire_pending(&ctx, tm))
+                .await?;
         }
 
         Ok(())
@@ -188,37 +191,33 @@ impl JsEngine {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_engine_initialization() {
-        let permissions = PermissionState::new();
-        let engine = JsEngine::new(&permissions);
-
+    #[tokio::test]
+    async fn test_engine_initialization() {
+        let permissions = Arc::new(PermissionState::new());
+        let engine = JsEngine::new(permissions).await;
         assert!(engine.is_ok(), "Engine failed to initialize");
     }
 
-    #[test]
-    fn test_engine_evaluation() {
-        let permissions = PermissionState::new();
-        let engine = JsEngine::new(&permissions).unwrap();
+    #[tokio::test]
+    async fn test_engine_evaluation() {
+        let permissions = Arc::new(PermissionState::new());
+        let engine = JsEngine::new(permissions).await.unwrap();
 
-        // Valid syntax should succeed
-        let result = engine.eval("const x = 1 + 1;");
+        let result = engine.eval("const x = 1 + 1;").await;
         assert!(result.is_ok());
 
-        // Invalid syntax should fail
-        let error_result = engine.eval("const x = ;");
+        let error_result = engine.eval("const x = ;").await;
         assert!(error_result.is_err());
     }
 
-    #[test]
-    fn test_eval_typescript() {
-        let permissions = PermissionState::new();
-        let engine = JsEngine::new(&permissions).unwrap();
+    #[tokio::test]
+    async fn test_eval_typescript() {
+        let permissions = Arc::new(PermissionState::new());
+        let engine = JsEngine::new(permissions).await.unwrap();
 
-        // TypeScript with type annotations — transpiler should strip them
         let ts_code = "const x: number = 42;";
         let js_code = transpiler::transpile(ts_code);
-        let result = engine.eval(&js_code);
+        let result = engine.eval(&js_code).await;
         assert!(
             result.is_ok(),
             "TS transpiled code should eval: {:?}",

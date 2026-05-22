@@ -519,8 +519,12 @@ fn packages_from_node_modules(root: &Path) -> Vec<(String, String)> {
 ///
 /// - `force_refresh`: bypass the 24-hour cache TTL and fetch fresh data.
 pub async fn run_audit(force_refresh: bool) -> anyhow::Result<AuditReport> {
-    let lockfile_path = PathBuf::from("3va-lock.json");
-    let node_modules = PathBuf::from("node_modules");
+    run_audit_in(force_refresh, &std::env::current_dir()?).await
+}
+
+pub async fn run_audit_in(force_refresh: bool, project_dir: &Path) -> anyhow::Result<AuditReport> {
+    let lockfile_path = project_dir.join("3va-lock.json");
+    let node_modules = project_dir.join("node_modules");
 
     let packages: Vec<(String, String)> = if lockfile_path.exists() {
         let lock = Lockfile::load(&lockfile_path)?;
@@ -903,22 +907,14 @@ mod tests {
     #[tokio::test]
     async fn run_audit_no_lockfile_no_node_modules_errors() {
         let dir = TempDir::new().unwrap();
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        let result = run_audit(false).await;
-
-        std::env::set_current_dir(prev).unwrap();
+        let result = run_audit_in(false, dir.path()).await;
         assert!(result.is_err(), "debe fallar sin lockfile ni node_modules");
     }
 
     #[tokio::test]
     async fn run_audit_empty_lockfile_returns_empty_report() {
         let dir = TempDir::new().unwrap();
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
 
-        // Write a minimal valid lockfile with no dependencies
         let lockfile_content = r#"{
             "lockfileVersion": 1,
             "name": "test-project",
@@ -927,13 +923,8 @@ mod tests {
             "dependencies": {}
         }"#;
         fs::write(dir.path().join("3va-lock.json"), lockfile_content).unwrap();
-        // Create empty node_modules so the code path passes
-        fs::create_dir(dir.path().join("node_modules")).unwrap();
 
-        let result = run_audit(false).await;
-
-        std::env::set_current_dir(prev).unwrap();
-        let report = result.unwrap();
+        let report = run_audit_in(false, dir.path()).await.unwrap();
         assert_eq!(report.total_packages, 0);
         assert_eq!(report.total_vulns, 0);
         assert!(report.findings.is_empty());
