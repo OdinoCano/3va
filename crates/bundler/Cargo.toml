@@ -17,3 +17,6 @@ oxc_parser = "0.132.0"
 oxc_ast = "0.132.0"
 oxc_codegen = "0.132.0"
 oxc_span = "0.132.0"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -39,37 +39,27 @@
 
 ```rust
 // crates/js/src/lib.rs
-use rquickjs::{Context, Runtime, Module, Value};
+use rquickjs::{AsyncRuntime, AsyncContext};
 use vvva_permissions::PermissionState;
+use vvva_core::Runtime;
 
 pub struct JsEngine {
-    runtime: Runtime,
-    context: Context,
-    module_loader: ModuleLoader,
-    polyfills: PolyfillRegistry,
+    runtime: AsyncRuntime,   // rquickjs async runtime
+    context: AsyncContext,   // rquickjs async context
+    runtime_core: Mutex<Runtime>, // vvva_core Runtime for TimerWheel + TaskQueue
+    // permissions: Arc<PermissionState> — held internally
 }
 
 impl JsEngine {
-    pub fn new(permissions: &PermissionState) -> anyhow::Result<Self> {
-        // 1. Create QuickJS runtime
-        let runtime = Runtime::new();
-
-        // 2. Set memory limit (default: 256MB)
-        runtime.set_memory_limit(256 * 1024 * 1024);
-
-        // 3. Create context
-        let context = Context::full(&runtime)?;
-
-        // 4. Initialize modules and polyfills
-        let module_loader = ModuleLoader::new(permissions);
-        let polyfills = PolyfillRegistry::new();
-
-        Ok(Self {
-            runtime,
-            context,
-            module_loader,
-            polyfills,
-        })
+    pub async fn new(permissions: Arc<PermissionState>) -> anyhow::Result<Self> {
+        let runtime = AsyncRuntime::new()?;
+        let runtime_core = Mutex::new(Runtime::new((*permissions).clone()));
+        // ESM loader + resolver registered on the runtime
+        runtime.set_loader(EsmResolver, EsmLoader { permissions: permissions.clone() }).await;
+        let context = AsyncContext::full(&runtime).await?;
+        // Builtins injected: console, timers, buffer, process, fetch, fs, websocket, modules
+        // ...
+        Ok(Self { runtime, context, runtime_core })
     }
 }
 ```
@@ -77,13 +67,13 @@ impl JsEngine {
 ### 1.3.2 Lifecycle
 
 ```
-1. Create Runtime
+1. Create AsyncRuntime + AsyncContext
        │
        ▼
-2. Configure limits (memory, stack)
+2. Register EsmResolver + EsmLoader
        │
        ▼
-3. Create Context
+3. Inject builtins (console, timers, buffer, process, fetch, fs, modules)
        │
        ▼
 4. Load globals and polyfills
@@ -124,80 +114,35 @@ pub fn eval_module(&self, code: &str, path: &str) -> anyhow::Result<Value> {
 }
 ```
 
-## 1.4 Memory Management
+---
 
-### 1.4.1 Memory Limits
+## 1.4 Planned — Memory Limits
+
+> **Status: PENDING** — memory and stack limits are not yet configured in `JsEngine::new()`.
+
+Planned configuration:
 
 ```rust
-// Memory limits configuration
-pub struct MemoryLimits {
-    pub heap_max: usize,      // 256MB default
-    pub stack_limit: usize,   // 1MB default
-    pub memory_warning: usize, // 80% of maximum
-}
-
-impl Default for MemoryLimits {
-    fn default() -> Self {
-        Self {
-            heap_max: 256 * 1024 * 1024,
-            stack_limit: 1024 * 1024,
-            memory_warning: 256 * 1024 * 1024 / 10 * 8,
-        }
-    }
-}
+// PLANNED — not yet applied
+runtime.set_memory_limit(256 * 1024 * 1024);  // 256 MB heap
+runtime.set_max_stack_size(1 * 1024 * 1024);  // 1 MB stack
 ```
 
-### 1.4.2 Exceeded Memory Handling
+QuickJS will throw `InternalError: out of memory` if the heap is exhausted. When the limit API is integrated, 3va will catch this and return a structured error instead of panicking.
+
+## 1.5 Planned — WASM Compilation Target
+
+> **Status: FUTURE** — no implementation started.
+
+QuickJS itself can be compiled to WASM, which would allow 3va to run inside a browser sandbox or Cloudflare Workers. This requires a separate build profile and JS binding layer. Planned for after the QuickJS+Tokio event loop integration stabilizes.
 
 ```rust
-// Callback when memory is exceeded
-runtime.set_memory_limit_callback(|| {
-    // Options:
-    // 1. Force GC
-    // 2. Throw error
-    // 3. Terminate process
-    rquickjs::Error::new_error("Memory limit exceeded")
-});
-```
-
-## 1.5 thread_isolate (WASM)
-
-### 1.5.1 WebAssembly Isolation
-
-```rust
-// For future WASM-first support
-pub struct WasmIsolate {
-    runtime: Runtime,
-    isolate: Isolates,
-}
-
-impl WasmIsolate {
-    pub fn new() -> Self {
-        // QuickJS can be compiled to WASM
-        // allowing multiple isolates in the same process
-    }
-
-    pub fn spawn(&self) -> WasmInstance {
-        // Create new isolated instance
-    }
-}
-```
-
-## 1.6 Options Configuration
-
-### 1.6.1 Runtime Options
-
-```rust
-let runtime = Runtime::new()
-    .set_memory_limit(512 * 1024 * 1024)  // 512MB
-    .set_max_stack_size(2 * 1024 * 1024) // 2MB
-    .set_unhandled_promise_rejection_mode(
-        UnhandledPromiseRejection::Throw
-    )
-    .set_optimizer(false)  // Disable optimizer for debugging
-    .set_strict(true);    // Strict mode by default
+// FUTURE — architecture target only, not a real type yet
+// pub struct WasmIsolate { ... }
+// Each WASM instance gets its own QuickJS runtime
+// allowing multiple isolated contexts in the same process.
 ```
 
 ---
 
-*Integration conforming to rquickjs and QuickJS documentation.*
+*Integration via the `rquickjs` crate. Source: `crates/js/src/lib.rs`.*

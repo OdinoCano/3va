@@ -126,68 +126,19 @@ await fetch(url, {
 });
 ```
 
-### 3.4.2 Web APIs
+### 3.4.2 Web Globals (implemented)
 
-| API | Description |
-|-----|-------------|
-| AbortController | Abort control |
-| AbortSignal | Abort signal |
-| BroadcastChannel | Cross-tab communication |
-| Crypto | Cryptographic operations |
-| CryptoKey | Cryptographic keys |
-| Performance | Performance measurement |
-| PerformanceEntry | Performance entry |
-| PerformanceMark | Performance mark |
-| PerformanceMeasure | Performance measure |
-| TextEncoder | Text encoder |
-| TextDecoder | Text decoder |
-| TransformStream | Transform streams |
-| ReadableStream | Readable streams |
-| WritableStream | Writable streams |
-| Headers | HTTP headers |
-| Request | HTTP request |
-| Response | HTTP response |
-| FormData | Form data |
-| URLSearchParams | URL parameters |
-| WebSocket | WebSockets |
+| API | Status | Notes |
+|-----|--------|-------|
+| `TextEncoder` / `TextDecoder` | Implemented | UTF-8; global |
+| `fetch` | Implemented | Requires `--allow-net` |
+| `WebSocket` | Implemented | Requires `--allow-net` |
+| `AbortController` / `AbortSignal` | Not implemented | Planned |
+| `ReadableStream` / `WritableStream` | Not implemented | Planned |
+| `FormData` | Not implemented | Planned |
+| `URLSearchParams` | Partial | Via `require('url')` / `require('querystring')` JS stub |
+| `Headers` / `Request` / `Response` | Partial | Accessible on `fetch` response; not standalone constructors |
 
-## 3.5 Security Polyfills
+---
 
-### 3.5.1 Verified Fetch
-
-```rust
-// 3va's fetch includes permission verification
-pub async fn secure_fetch(url: &str, options: RequestInit) -> Result<Response> {
-    // 1. Check network permission
-    if !permissions.check(&Capability::Network(url)) {
-        return Err(Error::PermissionDenied);
-    }
-    // 2. Validate URL
-    let parsed = Url::parse(url)?;
-    validate_no_malicious_redirect(&parsed)?;
-    // 3. Execute fetch
-    let response = native_fetch(url, options).await?;
-    // 4. Validate response
-    validate_response(&response)?;
-    Ok(response)
-}
-```
-
-### 3.5.2 Console with Audit Logging
-
-```rust
-// Console writes to audit log
-pub fn log(&self, level: Level, args: Vec<Value>) {
-    // Normal output
-    self.output.write(args);
-    // Audit log
-    audit::log(AuditEvent {
-        event_type: "console".to_string(),
-        level: level.to_string(),
-        timestamp: now(),
-        data: args.clone(),
-    });
-}
-```
-
-Globals conforming to Node.js API and WHATWG standards.
+*Globals conforming to Node.js API and WHATWG standards. For full module status see [04-core/02-modulo-system.md](02-modulo-system.md).*

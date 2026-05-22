@@ -8,3 +8,6 @@ edition = "2024"
 tokio.workspace = true
 anyhow.workspace = true
 vvva_permissions = { path = "../permissions" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

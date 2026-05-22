@@ -1,318 +1,169 @@
 # 04 - AUDIT AND LOGGING
 
-## 4.1 Audit System
+## 4.1 Overview
 
-3va implements a complete audit system that logs all sensitive operations for regulatory compliance and forensic analysis.
+3va's audit system logs permission decisions and I/O operations. The implementation is in `crates/permissions/src/audit.rs`.
 
-## 4.2 Eventos Auditados
+## 4.2 Implemented Types
 
-### 4.2.1 Event Categories
-
-| Category | Description | Events |
-|----------|-------------|--------|
-| permission | Permission checks | check, allow, deny |
-| fs | File system operations | read, write, delete, mkdir |
-| network | Network operations | connect, send, receive |
-| process | Process creation | spawn, exec |
-| env | Environment variable access | get, set |
-| module | Module loading | load, resolve |
-| security | Security events | blocked, flagged |
-
-### 4.2.2 Event Format
-
-```rust
-pub struct AuditEvent {
-    pub timestamp: DateTime<Utc>,           // RFC 3339
-    pub event_id: Uuid,                      // Unique identifier
-    pub category: AuditCategory,             // permission, fs, network, etc.
-    pub action: String,                      // read, write, connect, etc.
-    pub resource: Option<String>,            // Path, URL, etc.
-    pub principal: Principal,                // User/session info
-    pub decision: AuditDecision,             // allow, deny
-    pub reason: Option<String>,              // Why it was allowed/denied
-    pub metadata: HashMap<String, String>,   // Additional data
-    pub source: EventSource,                 // CLI, API, module
-}
-
-pub enum AuditDecision {
-    Allow,
-    Deny(String),  // Denial reason
-}
-
-pub enum EventSource {
-    UserCode,
-    Builtin,
-    Package(String),
-    CLI,
-}
-```
-
-### 4.2.3 Event Example
-
-```json
-{
-  "timestamp": "2026-05-18T14:30:00.123Z",
-  "eventId": "550e8400-e29b-41d4-a716-446655440000",
-  "category": "fs",
-  "action": "read",
-  "resource": "/app/config.json",
-  "principal": {
-    "user": "root",
-    "session": "abc123"
-  },
-  "decision": "allow",
-  "source": "userCode",
-  "metadata": {
-    "mode": "sync",
-    "size": "1024"
-  }
-}
-```
-
-## 4.3 Audit Configuration
-
-### 4.3.1 Logging Levels
-
-| Level | Events Logged |
-|-------|---------------|
-| off | None |
-| errors | Only denials and errors |
-| warnings | errors + warnings |
-| info | warnings + main operations |
-| debug | info + all details |
-| trace | debug + debugging information |
-
-### 4.3.2 Configuration
-
-```rust
-pub struct AuditConfig {
-    pub level: AuditLevel,
-    pub destinations: Vec<AuditDestination>,
-    pub retention_days: u32,
-    pub max_file_size: u64,
-    pub rotate: bool,
-    pub filters: AuditFilters,
-}
-
-pub enum AuditDestination {
-    File(PathBuf),
-    Stdout,
-    Stderr,
-    Syslog,
-    Custom(Box<dyn AuditSink>),
-}
-
-pub struct AuditFilters {
-    pub categories: Vec<AuditCategory>,
-    pub min_decision: AuditDecision,  // Only allow decisions >= level
-    pub resources: Option<Vec<String>>,  // Filter by specific resources
-}
-```
-
-### 4.3.2 CLI Configuration
-
-```bash
-# Log to file
-3va run app.ts --audit-log=/var/log/3va/audit.log
-
-# Log to stdout
-3va run app.ts --audit-log=stdout
-
-# Detail level
-3va run app.ts --audit-level=info --audit-log=/var/log/3va/audit.log
-
-# Filter only denials
-3va run app.ts --audit-level=errors
-```
-
-## 4.4 Implementation
-
-### 4.4.1 Audit Logger
-
-```rust
-pub struct AuditLogger {
-    config: AuditConfig,
-    writer: Box<dyn Write>,
-    formatter: AuditFormatter,
-}
-
-impl AuditLogger {
-    pub fn log(&self, event: AuditEvent) {
-        // 1. Filter according to config
-        if !self.should_log(&event) {
-            return;
-        }
-
-        // 2. Format
-        let formatted = self.formatter.format(&event);
-
-        // 3. Write
-        if let Err(e) = self.writer.write(formatted) {
-            eprintln!("Audit log write failed: {}", e);
-        }
-    }
-
-    fn should_log(&self, event: &AuditEvent) -> bool {
-        // Check level
-        if !event.category.enabled_at(self.config.level) {
-            return false;
-        }
-
-        // Check filters
-        if let Some(resources) = &self.config.filters.resources {
-            if let Some(resource) = &event.resource {
-                return resources.iter().any(|r| resource.contains(r));
-            }
-        }
-
-        true
-    }
-}
-```
-
-### 4.4.2 Permissions Integration
-
-```rust
-// En PermissionState
-pub fn check_with_audit(&self, cap: &Capability) -> bool {
-    let decision = if self.check(cap) {
-        AuditDecision::Allow
-    } else {
-        AuditDecision::Deny("No matching capability".to_string())
-    };
-
-    audit::log(AuditEvent {
-        category: AuditCategory::Permission,
-        action: "check".to_string(),
-        resource: Some(format!("{:?}", cap)),
-        decision,
-        ..Default::default()
-    });
-
-    decision == AuditDecision::Allow
-}
-```
-
-## 4.5 Log Rotation
-
-### 4.5.1 Configuration
-
-```rust
-pub struct LogRotation {
-    pub max_size: u64,        // Maximum size per file
-    pub max_files: u32,       // Maximum number of files
-    pub compress: bool,       // Compress old files
-}
-
-impl LogRotation {
-    pub fn should_rotate(&self, current_size: u64) -> bool {
-        current_size >= self.max_size
-    }
-
-    pub fn rotate(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
-        // 1. Rename current file to .1
-        // 2. Compress old files if enabled
-        // 3. Delete files > max_files
-    }
-}
-```
-
-## 4.6 Regulatory Compliance
-
-### 4.6.1 GDPR
-
-```rust
-// For GDPR compliance:
-// - Logging of personal data access
-// - Configurable retention
-// - Right to deletion
-
-pub struct GdprConfig {
-    pub log_personal_data_access: bool,
-    pub personal_data_patterns: Vec<Regex>,
-    pub retention_days: u32,
-    pub right_to_deletion: bool,
-}
-```
-
-### 4.6.2 ISO 27001
-
-```rust
-// ISO 27001 compliance:
-// - Security auditing
-// - Traceability
-// - Non-repudiation
-
-pub struct Iso27001Config {
-    pub log_all_security_events: bool,
-    pub log_access_control: bool,
-    pub immutability: bool,  // Logs cannot be modified
-    pub integrity_check: bool,  // Log checksum
-}
-```
-
-## 4.7 Analysis Tools
-
-### 4.7.1 Audit CLI
-
-```bash
-# View audit logs
-3va audit view --file /var/log/3va/audit.log
-
-# Filter by category
-3va audit view --category=denied
-
-# Filter by time
-3va audit view --since="2026-05-18T10:00:00Z"
-
-# Generate report
-3va audit report --output=audit-report.html
-
-# Statistics
-3va audit stats --period=24h
-```
-
-### 4.7.2 Log Aggregation
-
-```rust
-// Aggregation from multiple sources
-pub struct AuditAggregator {
-    sources: Vec<Box<dyn AuditSource>>,
-}
-
-impl AuditAggregator {
-    pub fn query(&self, query: AuditQuery) -> Vec<AuditEvent> {
-        // Aggregate events from multiple sources
-        // and return unified results
-    }
-}
-```
-
----
-
-*Audit compliant with ISO 27001, GDPR, and security standards.*
-
-## 4.8 Implementation Status (May 2026)
-
-### ✅ Implemented
+### `AuditEvent` (enum)
 
 ```rust
 // crates/permissions/src/audit.rs
+pub enum AuditEvent {
+    PermissionDenied {
+        timestamp: DateTime<Utc>,
+        capability: String,
+        resource: String,
+        reason: String,
+    },
+    PermissionGranted {
+        timestamp: DateTime<Utc>,
+        capability: String,
+        resource: String,
+    },
+    FileAccess {
+        timestamp: DateTime<Utc>,
+        path: PathBuf,
+        operation: String,
+        allowed: bool,
+    },
+    NetworkAccess {
+        timestamp: DateTime<Utc>,
+        host: String,
+        port: u16,
+        allowed: bool,
+    },
+    ProcessSpawn {
+        timestamp: DateTime<Utc>,
+        command: String,
+        allowed: bool,
+    },
+    EnvAccess {
+        timestamp: DateTime<Utc>,
+        variable: String,
+        allowed: bool,
+    },
+}
+```
+
+### `AuditLog`
+
+Append-only log of `AuditEvent` values. Serializes to JSON.
+
+```rust
+pub struct AuditLog {
+    pub events: Vec<AuditEvent>,
+}
+
+impl AuditLog {
+    pub fn add_event(&mut self, event: AuditEvent)
+    pub fn log_permission_denied(&mut self, capability: &str, resource: &str, reason: &str)
+    pub fn log_file_access(&mut self, path: &Path, operation: &str, allowed: bool)
+    pub fn log_network_access(&mut self, host: &str, port: u16, allowed: bool)
+    pub fn to_json(&self) -> String
+}
+```
+
+### `AuditLogger`
+
+Wraps `AuditLog` and optionally mirrors events to stderr.
+
+```rust
 pub struct AuditLogger {
     log: AuditLog,
     enable_console: bool,
 }
 
 impl AuditLogger {
-    pub fn log_denied(&mut self, capability: &str, resource: &str, reason: &str);
-    pub fn log_file(&mut self, path: &PathBuf, operation: &str, allowed: bool);
-    pub fn log_network(&mut self, host: &str, port: u16, allowed: bool);
-    pub fn export(&self) -> String;  // Exports to JSON
+    pub fn new() -> Self
+    pub fn with_console(mut self) -> Self       // enable stderr mirroring
+    pub fn log_denied(&mut self, capability: &str, resource: &str, reason: &str)
+    pub fn log_file(&mut self, path: &Path, operation: &str, allowed: bool)
+    pub fn log_network(&mut self, host: &str, port: u16, allowed: bool)
+    pub fn get_log(&self) -> &AuditLog
+    pub fn export(&self) -> String              // JSON export
 }
 ```
 
-### 📋 Pending
-- Log rotation
-- Audit CLI (`3va audit`)
-- Automatic integration with PermissionState
-- GDPR/ISO 27001 configs
+## 4.3 JSON Output Format
+
+`AuditLog::to_json()` serializes to a JSON array. Each event follows the shape of its variant:
+
+```json
+[
+  {
+    "FileAccess": {
+      "timestamp": "2026-05-22T14:30:00.123Z",
+      "path": "/app/config.json",
+      "operation": "read",
+      "allowed": true
+    }
+  },
+  {
+    "PermissionDenied": {
+      "timestamp": "2026-05-22T14:30:01.000Z",
+      "capability": "Network",
+      "resource": "api.example.com",
+      "reason": "host not in --allow-net list"
+    }
+  }
+]
+```
+
+## 4.4 Planned Features (not yet implemented)
+
+> **Status: PENDING** — the following are planned design, not current behavior.
+
+### 4.4.1 CLI integration
+
+```bash
+# PLANNED — flags do not exist yet
+3va run app.ts --audit-log=/var/log/3va/audit.log
+3va run app.ts --audit-log=stdout
+3va run app.ts --audit-level=errors
+
+# PLANNED — sub-commands do not exist yet
+3va audit view --file /var/log/3va/audit.log
+3va audit view --category=denied --since="2026-05-18T10:00:00Z"
+3va audit report --output=audit-report.html
+3va audit stats --period=24h
+```
+
+### 4.4.2 Log rotation config
+
+```rust
+// PLANNED — AuditConfig does not exist yet
+pub struct AuditConfig {
+    pub level: AuditLevel,              // off, errors, warnings, info, debug, trace
+    pub destinations: Vec<AuditDestination>, // File(path), Stdout, Stderr, Syslog
+    pub retention_days: u32,
+    pub max_file_size: u64,
+    pub rotate: bool,
+}
+```
+
+### 4.4.3 Automatic integration with `PermissionState`
+
+Currently `AuditLogger` must be driven manually. Planned: `PermissionState::check` will fire audit events automatically on every allow/deny decision.
+
+### 4.4.4 GDPR / ISO 27001
+
+```rust
+// PLANNED — not implemented
+pub struct GdprConfig {
+    pub log_personal_data_access: bool,
+    pub retention_days: u32,
+    pub right_to_deletion: bool,
+}
+
+pub struct Iso27001Config {
+    pub log_all_security_events: bool,
+    pub immutability: bool,   // append-only, no modification
+    pub integrity_check: bool, // checksum per log file
+}
+```
+
+---
+
+*Implemented in `crates/permissions/src/audit.rs`.*
