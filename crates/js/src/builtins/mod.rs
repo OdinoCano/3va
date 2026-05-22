@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod child_process;
 pub mod console;
 pub mod fetch;
 pub mod fs;
@@ -6,6 +7,7 @@ pub mod modules;
 pub mod process;
 pub mod timers;
 pub mod websocket;
+pub mod zlib;
 
 use rquickjs::Ctx;
 use std::sync::Arc;
@@ -25,6 +27,9 @@ pub fn inject_all(
     fetch::inject_fetch(ctx, permissions.clone())?;
     fs::inject_fs(ctx, permissions.clone())?;
     modules::inject_require(ctx, permissions.clone())?;
-    websocket::inject_websocket(ctx, permissions)?;
+    websocket::inject_websocket(ctx, permissions.clone())?;
+    // These run after inject_require so they can overwrite the placeholder stubs
+    zlib::inject_zlib(ctx)?;
+    child_process::inject_child_process(ctx, permissions)?;
     Ok(())
 }

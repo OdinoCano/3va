@@ -2,7 +2,7 @@
 
 ## 4.1 Overview
 
-3va exposes a subset of browser and Node.js-compatible APIs. The table below reflects what is **actually implemented** as of v0.1.0.
+3va exposes a subset of browser and Node.js-compatible APIs. The table below reflects what is **actually implemented** as of v0.2.0.
 
 ## 4.2 API Status
 
@@ -16,12 +16,16 @@
 | `console` | Implemented | `builtins/console.rs` |
 | `Buffer` | Implemented | `builtins/buffer.rs`; Node.js-compatible |
 | `process` | Implemented | `builtins/process.rs` |
+| `AbortController` / `AbortSignal` | Implemented | `modules.rs`; integrates with `fetch` via `Promise.race` |
+| `Blob` / `File` | Implemented | `modules.rs`; `text()`, `arrayBuffer()`, `bytes()`, `slice()`, `stream()` |
+| `FormData` | Implemented | `modules.rs`; `append`, `set`, `get`, `getAll`, `delete`, `forEach`, iteration |
+| `ReadableStream` | Implemented | `modules.rs`; pull model with `getReader`, `pipeTo`, `pipeThrough`, `tee` |
+| `WritableStream` | Implemented | `modules.rs`; `getWriter`, `write`, `close` |
+| `TransformStream` | Implemented | `modules.rs`; `readable` + `writable` pair with shared controller |
+| `URL` / `URLSearchParams` | Implemented | `modules.rs`; full parsing, relative resolution, `canParse()`, iteration |
+| `FileReader` | Implemented | `modules.rs`; `readAsText`, `readAsDataURL`, `readAsArrayBuffer`, `abort` |
 | `perf_hooks` (`performance.now`) | JS stub | `modules.rs`; backed by `Date.now()` |
-| `AbortController` / `AbortSignal` | Not implemented | Planned |
-| `ReadableStream` / `WritableStream` | Not implemented | Planned |
-| `Blob` / `File` / `FileReader` | Not implemented | Planned |
 | `BroadcastChannel` | Not implemented | Planned |
-| `FormData` | Not implemented | Planned |
 | `crypto.subtle` | Not implemented | Planned (requires ML-KEM/ML-DSA crates) |
 
 ## 4.3 `fetch`
@@ -40,7 +44,7 @@ const res2 = await fetch('https://api.example.com/submit', {
 console.log(res2.status);
 ```
 
-Response methods: `.json()`, `.text()`, `.arrayBuffer()`. Requires `--allow-net=<host>`.
+Response methods: `.json()`, `.text()`, `.arrayBuffer()`, `.bytes()`, `.blob()`. Requires `--allow-net=<host>`.
 
 ## 4.4 `WebSocket`
 
@@ -67,7 +71,96 @@ const dec = new TextDecoder('utf-8');
 const str = dec.decode(bytes);          // 'hello'
 ```
 
-## 4.6 `perf_hooks` (stub)
+## 4.6 `AbortController` / `AbortSignal`
+
+```javascript
+const controller = new AbortController();
+const signal = controller.signal;
+
+fetch('https://api.example.com/data', { signal })
+  .catch(err => {
+    if (err.message === 'AbortError') console.log('Fetch aborted');
+  });
+
+setTimeout(() => controller.abort(), 5000);
+
+// Static helpers
+const timedSignal = AbortSignal.timeout(3000);
+const alreadyAborted = AbortSignal.abort('reason');
+```
+
+The abort signal races against the HTTP response using `Promise.race`. Since `ureq` is synchronous, network I/O cannot be cancelled mid-flight, but the rejection propagates immediately.
+
+## 4.7 `Blob` / `File`
+
+```javascript
+const blob = new Blob(['Hello World'], { type: 'text/plain' });
+console.log(blob.size);           // 11
+console.log(blob.type);           // 'text/plain'
+
+const text = await blob.text();
+const buffer = await blob.arrayBuffer();
+const bytes = await blob.bytes();          // Uint8Array
+const slice = blob.slice(0, 5);           // new Blob
+const stream = blob.stream();              // ReadableStream
+
+const file = new File(['content'], 'example.txt', { type: 'text/plain' });
+console.log(file.name);           // 'example.txt'
+console.log(file instanceof Blob);// true
+```
+
+## 4.8 `FormData`
+
+```javascript
+const form = new FormData();
+form.append('username', 'alice');
+form.append('tag', 'admin');
+form.append('tag', 'user');
+
+form.get('username');             // 'alice'
+form.getAll('tag');               // ['admin', 'user']
+form.has('username');             // true
+form.set('username', 'bob');      // replaces all 'username' entries
+form.delete('tag');
+
+form.forEach((value, key) => console.log(key, value));
+
+for (const [key, value] of form) {
+  console.log(key, value);
+}
+```
+
+## 4.9 Streams
+
+```javascript
+// ReadableStream
+const stream = new ReadableStream({
+  start(controller) {
+    controller.enqueue('chunk1');
+    controller.enqueue('chunk2');
+    controller.close();
+  }
+});
+const reader = stream.getReader();
+const { value, done } = await reader.read();
+
+// WritableStream
+const writable = new WritableStream({
+  write(chunk) { console.log('received:', chunk); },
+  close() { console.log('done'); }
+});
+
+// TransformStream
+const transform = new TransformStream({
+  transform(chunk, controller) {
+    controller.enqueue(chunk.toUpperCase());
+  }
+});
+// transform.readable instanceof ReadableStream  → true
+// transform.writable instanceof WritableStream  → true
+```
+
+## 4.10 `perf_hooks` (stub)
 
 Available via `require('perf_hooks')`. Backed by `Date.now()` — not high-resolution.
 
@@ -80,61 +173,9 @@ const elapsed = performance.now() - t0;
 
 ---
 
-## 4.7 Planned APIs (not yet implemented)
+## 4.11 Planned APIs (not yet implemented)
 
-> **Status: PENDING** — these APIs are part of the roadmap but do not work yet. Code using them will throw or silently no-op.
-
-### `AbortController` / `AbortSignal`
-
-```javascript
-// PLANNED — not yet functional
-const controller = new AbortController();
-const signal = controller.signal;
-
-fetch('/api/data', { signal })
-  .catch(err => {
-    if (err.name === 'AbortError') console.log('Fetch aborted');
-  });
-
-controller.abort();
-```
-
-### `ReadableStream` / `WritableStream`
-
-```javascript
-// PLANNED — not yet functional
-const stream = new ReadableStream({
-  start(controller) {
-    controller.enqueue('chunk1');
-    controller.close();
-  }
-});
-
-const reader = stream.getReader();
-const { value, done } = await reader.read();
-```
-
-### `Blob` / `File`
-
-```javascript
-// PLANNED — not yet functional
-const blob = new Blob(['Hello World'], { type: 'text/plain' });
-const file = new File(['content'], 'example.txt', { type: 'text/plain' });
-
-const text = await blob.text();
-const buffer = await blob.arrayBuffer();
-```
-
-### `FormData`
-
-```javascript
-// PLANNED — not yet functional
-const form = new FormData();
-form.append('username', 'alice');
-form.append('file', blob, 'file.txt');
-
-await fetch('/upload', { method: 'POST', body: form });
-```
+> **Status: PENDING** — these APIs are part of the roadmap but do not work yet.
 
 ### `crypto.subtle`
 
@@ -144,11 +185,6 @@ const key = await crypto.subtle.generateKey(
   { name: 'AES-GCM', length: 256 },
   true,
   ['encrypt', 'decrypt']
-);
-const encrypted = await crypto.subtle.encrypt(
-  { name: 'AES-GCM', iv },
-  key,
-  data
 );
 ```
 

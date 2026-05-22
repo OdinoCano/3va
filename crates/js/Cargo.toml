@@ -26,6 +26,7 @@ ureq.workspace = true
 tungstenite.workspace = true
 tokio.workspace = true
 url.workspace = true
+flate2.workspace = true
 oxc_transformer = "0.132"
 oxc_codegen = "0.132"
 oxc_parser = "0.132"

@@ -116,19 +116,16 @@ pub fn eval_module(&self, code: &str, path: &str) -> anyhow::Result<Value> {
 
 ---
 
-## 1.4 Planned — Memory Limits
+## 1.4 Memory Limits
 
-> **Status: PENDING** — memory and stack limits are not yet configured in `JsEngine::new()`.
-
-Planned configuration:
+Heap and GC limits are configured in `JsEngine::new()` (`crates/js/src/lib.rs`):
 
 ```rust
-// PLANNED — not yet applied
-runtime.set_memory_limit(256 * 1024 * 1024);  // 256 MB heap
-runtime.set_max_stack_size(1 * 1024 * 1024);  // 1 MB stack
+runtime.set_memory_limit(256 * 1024 * 1024).await;   // 256 MB heap
+runtime.set_gc_threshold(204 * 1024 * 1024).await;    // GC triggers at 80% (≈204 MB)
 ```
 
-QuickJS will throw `InternalError: out of memory` if the heap is exhausted. When the limit API is integrated, 3va will catch this and return a structured error instead of panicking.
+QuickJS throws `InternalError: out of memory` when the heap limit is reached. Stack size is unbounded by default; a configurable stack limit is planned.
 
 ## 1.5 Planned — WASM Compilation Target
 

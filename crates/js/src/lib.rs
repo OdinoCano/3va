@@ -57,6 +57,10 @@ impl JsEngine {
         let timer_manager = TimerManager::new();
         let runtime_core = Mutex::new(Runtime::new((*permissions).clone()));
 
+        // 256 MB heap limit; GC triggered at 80% (≈204 MB).
+        runtime.set_memory_limit(256 * 1024 * 1024).await;
+        runtime.set_gc_threshold(204 * 1024 * 1024).await;
+
         // Wire the ESM module loader so cross-file imports resolve correctly.
         runtime
             .set_loader(

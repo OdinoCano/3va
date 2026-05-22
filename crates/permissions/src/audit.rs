@@ -83,6 +83,14 @@ impl AuditLog {
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
+
+    pub fn write_to_file(&self, path: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let json = self.to_json();
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(json.as_bytes())?;
+        Ok(())
+    }
 }
 
 impl Default for AuditLog {
