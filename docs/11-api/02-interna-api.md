@@ -1,8 +1,8 @@
-# 02 - API INTERNA DEL RUNTIME
+# 02 - RUNTIME INTERNAL API
 
-## 2.1 APIs Internas
+## 2.1 Internal APIs
 
-APIs disponibles para desarrollo de extensiones y plugins.
+APIs available for extension and plugin development.
 
 ## 2.2 Runtime Core
 
@@ -12,7 +12,7 @@ pub struct Runtime {
     pub permissions: PermissionState,
 }
 
-// Métodos
+// Methods
 impl Runtime {
     pub fn new() -> Self
     pub async fn run(&self) -> anyhow::Result<()>
@@ -20,7 +20,7 @@ impl Runtime {
 }
 ```
 
-## 2.3 Permisos
+## 2.3 Permissions
 
 ```rust
 // crates/permissions/src/lib.rs
@@ -35,7 +35,7 @@ impl PermissionState {
 }
 ```
 
-## 2.4 Motor JS
+## 2.4 JS Engine
 
 ```rust
 // crates/js/src/lib.rs
@@ -75,4 +75,4 @@ pub struct PackageInfo { ... }
 
 ---
 
-*API interna para extensiones y contribuciones.*
+*Internal API for extensions and contributions.*

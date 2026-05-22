@@ -1,68 +1,68 @@
-# 04 - COMPATIBILIDAD RETROACTIVA
+# 04 - BACKWARD COMPATIBILITY
 
-## 4.1 Compatibilidad con Node.js
+## 4.1 Node.js Compatibility
 
-3va prioriza compatibilidad con el ecosistema Node.js.
+3va prioritizes compatibility with the Node.js ecosystem.
 
-## 4.2 APIs Compatibles
+## 4.2 Compatible APIs
 
-| Módulo | Compatibilidad | Notas |
+| Module | Compatibility | Notes |
 |--------|----------------|-------|
-| fs | 95% | Sin soporte para algunos edge cases |
-| http | 99% | Completo |
-| https | 95% | TLS parcial |
-| net | 95% | Unix sockets parcial |
-| crypto | 90% | Algoritmos modernos |
+| fs | 95% | No support for some edge cases |
+| http | 99% | Complete |
+| https | 95% | Partial TLS |
+| net | 95% | Partial Unix sockets |
+| crypto | 90% | Modern algorithms |
 | stream | 90% | Streams2 partial |
-| process | 99% | Completo |
-| buffer | 100% | Completo |
-| events | 100% | Completo |
-| url | 100% | Completo |
-| querystring | 100% | Completo |
-| path | 100% | Completo |
-| os | 100% | Completo |
-| util | 95% | Completo |
+| process | 99% | Complete |
+| buffer | 100% | Complete |
+| events | 100% | Complete |
+| url | 100% | Complete |
+| querystring | 100% | Complete |
+| path | 100% | Complete |
+| os | 100% | Complete |
+| util | 95% | Complete |
 
-## 4.3 Flags de Compatibilidad
+## 4.3 Compatibility Flags
 
-| Flag | Descripcion |
+| Flag | Description |
 |------|-------------|
-| --compat | Modo compatibilidad máxima |
-| --preset=node | Simular Node.js |
+| --compat | Maximum compatibility mode |
+| --preset=node | Simulate Node.js |
 
-## 4.4 Polyfills Automáticos
+## 4.4 Automatic Polyfills
 
-3va polyfill automáticamente APIs no disponibles:
+3va automatically polyfills unavailable APIs:
 
 ```javascript
-// Automático
+// Automatic
 fetch
 AbortController
 TextEncoder
 Performance
 
-// Requiere flag
+// Requires flag
 crypto (some algorithms)
 ```
 
 ## 4.5 Breaking Changes
 
-| Version | Cambio | Migration |
+| Version | Change | Migration |
 |---------|--------|-----------|
-| 1.0 | Removed legacy API | Usar nuevo namespace |
+| 1.0 | Removed legacy API | Use new namespace |
 | 0.9 | Changed default security | --legacy-security |
 
-## 4.6 Testing de Compatibilidad
+## 4.6 Compatibility Testing
 
 ```bash
-# Test suite de compatibilidad
+# Compatibility test suite
 3va test --compat
 
-# Run npm test de paquetes
+# Run npm test of packages
 3va test-compat express
 3va test-compat lodash
 ```
 
 ---
 
-*Compatibilidad targeting 99% Node.js API parity.*
+*Compatibility targeting 99% Node.js API parity.*

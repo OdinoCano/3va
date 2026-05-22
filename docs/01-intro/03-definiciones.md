@@ -1,46 +1,46 @@
-# 03 - DEFINICIONES Y ABREVIATURAS
+# 03 - DEFINITIONS AND ABBREVIATIONS
 
-## 3.1 Términos y Definiciones
+## 3.1 Terms and Definitions
 
-### 3.1.1 Términos del Dominio
+### 3.1.1 Domain Terms
 
-**Capability (Capacidad)**: Un permiso explícito concedido a un proceso para realizar una operación específica, como leer un archivo o conectarse a una red.
+**Capability**: An explicit permission granted to a process to perform a specific operation, such as reading a file or connecting to a network.
 
-**Sandboxing**: Técnica de aislamiento que ejecuta código en un entorno restringido con acceso limitado a recursos del sistema.
+**Sandboxing**: An isolation technique that executes code in a restricted environment with limited access to system resources.
 
-**Deny-by-default (Denegar por defecto)**: Principio de seguridad donde todos los permisos están prohibidos a menos que se concedan explícitamente.
+**Deny-by-default**: A security principle where all permissions are prohibited unless explicitly granted.
 
-**Tree shaking**: Proceso de eliminación de código muerto durante el empaquetado.
+**Tree shaking**: The process of removing dead code during bundling.
 
-**Code splitting**: Técnica de división del código en fragmentos que se cargan bajo demanda.
+**Code splitting**: A technique for splitting code into chunks that are loaded on demand.
 
-**Lockfile**: Archivo que registra las versiones exactas de todas las dependencias para garantizar instalaciones reproducibles.
+**Lockfile**: A file that records the exact versions of all dependencies to ensure reproducible installations.
 
-**Polyfill**: Implementación de una API de JavaScript en entornos que no la soportan nativamente.
+**Polyfill**: An implementation of a JavaScript API in environments that do not natively support it.
 
-**Fuzzing**: Técnica de pruebas que introduce datos aleatorios o semialeatorios para detectar vulnerabilidades.
+**Fuzzing**: A testing technique that introduces random or semi-random data to detect vulnerabilities.
 
-**Supply chain (Cadena de suministro)**: Conjunto de todos los componentes, dependencias y procesos involucrados en el desarrollo y distribución de software.
+**Supply chain**: The set of all components, dependencies, and processes involved in the development and distribution of software.
 
-**Post-cuantum**: Conjunto de algoritmos criptográficos resistentes a ataques de computación cuántica.
+**Post-quantum**: A set of cryptographic algorithms resistant to quantum computing attacks.
 
-### 3.1.2 Términos Técnicos
+### 3.1.2 Technical Terms
 
-**WASM (WebAssembly)**: Formato de instrucciones binarias diseñado para ejecución en navegadores y servidores.
+**WASM (WebAssembly)**: A binary instruction format designed for execution in browsers and servers.
 
-**ESM (ECMAScript Modules)**: Sistema de módulos nativo de JavaScript basado en la especificación ES6+.
+**ESM (ECMAScript Modules)**: JavaScript's native module system based on the ES6+ specification.
 
-**CommonJS**: Sistema de módulos tradicional de Node.js con require() y module.exports.
+**CommonJS**: Node.js's traditional module system using require() and module.exports.
 
-**JSX**: Extensión de sintaxis para JavaScript que permite escribir HTML en archivos JavaScript.
+**JSX**: A syntax extension for JavaScript that allows writing HTML in JavaScript files.
 
-**QuickJS**: Implementación de JavaScript escrita en C con licencia MIT.
+**QuickJS**: A JavaScript implementation written in C with an MIT license.
 
-**Tokio**: Runtime asíncrono para Rust.
+**Tokio**: An asynchronous runtime for Rust.
 
-## 3.2 Abreviaturas
+## 3.2 Abbreviations
 
-| Abreviatura | Significado |
+| Abbreviation | Meaning |
 |-------------|--------------|
 | API | Application Programming Interface |
 | CLI | Command Line Interface |
@@ -61,118 +61,118 @@
 | WASM | WebAssembly |
 | WASI | WebAssembly System Interface |
 
-## 3.3 Convenciones
+## 3.3 Conventions
 
-### 3.3.1 Convenciones de Nomenclatura
+### 3.3.1 Naming Conventions
 
-- **Crates**: Prefijo `vvva_` seguido del nombre del componente (e.g., `vvva_core`, `vvva_permissions`)
-- **Comandos CLI**: kebab-case (e.g., `3va run`, `3va install`)
-- **Flags**: double-dash con kebab-case (e.g., `--allow-net`, `--deny-env`)
-- **Enumeraciones**: PascalCase (e.g., `Capability`, `PermissionState`)
+- **Crates**: Prefix `vvva_` followed by the component name (e.g., `vvva_core`, `vvva_permissions`)
+- **CLI Commands**: kebab-case (e.g., `3va run`, `3va install`)
+- **Flags**: double-dash with kebab-case (e.g., `--allow-net`, `--deny-env`)
+- **Enumerations**: PascalCase (e.g., `Capability`, `PermissionState`)
 
-### 3.3.2 Convenciones de Versiónado
+### 3.3.2 Versioning Conventions
 
-El versionado sigue SemVer (Semantic Versioning) con el formato:
+Versioning follows SemVer (Semantic Versioning) with the format:
 ```
 MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]
 ```
 
-- **MAJOR**: Cambios incompatibles en la API
-- **MINOR**: Funcionalidad nueva compatible
-- **PATCH**: Correcciones compatibles
+- **MAJOR**: Incompatible API changes
+- **MINOR**: Backward-compatible new functionality
+- **PATCH**: Backward-compatible bug fixes
 
-## 3.4 Referencias Normativas
+## 3.4 Normative References
 
-### 3.4.1 Estándares ISO/IEC
+### 3.4.1 ISO/IEC Standards
 
-- ISO/IEC 27001:2022 - Sistemas de gestión de seguridad de la información
-- ISO/IEC 25010:2011 - Calidad de productos de software
-- ISO/IEC 29148:2018 - Ingeniería de requisitos
-- ISO/IEC 12207:2008 - Procesos del ciclo de vida del software
+- ISO/IEC 27001:2022 - Information security management systems
+- ISO/IEC 25010:2011 - Software product quality
+- ISO/IEC 29148:2018 - Requirements engineering
+- ISO/IEC 12207:2008 - Software life cycle processes
 
-### 3.4.2 Estándares IEEE
+### 3.4.2 IEEE Standards
 
-- IEEE 829:2008 - Documentación de pruebas de software
-- IEEE 1012:2016 - Verificación y validación de software
-- IEEE 1063:2002 - Documentación de requisitos de software
+- IEEE 829:2008 - Software test documentation
+- IEEE 1012:2016 - Software verification and validation
+- IEEE 1063:2002 - Software requirements documentation
 
-### 3.4.3 Estándares Europeos
+### 3.4.3 European Standards
 
-- EN 55024:2010 - Equipos de tecnología de información - Características de inmunidad
-- GDPR (Reglamento (UE) 2016/679) - Protección de datos personales
-- eIDAS (Reglamento (UE) 910/2014) - Identificación electrónica y servicios de confianza
+- EN 55024:2010 - Information technology equipment - Immunity characteristics
+- GDPR (Regulation (EU) 2016/679) - Personal data protection
+- eIDAS (Regulation (EU) 910/2014) - Electronic identification and trust services
 
-### 3.4.4 Estándares de la Industria
+### 3.4.4 Industry Standards
 
-- ECMAScript 2024 - Especificación del lenguaje JavaScript
-- CommonJS Modules 1.1.1 - Especificación de módulos
-- Node.js API Documentation - APIs compatibles
+- ECMAScript 2024 - JavaScript language specification
+- CommonJS Modules 1.1.1 - Module specification
+- Node.js API Documentation - Compatible APIs
 
 ---
 
-*Las definiciones en esta sección son vinculantes para la implementación del proyecto.*
+*The definitions in this section are binding for the project implementation.*
 
-## 4.1 Estándares Internacionales
-### 4.1.1 Estándares ISO/IEC
-Referencia	Título	Aplicación
-ISO/IEC 27001:2022	Sistemas de gestión de seguridad de la información	Requisitos de seguridad
-ISO/IEC 27002:2022	Controles de seguridad de la información	Implementación de controles
-ISO/IEC 27005:2022	Gestión de riesgos de seguridad de la información	Análisis de riesgos
-ISO/IEC 25010:2011	Calidad de productos de software	Métricas de calidad
-ISO/IEC 25001:2014	Planificación y gestión de calidad	Gestión de calidad
-ISO/IEC 29148:2018	Ingeniería de requisitos	Documentación de requisitos
-ISO/IEC 12207:2008	Procesos del ciclo de vida del software	Metodología de desarrollo
-ISO/IEC 15289:2019	Documentación de software	Estructura documental
-ISO/IEC 15939:2007	Proceso de medición de software	Métricas
-### 4.1.2 Estándares IEEE
-Referencia	Título	Aplicación
-IEEE 829	Estándar para documentación de pruebas de software	Documentación de testing
-IEEE 1012	Estándar para verificación y validación de software	V&V
-IEEE 1063	Estándar para documentación de requisitos de software	Especificación de requisitos
-IEEE 1008	Estándar para pruebas de unidad de software	Testing unitario
-IEEE 1028	Estándar para inspecciones de software	Revisiones de código
-IEEE 1044	Clasificación de anomalías de software	Gestión de defectos
-IEEE 1059	Guía para técnicas de verificación de software	Técnicas de validación
-IEEE 1074	Estándar para procesos de desarrollo de software	Metodología
-### 4.1.3 Estándares Europeos
-Referencia	Título	Aplicación
-EN 55024:2010	Equipos de TI - Características de inmunidad	Compatibilidad electromagnética
-EN 301 549	Requisitos de accesibilidad para productos ICT	Accesibilidad
-GDPR	Reglamento (UE) 2016/679	Protección de datos
-eIDAS	Reglamento (UE) 910/2014	Firmas electrónicas
-NIS2	Directiva (UE) 2022/2555	Seguridad de redes
-## 4.2 Especificaciones Técnicas
-### 4.2.1 JavaScript y Node.js
-Referencia	Título	Aplicación
-ECMAScript 2024	ECMA-262 15th edition	Especificación del lenguaje
-CommonJS Modules 1.1.1	CommonJS Module Specification	Sistema de módulos
-Node.js API	Node.js Documentation	APIs compatibles
-WHATWG Fetch	Fetch Standard	API fetch
+## 4.1 International Standards
+### 4.1.1 ISO/IEC Standards
+Reference	Title	Application
+ISO/IEC 27001:2022	Information security management systems	Security requirements
+ISO/IEC 27002:2022	Information security controls	Control implementation
+ISO/IEC 27005:2022	Information security risk management	Risk analysis
+ISO/IEC 25010:2011	Software product quality	Quality metrics
+ISO/IEC 25001:2014	Quality planning and management	Quality management
+ISO/IEC 29148:2018	Requirements engineering	Requirements documentation
+ISO/IEC 12207:2008	Software life cycle processes	Development methodology
+ISO/IEC 15289:2019	Software documentation	Document structure
+ISO/IEC 15939:2007	Software measurement process	Metrics
+### 4.1.2 IEEE Standards
+Reference	Title	Application
+IEEE 829	Standard for software test documentation	Testing documentation
+IEEE 1012	Standard for software verification and validation	V&V
+IEEE 1063	Standard for software requirements documentation	Requirements specification
+IEEE 1008	Standard for software unit testing	Unit testing
+IEEE 1028	Standard for software inspections	Code reviews
+IEEE 1044	Classification of software anomalies	Defect management
+IEEE 1059	Guide for software verification techniques	Validation techniques
+IEEE 1074	Standard for software development processes	Methodology
+### 4.1.3 European Standards
+Reference	Title	Application
+EN 55024:2010	IT equipment - Immunity characteristics	Electromagnetic compatibility
+EN 301 549	Accessibility requirements for ICT products	Accessibility
+GDPR	Regulation (EU) 2016/679	Data protection
+eIDAS	Regulation (EU) 910/2014	Electronic signatures
+NIS2	Directive (EU) 2022/2555	Network security
+## 4.2 Technical Specifications
+### 4.2.1 JavaScript and Node.js
+Reference	Title	Application
+ECMAScript 2024	ECMA-262 15th edition	Language specification
+CommonJS Modules 1.1.1	CommonJS Module Specification	Module system
+Node.js API	Node.js Documentation	Compatible APIs
+WHATWG Fetch	Fetch Standard	fetch API
 WHATWG Streams	Streams Standard	Streams API
-W3C WebSocket	WebSocket API	API WebSocket
+W3C WebSocket	WebSocket API	WebSocket API
 ### 4.2.2 WebAssembly
-Referencia	Título	Aplicación
-WASI	WebAssembly System Interface	Interface del sistema
-WASM Core	WebAssembly Core Specification	Especificación del núcleo
-WASM JS API	JavaScript API for WebAssembly	Integración JS
-## 4.3 Documentos de Proyecto
-Identificador	Título	Descripción
-3VA-SPEC-2026-001	Especificación técnica (este documento)	Especificación completa
-3VA-DESIGN-2026-001	Documento de diseño arquitectónico	Arquitectura detallada
-3VA-TEST-2026-001	Plan de pruebas	Estrategia de testing
-3VA-SEC-2026-001	Análisis de seguridad	Modelo de amenazas
-3VA-REQ-2026-001	Especificación de requisitos	Requisitos funcionales
-## 4.4 Recursos Externos
-### 4.4.1 Herramientas y Bibliotecas
-Recurso	URL	Propósito
-Rust	https://rustup.rs/ (https://rustup.rs/)	Lenguaje de implementación
-Tokio	https://tokio.rs/ (https://tokio.rs/)	Runtime asíncrono
-QuickJS	https://bellard.org/quickjs/ (https://bellard.org/quickjs/)	Motor JavaScript
-rquickjs	https://github.com/Delakroa/rquickjs (https://github.com/Delakroa/rquickjs)	Bindings de QuickJS
+Reference	Title	Application
+WASI	WebAssembly System Interface	System interface
+WASM Core	WebAssembly Core Specification	Core specification
+WASM JS API	JavaScript API for WebAssembly	JS integration
+## 4.3 Project Documents
+Identifier	Title	Description
+3VA-SPEC-2026-001	Technical specification (this document)	Full specification
+3VA-DESIGN-2026-001	Architectural design document	Detailed architecture
+3VA-TEST-2026-001	Test plan	Testing strategy
+3VA-SEC-2026-001	Security analysis	Threat model
+3VA-REQ-2026-001	Requirements specification	Functional requirements
+## 4.4 External Resources
+### 4.4.1 Tools and Libraries
+Resource	URL	Purpose
+Rust	https://rustup.rs/ (https://rustup.rs/)	Implementation language
+Tokio	https://tokio.rs/ (https://tokio.rs/)	Asynchronous runtime
+QuickJS	https://bellard.org/quickjs/ (https://bellard.org/quickjs/)	JavaScript engine
+rquickjs	https://github.com/Delakroa/rquickjs (https://github.com/Delakroa/rquickjs)	QuickJS bindings
 Clap	https://clap.rs/ (https://clap.rs/)	CLI parsing
 tracing	https://tokio.rs/recipes/tracing (https://tokio.rs/recipes/tracing)	Logging
-### 4.4.2 Referencias de Seguridad
-Recurso	URL	Propósito
-OWASP Top 10	https://owasp.org/www-project-top-ten/ (https://owasp.org/www-project-top-ten/)	Vulnerabilidades web
-CVE Database	https://cve.mitre.org/ (https://cve.mitre.org/)	Base de vulnerabilidades
-NIST SP 800-53	https://csrc.nist.gov/publications/sp800 (https://csrc.nist.gov/publications/sp800)	Controles de seguridad
+### 4.4.2 Security References
+Resource	URL	Purpose
+OWASP Top 10	https://owasp.org/www-project-top-ten/ (https://owasp.org/www-project-top-ten/)	Web vulnerabilities
+CVE Database	https://cve.mitre.org/ (https://cve.mitre.org/)	Vulnerability database
+NIST SP 800-53	https://csrc.nist.gov/publications/sp800 (https://csrc.nist.gov/publications/sp800)	Security controls

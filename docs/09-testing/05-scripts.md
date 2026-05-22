@@ -1,45 +1,45 @@
-# 05 - SCRIPTS DE TEST Y VERIFICACIÓN
+# 05 - TEST AND VERIFICATION SCRIPTS
 
-## 5.1 Script de Integración (`integration_tests.sh`)
+## 5.1 Integration Script (`integration_tests.sh`)
 
-Este script valida el funcionamiento completo de 3va con todos los registries soportados.
+This script validates the full functioning of 3va with all supported registries.
 
-### Ubicación
+### Location
 ```
 scripts/integration_tests.sh
 ```
 
-### Uso
+### Usage
 ```bash
 ./scripts/integration_tests.sh
 ```
 
-### Fases de Test
+### Test Phases
 
-| Fase | Descripción | Verifica |
+| Phase | Description | Verifies |
 |------|-------------|----------|
-| FASE 1 | NPM Registry | lodash desde registry.npmjs.org |
-| FASE 2 | Yarn Registry | axios desde registry.yarnpkg.com |
-| FASE 3 | JSR Registry | @std/path desde jsr.io |
-| FASE 4 | Import Verification | Coexistencia de paquetes |
-| FASE 5 | Basic Execution | JS/TypeScript puro |
-| FASE 6 | Diagnostics | doctor, help, version |
-| FASE 7 | Bundle | basic, minify, split |
-| FASE 8 | Test Runner | runner y --watch |
-| FASE 9 | Update/Reinstall | comandos disponibles |
-| FASE 10 | Sandbox Security | secure-by-default |
+| PHASE 1 | NPM Registry | lodash from registry.npmjs.org |
+| PHASE 2 | Yarn Registry | axios from registry.yarnpkg.com |
+| PHASE 3 | JSR Registry | @std/path from jsr.io |
+| PHASE 4 | Import Verification | Package coexistence |
+| PHASE 5 | Basic Execution | Pure JS/TypeScript |
+| PHASE 6 | Diagnostics | doctor, help, version |
+| PHASE 7 | Bundle | basic, minify, split |
+| PHASE 8 | Test Runner | runner and --watch |
+| PHASE 9 | Update/Reinstall | available commands |
+| PHASE 10 | Sandbox Security | secure-by-default |
 
-### Requisitos
-- Binary compilado en `target/debug/3va`
-- Network acceso a:
+### Requirements
+- Binary compiled at `target/debug/3va`
+- Network access to:
   - registry.npmjs.org
   - registry.yarnpkg.com
   - jsr.io
 
-### Salida Esperada
+### Expected Output
 ```
 ╔════════════════════════════════════════════════════════════════╗
-║                         RESUMEN FINAL                        ║
+║                         FINAL SUMMARY                        ║
 ╚════════════════════════════════════════════════════════════════╝
 
   Total Tests:   25
@@ -47,9 +47,9 @@ scripts/integration_tests.sh
   Failed:        0
   Success Rate: 100.0%
 
-✓ TODOS LOS TESTS DE INTEGRACIÓN PASARON
+✓ ALL INTEGRATION TESTS PASSED
 
-Registries verificados:
+Registries verified:
   - npm (registry.npmjs.org) ✓
   - yarn (registry.yarnpkg.com) ✓
   - jsr (jsr.io) ✓
@@ -57,64 +57,64 @@ Registries verificados:
 
 ---
 
-## 5.2 Script de Seguridad (`security_verify.sh`)
+## 5.2 Security Script (`security_verify.sh`)
 
-Ejecuta el pipeline completo de verificación de seguridad.
+Runs the full security verification pipeline.
 
-### Ubicación
+### Location
 ```
 scripts/security_verify.sh
 ```
 
-### Uso
+### Usage
 ```bash
 ./scripts/security_verify.sh
 ```
 
-### Niveles de Verificación
+### Verification Levels
 
-| Nivel | Verificación | Estado Requerido |
+| Level | Verification | Required Status |
 |-------|--------------|------------------|
 | 1 | Cargo Hardening | fmt, clippy, test, audit, deny, geiger |
-| 2 | Semgrep | Reglas custom de seguridad |
-| 3 | Fuzzing | Parser y package manager |
+| 2 | Semgrep | Custom security rules |
+| 3 | Fuzzing | Parser and package manager |
 | 4 | Sanitizers | ASAN, UBSAN |
 | 5 | Security Tests | path_traversal, sandbox_escape, etc. |
 | 6 | Supply Chain | Cargo.lock, cargo vet |
 | 7 | CodeQL | GitHub Advanced Security |
 
-### Instalación de Herramientas
+### Tool Installation
 ```bash
-# Nivel 1
+# Level 1
 cargo install cargo-audit
 cargo install cargo-deny
 cargo install cargo-geiger
 
-# Nivel 2
-pip install semgrep  # o: npm install -g semgrep
+# Level 2
+pip install semgrep  # or: npm install -g semgrep
 
-# Nivel 3
+# Level 3
 cargo install cargo-fuzz
 ```
 
-### Instalación de Herramientas (automático)
-El script intenta instalar las herramientas faltantes automáticamente.
+### Tool Installation (automatic)
+The script attempts to install missing tools automatically.
 
-### Salida Esperada
+### Expected Output
 ```
 ══════════════════════════════════════════════════════════
-                    RESUMEN DE SEGURIDAD                   
+                    SECURITY SUMMARY                   
 ══════════════════════════════════════════════════════════
 
 Failures:  0
 Warnings:  X
 
-✓ Pipeline de seguridad PASSED
+✓ Security pipeline PASSED
 ```
 
 ---
 
-## 53. Pipeline CI/CD Recomendado
+## 5.3 Recommended CI/CD Pipeline
 
 ### GitHub Actions
 ```yaml
@@ -147,9 +147,9 @@ jobs:
 
 ---
 
-## 5.4 Tests de Seguridad Específicos
+## 5.4 Specific Security Tests
 
-El proyecto incluye tests de seguridad en `tests/security/`:
+The project includes security tests in `tests/security/`:
 
 ```bash
 # Path traversal
@@ -167,4 +167,4 @@ cargo test --test security dos
 
 ---
 
-*Scripts conformes a IEEE 829 test documentation standard.*
+*Scripts conforming to IEEE 829 test documentation standard.*

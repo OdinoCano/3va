@@ -1,119 +1,119 @@
-# 02 - COMANDOS DISPONIBLES
+# 02 - AVAILABLE COMMANDS
 
-## 2.1 Catálogo de Comandos
+## 2.1 Command Catalog
 
-Este documento describe todos los comandos disponibles en la CLI de 3va.
+This document describes all available commands in the 3va CLI.
 
 ---
 
-## 2.2 Comandos de Ejecución
+## 2.2 Execution Commands
 
 ### 2.2.1 `run`
 
-Ejecuta un archivo JavaScript o TypeScript en un entorno sandboxed. Los permisos son denegados por defecto.
+Executes a JavaScript or TypeScript file in a sandboxed environment. Permissions are denied by default.
 
-**Firma:**
+**Signature:**
 ```
 3va run [OPTIONS] <FILE>
 ```
 
-**Parámetros:**
-| Parámetro | Tipo | Descripción |
+**Parameters:**
+| Parameter | Type | Description |
 |-----------|------|-------------|
-| `FILE` | `path` (requerido) | Ruta al archivo `.js` o `.ts` a ejecutar |
+| `FILE` | `path` (required) | Path to the `.js` or `.ts` file to execute |
 
-**Opciones:**
-| Opción | Tipo | Descripción |
+**Options:**
+| Option | Type | Description |
 |--------|------|-------------|
-| `--allow-read=<path>` | `path` (repetible) | Concede permiso de lectura a la ruta indicada. Se puede especificar varias veces. |
-| `--allow-write=<path>` | `path` (repetible) | Concede permiso de escritura a la ruta indicada. Se puede especificar varias veces. |
-| `--allow-net=<host>` | `string` (repetible) | Concede acceso de red al host indicado. Se puede especificar varias veces. |
-| `--allow-env` | `bool` | Permite acceso a variables de entorno del proceso. |
-| `--allow-child-process` | `bool` | Permite lanzar procesos hijos. |
-| `--interactive` | `bool` | Activa el prompt interactivo de permisos en tiempo de ejecución. |
+| `--allow-read=<path>` | `path` (repeatable) | Grants read permission to the specified path. Can be specified multiple times. |
+| `--allow-write=<path>` | `path` (repeatable) | Grants write permission to the specified path. Can be specified multiple times. |
+| `--allow-net=<host>` | `string` (repeatable) | Grants network access to the specified host. Can be specified multiple times. |
+| `--allow-env` | `bool` | Allows access to process environment variables. |
+| `--allow-child-process` | `bool` | Allows spawning child processes. |
+| `--interactive` | `bool` | Enables the interactive permission prompt at runtime. |
 
-**Comportamiento:**
-1. Carga y valida el archivo de entrada.
-2. Inicializa `PermissionState` con los permisos concedidos.
-3. Transpila TypeScript automáticamente si la extensión es `.ts`.
-4. Ejecuta el archivo en el motor QuickJS.
-5. Corre el event loop hasta completar timers, microtasks y callbacks pendientes.
+**Behavior:**
+1. Loads and validates the input file.
+2. Initializes `PermissionState` with the granted permissions.
+3. Automatically transpiles TypeScript if the extension is `.ts`.
+4. Executes the file in the QuickJS engine.
+5. Runs the event loop until pending timers, microtasks, and callbacks complete.
 
-**Ejemplos:**
+**Examples:**
 ```bash
-# Ejecución sin permisos
+# Execution without permissions
 3va run app.ts
 
-# Permiso de lectura a un directorio
+# Read permission to a directory
 3va run app.ts --allow-read=/app/data
 
-# Permiso de red
+# Network permission
 3va run app.ts --allow-net=api.example.com
 
-# Múltiples permisos
+# Multiple permissions
 3va run app.ts --allow-read=/config --allow-read=/data --allow-net=api.example.com --allow-env
 
-# Modo interactivo (el runtime solicita permisos al usuario conforme los necesita)
+# Interactive mode (the runtime requests permissions from the user as needed)
 3va run app.ts --interactive
 ```
 
 ---
 
-## 2.3 Comandos de Package Manager
+## 2.3 Package Manager Commands
 
 ### 2.3.1 `install`
 
-Instala un paquete desde un registry. Requiere `--allow-net` con el host del registry. Nunca ejecuta scripts post-install.
+Installs a package from a registry. Requires `--allow-net` with the registry host. Never executes post-install scripts.
 
-**Firma:**
+**Signature:**
 ```
 3va install [<PACKAGE>[@<VERSION>]] --allow-net=<registry-host>
 ```
 
-**Parámetros:**
-| Parámetro | Tipo | Descripción |
+**Parameters:**
+| Parameter | Type | Description |
 |-----------|------|-------------|
-| `PACKAGE[@VERSION]` | `string` (opcional) | Paquete a instalar con versión opcional. Si se omite el comando completo, instala dependencias del `package.json`. |
+| `PACKAGE[@VERSION]` | `string` (optional) | Package to install with optional version. If the entire command is omitted, installs dependencies from `package.json`. |
 
-**Opciones:**
-| Opción | Tipo | Descripción |
+**Options:**
+| Option | Type | Description |
 |--------|------|-------------|
-| `--allow-net=<host>` | `string` | **Requerido.** Host del registry. Determina qué registry se utiliza. |
+| `--allow-net=<host>` | `string` | **Required.** Registry host. Determines which registry is used. |
 
-**El registry se deriva del host:**
-| `--allow-net` | Registry usado |
+**The registry is derived from the host:**
+| `--allow-net` | Registry used |
 |---------------|---------------|
 | `registry.npmjs.org` | npm |
 | `registry.yarnpkg.com` | Yarn |
-| `jsr.io` | JSR (solo paquetes con scope `@scope/name`) |
-| Cualquier otro host | Registry npm-compatible personalizado |
+| `jsr.io` | JSR (scoped packages only `@scope/name`) |
+| Any other host | Custom npm-compatible registry |
 
-> No existe un flag `--registry` separado — el registry queda determinado exclusivamente por el host autorizado en `--allow-net`, coherente con el modelo de capacidades de 3va.
+> There is no separate `--registry` flag — the registry is determined exclusively by the host authorized in `--allow-net`, consistent with 3va's capability model.
 
-**Resolución de versión:**
-- Si no se especifica versión, se usa `dist-tags.latest`.
-- Si la versión solicitada no existe, se muestran las 5 versiones más cercanas por distancia semver.
+**Version resolution:**
+- If no version is specified, `dist-tags.latest` is used.
+- If the requested version does not exist, the 5 closest versions by semver distance are shown.
 
-**Tras una instalación exitosa:**
-- Actualiza `package.json` con la dependencia.
-- Escribe o actualiza `3va-lock.json` con la versión exacta y el registry de origen.
+**After a successful installation:**
+- Updates `package.json` with the dependency.
+- Writes or updates `3va-lock.json` with the exact version and source registry.
 
-**Ejemplos:**
+**Examples:**
 ```bash
-# Desde npm (última versión)
+# From npm (latest version)
 3va install axios --allow-net=registry.npmjs.org
 
-# Desde npm (versión exacta)
+# From npm (exact version)
 3va install axios@1.7.2 --allow-net=registry.npmjs.org
 
-# Desde Yarn
+# From Yarn
 3va install react --allow-net=registry.yarnpkg.com
 
-# Desde JSR (requiere @scope/name)
+# From JSR (requires @scope/name)
 3va install @std/path --allow-net=jsr.io
 3va install @std/path@0.196.0 --allow-net=jsr.io
 
-# Sin --allow-net: error explicativo con el comando correcto
+# Without --allow-net: explanatory error with the correct command
 3va install axios
 # ✗ Network access denied.
 #   3va install axios --allow-net=registry.npmjs.org
@@ -123,14 +123,14 @@ Instala un paquete desde un registry. Requiere `--allow-net` con el host del reg
 
 ### 2.3.2 `reinstall`
 
-Fuerza la reinstalación de un paquete aunque ya esté instalado. Útil para reparar una instalación corrupta o cambiar de versión.
+Forces reinstallation of a package even if already installed. Useful for repairing a corrupted installation or changing version.
 
-**Firma:**
+**Signature:**
 ```
 3va reinstall <PACKAGE>[@<VERSION>] --allow-net=<registry-host>
 ```
 
-**Ejemplos:**
+**Examples:**
 ```bash
 3va reinstall axios --allow-net=registry.npmjs.org
 3va reinstall axios@1.6.0 --allow-net=registry.npmjs.org
@@ -141,31 +141,31 @@ Fuerza la reinstalación de un paquete aunque ya esté instalado. Útil para rep
 
 ### 2.3.3 `update`
 
-Actualiza paquetes instalados a su última versión, respetando el registry de origen registrado en `3va-lock.json`.
+Updates installed packages to their latest version, respecting the source registry recorded in `3va-lock.json`.
 
-**Firma:**
+**Signature:**
 ```
 3va update [<PACKAGE>...] --allow-net=<hosts>
 ```
 
-**Parámetros:**
-| Parámetro | Tipo | Descripción |
+**Parameters:**
+| Parameter | Type | Description |
 |-----------|------|-------------|
-| `PACKAGE` | `string[]` (opcional) | Paquetes a actualizar. Si se omite, actualiza todos. |
+| `PACKAGE` | `string[]` (optional) | Packages to update. If omitted, updates all. |
 
-**Opciones:**
-| Opción | Tipo | Descripción |
+**Options:**
+| Option | Type | Description |
 |--------|------|-------------|
-| `--allow-net=<hosts>` | `string` | Hosts autorizados, separados por comas. Deben cubrir todos los registries requeridos. |
+| `--allow-net=<hosts>` | `string` | Authorized hosts, comma-separated. Must cover all required registries. |
 
-**Comportamiento:**
-1. Lee `3va-lock.json` y el campo `registry` de cada dependencia.
-2. Agrupa los paquetes a actualizar por registry.
-3. Verifica que `--allow-net` incluya todos los hosts requeridos.
-4. Si falta algún host, muestra el comando exacto que el usuario debe ejecutar.
-5. Actualiza cada paquete desde su registry original.
+**Behavior:**
+1. Reads `3va-lock.json` and the `registry` field of each dependency.
+2. Groups packages to update by registry.
+3. Verifies that `--allow-net` includes all required hosts.
+4. If a host is missing, shows the exact command the user should run.
+5. Updates each package from its original registry.
 
-**Si falta `--allow-net`:**
+**If `--allow-net` is missing:**
 ```
 ✗ Update requires network access to:
 
@@ -175,226 +175,226 @@ Actualiza paquetes instalados a su última versión, respetando el registry de o
 Run: 3va update --allow-net=registry.npmjs.org,jsr.io
 ```
 
-**Ejemplos:**
+**Examples:**
 ```bash
-# Actualizar todos los paquetes
+# Update all packages
 3va update --allow-net=registry.npmjs.org,jsr.io
 
-# Actualizar un paquete específico
+# Update a specific package
 3va update axios --allow-net=registry.npmjs.org
 
-# Actualizar varios paquetes de distintos registries
+# Update multiple packages from different registries
 3va update axios @std/path --allow-net=registry.npmjs.org,jsr.io
 ```
 
 ---
 
-## 2.4 Comandos de Testing
+## 2.4 Testing Commands
 
 ### 2.4.1 `test`
 
-Ejecuta la suite de pruebas del proyecto.
+Runs the project's test suite.
 
-**Firma:**
+**Signature:**
 ```
 3va test [<PATHS>...] [OPTIONS]
 ```
 
-**Parámetros:**
-| Parámetro | Tipo | Descripción |
+**Parameters:**
+| Parameter | Type | Description |
 |-----------|------|-------------|
-| `PATHS` | `path[]` (opcional) | Archivos o directorios donde buscar tests. Por defecto, busca recursivamente en `.` |
+| `PATHS` | `path[]` (optional) | Files or directories to search for tests. By default, searches recursively in `.` |
 
-**Opciones:**
-| Opción | Abreviatura | Descripción |
+**Options:**
+| Option | Abbreviation | Description |
 |--------|-------------|-------------|
-| `--watch` | | Ejecuta los tests en modo observador: se re-ejecutan automáticamente al detectar cambios en archivos. |
-| `--coverage` | | Genera informe de cobertura de líneas y ramas al finalizar. |
-| `--update-snapshots` | `-u` | Sobreescribe los snapshots existentes con los valores actuales. |
+| `--watch` | | Runs tests in watch mode: they are re-executed automatically when file changes are detected. |
+| `--coverage` | | Generates line and branch coverage report upon completion. |
+| `--update-snapshots` | `-u` | Overwrites existing snapshots with current values. |
 
-**Descubrimiento automático:**
+**Auto-discovery:**
 
-El runner detecta archivos con las siguientes extensiones:
+The runner detects files with the following extensions:
 - `*.test.js`
 - `*.test.ts`
 - `*.spec.js`
 - `*.spec.ts`
 
-**Ejemplos:**
+**Examples:**
 ```bash
-# Ejecutar todos los tests del proyecto
+# Run all project tests
 3va test
 
-# Ejecutar tests en un directorio concreto
+# Run tests in a specific directory
 3va test tests/
 
-# Ejecutar un archivo específico
+# Run a specific file
 3va test tests/auth.test.ts
 
-# Modo observador
+# Watch mode
 3va test --watch
 
-# Con cobertura
+# With coverage
 3va test --coverage
 
-# Actualizar snapshots desactualizados
+# Update outdated snapshots
 3va test --update-snapshots
 3va test -u
 
-# Combinar flags
+# Combine flags
 3va test tests/ --coverage --watch
 ```
 
 ---
 
-## 2.5 Comandos de Build
+## 2.5 Build Commands
 
 ### 2.5.1 `bundle`
 
-Empaqueta una aplicación desde un punto de entrada único, resolviendo imports y aplicando tree-shaking.
+Bundles an application from a single entry point, resolving imports and applying tree-shaking.
 
-**Firma:**
+**Signature:**
 ```
 3va bundle <INPUT> [-o <OUTPUT>] [OPTIONS]
 ```
 
-**Parámetros:**
-| Parámetro | Tipo | Descripción |
+**Parameters:**
+| Parameter | Type | Description |
 |-----------|------|-------------|
-| `INPUT` | `path` (requerido) | Archivo de entrada (punto de entrada de la aplicación) |
+| `INPUT` | `path` (required) | Entry file (application entry point) |
 
-**Opciones:**
-| Opción | Abreviatura | Default | Descripción |
+**Options:**
+| Option | Abbreviation | Default | Description |
 |--------|-------------|---------|-------------|
-| `--output <path>` | `-o` | `dist/bundle.js` | Ruta del archivo bundle generado |
-| `--split` | | | Genera chunks separados (code splitting) |
-| `--minify` | | | Minifica el código de salida |
-| `--source-map` | | | Genera archivo `.map` junto al bundle |
+| `--output <path>` | `-o` | `dist/bundle.js` | Output bundle file path |
+| `--split` | | | Generates separate chunks (code splitting) |
+| `--minify` | | | Minifies output code |
+| `--source-map` | | | Generates `.map` file alongside the bundle |
 
-**Ejemplos:**
+**Examples:**
 ```bash
-# Bundle básico (salida en dist/bundle.js)
+# Basic bundle (output in dist/bundle.js)
 3va bundle src/index.ts
 
-# Bundle con salida personalizada
+# Bundle with custom output
 3va bundle src/index.ts -o dist/app.js
 
-# Bundle para producción
+# Production bundle
 3va bundle src/index.ts --minify --source-map
 
-# Bundle con code splitting
+# Bundle with code splitting
 3va bundle src/index.ts --split -o dist/
 ```
 
 ---
 
-## 2.6 Comandos de Desarrollo
+## 2.6 Development Commands
 
 ### 2.6.1 `dev`
 
-Inicia el servidor de desarrollo con recarga en caliente (HMR) y servicio de archivos estáticos.
+Starts the development server with hot module replacement (HMR) and static file serving.
 
-**Firma:**
+**Signature:**
 ```
 3va dev [OPTIONS]
 ```
 
-**Opciones:**
-| Opción | Default | Descripción |
+**Options:**
+| Option | Default | Description |
 |--------|---------|-------------|
-| `--port <N>` | `3000` | Puerto en el que escucha el servidor |
-| `--host <H>` | `127.0.0.1` | Dirección de red a la que se enlaza |
-| `--open` | | Abre el navegador automáticamente al iniciar |
-| `--public-dir <D>` | `public/` | Directorio de archivos estáticos a servir |
+| `--port <N>` | `3000` | Port the server listens on |
+| `--host <H>` | `127.0.0.1` | Network address to bind to |
+| `--open` | | Opens the browser automatically on start |
+| `--public-dir <D>` | `public/` | Static files directory to serve |
 
-**Comportamiento:**
-1. Realiza una compilación inicial al arrancar.
-2. Vigila cambios en archivos `.js`, `.ts`, `.jsx`, `.tsx` con un debounce de 300 ms.
-3. Al detectar cambios, hace rebuild y notifica a los clientes conectados via HMR.
-4. Sirve archivos estáticos desde `--public-dir` con los MIME types correctos.
-5. Rutas no encontradas devuelven `public/index.html` (fallback SPA).
-6. Si no existe `public/index.html`, sirve una página de desarrollo integrada.
+**Behavior:**
+1. Performs an initial compilation on startup.
+2. Watches for changes in `.js`, `.ts`, `.jsx`, `.tsx` files with a 300 ms debounce.
+3. On detecting changes, rebuilds and notifies connected clients via HMR.
+4. Serves static files from `--public-dir` with correct MIME types.
+5. Unmatched routes return `public/index.html` (SPA fallback).
+6. If `public/index.html` does not exist, serves a built-in development page.
 
 **HMR (Hot Module Replacement):**
-- El endpoint SSE es `/__hmr`.
-- 3va inyecta automáticamente el script cliente HMR justo antes de `</body>` en todos los archivos HTML servidos.
-- Los clientes conectados reciben notificaciones de rebuild sin necesidad de recargar manualmente.
+- The SSE endpoint is `/__hmr`.
+- 3va automatically injects the HMR client script just before `</body>` in all served HTML files.
+- Connected clients receive rebuild notifications without needing to manually reload.
 
-**Ejemplos:**
+**Examples:**
 ```bash
-# Servidor de desarrollo con configuración por defecto
+# Development server with default configuration
 3va dev
 
-# Puerto y host personalizados
+# Custom port and host
 3va dev --port 8080 --host 0.0.0.0
 
-# Abrir el navegador automáticamente
+# Open browser automatically
 3va dev --open
 
-# Directorio público alternativo
+# Alternative public directory
 3va dev --public-dir www/
 
-# Configuración completa
+# Full configuration
 3va dev --port 4000 --host 0.0.0.0 --open --public-dir static/
 ```
 
 ---
 
-## 2.7 Comandos de Diagnóstico
+## 2.7 Diagnostic Commands
 
 ### 2.7.1 `audit`
 
-Audita las dependencias instaladas en hasta **tres fases**. Las tres fases se ejecutan independientemente: un error en una fase no cancela las siguientes.
+Audits installed dependencies in up to **three phases**. All three phases run independently: an error in one phase does not cancel the following ones.
 
-**Firma:**
+**Signature:**
 ```
 3va audit [OPTIONS]
 ```
 
-**Opciones:**
-| Opción | Descripción |
+**Options:**
+| Option | Description |
 |--------|-------------|
-| `--deny` | Sale con código de error ≠ 0 si se detecta algún hallazgo de severidad **CRITICAL** o **HIGH**. Recomendado como gate en pipelines CI/CD. |
-| `--update-cache` | Ignora la caché local (TTL 24 h) y descarga datos frescos de la API OSV. |
-| `--secrets` | Activa la Fase 3: detección de secretos hardcodeados en el código de dependencias. |
-| `--json` | Emite la salida en formato JSON machine-readable en lugar del formato humano. |
+| `--deny` | Exits with a non-zero error code if any finding of **CRITICAL** or **HIGH** severity is detected. Recommended as a gate in CI/CD pipelines. |
+| `--update-cache` | Ignores the local cache (TTL 24 h) and downloads fresh data from the OSV API. |
+| `--secrets` | Enables Phase 3: detection of hardcoded secrets in dependency code. |
+| `--json` | Outputs machine-readable JSON instead of human-readable format. |
 
-**Fases de auditoría:**
+**Audit phases:**
 
-**Fase 1 — Análisis estático de malware**
-Escanea el código extraído en `node_modules/` buscando patrones maliciosos conocidos:
-- Exfiltración de datos (envío de variables de entorno, credenciales del sistema)
-- Inyección de comandos en scripts de instalación
-- Ofuscación sospechosa (`eval`, `Function`, cadenas codificadas en base64)
-- Mineros de criptomonedas (fingerprints de stratum/pool)
+**Phase 1 — Static malware analysis**
+Scans extracted code in `node_modules/` for known malicious patterns:
+- Data exfiltration (sending environment variables, system credentials)
+- Command injection in installation scripts
+- Suspicious obfuscation (`eval`, `Function`, base64-encoded strings)
+- Cryptocurrency miners (stratum/pool fingerprints)
 
-**Fase 2 — Vulnerabilidades conocidas (OSV)**
-- Consulta `https://api.osv.dev/v1/querybatch` en lotes de hasta 100 paquetes.
-- Lee `3va-lock.json` para obtener versiones exactas; si no existe, recorre `node_modules/` como fallback.
-- Cachea resultados en `~/.cache/3va/audit/` durante 24 horas.
-- Si la API no está disponible, usa la caché stale y avisa al usuario — nunca falla por problemas de conectividad.
-- Solo se transmite `{ name, version, ecosystem }` a OSV. No se envía código fuente ni rutas de archivos.
+**Phase 2 — Known vulnerabilities (OSV)**
+- Queries `https://api.osv.dev/v1/querybatch` in batches of up to 100 packages.
+- Reads `3va-lock.json` for exact versions; if it does not exist, falls back to walking `node_modules/`.
+- Caches results in `~/.cache/3va/audit/` for 24 hours.
+- If the API is unavailable, uses stale cache and warns the user — never fails due to connectivity issues.
+- Only `{ name, version, ecosystem }` is transmitted to OSV. No source code or file paths are sent.
 
-**Fase 3 — Detección de secretos (requiere `--secrets`)**
-Escanea dependencias buscando secretos hardcodeados mediante `SecretsScanner`:
-- Claves de AWS (`AKIA...`)
-- Tokens de GitHub (`ghp_`, `ghs_`, `gho_`)
-- Claves privadas PEM (`-----BEGIN ... PRIVATE KEY-----`)
-- Tokens JWT (`eyJ...`)
-- Claves de API de Stripe (`sk_live_...`)
-- Otros patrones de secretos comunes
+**Phase 3 — Secret detection (requires `--secrets`)**
+Scans dependencies for hardcoded secrets using `SecretsScanner`:
+- AWS keys (`AKIA...`)
+- GitHub tokens (`ghp_`, `ghs_`, `gho_`)
+- Private PEM keys (`-----BEGIN ... PRIVATE KEY-----`)
+- JWT tokens (`eyJ...`)
+- Stripe API keys (`sk_live_...`)
+- Other common secret patterns
 
-**Severidad OSV:**
-| Rango CVSS v3 | Etiqueta |
-|---------------|---------|
+**OSV Severity:**
+| CVSS v3 Range | Label |
+|---------------|-------|
 | ≥ 9.0 | CRITICAL |
 | ≥ 7.0 | HIGH |
 | ≥ 4.0 | MEDIUM |
 | < 4.0 | LOW |
 
-La severidad se determina en este orden: CVSS v3 vector → CVSS v2 score → campo `database_specific.severity` (formato GitHub Advisory).
+Severity is determined in this order: CVSS v3 vector → CVSS v2 score → `database_specific.severity` field (GitHub Advisory format).
 
-**Formato JSON (`--json`):**
+**JSON format (`--json`):**
 ```json
 {
   "passed": true,
@@ -413,34 +413,34 @@ La severidad se determina en este orden: CVSS v3 vector → CVSS v2 score → ca
   }
 }
 ```
-> Cuando se usa `--json`, todo el output human-readable se suprime y solo se emite el JSON a stdout.
+> When using `--json`, all human-readable output is suppressed and only JSON is emitted to stdout.
 
-**Caché local:**
+**Local cache:**
 ```
 ~/.cache/3va/audit/
   lodash@4.17.20.json
   axios@1.7.9.json
-  @scope__pkg@2.0.0.json    ← @ y / sanitizados en el nombre de archivo
+  @scope__pkg@2.0.0.json    ← @ and / sanitized in filename
 ```
 
-**Ejemplos:**
+**Examples:**
 ```bash
-# Auditoría estándar (malware + CVEs)
+# Standard audit (malware + CVEs)
 3va audit
 
-# CI/CD: falla si hay HIGH o CRITICAL
+# CI/CD: fail on HIGH or CRITICAL
 3va audit --deny
 
-# Incluir detección de secretos
+# Include secret detection
 3va audit --secrets
 
-# Forzar datos frescos de OSV
+# Force fresh OSV data
 3va audit --update-cache
 
-# Salida JSON (para integración con otras herramientas)
+# JSON output (for integration with other tools)
 3va audit --json
 
-# Auditoría completa con salida JSON para CI
+# Full audit with JSON output for CI
 3va audit --secrets --deny --json
 ```
 
@@ -448,30 +448,30 @@ La severidad se determina en este orden: CVSS v3 vector → CVSS v2 score → ca
 
 ### 2.7.2 `sandbox`
 
-Abre un REPL interactivo de JavaScript aislado en sandbox.
+Opens an isolated JavaScript REPL in a sandbox.
 
-**Firma:**
+**Signature:**
 ```
 3va sandbox
 ```
 
-**Comportamiento:**
-- En TTY: abre el REPL interactivo con soporte multi-línea. El detector de brackets rastrean paréntesis, corchetes y llaves para determinar cuándo una expresión está completa.
-- En pipe / CI (stdin no-TTY): sale inmediatamente sin bloquear el proceso.
-- Los objetos se muestran en formato JSON estilo Node.js.
-- Las sentencias que producen `undefined` lo muestran explícitamente.
+**Behavior:**
+- In TTY: opens the interactive REPL with multi-line support. The bracket matcher tracks parentheses, brackets, and braces to determine when an expression is complete.
+- In pipe / CI (non-TTY stdin): exits immediately without blocking the process.
+- Objects are displayed in Node.js-style JSON format.
+- Statements that produce `undefined` display it explicitly.
 
-**Comandos de sesión REPL:**
-| Comando | Descripción |
+**REPL session commands:**
+| Command | Description |
 |---------|-------------|
-| `.help` | Muestra la lista de comandos disponibles |
-| `.exit` | Sale del REPL |
-| `.clear` | Limpia el contexto de la sesión actual |
-| `.allow-read <path>` | Concede permiso de lectura a la ruta indicada en la sesión |
-| `.allow-net <host>` | Concede acceso de red al host indicado en la sesión |
-| `.permissions` | Lista todos los permisos actualmente concedidos en la sesión |
+| `.help` | Shows the list of available commands |
+| `.exit` | Exits the REPL |
+| `.clear` | Clears the current session context |
+| `.allow-read <path>` | Grants read permission to the specified path in the session |
+| `.allow-net <host>` | Grants network access to the specified host in the session |
+| `.permissions` | Lists all currently granted permissions in the session |
 
-**Ejemplo de sesión:**
+**Session example:**
 ```
 3va sandbox
 > 1 + 1
@@ -492,24 +492,24 @@ Granted permissions:
 
 ### 2.7.3 `doctor`
 
-Verifica la salud del runtime y del entorno del sistema.
+Checks the health of the runtime and system environment.
 
-**Firma:**
+**Signature:**
 ```
 3va doctor
 ```
 
-Comprueba la instalación del binario, la configuración del entorno, los archivos de bloqueo y otros requisitos del sistema. Útil para diagnosticar problemas de instalación o configuración.
+Verifies the binary installation, environment configuration, lock files, and other system requirements. Useful for diagnosing installation or configuration issues.
 
 ---
 
-## 2.8 Opción Global
+## 2.8 Global Option
 
 ### `--accessible`
 
-Activa el modo accesible: deshabilita colores, animaciones y caracteres especiales en la salida. Conforme a EN 301 549 para lectores de pantalla y terminales Braille.
+Enables accessible mode: disables colors, animations, and special characters in output. Compliant with EN 301 549 for screen readers and Braille terminals.
 
-Se puede combinar con cualquier subcomando:
+Can be combined with any subcommand:
 
 ```bash
 3va --accessible run app.ts
@@ -520,4 +520,4 @@ Se puede combinar con cualquier subcomando:
 
 ---
 
-*Comandos conformes a IEEE 829 y diseño de CLI seguro por defecto.*
+*Commands compliant with IEEE 829 and secure-by-default CLI design.*

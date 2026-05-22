@@ -2,22 +2,22 @@
 
 ## 3.1 Snapshots
 
-Los snapshots guardan serializaciones de valores para comparar.
+Snapshots store serializations of values for comparison.
 
-## 3.2 Uso
+## 3.2 Usage
 
 ```javascript
-// Crear snapshot
+// Create snapshot
 test("renders correctly", () => {
   const tree = render(<App />);
   expect(tree).toMatchSnapshot();
 });
 
-// Actualizar snapshots
+// Update snapshots
 3va test --update-snapshots
 ```
 
-## 3.3 Ubicación
+## 3.3 Location
 
 ```
 __snapshots__/
@@ -25,7 +25,7 @@ __snapshots__/
 └── utils.test.js.snap
 ```
 
-## 3.4 Formato
+## 3.4 Format
 
 ```javascript
 // __snapshots__/test.js.snap
@@ -39,7 +39,7 @@ exports[`test name 1`] = `
 ## 3.5 Inline Snapshots
 
 ```javascript
-// Snapshot inline en el test
+// Inline snapshot in the test
 expect(value).toMatchInlineSnapshot(`
   <div>value</div>
 `);
@@ -47,4 +47,4 @@ expect(value).toMatchInlineSnapshot(`
 
 ---
 
-*Snapshots conforme a Jest snapshot.*
+*Snapshots conforming to Jest snapshot.*

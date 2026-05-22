@@ -14,32 +14,32 @@ The question is not "if" but "how well contained".
 
 ---
 
-## Pipeline de Seguridad
+## Security Pipeline
 
-### Nivel 1 - Cargo Hardening (Obligatorio)
+### Level 1 - Cargo Hardening (Mandatory)
 
 ```bash
 ./scripts/security_verify.sh
 ```
 
-Ejecuta automáticamente:
+Automatically executes:
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all-features`
 - `cargo audit --deny-warnings`
 - `cargo deny check`
-- `cargo geiger` (detección de unsafe)
+- `cargo geiger` (unsafe detection)
 
-### Clippy — Lints de Seguridad
+### Clippy — Security Lints
 
-El paso de Clippy se ejecuta en dos fases:
+The Clippy step runs in two phases:
 
-**Fase 1 — Warnings como errores (todos los targets):**
+**Phase 1 — Warnings as errors (all targets):**
 ```bash
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-**Fase 2 — Lints específicos de seguridad:**
+**Phase 2 — Security-specific lints:**
 ```bash
 cargo clippy --all-targets --all-features -- \
   -D clippy::unwrap_used \
@@ -53,99 +53,99 @@ cargo clippy --all-targets --all-features -- \
   -W clippy::wildcard_enum_match_arm
 ```
 
-| Lint | Nivel | Razón |
-|------|-------|-------|
-| `unwrap_used` | error | Panic silencioso en producción |
-| `expect_used` | error | Panic con mensaje, igual de peligroso |
-| `panic` | error | Aborta el runtime sin cleanup |
-| `indexing_slicing` | error | Panic por índice fuera de rango |
-| `integer_arithmetic` | error | Overflow/underflow no chequeado |
-| `todo` | error | Código incompleto en producción |
-| `unimplemented` | error | Igual que `todo` |
-| `unreachable` | warning | Puede indicar lógica incorrecta |
-| `wildcard_enum_match_arm` | warning | Match no exhaustivo en enums |
+| Lint | Level | Reason |
+|------|-------|--------|
+| `unwrap_used` | error | Silent panic in production |
+| `expect_used` | error | Panic with message, equally dangerous |
+| `panic` | error | Aborts the runtime without cleanup |
+| `indexing_slicing` | error | Panic due to out-of-bounds index |
+| `integer_arithmetic` | error | Unchecked overflow/underflow |
+| `todo` | error | Incomplete code in production |
+| `unimplemented` | error | Same as `todo` |
+| `unreachable` | warning | May indicate incorrect logic |
+| `wildcard_enum_match_arm` | warning | Non-exhaustive enum match |
 
-Para silenciar un lint puntualmente con justificación documentada:
+To silence a specific lint with documented justification:
 ```rust
-#[allow(clippy::unwrap_used)] // SAFETY: campo inicializado en new(), invariante garantizado
+#[allow(clippy::unwrap_used)] // SAFETY: field initialized in new(), invariant guaranteed
 let val = self.inner.unwrap();
 ```
 
-### Instalación de herramientas de Nivel 1
+### Level 1 Tool Installation
 
 ```bash
-# Instalar cargo-audit
+# Install cargo-audit
 cargo install cargo-audit
 
-# Instalar cargo-deny
+# Install cargo-deny
 cargo install cargo-deny
 
-# Instalar cargo-geiger
+# Install cargo-geiger
 cargo install cargo-geiger
 ```
 
 ---
 
-### Nivel 2 - Semgrep (Seguridad Seria)
+### Level 2 - Semgrep (Serious Security)
 
-Reglas custom en `.semgrep/rules/`:
+Custom rules in `.semgrep/rules/`:
 
-#### Detección de código inseguro
-- `no-unwrap-in-security-critical`: Detecta `unwrap()` en código sensible
-- `no-expect-in-security-critical`: Detecta `expect()` en código sensible
-- `no-panic-in-security-critical`: Detecta `panic!` en código sensible
+#### Unsafe Code Detection
+- `no-unwrap-in-security-critical`: Detects `unwrap()` in sensitive code
+- `no-expect-in-security-critical`: Detects `expect()` in sensitive code
+- `no-panic-in-security-critical`: Detects `panic!` in sensitive code
 
-#### Sistema de archivos
-- `no-std-fs-without-validation`: Detecta uso de `std::fs` sin validación
-- `no-tokio-process-without-validation`: Detecta command execution sin sanitizar
+#### File System
+- `no-std-fs-without-validation`: Detects `std::fs` usage without validation
+- `no-tokio-process-without-validation`: Detects command execution without sanitization
 
-#### Reglas específicas 3VA
-- **Capability bypass**: Detecta accesos sin `--allow-read`, `--allow-net`, `--allow-env`
-- **Sandbox bypass**: Detecta symlink escapes, path traversal
-- **Host validation**: Valida URLs antes de network calls
-- **Deserialización**: Detecta parsing sin validación de esquema
-- **JS↔Rust bridge**: Detecta conversiones de tipo inseguras
+#### 3VA-specific rules
+- **Capability bypass**: Detects accesses without `--allow-read`, `--allow-net`, `--allow-env`
+- **Sandbox bypass**: Detects symlink escapes, path traversal
+- **Host validation**: Validates URLs before network calls
+- **Deserialization**: Detects parsing without schema validation
+- **JS↔Rust bridge**: Detects unsafe type conversions
 
-### Instalación de Semgrep
+### Semgrep Installation
 
 ```bash
-# Python
+# Via Python
 pip install semgrep
 
-# O npm
+# Or via npm
 npm install -g semgrep
 
-# Ejecutar
+# Run
 semgrep --config .semgrep/rules/ .
 ```
 
 ---
 
-### Nivel 3 - Fuzzing
+### Level 3 - Fuzzing
 
-Superficies fuzzables:
+Fuzzable surfaces:
 - CLI parser (`cargo run ...`)
 - Package manager (tarballs, package.json, lockfiles)
 - Capability parser (`--allow-read`, `--allow-net`, `--deny-env`)
 - JS↔Rust bridge (type conversions, host functions)
 
-### Instalación de fuzzing
+### Fuzzing Installation
 
 ```bash
-# Instalar cargo-fuzz
+# Install cargo-fuzz
 cargo install cargo-fuzz
 
-# Inicializar fuzzing
+# Initialize fuzzing
 cargo fuzz init
 
-# Fuzz targets están en fuzz/fuzz_targets/
+# Fuzz targets are in fuzz/fuzz_targets/
 ```
 
 ---
 
-### Nivel 4 - Sanitizers
+### Level 4 - Sanitizers
 
-**MUY IMPORTANTE**: QuickJS usa C internamente, necesitas ASAN.
+**VERY IMPORTANT**: QuickJS uses C internally, you need ASAN.
 
 ```bash
 # Instalar Rust nightly
@@ -157,15 +157,15 @@ RUSTFLAGS="-Z sanitizer=address" cargo +nightly test -Zbuild-std --target x86_64
 # UndefinedBehaviorSanitizer
 RUSTFLAGS="-Z sanitizer=undefined" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
 
-# ThreadSanitizer (si usas Tokio intensamente)
+# ThreadSanitizer (if you use Tokio heavily)
 RUSTFLAGS="-Z sanitizer=thread" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
 ```
 
 ---
 
-### Nivel 5 - Tests de Seguridad
+### Level 5 - Security Tests
 
-Ejecutar tests específicos:
+Run specific tests:
 
 ```bash
 # Path traversal
@@ -183,45 +183,45 @@ cargo test --test security dos
 
 ---
 
-### Nivel 6 - Supply Chain
+### Level 6 - Supply Chain
 
-**OBLIGATORIO**: Cargo.lock debe estar en el repositorio.
+**MANDATORY**: Cargo.lock must be in the repository.
 
 ```bash
-# Verificar Cargo.lock existe
+# Verify Cargo.lock exists
 ls Cargo.lock
 
-# Instalar cargo-vet (recomendado)
+# Install cargo-vet (recommended)
 cargo install cargo-vet
 
-# Auditar dependencias
+# Audit dependencies
 cargo vet
 ```
 
-**Protecciones críticas**:
-- Zip Slip: Validar paths en tarballs
-- Symlink escape: No seguir symlinks sin validación
-- Compression bombs: Detectar ratios >1000:1
-- Unicode normalization: Normalizar paths
+**Critical protections**:
+- Zip Slip: Validate paths in tarballs
+- Symlink escape: Do not follow symlinks without validation
+- Compression bombs: Detect ratios >1000:1
+- Unicode normalization: Normalize paths
 
 ---
 
-### Nivel 7 - GitHub Advanced Security
+### Level 7 - GitHub Advanced Security
 
-**MUY RECOMENDADO**: Configurar GitHub Advanced Security.
+**HIGHLY RECOMMENDED**: Configure GitHub Advanced Security.
 
-En GitHub:
+On GitHub:
 1. Settings → Security → Code scanning
 2. Enable CodeQL
-3. Configurar `.github/workflows/codeql.yml`
+3. Configure `.github/workflows/codeql.yml`
 
 ---
 
-## Configuración de GitHub Actions
+## GitHub Actions Configuration
 
-### Pipeline mínimo
+### Minimum Pipeline
 
-Crear `.github/workflows/security.yml`:
+Create `.github/workflows/security.yml`:
 
 ```yaml
 name: Security Pipeline
@@ -271,40 +271,40 @@ jobs:
 
 ---
 
-## Puntos Críticos de Seguridad
+## Critical Security Points
 
-### 1. Boundary Rust ↔ QuickJS (MÁS RIESGOSO)
-- Cada API expuesta al JS es superficie de ataque
-- Validar TODAS las conversiones de tipo
-- No confiar en valores JS sin validar
+### 1. Rust ↔ QuickJS Boundary (MOST RISKY)
+- Each API exposed to JS is an attack surface
+- Validate ALL type conversions
+- Do not trust unvalidated JS values
 
 ### 2. Package Manager
-- Supply chain es la amenaza principal
-- Bloquear lifecycle scripts: `preinstall`, `install`, `postinstall`, `prepare`, `prepublish`
-- Verificar integridad de tarballs
+- Supply chain is the main threat
+- Block lifecycle scripts: `preinstall`, `install`, `postinstall`, `prepare`, `prepublish`
+- Verify tarball integrity
 
 ### 3. Capability Enforcement
-- Cualquier bypass destruye el modelo de seguridad
-- Validar capabilities ANTES de cada operación
+- Any bypass destroys the security model
+- Validate capabilities BEFORE each operation
 
 ### 4. Path Canonicalization
-- MUCHOS runtimes fallan aquí
-- Usar `canonicalize()` y validar que empieza con base
+- MANY runtimes fail here
+- Use `canonicalize()` and validate it starts with the base
 
 ### 5. Host API Exposure
-- Cada función expuesta al JS es un vector potencial
+- Each function exposed to JS is a potential vector
 
 ---
 
 ## AI Security Review
 
-Para análisis automático de PRs, configurar:
+For automatic PR analysis, configure:
 
 ```bash
-# Con Semgrep
+# With Semgrep
 semgrep --config .semgrep/rules/ --json --output=semgrep.json .
 
-# Generar reporte
+# Generate report
 jq '.results | length' semgrep.json
 ```
 
@@ -312,7 +312,7 @@ jq '.results | length' semgrep.json
 
 ## Release Gate
 
-Nunca publicar si falla:
+Never publish if any of these fail:
 - [ ] cargo fmt
 - [ ] cargo clippy
 - [ ] cargo audit
@@ -326,6 +326,6 @@ Nunca publicar si falla:
 
 ---
 
-## Contacto de Seguridad
+## Security Contact
 
-Para reportar vulnerabilidades: [edgarcano.166@gmail.com]
+To report vulnerabilities: [edgarcano.166@gmail.com]

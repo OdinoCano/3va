@@ -1,212 +1,212 @@
-# 01 - INTERFAZ DE LÍNEA DE COMANDOS
+# 01 - COMMAND LINE INTERFACE
 
-## 1.1 Descripción General
+## 1.1 Overview
 
-La interfaz de línea de comandos (CLI) de 3va constituye el punto de entrada primario para todas las operaciones del sistema. Implementada mediante la librería `clap` de Rust, proporciona una experiencia de usuario consistente con herramientas modernas como Bun, npm y cargo.
+The 3va command line interface (CLI) is the primary entry point for all system operations. Implemented via Rust's `clap` library, it provides a consistent user experience with modern tools like Bun, npm, and cargo.
 
-## 1.2 Estructura del Comando Principal
+## 1.2 Main Command Structure
 
-### 1.2.1 Formato de Uso
+### 1.2.1 Usage Format
 ```
 3va [GLOBAL OPTIONS] <COMMAND> [COMMAND OPTIONS] [ARGUMENTS]
 ```
 
 ### 1.2.2 Global Options
-Las opciones globales están disponibles para todos los comandos:
+Global options are available for all commands:
 
-| Opción | Descripción | Valor por defecto |
-|--------|-------------|-------------------|
-| --help, -h | Muestra ayuda | - |
-| --version, -v | Muestra versión | - |
-| --verbose, -V | Salida verbose | false |
-| --quiet, -q | Suprime salida | false |
-| --json | Salida en formato JSON | false |
-| --config | Archivo de configuración | ~/.3va/config.json |
+| Option | Description | Default |
+|--------|-------------|---------|
+| --help, -h | Shows help | - |
+| --version, -v | Shows version | - |
+| --verbose, -V | Verbose output | false |
+| --quiet, -q | Suppresses output | false |
+| --json | JSON-formatted output | false |
+| --config | Configuration file | ~/.3va/config.json |
 
-### 1.2.3 Nivel de Verbosidad
+### 1.2.3 Verbosity Level
 ```
-0: error      - Solo errores críticos
-1: warn       - Advertencias y errores
-2: info       - Información general (default)
-3: debug      - Depuración detallada
-4: trace      - Trazas completas
+0: error      - Only critical errors
+1: warn       - Warnings and errors
+2: info       - General information (default)
+3: debug      - Detailed debugging
+4: trace      - Full traces
 ```
 
-## 1.3 Subcomandos
+## 1.3 Subcommands
 
-### 1.3.1 Comando: run
-Ejecuta un archivo JavaScript o TypeScript con el runtime de 3va.
+### 1.3.1 Command: run
+Executes a JavaScript or TypeScript file with the 3va runtime.
 
 ```
 3va run [OPTIONS] <FILE> [-- <SCRIPT_ARGS>...]
 ```
 
-**Opciones específicas:**
-| Opción | Descripción |
+**Specific options:**
+| Option | Description |
 |--------|-------------|
-| --inspect | Activa inspector de Chrome |
-| --inspect-brk | Inspector con breakpoint inicial |
-| --watch | Recarga automática en cambios |
-| --env | Variables de entorno como JSON |
+| --inspect | Enables Chrome inspector |
+| --inspect-brk | Inspector with initial breakpoint |
+| --watch | Auto-reload on changes |
+| --env | Environment variables as JSON |
 
-**Ejemplo:**
+**Example:**
 ```bash
 3va run app.ts --allow-read=/app --allow-net=api.example.com
 ```
 
-### 1.3.2 Comando: install
-Instala uno o más paquetes desde el registry.
+### 1.3.2 Command: install
+Installs one or more packages from the registry.
 
 ```
 3va install [OPTIONS] <PACKAGE>[@<VERSION>]...
 ```
 
-**Opciones específicas:**
-| Opción | Descripción |
+**Specific options:**
+| Option | Description |
 |--------|-------------|
-| --save | Añade a dependencies |
-| --save-dev | Añade a devDependencies |
-| --save-peer | Añade a peerDependencies |
-| --global | Instalación global |
-| --allow-net | Permitir acceso a red |
+| --save | Adds to dependencies |
+| --save-dev | Adds to devDependencies |
+| --save-peer | Adds to peerDependencies |
+| --global | Global installation |
+| --allow-net | Allow network access |
 
-**Ejemplo:**
+**Example:**
 ```bash
 3va install axios lodash --save
 ```
 
-### 1.3.3 Comando: test
-Ejecuta la suite de pruebas.
+### 1.3.3 Command: test
+Runs the test suite.
 
 ```
 3va test [OPTIONS] [FILES_OR_PATTERNS]...
 ```
 
-**Opciones específicas:**
-| Opción | Descripción |
+**Specific options:**
+| Option | Description |
 |--------|-------------|
-| --watch | Modo watch |
-| --coverage | Generar coverage |
-| --update-snapshots | Actualizar snapshots |
-| --bail | Detener en primer fallo |
-| --test-name-pattern | Filtrar por nombre |
+| --watch | Watch mode |
+| --coverage | Generate coverage |
+| --update-snapshots | Update snapshots |
+| --bail | Stop on first failure |
+| --test-name-pattern | Filter by name |
 
-**Ejemplo:**
+**Example:**
 ```bash
 3va test --coverage --bail
 ```
 
-### 1.3.4 Comando: build
-Empaqueta código para distribución.
+### 1.3.4 Command: build
+Bundles code for distribution.
 
 ```
 3va build [OPTIONS] <ENTRY_FILE>
 ```
 
-**Opciones específicas:**
-| Opción | Descripción |
+**Specific options:**
+| Option | Description |
 |--------|-------------|
-| --out-dir | Directorio de salida |
-| --format | Formato: esm, cjs, iife |
+| --out-dir | Output directory |
+| --format | Format: esm, cjs, iife |
 | --target | Target: node, browser, webworker |
-| --minify | Minificar salida |
-| --source-map | Generar source maps |
+| --minify | Minify output |
+| --source-map | Generate source maps |
 
-**Ejemplo:**
+**Example:**
 ```bash
 3va build index.ts --out-dir ./dist --minify
 ```
 
-### 1.3.5 Comando: eval
-Evalúa código JavaScript inline.
+### 1.3.5 Command: eval
+Evaluates inline JavaScript code.
 
 ```
 3va eval [OPTIONS] <CODE>
 ```
 
-**Opciones específicas:**
-| Opción | Descripción |
+**Specific options:**
+| Option | Description |
 |--------|-------------|
-| --print | Imprime el resultado |
-| --json | Salida en JSON |
+| --print | Prints the result |
+| --json | JSON output |
 
-**Ejemplo:**
+**Example:**
 ```bash
 3va eval "console.log('Hello ' + 3va')"
 ```
 
-## 1.4 Flags de Permisos
+## 1.4 Permission Flags
 
-### 1.4.1 Sistema de Permisos
+### 1.4.1 Permission System
 
-Los permisos siguen el principio de "denegar por defecto". Los flags de permisos permiten granular qué operaciones están permitidas.
+Permissions follow the "deny by default" principle. Permission flags allow granular control over which operations are allowed.
 
-### 1.4.2 Flags de Permiso
+### 1.4.2 Permission Flags
 
-| Flag | Recurso | Descripción |
-|------|---------|-------------|
-| --allow-read | Sistema de archivos | Permite leer archivos |
-| --allow-read= | Path específico | Permite leer un path específico |
-| --allow-write | Sistema de archivos | Permite escribir archivos |
-| --allow-write= | Path específico | Permite escribir en un path específico |
-| --allow-net | Red | Permite conexiones de red |
-| --allow-net= | Hostname/IP | Permite conectar a host específico |
-| --allow-env | Entorno | Permite acceder a variables de entorno |
-| --allow-child-process | Procesos | Permite crear procesos hijos |
-| --allow-ffi | FFI | Permite llamadas a funciones nativas |
+| Flag | Resource | Description |
+|------|----------|-------------|
+| --allow-read | File system | Allows reading files |
+| --allow-read= | Specific path | Allows reading a specific path |
+| --allow-write | File system | Allows writing files |
+| --allow-write= | Specific path | Allows writing to a specific path |
+| --allow-net | Network | Allows network connections |
+| --allow-net= | Hostname/IP | Allows connecting to a specific host |
+| --allow-env | Environment | Allows accessing environment variables |
+| --allow-child-process | Processes | Allows creating child processes |
+| --allow-ffi | FFI | Allows native function calls |
 
-### 1.4.3 Flags de Denegación
+### 1.4.3 Deny Flags
 
-| Flag | Descripción |
+| Flag | Description |
 |------|-------------|
-| --deny-read | Deniega lectura de archivos |
-| --deny-write | Deniega escritura de archivos |
-| --deny-net | Deniega conexiones de red |
-| --deny-env | Deniega acceso a entorno |
-| --deny-child-process | Deniega creación de procesos |
+| --deny-read | Denies file read |
+| --deny-write | Denies file write |
+| --deny-net | Denies network connections |
+| --deny-env | Denies environment access |
+| --deny-child-process | Denies process creation |
 
-### 1.4.4 Ejemplos de Permisos
+### 1.4.4 Permission Examples
 
 ```bash
-# Permitir solo lectura del directorio actual
+# Allow read-only access to current directory
 3va run script.ts --allow-read=.
 
-# Permitir acceso a API específica
+# Allow access to a specific API
 3va run app.ts --allow-net=api.github.com
 
-# Permisos completos para desarrollo
+# Full permissions for development
 3va run dev.ts --allow-read --allow-write --allow-net --allow-env --allow-child-process
 
-# Denegar entorno pero permitir red
+# Deny environment but allow network
 3va run app.ts --deny-env --allow-net
 ```
 
-## 1.5 Gestión de Errores
+## 1.5 Error Management
 
-### 1.5.1 Códigos de Salida
+### 1.5.1 Exit Codes
 
-| Código | Significado | Ejemplo |
-|--------|-------------|---------|
-| 0 | Éxito | Ejecución completada |
-| 1 | Error general | Fallo desconocido |
-| 2 | Error de uso | Argumentos inválidos |
-| 3 | Error de configuración | Config inválida |
-| 4 | Error de permisos | Permiso denegado |
-| 5 | Error de módulo | Módulo no encontrado |
-| 6 | Error de runtime | Error en JS |
-| 7 | Error de bundle | Error en build |
-| 8 | Error de test | Test fallido |
-| 9 | Error de seguridad | Vulnerabilidad detectada |
+| Code | Meaning | Example |
+|------|---------|---------|
+| 0 | Success | Execution completed |
+| 1 | General error | Unknown failure |
+| 2 | Usage error | Invalid arguments |
+| 3 | Configuration error | Invalid config |
+| 4 | Permission error | Permission denied |
+| 5 | Module error | Module not found |
+| 6 | Runtime error | JS error |
+| 7 | Bundle error | Build error |
+| 8 | Test error | Test failed |
+| 9 | Security error | Vulnerability detected |
 
-### 1.5.2 Formato de Mensajes de Error
+### 1.5.2 Error Message Format
 
-**Modo texto:**
+**Text mode:**
 ```
 Error: Permission denied: FileRead(/etc/passwd)
   --> app.ts:5:1
 ```
 
-**Modo JSON:**
+**JSON mode:**
 ```json
 {
   "error": "permission_denied",
@@ -221,4 +221,4 @@ Error: Permission denied: FileRead(/etc/passwd)
 
 ---
 
-*Interfaz conforme a IEEE 829 y estándares de CLI.*
+*Interface compliant with IEEE 829 and CLI standards.*

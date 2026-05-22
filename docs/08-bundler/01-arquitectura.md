@@ -1,10 +1,10 @@
-# 01 - ARQUITECTURA DEL BUNDLER
+# 01 - BUNDLER ARCHITECTURE
 
-## 1.1 Visión General
+## 1.1 Overview
 
-El empaquetador (Bundler) nativo de 3va es un sistema optimizado de generación de código capaz de resolver grafos de dependencias, ejecutar *tree-shaking* (eliminación de código muerto) de manera agresiva y generar *chunks* (fragmentos) sin dependencias externas.
+3va's native Bundler is an optimized code generation system capable of resolving dependency graphs, performing aggressive tree shaking (dead code elimination), and generating chunks without external dependencies.
 
-## 1.2 Componentes Principales
+## 1.2 Main Components
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -17,24 +17,24 @@ El empaquetador (Bundler) nativo de 3va es un sistema optimizado de generación 
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 1.2.1 El Resolutor (ModuleResolver)
-Construye el grafo del módulo (`DependencyGraph`) analizando los imports ESM (`import x from 'y'`) y las llamadas CommonJS (`require()`), resolviendo rutas relativas y absolutas contra el sistema de archivos virtual (`VirtualFs`).
+### 1.2.1 ModuleResolver
+Builds the module graph (`DependencyGraph`) by analyzing ESM imports (`import x from 'y'`) and CommonJS `require()` calls, resolving relative and absolute paths against the virtual filesystem (`VirtualFs`).
 
-### 1.2.2 El Tree Shaker
-Analiza el AST (Abstract Syntax Tree) para marcar los nodos que se utilizan realmente (`used_exports`) y purgar las declaraciones exportadas que jamás son llamadas por ningún archivo consumidor del proyecto.
+### 1.2.2 Tree Shaker
+Analyzes the AST (Abstract Syntax Tree) to mark nodes that are actually used (`used_exports`) and purge exported declarations that are never called by any consumer file in the project.
 
-### 1.2.3 El Generador (CodeGenerator)
-Emite el código de salida unificando los módulos bajo un formato destino (IIFE, CommonJS, ESM). Soporta remoción de tipado TypeScript instantánea en el proceso de lectura (`process_module`).
+### 1.2.3 CodeGenerator
+Emits the output code by unifying modules under a target format (IIFE, CommonJS, ESM). Supports instant TypeScript type stripping during the reading process (`process_module`).
 
-## 1.3 Formatos de Salida Soportados
+## 1.3 Supported Output Formats
 
-| Formato | Descripción | Uso principal |
+| Format | Description | Primary Use |
 |---------|-------------|---------------|
-| `IIFE` | Expresión de función invocada inmediatamente | Browsers (sin systemjs) |
+| `IIFE` | Immediately Invoked Function Expression | Browsers (without systemjs) |
 | `CJS` | CommonJS (`require` / `module.exports`) | Node.js Legacy |
-| `ESM` | ES Modules (`import` / `export`) | Navegadores Modernos y 3va |
+| `ESM` | ES Modules (`import` / `export`) | Modern Browsers and 3va |
 
-## 1.4 Ejemplo de Uso API
+## 1.4 API Usage Example
 
 ```rust
 let mut bundler = Bundler::new(PathBuf::from("."));
@@ -49,11 +49,11 @@ bundler.add_entry("src/index.ts")?;
 let code = bundler.bundle()?;
 ```
 
-## 1.5 Cumplimiento Normativo (ISO/IEC)
+## 1.5 Regulatory Compliance (ISO/IEC)
 
-El diseño modular de este empaquetador está trazado bajo el marco procedimental de **ISO/IEC 12207** (Procesos del ciclo de vida del software), proveyendo una etapa de "construcción" inmutable y auditable.
-- Al aislar el parsing, minificación y resolución, asegura la trazabilidad del código fuente hasta el artefacto compilado.
+The modular design of this bundler is traced under the procedural framework of **ISO/IEC 12207** (Software life cycle processes), providing an immutable and auditable "construction" stage.
+- By isolating parsing, minification, and resolution, it ensures traceability from source code to the compiled artifact.
 
 ---
 
-*Implementado en `crates/bundler/src/` (`lib.rs`, `tree_shaker.rs`, `generator.rs`, `resolver.rs`).*
+*Implemented in `crates/bundler/src/` (`lib.rs`, `tree_shaker.rs`, `generator.rs`, `resolver.rs`).*

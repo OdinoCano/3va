@@ -1,43 +1,43 @@
-# 03 - POLYFILLS Y SHIMS
+# 03 - POLYFILLS AND SHIMS
 
-## 3.1 Sistema de Polyfills
+## 3.1 Polyfill System
 
-3va implementa polyfills para APIs de Node.js y navegador que no están disponibles nativamente en QuickJS.
+3va implements polyfills for Node.js and browser APIs that are not natively available in QuickJS.
 
-## 3.2 Polyfills de Node.js
+## 3.2 Node.js Polyfills
 
-### 3.2.1 Módulos Integrados
+### 3.2.1 Built-in Modules
 
-| Módulo | Tipo | Descripción |
+| Module | Type | Description |
 |--------|------|-------------|
-| buffer | Built-in | Buffer de datos binarios |
-| console | Built-in | Consola (con auditoría) |
-| crypto | Built-in | Criptografía básica |
+| buffer | Built-in | Binary data buffer |
+| console | Built-in | Console (with audit) |
+| crypto | Built-in | Basic cryptography |
 | events | Built-in | EventEmitter |
-| fs | Built-in (parcial) | Sistema de archivos |
-| http | Built-in (parcial) | HTTP cliente/servidor |
-| os | Built-in | Información del sistema |
-| path | Built-in | Utilidades de rutas |
-| process | Built-in | Proceso actual |
-| stream | Built-in (parcial) | Streams |
-| url | Built-in | Parseo de URLs |
-| util | Built-in | Utilidades |
+| fs | Built-in (partial) | File system |
+| http | Built-in (partial) | HTTP client/server |
+| os | Built-in | System information |
+| path | Built-in | Path utilities |
+| process | Built-in | Current process |
+| stream | Built-in (partial) | Streams |
+| url | Built-in | URL parsing |
+| util | Built-in | Utilities |
 
 ### 3.2.2 Buffer
 
 ```javascript
-// Polyfill de Buffer disponible globalmente
+// Buffer polyfill available globally
 const buf = Buffer.from('Hello World');
 const buf = Buffer.alloc(8);
 const buf = Buffer.allocUnsafe(8);
 
-// Encodings soportados
+// Supported encodings
 buf.toString('utf8')
 buf.toString('base64')
 buf.toString('hex')
 buf.toString('latin1')
 
-// Métodos
+// Methods
 Buffer.isBuffer(obj)
 Buffer.byteLength(string, encoding)
 Buffer.concat(buffers)
@@ -83,7 +83,7 @@ emitter.on('event', (arg) => {
 
 emitter.emit('event', { data: 'value' });
 
-// Métodos
+// Methods
 emitter.on(event, listener)
 emitter.once(event, listener)
 emitter.off(event, listener)
@@ -91,12 +91,12 @@ emitter.emit(event, ...args)
 emitter.removeAllListeners(event)
 ```
 
-## 3.3 Polyfills de Web APIs
+## 3.3 Web APIs Polyfills
 
 ### 3.3.1 fetch
 
 ```javascript
-// fetch disponible globalmente
+// fetch available globally
 const response = await fetch('https://api.example.com/data');
 const json = await response.json();
 
@@ -130,11 +130,11 @@ const encoded = encoder.encode('Hello');  // Uint8Array
 const decoder = new TextDecoder('utf-8');
 const decoded = decoder.decode(encoded);  // "Hello"
 
-// Con stream
+// With stream
 const transform = encoder.encodeStreaming(data);
 ```
 
-### 3.3.3 URL y URLSearchParams
+### 3.3.3 URL and URLSearchParams
 
 ```javascript
 // URL
@@ -162,32 +162,32 @@ params.delete('baz');
 // Performance
 const start = performance.now();
 
-// ... código ...
+// ... code ...
 
 const end = performance.now();
-console.log(`Tiempo: ${end - start}ms`);
+console.log(`Time: ${end - start}ms`);
 
-// Marcas y medidas
+// Marks and measures
 performance.mark('start');
-// ... código ...
+// ... code ...
 performance.mark('end');
 performance.measure('total', 'start', 'end');
 
-// Navigation timing (parcial)
+// Navigation timing (partial)
 performance.timing;
 performance.navigation;
 ```
 
-## 3.4 Polyfills de Seguridad
+## 3.4 Security Polyfills
 
-### 3.4.1 Fetch Seguro
+### 3.4.1 Secure Fetch
 
 ```rust
-// El fetch de 3va implementa:
-// 1. Verificación de permisos
-// 2. Validación de URL
-// 3. Sanitización de headers
-// 4. Límites de tamaño de respuesta
+// 3va's fetch implements:
+// 1. Permission verification
+// 2. URL validation
+// 3. Header sanitization
+// 4. Response size limits
 
 pub struct SecureFetch {
     permissions: PermissionState,
@@ -196,21 +196,21 @@ pub struct SecureFetch {
 
 impl SecureFetch {
     pub async fn fetch(&self, url: &str, init: RequestInit) -> Result<Response> {
-        // Verificar permiso de red
+        // Check network permission
         let url_parsed = Url::parse(url)?;
         if !self.permissions.check(&Capability::Network(url_parsed.host_str().unwrap_or(""))) {
             return Err(Error::PermissionDenied);
         }
 
-        // Verificar URL no es maligna
+        // Check URL is not malicious
         if url_parsed.username().is_some() && url_parsed.password().is_some() {
-            return Err(Error::SecurityError("URL con credenciales embebidas"));
+            return Err(Error::SecurityError("URL with embedded credentials"));
         }
 
-        // Fetch con límites
+        // Fetch with limits
         let response = self.raw_fetch(url, init).await?;
 
-        // Verificar tamaño
+        // Check size
         if let Some(len) = response.content_length() {
             if len > self.max_response_size {
                 return Err(Error::ResponseTooLarge);
@@ -222,7 +222,7 @@ impl SecureFetch {
 }
 ```
 
-## 3.5 Registro de Polyfills
+## 3.5 Polyfill Registration
 
 ### 3.5.1 PolyfillRegistry
 
@@ -234,9 +234,9 @@ pub struct PolyfillRegistry {
 
 impl PolyfillRegistry {
     pub fn init(context: &Context) -> anyhow::Result<()> {
-        // 1. Cargar módulos built-in en el contexto
-        // 2. Definir globals
-        // 3. Configurar resolveHook
+        // 1. Load built-in modules in context
+        // 2. Define globals
+        // 3. Configure resolveHook
 
         Ok(())
     }
@@ -247,14 +247,14 @@ impl PolyfillRegistry {
 }
 ```
 
-### 3.5.2 Configuración de Polyfills
+### 3.5.2 Polyfill Configuration
 
 ```javascript
-// En JavaScript: deshabilitar polyfills específicos
+// In JavaScript: disable specific polyfills
 3va run app.ts --no-polyfill=fetch
 3va run app.ts --no-polyfill=stream
 ```
 
 ---
 
-*Polyfills conformes a Node.js API y WHATWG standards.*
+*Polyfills conforming to Node.js API and WHATWG standards.*

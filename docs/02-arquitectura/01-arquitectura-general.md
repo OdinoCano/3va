@@ -1,8 +1,8 @@
-# 01 - ARQUITECTURA GENERAL DEL SISTEMA
+# 01 - GENERAL SYSTEM ARCHITECTURE
 
-## 1.1 Visión de Arquitectura
+## 1.1 Architecture Vision
 
-La arquitectura de 3va sigue un diseño modular basado en crates de Rust, donde cada componente cumple una responsabilidad específica y se comunica a través de interfaces bien definidas. El sistema está diseñado siguiendo principios de seguridad por defecto y separación de privilegios.
+The architecture of 3va follows a modular design based on Rust crates, where each component fulfills a specific responsibility and communicates through well-defined interfaces. The system is designed following principles of security by default and separation of privileges.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -10,124 +10,124 @@ La arquitectura de 3va sigue un diseño modular basado en crates de Rust, donde 
 │                    (vvva_cli - Entrypoint)                       │
 └─────────────────────────────────────────────────────────────────┘
                               │
-        ┌─────────────────────┼─────────────────────┐
-        │                     │                     │
-        ▼                     ▼                     ▼
-┌───────────────┐    ┌───────────────┐    ┌───────────────┐
-│   vvva_core   │    │   vvva_pm     │    │  vvva_bundler │
-│   (Runtime)   │    │  (Package     │    │   (Bundler)   │
-│               │    │   Manager)    │    │               │
-└───────────────┘    └───────────────┘    └───────────────┘
-        │                     │                     │
-        └─────────────────────┼─────────────────────┘
-                              │
-                              ▼
-                    ┌───────────────┐
-                    │ vvva_permissions
-                    │ (Permissions) │
-                    └───────────────┘
-                              │
-                              ▼
-                    ┌───────────────┐
-                    │   vvva_js     │
-                    │ (JS Engine)   │
-                    └───────────────┘
+         ┌─────────────────────┼─────────────────────┐
+         │                     │                     │
+         ▼                     ▼                     ▼
+ ┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+ │   vvva_core   │    │   vvva_pm     │    │  vvva_bundler │
+ │   (Runtime)   │    │  (Package     │    │   (Bundler)   │
+ │               │    │   Manager)    │    │               │
+ └───────────────┘    └───────────────┘    └───────────────┘
+         │                     │                     │
+         └─────────────────────┼─────────────────────┘
+                               │
+                               ▼
+                     ┌───────────────┐
+                     │ vvva_permissions
+                     │ (Permissions) │
+                     └───────────────┘
+                               │
+                               ▼
+                     ┌───────────────┐
+                     │   vvva_js     │
+                     │ (JS Engine)   │
+                     └───────────────┘
 ```
 
-## 1.2 Principios de Diseño
+## 1.2 Design Principles
 
-### 1.2.1 Seguridad por Defecto
-Todos los componentes operan bajo el principio de "denegar por defecto". Ningún proceso tiene acceso a recursos del sistema sin una Capability explícita otorgada por el usuario.
+### 1.2.1 Security by Default
+All components operate under the principle of "deny by default". No process has access to system resources without an explicit Capability granted by the user.
 
-### 1.2.2 Mínimo Privilegio
-Cada componente tiene exactamente los permisos necesarios para cumplir su función. El runtime de JavaScript no tiene acceso directo al sistema de archivos; cualquier operación debe pasar por el verificador de permisos.
+### 1.2.2 Minimum Privilege
+Each component has exactly the permissions necessary to fulfill its function. The JavaScript runtime has no direct access to the filesystem; any operation must go through the permission verifier.
 
-### 1.2.3 Defensa en Profundidad
-Múltiples capas de seguridad protegen el sistema:
-- Capa 1: CLI (validación de argumentos)
-- Capa 2: Permissions (verificación de capabilities)
-- Capa 3: Sandbox (aislamiento del proceso)
-- Capa 4: Audit (registro de operaciones)
+### 1.2.3 Defense in Depth
+Multiple security layers protect the system:
+- Layer 1: CLI (argument validation)
+- Layer 2: Permissions (capability verification)
+- Layer 3: Sandbox (process isolation)
+- Layer 4: Audit (operation logging)
 
-### 1.2.4 Modularidad
-Cada crate es independiente y puede ser reemplazado o actualizado sin afectar otros componentes. La integración con QuickJS, por ejemplo, está abstraída para permitir cambios futuros.
+### 1.2.4 Modularity
+Each crate is independent and can be replaced or updated without affecting other components. The integration with QuickJS, for example, is abstracted to allow future changes.
 
-## 1.3 Arquitectura de Componentes
+## 1.3 Component Architecture
 
-### 1.3.1 Capa de Presentación (CLI)
-El CLI actúa como punto de entrada único para todas las operaciones. Parsea los argumentos del usuario, construye el contexto de permisos y delega al componente apropiado.
+### 1.3.1 Presentation Layer (CLI)
+The CLI acts as the single entry point for all operations. It parses user arguments, builds the permission context, and delegates to the appropriate component.
 
-**Responsabilidades:**
-- Parsing de argumentos y validación
-- Construcción de PermissionState
-- Enrutamiento de comandos
-- Formateo de salida
-
-**Interfaces:**
-- Interfaz de línea de comandos (usuario)
-- Interfaz de eventos (core, pm, bundler)
-
-### 1.3.2 Capa de Ejecución (Core)
-El core gestiona el ciclo de vida del runtime, incluyendo el event loop, la gestión de procesos y la coordinación de tareas asíncronas.
-
-**Responsabilidades:**
-- Event loop principal
-- Scheduling de tareas
-- Gestión de memoria
-- Coordinación de componentes
+**Responsibilities:**
+- Argument parsing and validation
+- PermissionState construction
+- Command routing
+- Output formatting
 
 **Interfaces:**
-- API de tareas asíncronas
-- API de gestión de procesos
+- Command line interface (user)
+- Event interface (core, pm, bundler)
 
-### 1.3.3 Capa de Seguridad (Permissions)
-El sistema de permisos aplica el modelo de capabilities, verificando cada operación contra la lista de permisos granted.
+### 1.3.2 Execution Layer (Core)
+The core manages the runtime lifecycle, including the event loop, process management, and asynchronous task coordination.
 
-**Responsabilidades:**
-- Almacenamiento de capabilities
-- Verificación de permisos
-- Matching de patrones
-- Auditoría de operaciones
-
-**Interfaces:**
-- API de verificación de permisos
-- API de auditoría
-
-### 1.3.4 Capa de Ejecución JavaScript (JS)
-El motor JavaScript ejecuta el código del usuario en un entorno aislado con acceso a las APIs web estándar.
-
-**Responsabilidades:**
-- Ejecución de código JS/TS
-- Gestión de módulos
-- Implementación de polyfills
-- Aislamiento del contexto
+**Responsibilities:**
+- Main event loop
+- Task scheduling
+- Memory management
+- Component coordination
 
 **Interfaces:**
-- API de evaluación de código
-- API de módulos
-- API de globals
+- Async task API
+- Process management API
 
-### 1.3.5 Capa de Paquetes (PM)
-El gestor de paquetes maneja la descarga, verificación e instalación de dependencias.
+### 1.3.3 Security Layer (Permissions)
+The permission system implements the capability model, verifying each operation against the list of granted permissions.
 
-**Responsabilidades:**
-- Resolución de dependencias
-- Descarga de paquetes
-- Verificación de firmas
-- Sandboxing de instalación
+**Responsibilities:**
+- Capability storage
+- Permission verification
+- Pattern matching
+- Operation auditing
 
 **Interfaces:**
-- API de instalación
-- API de resolución
-- API de lockfile
+- Permission verification API
+- Audit API
 
-## 1.4 Modelo de Despliegue
+### 1.3.4 JavaScript Execution Layer (JS)
+The JavaScript engine executes user code in an isolated environment with access to standard web APIs.
 
-3va se desplaza como un binario único que contiene todos los componentes integrados. Esto facilita la distribución y reduce la superficie de ataque.
+**Responsibilities:**
+- JS/TS code execution
+- Module management
+- Polyfill implementation
+- Context isolation
+
+**Interfaces:**
+- Code evaluation API
+- Module API
+- Globals API
+
+### 1.3.5 Package Layer (PM)
+The package manager handles downloading, verification, and installation of dependencies.
+
+**Responsibilities:**
+- Dependency resolution
+- Package downloading
+- Signature verification
+- Installation sandboxing
+
+**Interfaces:**
+- Installation API
+- Resolution API
+- Lockfile API
+
+## 1.4 Deployment Model
+
+3va is deployed as a single binary containing all integrated components. This simplifies distribution and reduces the attack surface.
 
 ```
 ┌─────────────────────────────────────────┐
-│              Binario 3va                │
+│              3va Binary                 │
 ├─────────────────────────────────────────┤
 │ CLI    │ Core │ Perms │ JS │ PM │ Bundler│
 └─────────────────────────────────────────┘
@@ -135,4 +135,4 @@ El gestor de paquetes maneja la descarga, verificación e instalación de depend
 
 ---
 
-*Documento conforme a ISO/IEC/IEEE 42010 y arquitectura de sistemas.*
+*Document conforming to ISO/IEC/IEEE 42010 and systems architecture.*

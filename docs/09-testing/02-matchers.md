@@ -1,33 +1,33 @@
-# 02 - MATCHERS Y ASERCIONES
+# 02 - MATCHERS AND ASSERTIONS
 
-## 2.1 Introducción
+## 2.1 Introduction
 
-Los matchers se invocan sobre el objeto devuelto por `expect(valor)`. Todos admiten negación anteponiendo `.not`:
+Matchers are invoked on the object returned by `expect(value)`. All support negation by prepending `.not`:
 
 ```javascript
-expect(valor).toBe(esperado);
-expect(valor).not.toBe(noEsperado);
+expect(value).toBe(expected);
+expect(value).not.toBe(unexpected);
 ```
 
-## 2.2 Igualdad
+## 2.2 Equality
 
-| Matcher | Descripción |
+| Matcher | Description |
 |---------|-------------|
-| `.toBe(esperado)` | Igualdad estricta (`===`) |
-| `.toEqual(esperado)` | Igualdad profunda (compara estructuras recursivamente) |
+| `.toBe(expected)` | Strict equality (`===`) |
+| `.toEqual(expected)` | Deep equality (compares structures recursively) |
 
 ```javascript
 expect(2 + 2).toBe(4);
 expect({ a: 1, b: [2] }).toEqual({ a: 1, b: [2] });
 ```
 
-## 2.3 Nulidad y Definición
+## 2.3 Nullity and Definition
 
-| Matcher | Descripción |
+| Matcher | Description |
 |---------|-------------|
-| `.toBeNull()` | El valor es `null` |
-| `.toBeUndefined()` | El valor es `undefined` |
-| `.toBeDefined()` | El valor no es `undefined` |
+| `.toBeNull()` | Value is `null` |
+| `.toBeUndefined()` | Value is `undefined` |
+| `.toBeDefined()` | Value is not `undefined` |
 
 ```javascript
 expect(null).toBeNull();
@@ -35,12 +35,12 @@ expect(undefined).toBeUndefined();
 expect(42).toBeDefined();
 ```
 
-## 2.4 Veracidad
+## 2.4 Truthiness
 
-| Matcher | Descripción |
+| Matcher | Description |
 |---------|-------------|
-| `.toBeTruthy()` | `Boolean(valor) === true` |
-| `.toBeFalsy()` | `Boolean(valor) === false` |
+| `.toBeTruthy()` | `Boolean(value) === true` |
+| `.toBeFalsy()` | `Boolean(value) === false` |
 
 ```javascript
 expect(1).toBeTruthy();
@@ -48,14 +48,14 @@ expect("").toBeFalsy();
 expect(0).toBeFalsy();
 ```
 
-## 2.5 Comparación Numérica
+## 2.5 Numeric Comparison
 
-| Matcher | Descripción |
+| Matcher | Description |
 |---------|-------------|
-| `.toBeGreaterThan(n)` | `valor > n` |
-| `.toBeLessThan(n)` | `valor < n` |
-| `.toBeGreaterThanOrEqual(n)` | `valor >= n` |
-| `.toBeLessThanOrEqual(n)` | `valor <= n` |
+| `.toBeGreaterThan(n)` | `value > n` |
+| `.toBeLessThan(n)` | `value < n` |
+| `.toBeGreaterThanOrEqual(n)` | `value >= n` |
+| `.toBeLessThanOrEqual(n)` | `value <= n` |
 
 ```javascript
 expect(10).toBeGreaterThan(5);
@@ -64,31 +64,31 @@ expect(5).toBeGreaterThanOrEqual(5);
 expect(4).toBeLessThanOrEqual(4);
 ```
 
-## 2.6 Colecciones y Cadenas
+## 2.6 Collections and Strings
 
-| Matcher | Descripción |
+| Matcher | Description |
 |---------|-------------|
-| `.toContain(elemento)` | Array incluye el elemento, o la cadena incluye la subcadena |
-| `.toHaveLength(n)` | `valor.length === n` |
+| `.toContain(item)` | Array includes the item, or string includes the substring |
+| `.toHaveLength(n)` | `value.length === n` |
 
 ```javascript
 expect([1, 2, 3]).toContain(2);
-expect("hola mundo").toContain("mundo");
+expect("hello world").toContain("world");
 expect([1, 2, 3]).toHaveLength(3);
 expect("abc").toHaveLength(3);
 ```
 
-## 2.7 Excepciones
+## 2.7 Exceptions
 
-| Matcher | Descripción |
+| Matcher | Description |
 |---------|-------------|
-| `.toThrow()` | La función lanza cualquier error al invocarse |
+| `.toThrow()` | Function throws any error when invoked |
 
-El valor pasado a `expect` debe ser una función; el matcher la invoca internamente.
+The value passed to `expect` must be a function; the matcher invokes it internally.
 
 ```javascript
 expect(() => {
-  throw new Error("fallo");
+  throw new Error("fail");
 }).toThrow();
 
 expect(() => {
@@ -98,19 +98,19 @@ expect(() => {
 
 ## 2.8 Snapshots
 
-| Matcher | Descripción |
+| Matcher | Description |
 |---------|-------------|
-| `.toMatchSnapshot()` | Crea o compara contra un snapshot en disco |
+| `.toMatchSnapshot()` | Creates or compares against a snapshot on disk |
 
-La primera ejecución guarda el valor serializado. Las ejecuciones posteriores fallan si el valor difiere. Usar `3va test --update-snapshots` para sobrescribir snapshots desactualizados.
+The first run saves the serialized value. Subsequent runs fail if the value differs. Use `3va test --update-snapshots` to overwrite outdated snapshots.
 
 ```javascript
-test("estructura del usuario", () => {
-  const usuario = { id: 1, nombre: "Ana", activo: true };
-  expect(usuario).toMatchSnapshot();
+test("user structure", () => {
+  const user = { id: 1, name: "Ana", active: true };
+  expect(user).toMatchSnapshot();
 });
 ```
 
 ---
 
-*Matchers implementados en `crates/test/src/matchers.rs`.*
+*Matchers implemented in `crates/test/src/matchers.rs`.*

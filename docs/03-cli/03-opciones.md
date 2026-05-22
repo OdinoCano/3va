@@ -1,144 +1,273 @@
-# 03 - OPCIONES Y FLAGS
-3.1 Sistema de Opciones
-Este documento detalla todas las opciones y flags disponibles en 3va.
-3.2 Opciones por Categoría
-3.2.1 Opciones de Permiso
+# 03 - OPTIONS AND FLAGS
+
+## 3.1 Options System
+
+This document details all available options and flags in 3va.
+
+## 3.2 Options by Category
+
+### 3.2.1 Permission Options
+
+#### `--allow-read`
+
+Allows file system read operations.
+
+Usage types:
+```bash
+# Allow global read access
 --allow-read
-Permite operaciones de lectura del sistema de archivos.
-Tipos de uso:
-# Permitir lectura global
---allow-read
-# Permitir lectura de path específico
+
+# Allow reading a specific path
 --allow-read=/path/to/dir
 --allow-read=/path/to/file.js
 --allow-read=/path/to/dir/*
-Matching de patrones:
-- 
-/path - Permite todo en ese directorio
-- 
-/path/* - Equivalente al anterior
-- 
-/path/**/*.js - Todos los archivos .js recursivamente
+```
+
+Pattern matching:
+- `/path` - Allows everything in that directory
+- `/path/*` - Equivalent to the above
+- `/path/**/*.js` - All .js files recursively
+
+#### `--allow-write`
+
+Allows file system write operations.
+
+Usage types:
+```bash
+# Allow global write access
 --allow-write
-Permite operaciones de escritura del sistema de archivos.
-Tipos de uso:
-# Permitir escritura global
---allow-write
-# Permitir escritura en path específico
+
+# Allow writing to a specific path
 --allow-write=/tmp
 --allow-write=/app/cache
+```
+
+#### `--allow-net`
+
+Allows network connections.
+
+Usage types:
+```bash
+# Allow all network access
 --allow-net
-Permite conexiones de red.
-Tipos de uso:
-# Permitir toda red
---allow-net
-# Permitir hosts específicos
+
+# Allow specific hosts
 --allow-net=api.example.com
 --allow-net=*.example.com
 --allow-net=192.168.1.0/24
-# Múltiples hosts
+
+# Multiple hosts
 --allow-net=api.example.com --allow-net=cdn.example.com
-Patrones soportados:
-- 
-host - Host exacto
-- 
-*.host - Subdominios
-- 
-host:port - Host y puerto específico
-- 
-*.host:8080 - Subdominios con puerto
+```
+
+Supported patterns:
+- `host` - Exact host
+- `*.host` - Subdomains
+- `host:port` - Specific host and port
+- `*.host:8080` - Subdomains with port
+
+#### `--allow-env`
+
+Allows access to environment variables.
+
+Usage:
+```bash
 --allow-env
-Permite acceso a variables de entorno.
-Uso:
---allow-env
-Acceso limitado:
-# Solo variables específicas (futuro)
+```
+
+Limited access:
+```bash
+# Only specific variables (future)
 --allow-env=PATH,HOME
+```
+
+#### `--allow-child-process`
+
+Allows creating child processes.
+
+Usage:
+```bash
 --allow-child-process
-Permite crear procesos hijos.
-Uso:
---allow-child-process
-Con restricciones (futuro):
+```
+
+With restrictions (future):
+```bash
 --allow-child-process=git,curl
-3.2.2 Opciones de Denegación
-Los flags de denegación se usan para quitar permisos específicos cuando se usa un preset que concede más de lo necesario.
-# Desarrollo local pero sin red
+```
+
+### 3.2.2 Deny Options
+
+Deny flags are used to remove specific permissions when using a preset that grants more than necessary.
+
+```bash
+# Local development but no network
 3va run dev.ts --allow-read --allow-write --deny-net
-# Entorno de prueba sin procesos hijos
+
+# Test environment without child processes
 3va run test.ts --allow-read --deny-child-process
-3.2.3 Opciones de Runtime
---inspect
-Activa el inspector de depuración de Chrome.
+```
+
+### 3.2.3 Runtime Options
+
+#### `--inspect`
+
+Enables the Chrome debug inspector.
+
+```bash
 3va run app.ts --inspect
 # Listening on ws://127.0.0.1:9229/...
---inspect-brk
-Inspector con breakpoint inicial.
+```
+
+#### `--inspect-brk`
+
+Inspector with initial breakpoint.
+
+```bash
 3va run app.ts --inspect-brk
---watch
-Recarga automática ante cambios.
+```
+
+#### `--watch`
+
+Auto-reload on changes.
+
+```bash
 3va run app.ts --watch
-3.2.4 Opciones de Package Manager
---save, --save-dev, --save-peer
-Ubicación de la dependencia.
+```
+
+### 3.2.4 Package Manager Options
+
+#### `--save`, `--save-dev`, `--save-peer`
+
+Dependency location.
+
+```bash
 3va install lodash --save           # dependencies
-3va install jest --save-dev       # devDependencies
-3va install react --save-peer     # peerDependencies
---global
-Instalación global del paquete.
+3va install jest --save-dev         # devDependencies
+3va install react --save-peer       # peerDependencies
+```
+
+#### `--global`
+
+Global package installation.
+
+```bash
 3va install typescript --global
-3.2.5 Opciones de Build
---out-dir
-Directorio de salida.
+```
+
+### 3.2.5 Build Options
+
+#### `--out-dir`
+
+Output directory.
+
+```bash
 3va build index.ts --out-dir ./dist
---format
-Formato del bundle.
+```
+
+#### `--format`
+
+Bundle format.
+
+```bash
 3va build index.ts --format=esm    # ES Modules
-3va build index.ts --format=cjs   # CommonJS
-3va build index.ts --format=iife  # IIFE
---target
-Target de compilación.
+3va build index.ts --format=cjs    # CommonJS
+3va build index.ts --format=iife   # IIFE
+```
+
+#### `--target`
+
+Compilation target.
+
+```bash
 3va build index.ts --target=node
 3va build index.ts --target=browser
 3va build index.ts --target=webworker
---minify
-Minificar el output.
+```
+
+#### `--minify`
+
+Minify the output.
+
+```bash
 3va build index.ts --minify
---source-map
-Generar source maps.
+```
+
+#### `--source-map`
+
+Generate source maps.
+
+```bash
 3va build index.ts --source-map
 3va build index.ts --source-map=hidden
-3.2.6 Opciones de Testing
---coverage
-Generar reporte de cobertura.
+```
+
+### 3.2.6 Testing Options
+
+#### `--coverage`
+
+Generate coverage report.
+
+```bash
 3va test --coverage
---update-snapshots
-Actualizar snapshots automáticamente.
+```
+
+#### `--update-snapshots`
+
+Automatically update snapshots.
+
+```bash
 3va test --update-snapshots
---reporter
-Seleccionar reporter.
+```
+
+#### `--reporter`
+
+Select reporter.
+
+```bash
 3va test --reporter=spec
 3va test --reporter=dot
 3va test --reporter=json
-3.3 Presets de Permisos
-3.3.1 preset:node
-Simula el comportamiento de Node.js.
+```
+
+## 3.3 Permission Presets
+
+### 3.3.1 `preset:node`
+
+Simulates Node.js behavior.
+
+```bash
 3va run app.ts --preset=node
-# Equivalente a:
+# Equivalent to:
 --allow-read --allow-write --allow-net --allow-env --allow-child-process
-3.3.2 preset:browser
-Simula el entorno de navegador.
+```
+
+### 3.3.2 `preset:browser`
+
+Simulates browser environment.
+
+```bash
 3va run app.ts --preset=browser
-# Equivalente a:
+# Equivalent to:
 --allow-net --allow-read --allow-write
-3.3.3 preset:none
-Sin permisos (más restrictivo que default).
+```
+
+### 3.3.3 `preset:none`
+
+No permissions (more restrictive than default).
+
+```bash
 3va run app.ts --preset=none
-# Equivalente a:
-# (ningún permiso granted por defecto)
-3.4 Variables de Entorno del CLI
-Variable	Descripción
-3VA_CONFIG	Ruta al archivo de configuración
-3VA_LOG_LEVEL	Nivel de logging
-3VA_CACHE_DIR	Directorio de cache
-3VA_REGISTRY	Registry de npm a usar
-Opciones conforme a IEEE 829 y diseño de CLI.
+# Equivalent to:
+# (no permissions granted by default)
+```
+
+## 3.4 CLI Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `3VA_CONFIG` | Path to configuration file |
+| `3VA_LOG_LEVEL` | Logging level |
+| `3VA_CACHE_DIR` | Cache directory |
+| `3VA_REGISTRY` | npm registry to use |
+
+*Options compliant with IEEE 829 and CLI design.*

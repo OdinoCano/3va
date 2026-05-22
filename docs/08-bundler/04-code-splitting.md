@@ -1,29 +1,29 @@
 # 04 - CODE SPLITTING
 
-## 4.1 División de Código
+## 4.1 Code Division
 
-Code splitting divide el bundle en múltiples chunks que se cargan bajo demanda.
+Code splitting divides the bundle into multiple chunks that load on demand.
 
-## 4.2 Estrategias
+## 4.2 Strategies
 
-| Estrategia | Descripcion |
+| Strategy | Description |
 |------------|-------------|
-| entry | Un chunk por punto de entrada |
-| async | Chunks para dynamic imports |
-| manual | División manual con comentarios |
+| entry | One chunk per entry point |
+| async | Chunks for dynamic imports |
+| manual | Manual division with comments |
 
 ## 4.3 Dynamic Imports
 
 ```javascript
-// Se crea un chunk separado
+// A separate chunk is created
 const module = await import("./heavy-module.js");
 
-// En build
+// In build
 // main.js
 // heavy-module.js (lazy loaded)
 ```
 
-## 4.4 Configuración
+## 4.4 Configuration
 
 ```javascript
 // 3va.config.js
@@ -48,4 +48,4 @@ dist/
 
 ---
 
-*Code splitting conforme a webpack y esbuild.*
+*Code splitting conforming to webpack and esbuild.*

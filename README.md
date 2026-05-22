@@ -54,9 +54,23 @@ sudo cp target/release/3va /usr/local/bin/
 
 ### Global flags
 
-| Flag | Description |
-|------|-------------|
-| `--accessible` | Enable accessible output mode |
+#### `--accessible` — Accessible / Screen Reader / Braille Mode
+
+Pass `--accessible` before any subcommand to enable accessible output. This flag:
+
+- Disables all ANSI colors and escape sequences
+- Removes animations, spinners, and progress bars
+- Produces plain line-by-line text suitable for screen readers and Braille terminals
+- Complies with EN 301 549 (European accessibility standard for ICT products)
+
+```bash
+3va --accessible run app.ts
+3va --accessible sandbox
+3va --accessible audit --json
+3va --accessible test
+```
+
+The flag is **positional** — it must come immediately after `3va`, before the subcommand.
 
 ---
 

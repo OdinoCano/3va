@@ -1,12 +1,12 @@
-# 03 - SANDBOXING Y AISLAMIENTO
+# 03 - SANDBOXING AND ISOLATION
 
-## 3.1 Filosofía de Sandboxing
+## 3.1 Sandboxing Philosophy
 
-3va implementa múltiples capas de aislamiento para ejecutar código de manera segura, protegiendo el sistema host de operaciones maliciosas o accidentales.
+3va implements multiple layers of isolation to execute code safely, protecting the host system from malicious or accidental operations.
 
-## 3.2 Niveles de Aislamiento
+## 3.2 Isolation Levels
 
-### 3.2.1 Arquitectura de Seguridad
+### 3.2.1 Security Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -17,7 +17,7 @@
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Nivel 1: Proceso 3va                    │
-│              (Binary ejecutable, permisos SO)                  │
+│                (Executable binary, OS permissions)               │
 │    - Usuario no root                                          │
 │    - Caps/Seccomp/BPF filters                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -35,15 +35,15 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Nivel 3: Paquetes npm                  │
 │              (node_modules sandbox)                             │
-│    - Sandbox de archivos                                      │
+│    - File sandbox                                             │
 │    - Sin acceso a red por defecto                             │
 │    - Sin post-install scripts                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## 3.3 Aislamiento del Runtime
+## 3.3 Runtime Isolation
 
-### 3.3.1 Límites de Recursos
+### 3.3.1 Resource Limits
 
 ```rust
 pub struct RuntimeLimits {
@@ -65,10 +65,10 @@ impl Default for RuntimeLimits {
 }
 ```
 
-### 3.3.2 Enforce de Límites
+### 3.3.2 Limit Enforcement
 
 ```rust
-// Verificación de memoria
+// Memory check
 pub fn check_memory_limit(&self) -> Result<(), Error> {
     let usage = self.runtime.memory_usage();
     if usage.heap_used > self.limits.max_memory {
@@ -78,7 +78,7 @@ pub fn check_memory_limit(&self) -> Result<(), Error> {
     }
 }
 
-// Timeout de ejecución
+// Execution timeout
 pub fn with_timeout<T, F>(
     future: F,
     duration: Duration
@@ -93,7 +93,7 @@ where
 ### 3.3.3 Thread Isolation
 
 ```rust
-// Aislamiento de threads para WebAssembly
+// Thread isolation for WebAssembly
 pub struct IsolatePool {
     pool: VecDeque<Isolate>,
     max_isolates: usize,
@@ -101,8 +101,8 @@ pub struct IsolatePool {
 
 impl IsolatePool {
     pub fn spawn(&mut self) -> IsolateHandle {
-        // Crear nuevo isolate si hay espacio
-        // o esperar a que uno se libere
+        // Create new isolate if space available
+        // or wait for one to be freed
     }
 }
 
@@ -122,14 +122,14 @@ pub struct VirtualFs {
 }
 
 pub struct MountPoint {
-    pub source: PathBuf,     // Real path (solo con permisos)
+    pub source: PathBuf,     // Real path (permissions only)
     pub read_only: bool,
     pub max_size: u64,
 }
 
 impl VirtualFs {
-    // El código JS ve /app como raíz virtual
-    // pero está montado en un directorio específico
+    // JS code sees /app as virtual root
+    // but it is mounted to a specific directory
     pub fn mount(&mut self, virtual_path: &str, source: &str) {
         self.mounts.insert(
             PathBuf::from(virtual_path),
@@ -142,7 +142,7 @@ impl VirtualFs {
             if path.starts_with(vp) {
                 let relative = path.strip_prefix(vp).unwrap();
                 let real = mount.source.join(relative);
-                // Verificar que no hay path traversal
+                // Verify no path traversal
                 if real.canonicalize()?.starts_with(mount.source.canonicalize()?) {
                     return Ok(real);
                 }
@@ -161,16 +161,16 @@ pub fn is_safe_path(base: &Path, target: &Path) -> bool {
     let base_canonical = base.canonicalize().unwrap();
     let target_canonical = target.canonicalize().unwrap();
 
-    // El target debe estar dentro del base
+    // Target must be within base
     target_canonical.starts_with(base_canonical) &&
-    // No contener secuencias ..
+    // Must not contain .. sequences
     !target.components().any(|c| c == Component::ParentDir)
 }
 ```
 
 ## 3.5 Sandboxing de Red
 
-### 3.5.1 Red Virtual
+### 3.5.1 Virtual Network
 
 ```rust
 pub struct VirtualNetwork {
@@ -181,25 +181,25 @@ pub struct VirtualNetwork {
 
 impl VirtualNetwork {
     pub fn connect(&self, host: &str, port: u16) -> Result<Box<dyn Connection>> {
-        // 1. Verificar que el host está permitido
+        // 1. Verify host is allowed
         if !self.is_allowed(host) {
             return Err(NetworkError::HostNotAllowed(host.to_string()));
         }
 
-        // 2. Resolver DNS (con cache)
+        // 2. Resolve DNS (with cache)
         let ip = self.dns_resolver.resolve(host).await?;
 
-        // 3. Validar IP resolved no es bypass
+        // 3. Validate resolved IP is not bypass
         if self.is_ip_banned(&ip) {
             return Err(NetworkError::IpBanned(ip));
         }
 
-        // 4. Conectar (a través de proxy si está configurado)
+        // 4. Connect (through proxy if configured)
         self.do_connect(&ip, port).await
     }
 
     fn is_allowed(&self, host: &str) -> bool {
-        // Check exacto o wildcard
+        // Check exact or wildcard
         self.allowed_hosts.iter().any(|allowed| {
             allowed == host ||
             (allowed.starts_with("*.") && host.ends_with(&allowed[1..]))
@@ -208,22 +208,22 @@ impl VirtualNetwork {
 }
 ```
 
-### 3.5.2 Restricciones de DNS
+### 3.5.2 DNS Restrictions
 
 ```rust
-// Prevenir DNS rebinding attacks
+// Prevent DNS rebinding attacks
 pub fn validate_dns(host: &str, resolved_ip: &IpAddr) -> bool {
-    // No permitir localhostresolve como IP pública
+    // Don't allow localhost resolve as public IP
     if resolved_ip.is_loopback() && !host.ends_with(".localhost") {
         return false;
     }
 
-    // No permitirlink-local
+    // Don't allow link-local
     if resolved_ip.is_link_local() {
         return false;
     }
 
-    // No permitirmulticast
+    // Don't allow multicast
     if resolved_ip.is_multicast() {
         return false;
     }
@@ -234,7 +234,7 @@ pub fn validate_dns(host: &str, resolved_ip: &IpAddr) -> bool {
 
 ## 3.6 Sandboxing de Paquetes npm
 
-### 3.6.1 Instalación Aislada
+### 3.6.1 Isolated Installation
 
 ```rust
 pub struct PackageSandbox {
@@ -245,17 +245,17 @@ pub struct PackageSandbox {
 
 impl PackageSandbox {
     pub fn install(&self, package: &Package) -> Result<(), Error> {
-        // 1. Verificar firma del paquete
+        // 1. Verify package signature
         self.verify_signature(package)?;
 
-        // 2. Escanear por malware
+        // 2. Scan for malware
         self.scan_for_malware(package)?;
 
-        // 3. Extraer en directorio aislado
+        // 3. Extract to isolated directory
         let extract_dir = self.base_dir.join(&package.name);
         self.extract(package, &extract_dir)?;
 
-        // 4. NO ejecutar post-install por defecto
+        // 4. DO NOT run post-install by default
         if self.block_post_install {
             self.disable_scripts(&extract_dir)?;
         }
@@ -265,20 +265,20 @@ impl PackageSandbox {
 }
 ```
 
-### 3.6.2 Ejecución de Scripts
+### 3.6.2 Script Execution
 
 ```rust
-// Por defecto, denegar scripts de paquetes
+// By default, deny package scripts
 pub fn should_run_script(script: &str, package: &PackageInfo) -> bool {
-    // Whitelist de scripts seguros
+    // Safe script whitelist
     let safe_scripts = ["prepublish", "prepare"];
 
-    // Por defecto: denegar todos
-    // Usuario debe usar --allow-scripts explícitamente
+    // By default: deny all
+    // User must use --allow-scripts explicitly
     false
 }
 
-// Con flag --allow-scripts=package
+// With --allow-scripts=package flag
 pub fn should_run_script_for_package(
     script: &str,
     package: &PackageInfo,
@@ -295,4 +295,4 @@ fn is_dangerous_script(script: &str) -> bool {
 
 ---
 
-*Sandboxing conforme a principios de Chrome Sandbox, gvisor, y WASI.*
+*Sandboxing based on Chrome Sandbox, gVisor, and WASI principles.*
