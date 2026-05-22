@@ -12,14 +12,14 @@ impl TimerId {
 
 pub struct Timer {
     pub id: TimerId,
-    pub callback: Box<dyn FnOnce() + Send>,
+    pub callback: Box<dyn Fn() + Send>,
     pub scheduled_at: Instant,
     pub repeating: bool,
     pub interval: Option<Duration>,
 }
 
 impl Timer {
-    pub fn new(id: TimerId, callback: Box<dyn FnOnce() + Send>, delay: Duration) -> Self {
+    pub fn new(id: TimerId, callback: Box<dyn Fn() + Send>, delay: Duration) -> Self {
         let scheduled_at = Instant::now() + delay;
         Self {
             id,
@@ -30,11 +30,7 @@ impl Timer {
         }
     }
 
-    pub fn interval(
-        id: TimerId,
-        callback: Box<dyn FnOnce() + Send + Send>,
-        interval: Duration,
-    ) -> Self {
+    pub fn interval(id: TimerId, callback: Box<dyn Fn() + Send>, interval: Duration) -> Self {
         let scheduled_at = Instant::now() + interval;
         Self {
             id,
@@ -94,7 +90,7 @@ impl TimerWheel {
 
     pub fn schedule_with_callback<F>(&mut self, delay: Duration, callback: F) -> TimerId
     where
-        F: FnOnce() + Send + 'static,
+        F: Fn() + Send + 'static,
     {
         let id = self.next_timer_id();
         let timer = Timer::new(id, Box::new(callback), delay);
@@ -104,7 +100,7 @@ impl TimerWheel {
 
     pub fn schedule_interval_with_callback<F>(&mut self, interval: Duration, callback: F) -> TimerId
     where
-        F: FnOnce() + Send + 'static,
+        F: Fn() + Send + 'static,
     {
         let id = self.next_timer_id();
         let timer = Timer::interval(id, Box::new(callback), interval);

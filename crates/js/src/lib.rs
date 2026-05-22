@@ -4,7 +4,8 @@ pub mod transpiler;
 
 use rquickjs::{AsyncContext, AsyncRuntime, Module};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use vvva_core::Runtime;
 use vvva_permissions::PermissionState;
 
 use builtins::TimerManager;
@@ -47,12 +48,14 @@ pub struct JsEngine {
     context: AsyncContext,
     _permissions: Arc<PermissionState>,
     timer_manager: Arc<TimerManager>,
+    runtime_core: Mutex<Runtime>,
 }
 
 impl JsEngine {
     pub async fn new(permissions: Arc<PermissionState>) -> anyhow::Result<Self> {
         let runtime = AsyncRuntime::new()?;
         let timer_manager = TimerManager::new();
+        let runtime_core = Mutex::new(Runtime::new((*permissions).clone()));
 
         // Wire the ESM module loader so cross-file imports resolve correctly.
         runtime
@@ -82,6 +85,7 @@ impl JsEngine {
             context,
             _permissions: permissions,
             timer_manager,
+            runtime_core,
         })
     }
 
@@ -163,24 +167,66 @@ impl JsEngine {
         self.run_event_loop().await
     }
 
-    /// Run the event loop: poll expired timers and fire callbacks until no pending timers remain.
+    /// Run the integrated event loop:
+    /// - Fire expired JS timers (setTimeout/setInterval managed by TimerManager)
+    /// - Fire expired Rust-level TimerWheel timers
+    /// - Process JS promise microtasks (runtime.idle)
+    /// - Yield to Tokio so concurrent async tasks can make progress
+    /// - Sleep until the next timer expiry (max 50ms per iteration)
     pub async fn run_event_loop(&self) -> anyhow::Result<()> {
         let max_iterations = 10_000;
         let mut iterations = 0;
 
-        while self.timer_manager.has_pending() && iterations < max_iterations {
+        while (self.timer_manager.has_pending()
+            || self.runtime_core.lock().unwrap().pending_task_count() > 0)
+            && iterations < max_iterations
+        {
             iterations += 1;
 
-            if let Some(wait) = self.timer_manager.next_expiry()
-                && wait.as_millis() > 0
-            {
-                tokio::time::sleep(wait.min(std::time::Duration::from_millis(50))).await;
-            }
-
+            // 1. Fire JS-level timers (setTimeout/setInterval)
             let tm = self.timer_manager.clone();
             self.context
                 .with(|ctx| builtins::timers::TimerManager::fire_pending(&ctx, tm))
                 .await?;
+
+            // 2. Fire Rust-level TimerWheel timers via the core Runtime
+            let expired = self.runtime_core.lock().unwrap().poll_timers();
+            for timer in expired {
+                (timer.callback)();
+                if timer.repeating
+                    && let Some(interval) = timer.interval
+                {
+                    self.runtime_core
+                        .lock()
+                        .unwrap()
+                        .set_timeout(interval, timer.callback);
+                }
+            }
+
+            // 3. Process JS promise microtasks
+            self.runtime.idle().await;
+
+            // 4. Yield to Tokio so concurrent async ops make progress
+            tokio::task::yield_now().await;
+
+            // 5. Sleep until the next timer expiry (JS or Rust)
+            let next_js = self.timer_manager.next_expiry();
+            let next_rust = self.runtime_core.lock().unwrap().next_timer_duration();
+            let wait = match (next_js, next_rust) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+
+            if let Some(wait) = wait
+                && wait > std::time::Duration::ZERO
+            {
+                tokio::time::sleep(wait.min(std::time::Duration::from_millis(50))).await;
+            } else if wait.is_none() {
+                // No pending timers at all, but still have tasks — brief yield
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
         }
 
         Ok(())

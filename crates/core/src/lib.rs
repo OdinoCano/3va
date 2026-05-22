@@ -21,9 +21,10 @@ impl Runtime {
         }
     }
 
-    /// Drive the event loop: fire expired timers and drain completed tasks.
-    /// Returns when all pending work is exhausted or the safety limit is hit.
-    pub fn run(&mut self) -> anyhow::Result<()> {
+    /// Drive the event loop: fire expired timers and yield to Tokio so
+    /// concurrent tasks can make progress. Returns when all pending work is
+    /// exhausted or the safety limit is hit.
+    pub async fn run(&mut self) -> anyhow::Result<()> {
         const MAX_ITERS: usize = 100_000;
         let mut iters = 0;
 
@@ -34,24 +35,23 @@ impl Runtime {
             let expired = self.timer_wheel.poll();
             for timer in expired {
                 (timer.callback)();
-                // Re-add repeating timers
+                // Re-add repeating timers preserving the callback (Fn, not consumed)
                 if timer.repeating
                     && let Some(interval) = timer.interval
                 {
-                    self.timer_wheel.schedule_with_callback(interval, || {});
+                    self.timer_wheel
+                        .schedule_with_callback(interval, timer.callback);
                 }
             }
 
-            // Short yield to let tokio tasks make progress
-            if self.task_queue.pending_count() > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
+            // Yield to let Tokio make progress on concurrent tasks
+            tokio::task::yield_now().await;
 
-            // Next timer hasn't fired yet — sleep until it's due
+            // Wait until next timer or max 50ms
             if let Some(wait) = self.next_timer_duration()
                 && wait > std::time::Duration::ZERO
             {
-                std::thread::sleep(wait.min(std::time::Duration::from_millis(50)));
+                tokio::time::sleep(wait.min(std::time::Duration::from_millis(50))).await;
             }
         }
 
@@ -69,14 +69,14 @@ impl Runtime {
 
     pub fn set_timeout<F>(&mut self, delay: std::time::Duration, callback: F) -> TimerId
     where
-        F: FnOnce() + Send + 'static,
+        F: Fn() + Send + 'static,
     {
         self.timer_wheel.schedule_with_callback(delay, callback)
     }
 
     pub fn set_interval<F>(&mut self, interval: std::time::Duration, callback: F) -> TimerId
     where
-        F: FnOnce() + Send + 'static,
+        F: Fn() + Send + 'static,
     {
         self.timer_wheel
             .schedule_interval_with_callback(interval, callback)

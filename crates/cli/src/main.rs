@@ -1296,7 +1296,6 @@ async fn main() -> anyhow::Result<()> {
 
             let permissions = Arc::new(permissions);
             let engine = vvva_js::JsEngine::new(permissions.clone()).await?;
-            let _runtime = vvva_core::Runtime::new((*permissions).clone());
             info!("3va Runtime initialized securely.");
 
             // Execute file (transpiles TypeScript automatically); event loop runs inside eval_file
