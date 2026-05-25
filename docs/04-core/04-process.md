@@ -33,14 +33,38 @@ console.log(process.execPath);      // "/usr/local/bin/3va"
 
 ### 4.2.2 Environment Variables
 
-```javascript
-// Reading environment
-process.env                         // Object with all variables
-process.env.PATH                    // Specific variable
-process.env.NODE_ENV                // Execution environment
+`process.env` is populated at runtime startup. Only variables that pass the
+permission check are included in the object — absent variables are simply not
+present (not `undefined`).
 
-// With permissions: process.env is only accessible with --allow-env
+```javascript
+// process.env is an ordinary JS object; only permitted keys are visible.
+process.env.NODE_ENV    // present if --allow-env= or --allow-env=NODE_ENV was passed
+process.env.SECRET_KEY  // absent unless that variable was explicitly allowed
+Object.keys(process.env) // lists only the granted variables
 ```
+
+**Permission modes**
+
+| CLI flag | Variables visible in `process.env` |
+|---|---|
+| (omitted) | `{}` — empty, no variables accessible |
+| `--allow-env=` | Full host environment (all variables) |
+| `--allow-env=NODE_ENV` | Only `NODE_ENV` |
+| `--allow-env=NODE_ENV,PORT` | Only `NODE_ENV` and `PORT` |
+
+```bash
+# Expose only two variables — all others are hidden
+3va run app.ts --allow-env=NODE_ENV,PORT
+
+# Expose everything (equivalent to Node.js default behaviour)
+3va run app.ts --allow-env=
+```
+
+The filtering happens in `inject_process` (`crates/js/src/builtins/process.rs`)
+before the JS context starts. It calls `PermissionState::check(&Capability::EnvVar(key))`
+for each host variable; because `caps_match` maps `EnvAccess → EnvVar(_)`, the
+full-grant case and the scoped case both resolve through the same code path.
 
 ### 4.2.3 Memory Information
 

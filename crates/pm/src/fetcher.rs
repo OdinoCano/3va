@@ -43,20 +43,86 @@ impl PackageFetcher {
         let mut archive = tar::Archive::new(decoder);
 
         std::fs::create_dir_all(dest)?;
+        // Canonical dest is used to verify no entry escapes the package directory.
+        let dest_canonical = std::fs::canonicalize(dest).unwrap_or_else(|_| dest.clone());
 
         for entry in archive.entries()? {
             let mut entry = entry?;
             let path = entry.path()?;
 
+            // npm tarballs always have a "package/" prefix — strip it.
             let cleaned: std::path::PathBuf = path.iter().skip(1).collect();
 
-            let out_path = dest.join(cleaned);
-
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)?;
+            // Skip root directory entry ("package/" itself becomes empty after skip).
+            if cleaned.as_os_str().is_empty() {
+                continue;
             }
 
-            entry.unpack(&out_path)?;
+            // Security: reject path traversal and absolute paths before joining.
+            let is_unsafe = cleaned.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            });
+            if is_unsafe {
+                tracing::warn!("Skipping unsafe path in package tarball: {:?}", path);
+                continue;
+            }
+
+            let out_path = dest.join(&cleaned);
+
+            // Security: verify the resolved output path stays within dest.
+            // Walk up to the first existing ancestor so canonicalize doesn't fail on
+            // not-yet-created intermediate directories.
+            let check_base = {
+                let mut p = out_path.clone();
+                loop {
+                    if p.exists() {
+                        break std::fs::canonicalize(&p).unwrap_or(dest_canonical.clone());
+                    }
+                    if !p.pop() {
+                        break dest_canonical.clone();
+                    }
+                }
+            };
+            if !check_base.starts_with(&dest_canonical) {
+                tracing::warn!("Skipping path that escapes package directory: {:?}", path);
+                continue;
+            }
+
+            // Create parent directories before extracting.
+            if let Some(parent) = out_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    tracing::warn!("Could not create parent dir for {:?}: {}", cleaned, e);
+                    continue;
+                }
+            }
+
+            // Handle entry types explicitly.
+            match entry.header().entry_type() {
+                tar::EntryType::Directory => {
+                    // Directory entries: just ensure the dir exists.
+                    if let Err(e) = std::fs::create_dir_all(&out_path) {
+                        tracing::warn!("Could not create dir {:?}: {}", cleaned, e);
+                    }
+                    continue;
+                }
+                tar::EntryType::Symlink | tar::EntryType::Link => {
+                    // Symlinks from untrusted packages are a supply-chain risk — always skip.
+                    tracing::debug!("Skipping symlink in package: {:?}", cleaned);
+                    continue;
+                }
+                _ => {}
+            }
+
+            // Extract the regular file. Skip on error so one bad entry doesn't abort
+            // the entire package (common with native-code packages like react-native).
+            if let Err(e) = entry.unpack(&out_path) {
+                tracing::warn!("Failed to extract {:?}: {}", cleaned, e);
+            }
         }
 
         Ok(())

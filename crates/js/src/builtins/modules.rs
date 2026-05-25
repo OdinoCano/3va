@@ -20,6 +20,8 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         globalThis.exports = globalThis.module.exports;
         globalThis.__filename = '';
         globalThis.__dirname = '';
+        // React Native globals
+        globalThis.__DEV__ = false;
     "#,
     )?;
 
@@ -46,11 +48,16 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         let source = std::fs::read_to_string(&full_path)
             .map_err(|_| rquickjs::Error::new_from_js("io", "file not found"))?;
 
-        // Transpile if TypeScript
-        let source = if path_str.ends_with(".ts") || path_str.ends_with(".tsx") {
+        // Transpile based on extension and content:
+        // - .ts / .tsx: always strip TypeScript types (JSX enabled for .tsx)
+        // - .jsx: always transform JSX
+        // - .js / .mjs / .cjs: always try OXC transpilation (handles JSX and strips Flow-like annotations)
+        let source = if path_str.ends_with(".tsx") || path_str.ends_with(".jsx") {
+            crate::transpiler::transpile_jsx(&source)
+        } else if path_str.ends_with(".ts") || path_str.ends_with(".mts") || path_str.ends_with(".cts") {
             crate::transpiler::transpile(&source)
         } else {
-            source
+            crate::transpiler::transpile_js(&source)
         };
 
         Ok(source)
@@ -864,6 +871,60 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 if (this.onloadend) this.onloadend({ type: 'loadend', target: this });
             };
             globalThis.FileReader = FileReader;
+
+            // ── module (Node.js Module API) ───────────────────────────────────────
+            // Next.js and many packages inspect Module._resolveFilename, Module._cache,
+            // Module.prototype.require, and createRequire. We provide a shim that is
+            // structurally compatible without implementing the full Node.js loader.
+            function NodeModule(id, parent) {
+                this.id = id || '';
+                this.filename = id || '';
+                this.loaded = true;
+                this.parent = parent || null;
+                this.children = [];
+                this.exports = {};
+                this.paths = [];
+            }
+            NodeModule.prototype.require = function(id) { return require(id); };
+            NodeModule._cache = globalThis.__requireCache;
+            NodeModule._extensions = { '.js': function(){}, '.json': function(){}, '.node': function(){} };
+            NodeModule._resolveFilename = function(request, parent, isMain, options) {
+                // Built-in modules (bare names or node: prefix) pass through
+                var bare = request.replace(/^node:/, '');
+                if (NodeModule.builtinModules.indexOf(bare) >= 0) return request;
+                if (bare === 'module') return request;
+                // Delegate to 3va's own resolver exposed via __resolvePath
+                if (typeof __resolvePath === 'function') {
+                    var base = (parent && parent.filename) ? parent.filename.replace(/\/[^\/]+$/, '') : undefined;
+                    return base ? __resolvePath(request, base) : __resolvePath(request);
+                }
+                return request;
+            };
+            NodeModule._load = function(request, parent, isMain) {
+                return require(request);
+            };
+            NodeModule.createRequire = function(filenameOrUrl) {
+                var base = String(filenameOrUrl).replace(/\/[^\/]+$/, '');
+                return function(id) {
+                    var resolved = __resolvePath(id, base);
+                    return require(resolved || id);
+                };
+            };
+            NodeModule.createRequireFromPath = NodeModule.createRequire;
+            NodeModule.builtinModules = [
+                'assert','buffer','child_process','crypto','events','fs','http','https',
+                'module','net','os','path','perf_hooks','process','querystring','stream',
+                'string_decoder','tls','url','util','zlib'
+            ];
+            NodeModule.isBuiltin = function(name) {
+                var n = name.replace(/^node:/, '');
+                return NodeModule.builtinModules.indexOf(n) >= 0;
+            };
+            NodeModule.syncBuiltinESMExports = function() {};
+            NodeModule.Module = NodeModule;
+
+            globalThis.__requireCache['module'] = NodeModule;
+            globalThis.__requireCache['node:module'] = NodeModule;
         })();
     "#)?;
 
@@ -967,6 +1028,17 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     // This avoids rquickjs Value<'js> lifetime issues by keeping all evaluation in JS.
     ctx.eval::<(), _>(r#"
         globalThis.require = function(path) {
+            // Strip node: prefix for built-in module resolution
+            if (path.indexOf('node:') === 0) {
+                var bare = path.slice(5);
+                if (globalThis.__requireCache[bare] !== undefined) {
+                    return globalThis.__requireCache[bare];
+                }
+                if (globalThis.__requireCache[path] !== undefined) {
+                    return globalThis.__requireCache[path];
+                }
+            }
+
             // Check built-ins and bare-name cache first (before path resolution)
             if (globalThis.__requireCache[path] !== undefined) {
                 return globalThis.__requireCache[path];
@@ -1008,7 +1080,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__dirname = dirname;
 
             // If the file uses ESM syntax, inline-convert to CJS before wrapping.
-            if (/^\s*(import\s|import\{|export\s|export\{|export\s*default)/.test(source)) {
+            if (/^\s*(import\s|import\{|export\s|export\{|export\s*default)/m.test(source)) {
                 source = __esmToCjs(source);
             }
 
@@ -1032,6 +1104,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             return result;
         };
+
+        // Node.js require.extensions — used by packages to register hooks for custom file types
+        globalThis.require.extensions = {};
     "#)?;
 
     Ok(())
@@ -1088,6 +1163,13 @@ fn resolve_file_path(base: &Path) -> PathBuf {
     if base.is_file() {
         return base.to_path_buf();
     }
+    // If the path is a directory with a package.json, resolve its entry point
+    if base.is_dir() && base.join("package.json").is_file() {
+        let entry = resolve_node_module_entry(base);
+        if entry.is_file() {
+            return entry;
+        }
+    }
     // Append extensions as strings to avoid PathBuf::with_extension clobbering
     // filenames that already contain dots (e.g. "Reflect.getPrototypeOf").
     let base_str = base.to_string_lossy();
@@ -1132,9 +1214,18 @@ fn resolve_node_module_from(
 fn resolve_in_pkg_dir(pkg_dir: &Path, subpath: Option<&str>) -> PathBuf {
     if let Some(sub) = subpath {
         let p = pkg_dir.join(sub);
+        // First try resolving as a file (with extension probing)
         let resolved = resolve_file_path(&p);
         if resolved.is_file() {
             return resolved;
+        }
+        // If the path is a directory, look for its package.json entry point
+        // (common for packages like @swc/helpers/_/_interop_require_default/)
+        if p.is_dir() {
+            let entry = resolve_node_module_entry(&p);
+            if entry.is_file() {
+                return entry;
+            }
         }
         p
     } else {

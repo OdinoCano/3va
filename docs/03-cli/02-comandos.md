@@ -14,47 +14,75 @@ Executes a JavaScript or TypeScript file in a sandboxed environment. Permissions
 
 **Signature:**
 ```
-3va run [OPTIONS] <FILE>
+3va run [OPTIONS] <FILE> [-- <SCRIPT_ARGS>...]
 ```
 
 **Parameters:**
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `FILE` | `path` (required) | Path to the `.js` or `.ts` file to execute |
+| `FILE` | `path` (required) | Path to the `.js`, `.ts`, `.jsx`, or `.tsx` file to execute |
+| `SCRIPT_ARGS` | `string...` (optional) | Arguments forwarded to the script via `process.argv[2+]`. Must appear after `--`. |
 
 **Options:**
 | Option | Type | Description |
 |--------|------|-------------|
-| `--allow-read=<path>` | `path` (repeatable) | Grants read permission to the specified path. Can be specified multiple times. |
-| `--allow-write=<path>` | `path` (repeatable) | Grants write permission to the specified path. Can be specified multiple times. |
-| `--allow-net=<host>` | `string` (repeatable) | Grants network access to the specified host. Can be specified multiple times. |
-| `--allow-env` | `bool` | Allows access to process environment variables. |
-| `--allow-child-process` | `bool` | Allows spawning child processes. |
+| `--allow-read=<paths>` | `path,...` | Grants read permission. Comma-separate multiple paths. Omit value (`--allow-read=`) to allow all paths. |
+| `--allow-write=<paths>` | `path,...` | Grants write permission. Comma-separate multiple paths. Omit value to allow all paths. |
+| `--allow-net=<hosts>` | `string,...` | Grants network access. Comma-separate multiple hosts. Supports `*.domain.com` wildcards. Omit value to allow all hosts. |
+| `--allow-env` | `bool` | Allows access to environment variables via `process.env`. |
+| `--allow-child-process` | `bool` | Allows spawning child processes via `child_process`. |
+| `--audit-log=<path>` | `path` | Writes a JSON audit log of permission checks to the specified file after execution. |
+| `--audit-level=<level>` | `"deny"\|"all"` | `deny` (default): log only denied checks. `all`: log every check. |
 | `--interactive` | `bool` | Enables the interactive permission prompt at runtime. |
+
+**`process.argv` layout:**
+```
+process.argv[0]   →  path to the 3va binary
+process.argv[1]   →  absolute path to the script
+process.argv[2+]  →  arguments passed after --
+```
+
+**Transpilation rules (applied automatically):**
+| Extension | Treatment |
+|-----------|-----------|
+| `.ts`, `.mts`, `.cts` | TypeScript type-strip via Oxc |
+| `.tsx`, `.jsx` | TypeScript strip + JSX → `React.createElement` |
+| `.js`, `.mjs`, others | JSX transform applied automatically if `<Tag` syntax is detected |
 
 **Behavior:**
 1. Loads and validates the input file.
 2. Initializes `PermissionState` with the granted permissions.
-3. Automatically transpiles TypeScript if the extension is `.ts`.
-4. Executes the file in the QuickJS engine.
-5. Runs the event loop until pending timers, microtasks, and callbacks complete.
+3. Transpiles the source according to the rules above.
+4. Sets `process.argv[1]` to the absolute script path; appends `SCRIPT_ARGS` to `process.argv`.
+5. Executes the file in the QuickJS engine.
+6. Runs the event loop until pending timers, microtasks, and callbacks complete.
 
 **Examples:**
 ```bash
-# Execution without permissions
+# Run without permissions
 3va run app.ts
 
-# Read permission to a directory
+# Read permission to a specific directory
 3va run app.ts --allow-read=/app/data
 
-# Network permission
-3va run app.ts --allow-net=api.example.com
+# Allow all network access (wildcard)
+3va run app.ts --allow-net=
 
-# Multiple permissions
-3va run app.ts --allow-read=/config --allow-read=/data --allow-net=api.example.com --allow-env
+# Specific hosts, comma-separated
+3va run app.ts --allow-net=api.example.com,cdn.example.com
 
-# Interactive mode (the runtime requests permissions from the user as needed)
-3va run app.ts --interactive
+# All permissions open (development only)
+3va run app.ts --allow-read= --allow-write= --allow-net= --allow-env --allow-child-process
+
+# Pass arguments to the script
+3va run server.ts -- --port 3000 --dev
+# process.argv → ['3va', '/abs/server.ts', '--port', '3000', '--dev']
+
+# JSX file
+3va run component.jsx --allow-read=/src
+
+# Audit log
+3va run app.ts --allow-net=api.example.com --audit-log=audit.json --audit-level=all
 ```
 
 ---
@@ -63,22 +91,22 @@ Executes a JavaScript or TypeScript file in a sandboxed environment. Permissions
 
 ### 2.3.1 `install`
 
-Installs a package from a registry. Requires `--allow-net` with the registry host. Never executes post-install scripts.
+Installs one or more packages from a registry. Requires `--allow-net` with the registry host. Never executes post-install scripts.
 
 **Signature:**
 ```
-3va install [<PACKAGE>[@<VERSION>]] --allow-net=<registry-host>
+3va install [<PACKAGE>[@<VERSION>]...] [--allow-net=<registry-host>]
 ```
 
 **Parameters:**
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `PACKAGE[@VERSION]` | `string` (optional) | Package to install with optional version. If the entire command is omitted, installs dependencies from `package.json`. |
+| `PACKAGE[@VERSION]...` | `string...` (optional) | One or more packages to install. Multiple packages can be specified in a single invocation. If omitted, installs all dependencies from `package.json`. |
 
 **Options:**
 | Option | Type | Description |
 |--------|------|-------------|
-| `--allow-net=<host>` | `string` | **Required.** Registry host. Determines which registry is used. |
+| `--allow-net=<host>` | `string` | Registry host. Determines which registry is used. Use `--allow-net=` to allow all registries. |
 
 **The registry is derived from the host:**
 | `--allow-net` | Registry used |
@@ -100,18 +128,20 @@ Installs a package from a registry. Requires `--allow-net` with the registry hos
 
 **Examples:**
 ```bash
-# From npm (latest version)
+# Single package from npm
 3va install axios --allow-net=registry.npmjs.org
 
-# From npm (exact version)
-3va install axios@1.7.2 --allow-net=registry.npmjs.org
+# Multiple packages in one command
+3va install next react react-dom --allow-net=registry.npmjs.org
 
-# From Yarn
-3va install react --allow-net=registry.yarnpkg.com
+# Exact version
+3va install axios@1.7.2 --allow-net=registry.npmjs.org
 
 # From JSR (requires @scope/name)
 3va install @std/path --allow-net=jsr.io
-3va install @std/path@0.196.0 --allow-net=jsr.io
+
+# Install all deps from package.json
+3va install --allow-net=registry.npmjs.org
 
 # Without --allow-net: explanatory error with the correct command
 3va install axios

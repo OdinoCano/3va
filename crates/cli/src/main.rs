@@ -861,10 +861,10 @@ async fn run_test_watch_mode(paths: Vec<PathBuf>, _coverage: bool) -> anyhow::Re
 /// Construye un PermissionState a partir de los flags del subcomando `run`.
 /// Extraído para permitir tests unitarios sin levantar el CLI completo.
 fn build_permissions(
-    allow_read: Option<&[PathBuf]>,
-    allow_write: Option<&[PathBuf]>,
+    allow_read: Option<&[String]>,
+    allow_write: Option<&[String]>,
     allow_net: Option<&[String]>,
-    allow_env: bool,
+    allow_env: Option<&[String]>,
     allow_child_process: bool,
     interactive: bool,
 ) -> vvva_permissions::PermissionState {
@@ -872,22 +872,42 @@ fn build_permissions(
     permissions.set_interactive(interactive);
 
     if let Some(reads) = allow_read {
-        for path in reads {
-            permissions.grant(vvva_permissions::Capability::FileRead(path.clone()));
+        if reads.is_empty() || reads.iter().any(|s| s.is_empty()) {
+            permissions.grant(vvva_permissions::Capability::FileRead(PathBuf::from("/")));
+        } else {
+            for path in reads {
+                permissions.grant(vvva_permissions::Capability::FileRead(PathBuf::from(path)));
+            }
         }
     }
     if let Some(writes) = allow_write {
-        for path in writes {
-            permissions.grant(vvva_permissions::Capability::FileWrite(path.clone()));
+        if writes.is_empty() || writes.iter().any(|s| s.is_empty()) {
+            permissions.grant(vvva_permissions::Capability::FileWrite(PathBuf::from("/")));
+        } else {
+            for path in writes {
+                permissions.grant(vvva_permissions::Capability::FileWrite(PathBuf::from(path)));
+            }
         }
     }
     if let Some(nets) = allow_net {
-        for host in nets {
-            permissions.grant(vvva_permissions::Capability::Network(host.clone()));
+        if nets.is_empty() || nets.iter().any(|s| s.is_empty()) {
+            permissions.grant(vvva_permissions::Capability::Network("*".to_string()));
+        } else {
+            for host in nets {
+                permissions.grant(vvva_permissions::Capability::Network(host.clone()));
+            }
         }
     }
-    if allow_env {
-        permissions.grant(vvva_permissions::Capability::EnvAccess);
+    if let Some(vars) = allow_env {
+        if vars.is_empty() || vars.iter().any(|s| s.is_empty()) {
+            // --allow-env or --allow-env= with no value → grant access to all vars.
+            permissions.grant(vvva_permissions::Capability::EnvAccess);
+        } else {
+            // --allow-env=NODE_ENV,PATH → grant only the listed variables.
+            for var in vars {
+                permissions.grant(vvva_permissions::Capability::EnvVar(var.clone()));
+            }
+        }
     }
     if allow_child_process {
         permissions.grant(vvva_permissions::Capability::SpawnProcess);
@@ -931,21 +951,25 @@ enum Commands {
         /// The file to run
         file: PathBuf,
 
-        /// Allow read access to specified paths
-        #[arg(long = "allow-read")]
-        allow_read: Option<Vec<PathBuf>>,
+        /// Allow read access to specified paths. Use --allow-read= (no value) to allow all paths.
+        /// Separate multiple paths with commas: --allow-read=/a,/b
+        #[arg(long = "allow-read", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_read: Option<Vec<String>>,
 
-        /// Allow network access to specified hosts
-        #[arg(long = "allow-net")]
+        /// Allow network access to specified hosts. Use --allow-net= (no value) to allow all hosts.
+        /// Separate multiple hosts with commas: --allow-net=api.example.com,cdn.example.com
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
         allow_net: Option<Vec<String>>,
 
-        /// Allow write access to specified paths
-        #[arg(long = "allow-write")]
-        allow_write: Option<Vec<PathBuf>>,
+        /// Allow write access to specified paths. Use --allow-write= (no value) to allow all paths.
+        /// Separate multiple paths with commas: --allow-write=/tmp,/var
+        #[arg(long = "allow-write", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_write: Option<Vec<String>>,
 
-        /// Allow environment variable access
-        #[arg(long = "allow-env")]
-        allow_env: bool,
+        /// Allow environment variable access. Use --allow-env to allow all variables,
+        /// or --allow-env=NODE_ENV,PATH to scope access to specific variables.
+        #[arg(long = "allow-env", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_env: Option<Vec<String>>,
 
         /// Allow spawning child processes
         #[arg(long = "allow-child-process")]
@@ -958,14 +982,19 @@ enum Commands {
         /// Audit level: "deny" logs only denied checks (default), "all" logs every check
         #[arg(long = "audit-level", default_value = "deny")]
         audit_level: String,
+
+        /// Arguments to pass to the script (after --)
+        #[arg(last = true)]
+        script_args: Vec<String>,
     },
     /// Install dependencies from 3va registry
     Install {
-        /// The package to install (e.g. axios or axios@1.7.9)
-        package: Option<String>,
+        /// Packages to install (e.g. axios axios@1.7.9 react react-dom). Omit to install from manifest.
+        #[arg(num_args = 0..)]
+        packages: Vec<String>,
 
-        /// Registry host to allow network access to (e.g. registry.npmjs.org, registry.yarnpkg.com, jsr.io)
-        #[arg(long = "allow-net")]
+        /// Registry host to allow network access to (e.g. registry.npmjs.org). Use --allow-net= to allow all.
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
         allow_net: Option<Vec<String>>,
     },
     /// Update installed packages to their latest version, preserving their original registry
@@ -973,8 +1002,8 @@ enum Commands {
         /// Specific packages to update (if omitted, updates all packages in lockfile)
         packages: Vec<String>,
 
-        /// Registry hosts to allow network access to (must cover all registries of the packages being updated)
-        #[arg(long = "allow-net")]
+        /// Registry hosts to allow network access to. Use --allow-net= to allow all.
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
         allow_net: Option<Vec<String>>,
     },
     /// Reinstall a package (force reinstall even if already installed)
@@ -982,8 +1011,8 @@ enum Commands {
         /// The package to reinstall (e.g. axios or axios@1.7.9)
         package: String,
 
-        /// Registry host to allow network access to (e.g. registry.npmjs.org, registry.yarnpkg.com, jsr.io)
-        #[arg(long = "allow-net")]
+        /// Registry host to allow network access to. Use --allow-net= to allow all.
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
         allow_net: Option<Vec<String>>,
     },
     /// Development server with hot module replacement
@@ -1293,13 +1322,14 @@ async fn main() -> anyhow::Result<()> {
             allow_child_process,
             audit_log,
             audit_level,
+            script_args,
         } => {
             info!("Running {:?} (Sandboxed)", file);
             let mut permissions = build_permissions(
                 allow_read.as_deref(),
                 allow_write.as_deref(),
                 allow_net.as_deref(),
-                *allow_env,
+                allow_env.as_deref(),
                 *allow_child_process,
                 std::io::stderr().is_terminal(), // solo prompt si stderr es visible (no capturado)
             );
@@ -1319,7 +1349,7 @@ async fn main() -> anyhow::Result<()> {
             info!("3va Runtime initialized securely.");
 
             // Execute file (transpiles TypeScript automatically); event loop runs inside eval_file
-            engine.eval_file(file).await?;
+            engine.eval_file_with_args(file, script_args).await?;
             info!("Execution finished.");
 
             // Write audit log to file if requested
@@ -1335,13 +1365,15 @@ async fn main() -> anyhow::Result<()> {
                 info!("Audit log written to {:?}", log_path);
             }
         }
-        Commands::Install { package, allow_net } => {
-            if let Some(pkg) = package {
-                info!("Installing package '{}'", pkg);
-                vvva_pm::install_package(pkg, allow_net.as_deref()).await?;
-            } else {
+        Commands::Install { packages, allow_net } => {
+            if packages.is_empty() {
                 info!("Installing dependencies from manifest...");
                 info!("Note: Post-install scripts are DISABLED by default for security.");
+            } else {
+                for pkg in packages {
+                    info!("Installing package '{}'", pkg);
+                    vvva_pm::install_package(pkg, allow_net.as_deref()).await?;
+                }
             }
         }
         Commands::Update {
@@ -1464,11 +1496,12 @@ mod tests {
 
     #[test]
     fn no_flags_produces_deny_by_default() {
-        let state = build_permissions(None, None, None, false, false, false);
+        let state = build_permissions(None, None, None, None, false, false);
         assert!(!state.check(&Capability::FileRead(PathBuf::from("/etc/passwd"))));
         assert!(!state.check(&Capability::FileWrite(PathBuf::from("/tmp/x"))));
         assert!(!state.check(&Capability::Network("registry.npmjs.org".to_string())));
         assert!(!state.check(&Capability::EnvAccess));
+        assert!(!state.check(&Capability::EnvVar("PATH".to_string())));
         assert!(!state.check(&Capability::SpawnProcess));
     }
 
@@ -1476,8 +1509,8 @@ mod tests {
 
     #[test]
     fn allow_read_flag_grants_file_read_for_path() {
-        let reads = vec![PathBuf::from("/app")];
-        let state = build_permissions(Some(&reads), None, None, false, false, false);
+        let reads = vec!["/app".to_string()];
+        let state = build_permissions(Some(&reads), None, None, None, false, false);
 
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/config.json"))));
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/subdir/main.ts"))));
@@ -1486,8 +1519,8 @@ mod tests {
 
     #[test]
     fn allow_read_multiple_paths_all_granted() {
-        let reads = vec![PathBuf::from("/app"), PathBuf::from("/tmp")];
-        let state = build_permissions(Some(&reads), None, None, false, false, false);
+        let reads = vec!["/app".to_string(), "/tmp".to_string()];
+        let state = build_permissions(Some(&reads), None, None, None, false, false);
 
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/main.js"))));
         assert!(state.check(&Capability::FileRead(PathBuf::from("/tmp/cache.json"))));
@@ -1500,7 +1533,7 @@ mod tests {
     #[test]
     fn allow_net_flag_grants_network_for_host() {
         let nets = vec!["registry.npmjs.org".to_string()];
-        let state = build_permissions(None, None, Some(&nets), false, false, false);
+        let state = build_permissions(None, None, Some(&nets), None, false, false);
 
         assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
         assert!(!state.check(&Capability::Network("evil.com".to_string())));
@@ -1515,7 +1548,7 @@ mod tests {
             "registry.yarnpkg.com".to_string(),
             "jsr.io".to_string(),
         ];
-        let state = build_permissions(None, None, Some(&nets), false, false, false);
+        let state = build_permissions(None, None, Some(&nets), None, false, false);
 
         assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
         assert!(state.check(&Capability::Network("registry.yarnpkg.com".to_string())));
@@ -1523,18 +1556,42 @@ mod tests {
         assert!(!state.check(&Capability::Network("evil.com".to_string())));
     }
 
-    // ── --allow-env / --allow-child-process ───────────────────────────────────
+    // ── --allow-env / --allow-env=VAR / --allow-child-process ────────────────
 
     #[test]
-    fn allow_env_flag_grants_env_access() {
-        let state = build_permissions(None, None, None, true, false, false);
+    fn allow_env_no_scope_grants_all_env_access() {
+        // --allow-env (no value) → Some(vec![]) → EnvAccess (all)
+        let state = build_permissions(None, None, None, Some(&[]), false, false);
         assert!(state.check(&Capability::EnvAccess));
+        assert!(state.check(&Capability::EnvVar("PATH".to_string())));
+        assert!(state.check(&Capability::EnvVar("SECRET_KEY".to_string())));
         assert!(!state.check(&Capability::FileRead(PathBuf::from("/etc/passwd"))));
     }
 
     #[test]
+    fn allow_env_scoped_grants_only_named_vars() {
+        // --allow-env=NODE_ENV,PORT → EnvVar grants for each name
+        let vars = vec!["NODE_ENV".to_string(), "PORT".to_string()];
+        let state = build_permissions(None, None, None, Some(&vars), false, false);
+
+        assert!(state.check(&Capability::EnvVar("NODE_ENV".to_string())));
+        assert!(state.check(&Capability::EnvVar("PORT".to_string())));
+        // Full EnvAccess (all) is NOT granted
+        assert!(!state.check(&Capability::EnvAccess));
+        // Unlisted vars are denied
+        assert!(!state.check(&Capability::EnvVar("SECRET_KEY".to_string())));
+    }
+
+    #[test]
+    fn allow_env_not_provided_denies_everything() {
+        let state = build_permissions(None, None, None, None, false, false);
+        assert!(!state.check(&Capability::EnvAccess));
+        assert!(!state.check(&Capability::EnvVar("PATH".to_string())));
+    }
+
+    #[test]
     fn allow_child_process_flag_grants_spawn_process() {
-        let state = build_permissions(None, None, None, false, true, false);
+        let state = build_permissions(None, None, None, None, true, false);
         assert!(state.check(&Capability::SpawnProcess));
         assert!(!state.check(&Capability::EnvAccess));
     }
@@ -1543,9 +1600,9 @@ mod tests {
 
     #[test]
     fn combined_flags_each_grant_only_their_capability() {
-        let reads = vec![PathBuf::from("/app")];
+        let reads = vec!["/app".to_string()];
         let nets = vec!["api.example.com".to_string()];
-        let state = build_permissions(Some(&reads), None, Some(&nets), true, false, false);
+        let state = build_permissions(Some(&reads), None, Some(&nets), Some(&[]), false, false);
 
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/main.js"))));
         assert!(state.check(&Capability::Network("api.example.com".to_string())));

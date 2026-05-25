@@ -126,19 +126,45 @@ impl JsEngine {
         self.runtime.idle().await;
     }
 
+    /// Like `eval_file` but also sets `process.argv[2+]` to the given script arguments.
+    pub async fn eval_file_with_args(&self, path: &Path, args: &[String]) -> anyhow::Result<()> {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let filename = canonical.to_string_lossy().to_string();
+        let script_arg = filename.replace('"', "\\\"");
+        let extra: String = args
+            .iter()
+            .map(|a| format!(", \"{}\"", a.replace('"', "\\\"")))
+            .collect();
+        let inject = format!(
+            "if (globalThis.process && Array.isArray(globalThis.process.argv)) \
+             {{ globalThis.process.argv = [globalThis.process.argv[0], \"{script_arg}\"{extra}]; }}"
+        );
+        self.context
+            .with(|ctx| {
+                ctx.eval::<(), _>(inject.as_str())?;
+                Ok::<(), rquickjs::Error>(())
+            })
+            .await?;
+        self.eval_file(path).await
+    }
+
     /// Read a file, transpile if TypeScript, set `__filename`/`__dirname`, then eval.
     /// Automatically detects ESM (top-level import/export) and uses Module evaluation.
     pub async fn eval_file(&self, path: &Path) -> anyhow::Result<()> {
         let source = std::fs::read_to_string(path)?;
 
-        // Transpile TypeScript
-        let code = if matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("ts") | Some("tsx")
-        ) {
-            transpiler::transpile(&source)
-        } else {
-            source
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let code = match ext {
+            "tsx" | "jsx" => transpiler::transpile_jsx(&source),
+            "ts" | "mts" | "cts" => transpiler::transpile(&source),
+            _ => {
+                // For .js/.mjs and unknown extensions, auto-detect JSX
+                if transpiler::looks_like_jsx(&source) {
+                    transpiler::transpile_js(&source)
+                } else {
+                    source
+                }
+            }
         };
 
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -153,14 +179,25 @@ impl JsEngine {
         self.context
             .with(|ctx| {
                 if is_esm {
+                    // Set argv[1] to the script path for ESM files too
+                    let argv_setup = format!(
+                        "if (globalThis.process && Array.isArray(globalThis.process.argv) \
+                         && globalThis.process.argv.length < 2) \
+                         {{ globalThis.process.argv.push('{}'); }}",
+                        filename.replace('\'', "\\'")
+                    );
+                    ctx.eval::<(), _>(argv_setup.as_str())?;
                     let module = Module::declare(ctx.clone(), filename.as_str(), code.as_str())?;
                     let (_module_eval, _promise) = module.eval()?;
                     Ok::<(), rquickjs::Error>(())
                 } else {
                     let setup = format!(
-                        "globalThis.__filename = '{}'; globalThis.__dirname = '{}';",
-                        filename.replace('\'', "\\'"),
-                        dirname.replace('\'', "\\'"),
+                        "globalThis.__filename = '{f}'; globalThis.__dirname = '{d}';\
+                         if (globalThis.process && Array.isArray(globalThis.process.argv) \
+                         && globalThis.process.argv.length < 2) \
+                         {{ globalThis.process.argv.push('{f}'); }}",
+                        f = filename.replace('\'', "\\'"),
+                        d = dirname.replace('\'', "\\'"),
                     );
                     ctx.eval::<(), _>(setup.as_str())?;
                     let _: rquickjs::Value = ctx.eval(code.as_str())?;

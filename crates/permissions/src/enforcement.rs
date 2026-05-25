@@ -167,10 +167,14 @@ impl EnvEnforcer {
     }
 
     pub fn get(&self, key: &str) -> Result<Option<String>, PermissionError> {
-        if !self.permission_state.check(&Capability::EnvAccess) {
+        // EnvVar(key) is satisfied by either EnvAccess (all) or EnvVar(key) specifically,
+        // because caps_match maps EnvAccess → EnvVar(_).
+        if !self.permission_state.check(&Capability::EnvVar(key.to_string())) {
             return Err(PermissionError::EnvAccessDenied);
         }
 
+        // Secondary allowlist: when with_allowed_vars() is set it acts as an extra filter
+        // on top of the capability layer (e.g. EnvAccess + with_allowed_vars(["PATH"])).
         if !self.allowed_vars.is_empty() && !self.allowed_vars.contains(key) {
             return Err(PermissionError::EnvVarNotAllowed(key.to_string()));
         }
@@ -179,6 +183,7 @@ impl EnvEnforcer {
     }
 
     pub fn all(&self) -> Result<std::collections::HashMap<String, String>, PermissionError> {
+        // Enumerating all vars requires the unrestricted EnvAccess grant.
         if !self.permission_state.check(&Capability::EnvAccess) {
             return Err(PermissionError::EnvAccessDenied);
         }
