@@ -58,7 +58,7 @@ log_info "═══════════════════════�
 log_step "1.1 Install lodash from npm"
 OUTPUT=$("$BINARY" install lodash --allow-net=registry.npmjs.org 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "installed successfully"; then
+if echo "$OUTPUT" | grep >/dev/null "installed successfully"; then
     log_pass "npm: install lodash"
 else
     log_fail "npm: install lodash"
@@ -94,7 +94,7 @@ log_info "═══════════════════════�
 log_step "2.1 Install axios from yarn"
 OUTPUT=$("$BINARY" install axios --allow-net=registry.yarnpkg.com 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -qi "installed successfully"; then
+if echo "$OUTPUT" | grep -i >/dev/null "installed successfully"; then
     log_pass "yarn: install axios"
 else
     log_fail "yarn: install axios"
@@ -129,7 +129,7 @@ log_info "═══════════════════════�
 log_step "3.1 Install @std/path from jsr (requires @scope)"
 OUTPUT=$("$BINARY" install @std/path --allow-net=jsr.io 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -qi "installed successfully"; then
+if echo "$OUTPUT" | grep -i >/dev/null "installed successfully"; then
     log_pass "jsr: install @std/path"
 else
     log_fail "jsr: install @std/path"
@@ -178,7 +178,7 @@ console.log('Import test: SECURITY MODEL VERIFIED');
 EOF
 OUTPUT=$("$BINARY" run import_all.js 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "SECURITY MODEL VERIFIED"; then
+if echo "$OUTPUT" | grep >/dev/null "SECURITY MODEL VERIFIED"; then
     log_pass "import: sandbox security model works"
 else
     log_fail "import: script failed"
@@ -219,7 +219,7 @@ console.log('PASSED');
 EOF
 OUTPUT=$("$BINARY" run pure_js.js 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "PASSED"; then
+if echo "$OUTPUT" | grep >/dev/null "PASSED"; then
     log_pass "exec: pure JS works"
 else
     log_fail "exec: pure JS failed"
@@ -237,7 +237,7 @@ console.log('TS PASSED');
 EOF
 OUTPUT=$("$BINARY" run pure_ts.ts 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "TS PASSED"; then
+if echo "$OUTPUT" | grep >/dev/null "TS PASSED"; then
     log_pass "exec: TypeScript works"
 else
     log_fail "exec: TypeScript failed"
@@ -247,7 +247,7 @@ log_step "4.3 Run with --allow-read"
 echo 'console.log("Read test:", process.cwd());' > read_test.js
 OUTPUT=$("$BINARY" run read_test.js 2>&1 | head -20)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "Sandboxed"; then
+if echo "$OUTPUT" | grep >/dev/null "Sandboxed"; then
     log_pass "exec: sandbox mode active"
 else
     log_fail "exec: sandbox mode issue"
@@ -263,21 +263,21 @@ log_info "═══════════════════════�
 
 log_step "6.1 Doctor check"
 OUTPUT=$("$BINARY" doctor 2>&1)
-if echo "$OUTPUT" | grep -q "healthy"; then
+if echo "$OUTPUT" | grep >/dev/null "healthy"; then
     log_pass "doctor: healthy"
 else
     log_fail "doctor: failed"
 fi
 
 log_step "6.2 Help output"
-if "$BINARY" --help 2>&1 | grep -q "Usage:"; then
+if "$BINARY" --help 2>&1 | grep >/dev/null "Usage:"; then
     log_pass "help: works"
 else
     log_fail "help: failed"
 fi
 
 log_step "6.3 Version output"
-if "$BINARY" --version 2>&1 | grep -q "0.1.0"; then
+if "$BINARY" --version 2>&1 | grep >/dev/null "0.1.0"; then
     log_pass "version: correct"
 else
     log_fail "version: mismatch"
@@ -297,7 +297,7 @@ export const add = (a, b) => a + b;
 console.log('Module loaded');
 EOF
 mkdir -p dist
-if "$BINARY" bundle main.js 2>&1 | grep -q "Bundle created"; then
+if "$BINARY" bundle main.js 2>&1 | grep >/dev/null "Bundle created"; then
     log_pass "bundle: basic works"
 else
     log_fail "bundle: basic failed"
@@ -305,7 +305,7 @@ fi
 
 log_step "7.2 Bundle with minify"
 rm -f dist/bundle.js
-if "$BINARY" bundle main.js --minify 2>&1 | grep -q "Bundle created"; then
+if "$BINARY" bundle main.js --minify 2>&1 | grep >/dev/null "Bundle created"; then
     SIZE=$(wc -c < dist/bundle.js)
     log_info "Bundle size (minified): $SIZE bytes"
     log_pass "bundle: minify works"
@@ -317,7 +317,7 @@ log_step "7.3 Bundle with code splitting"
 echo 'console.log("entry1");' > entry1.js
 echo 'console.log("entry2");' > entry2.js
 rm -f dist/bundle.js
-if "$BINARY" bundle entry1.js --split 2>&1 | grep -q "Bundle created"; then
+if "$BINARY" bundle entry1.js --split 2>&1 | grep >/dev/null "Bundle created"; then
     log_pass "bundle: splitting works"
 else
     log_fail "bundle: splitting failed"
@@ -349,7 +349,7 @@ else
 fi
 
 log_step "8.2 Test --watch (simulated - just check flag exists)"
-if "$BINARY" test --help 2>&1 | grep -q "watch"; then
+if "$BINARY" test --help 2>&1 | grep >/dev/null "watch"; then
     log_pass "test: --watch flag available"
 else
     log_fail "test: --watch flag missing"
@@ -364,14 +364,14 @@ log_info "FASE 9: UPDATE & REINSTALL"
 log_info "══════════════════════════════════════════════════════════"
 
 log_step "9.1 Update command exists"
-if "$BINARY" --help 2>&1 | grep -q "update"; then
+if "$BINARY" --help 2>&1 | grep >/dev/null "update"; then
     log_pass "update: command available"
 else
     log_fail "update: command missing"
 fi
 
 log_step "9.2 Reinstall command exists"
-if "$BINARY" --help 2>&1 | grep -q "reinstall"; then
+if "$BINARY" --help 2>&1 | grep >/dev/null "reinstall"; then
     log_pass "reinstall: command available"
 else
     log_fail "reinstall: command missing"
@@ -396,20 +396,20 @@ try {
 }
 EOF
 OUTPUT=$("$BINARY" run fs_test.js 2>&1)
-if echo "$OUTPUT" | grep -q "fs-blocked"; then
+if echo "$OUTPUT" | grep >/dev/null "fs-blocked"; then
     log_pass "sandbox: fs operations blocked without --allow-read"
 else
     log_warn "sandbox: fs operations not blocked (gap: __fsReadFileSync sin permiso)"
 fi
 
 log_step "10.2 Help shows permission flags"
-if "$BINARY" run --help 2>&1 | grep -q "allow-read"; then
+if "$BINARY" run --help 2>&1 | grep >/dev/null "allow-read"; then
     log_pass "sandbox: --allow-read flag exists"
 else
     log_fail "sandbox: --allow-read missing"
 fi
 
-if "$BINARY" run --help 2>&1 | grep -q "allow-net"; then
+if "$BINARY" run --help 2>&1 | grep >/dev/null "allow-net"; then
     log_pass "sandbox: --allow-net flag exists"
 else
     log_fail "sandbox: --allow-net missing"
@@ -424,25 +424,25 @@ log_info "FASE 11: AUDIT (3va audit)"
 log_info "══════════════════════════════════════════════════════════"
 
 log_step "11.1 Audit flags disponibles"
-if "$BINARY" audit --help 2>&1 | grep -q "deny"; then
+if "$BINARY" audit --help 2>&1 | grep >/dev/null "deny"; then
     log_pass "audit: --deny flag existe"
 else
     log_fail "audit: --deny flag falta"
 fi
 
-if "$BINARY" audit --help 2>&1 | grep -q "update-cache"; then
+if "$BINARY" audit --help 2>&1 | grep >/dev/null "update-cache"; then
     log_pass "audit: --update-cache flag existe"
 else
     log_fail "audit: --update-cache flag falta"
 fi
 
-if "$BINARY" audit --help 2>&1 | grep -q "secrets"; then
+if "$BINARY" audit --help 2>&1 | grep >/dev/null "secrets"; then
     log_pass "audit: --secrets flag existe"
 else
     log_fail "audit: --secrets flag falta"
 fi
 
-if "$BINARY" audit --help 2>&1 | grep -q "json"; then
+if "$BINARY" audit --help 2>&1 | grep >/dev/null "json"; then
     log_pass "audit: --json flag existe"
 else
     log_fail "audit: --json flag falta"
@@ -451,14 +451,14 @@ fi
 log_step "11.2 Audit Phase 1: malware scan (paquetes ya instalados)"
 OUTPUT=$("$BINARY" audit 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "Static Malware Analysis"; then
+if echo "$OUTPUT" | grep >/dev/null "Static Malware Analysis"; then
     log_pass "audit: Phase 1 malware ejecutada"
 else
     log_fail "audit: Phase 1 malware no ejecutada"
 fi
 
 log_step "11.3 Audit Phase 2: OSV scan (con cache)"
-if echo "$OUTPUT" | grep -q "Known Vulnerabilities\|OSV"; then
+if echo "$OUTPUT" | grep >/dev/null "Known Vulnerabilities\|OSV"; then
     log_pass "audit: Phase 2 OSV ejecutada"
 else
     log_fail "audit: Phase 2 OSV no ejecutada"
@@ -493,7 +493,7 @@ assert 'osv' in d['phases'], 'missing osv'
 assert 'malware' in d['phases'], 'missing malware'
 assert 'secrets' in d['phases'], 'missing secrets'
 print('OK')
-" 2>/dev/null | grep -q "OK"; then
+" 2>/dev/null | grep >/dev/null "OK"; then
     log_pass "audit: --json tiene estructura correcta"
 else
     log_fail "audit: --json estructura incorrecta"
@@ -502,7 +502,7 @@ fi
 log_step "11.7 Audit --secrets escanea el proyecto"
 OUTPUT=$("$BINARY" audit --secrets 2>&1)
 log_debug "Secrets output: ${OUTPUT:0:300}"
-if echo "$OUTPUT" | grep -q "Phase 3\|Secrets Detection\|No hardcoded secrets\|secrets found"; then
+if echo "$OUTPUT" | grep >/dev/null "Phase 3\|Secrets Detection\|No hardcoded secrets\|secrets found"; then
     log_pass "audit: --secrets ejecuta Phase 3"
 else
     log_fail "audit: --secrets no ejecuta Phase 3"
@@ -534,7 +534,7 @@ DENY_OUT=$("$BINARY" audit --json 2>&1)
 cd "$ORIG_DIR"
 rm -rf /tmp/audit-deny-test
 log_debug "Deny test output: ${DENY_OUT:0:400}"
-if echo "$DENY_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print('json_ok')" 2>/dev/null | grep -q "json_ok"; then
+if echo "$DENY_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print('json_ok')" 2>/dev/null | grep >/dev/null "json_ok"; then
     log_pass "audit: --json funciona con paquete vulnerable"
 else
     log_warn "audit: respuesta no es JSON (posible error de red)"
@@ -551,7 +551,7 @@ log_info "═══════════════════════�
 log_step "11.1 Sandbox evalúa expresiones básicas"
 OUTPUT=$(printf '1 + 1\n"hello"\n' | "$BINARY" sandbox 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "^2$" && echo "$OUTPUT" | grep -q '"hello"'; then
+if echo "$OUTPUT" | grep >/dev/null "^2$" && echo "$OUTPUT" | grep >/dev/null '"hello"'; then
     log_pass "sandbox: expresiones numéricas y strings"
 else
     log_fail "sandbox: expresiones básicas fallaron"
@@ -560,7 +560,7 @@ fi
 log_step "11.2 Sandbox muestra objetos como JSON"
 OUTPUT=$(printf '({"a":1,"b":2})\n' | "$BINARY" sandbox 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q '"a"'; then
+if echo "$OUTPUT" | grep >/dev/null '"a"'; then
     log_pass "sandbox: objeto mostrado como JSON"
 else
     log_fail "sandbox: objeto no mostrado"
@@ -569,7 +569,7 @@ fi
 log_step "11.3 Sandbox evalúa arrays"
 OUTPUT=$(printf '[1,2,3].map(x => x * 2)\n' | "$BINARY" sandbox 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "4"; then
+if echo "$OUTPUT" | grep >/dev/null "4"; then
     log_pass "sandbox: array.map evaluado"
 else
     log_fail "sandbox: array.map falló"
@@ -578,7 +578,7 @@ fi
 log_step "11.4 Sandbox define y llama funciones"
 OUTPUT=$(printf 'function add(a,b){return a+b}\nadd(10,32)\n' | "$BINARY" sandbox 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "^42$"; then
+if echo "$OUTPUT" | grep >/dev/null "^42$"; then
     log_pass "sandbox: definición y llamada de función"
 else
     log_fail "sandbox: función falló (esperado 42)"
@@ -587,7 +587,7 @@ fi
 log_step "11.5 Sandbox soporta multi-línea"
 OUTPUT=$(printf 'function greet(name) {\n  return "hello " + name;\n}\ngreet("mundo")\n' | "$BINARY" sandbox 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "hello mundo"; then
+if echo "$OUTPUT" | grep >/dev/null "hello mundo"; then
     log_pass "sandbox: función multi-línea"
 else
     log_fail "sandbox: función multi-línea falló"
@@ -596,7 +596,7 @@ fi
 log_step "11.6 Sandbox .permissions sin grants"
 OUTPUT=$(printf '.permissions\n' | "$BINARY" sandbox 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -q "no permissions granted"; then
+if echo "$OUTPUT" | grep >/dev/null "no permissions granted"; then
     log_pass "sandbox: .permissions vacío"
 else
     log_fail "sandbox: .permissions no muestra estado vacío"
@@ -605,7 +605,7 @@ fi
 log_step "11.7 Sandbox .allow-read y .permissions listan grant"
 OUTPUT=$(printf '.allow-read=/tmp\n.permissions\n' | "$BINARY" sandbox 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -qi "FileRead.*tmp"; then
+if echo "$OUTPUT" | grep -i >/dev/null "FileRead.*tmp"; then
     log_pass "sandbox: .allow-read concede y .permissions lo muestra"
 else
     log_fail "sandbox: grant no aparece en .permissions"
@@ -614,7 +614,7 @@ fi
 log_step "11.8 Sandbox .allow-net concede Network"
 OUTPUT=$(printf '.allow-net=api.example.com\n.permissions\n' | "$BINARY" sandbox 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -qi "Network.*api.example.com"; then
+if echo "$OUTPUT" | grep -i >/dev/null "Network.*api.example.com"; then
     log_pass "sandbox: .allow-net concede Network"
 else
     log_fail "sandbox: .allow-net no funciona"
@@ -623,7 +623,7 @@ fi
 log_step "11.9 Sandbox .clear resetea contexto JS"
 OUTPUT=$(printf 'const x = 42\n.clear\nx\n' | "$BINARY" sandbox 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -qi "Error\|not defined\|ReferenceError"; then
+if echo "$OUTPUT" | grep -i >/dev/null "Error\|not defined\|ReferenceError"; then
     log_pass "sandbox: .clear elimina variables definidas"
 else
     log_fail "sandbox: .clear no eliminó el contexto"
@@ -632,7 +632,7 @@ fi
 log_step "11.10 Sandbox reporta errores de sintaxis"
 OUTPUT=$(printf 'const x = ;;;\n' | "$BINARY" sandbox 2>&1)
 log_debug "Output: $OUTPUT"
-if echo "$OUTPUT" | grep -qi "Error\|Uncaught\|syntax\|unexpected"; then
+if echo "$OUTPUT" | grep -i >/dev/null "Error\|Uncaught\|syntax\|unexpected"; then
     log_pass "sandbox: error de sintaxis reportado"
 else
     log_fail "sandbox: error de sintaxis no reportado"
@@ -649,22 +649,22 @@ log_info "═══════════════════════�
 log_step "12.1 Dev --help muestra flags --port, --host, --open"
 DEV_HELP=$("$BINARY" dev --help 2>&1)
 log_debug "Dev help: ${DEV_HELP:0:300}"
-if echo "$DEV_HELP" | grep -q "port"; then
+if echo "$DEV_HELP" | grep >/dev/null "port"; then
     log_pass "dev: --port flag existe"
 else
     log_fail "dev: --port flag falta"
 fi
-if echo "$DEV_HELP" | grep -q "host"; then
+if echo "$DEV_HELP" | grep >/dev/null "host"; then
     log_pass "dev: --host flag existe"
 else
     log_fail "dev: --host flag falta"
 fi
-if echo "$DEV_HELP" | grep -q "open"; then
+if echo "$DEV_HELP" | grep >/dev/null "open"; then
     log_pass "dev: --open flag existe"
 else
     log_fail "dev: --open flag falta"
 fi
-if echo "$DEV_HELP" | grep -q "public"; then
+if echo "$DEV_HELP" | grep >/dev/null "public"; then
     log_pass "dev: --public-dir flag existe"
 else
     log_fail "dev: --public-dir flag falta"
@@ -692,7 +692,7 @@ fi
 # Test: built-in dev page served when no public/index.html
 DEV_INDEX=$(curl -s --max-time 3 "http://127.0.0.1:${DEV_PORT}/")
 log_debug "Dev index: ${DEV_INDEX:0:200}"
-if echo "$DEV_INDEX" | grep -qi "3VA\|bundle\|dev"; then
+if echo "$DEV_INDEX" | grep -i >/dev/null "3VA\|bundle\|dev"; then
     log_pass "dev: página de inicio servida"
 else
     log_fail "dev: página de inicio no servida"
@@ -710,7 +710,7 @@ fi
 # Test: /__hmr SSE endpoint — use -v so headers go to stderr, captured via 2>&1
 HMR_VERBOSE=$(curl -vs --max-time 1 "http://127.0.0.1:${DEV_PORT}/__hmr" 2>&1; true)
 log_debug "HMR verbose: ${HMR_VERBOSE:0:300}"
-if echo "$HMR_VERBOSE" | grep -qi "event-stream\|connected"; then
+if echo "$HMR_VERBOSE" | grep -i >/dev/null "event-stream\|connected"; then
     log_pass "dev: /__hmr SSE endpoint responde"
 else
     log_fail "dev: /__hmr SSE endpoint no responde"
@@ -728,12 +728,12 @@ sleep 2
 # index.html served with HMR injected
 HTML_RESP=$(curl -s --max-time 3 "http://127.0.0.1:18544/")
 log_debug "HTML response: ${HTML_RESP:0:300}"
-if echo "$HTML_RESP" | grep -q "__hmr"; then
+if echo "$HTML_RESP" | grep >/dev/null "__hmr"; then
     log_pass "dev: HMR client inyectado en HTML"
 else
     log_fail "dev: HMR client no inyectado en HTML"
 fi
-if echo "$HTML_RESP" | grep -q "Test App"; then
+if echo "$HTML_RESP" | grep >/dev/null "Test App"; then
     log_pass "dev: index.html servido desde public-dir"
 else
     log_fail "dev: index.html no servido desde public-dir"
@@ -742,7 +742,7 @@ fi
 # CSS file served with correct MIME
 CSS_CT=$(curl -s -o /dev/null -w "%{content_type}" --max-time 3 "http://127.0.0.1:18544/style.css")
 log_debug "CSS content-type: $CSS_CT"
-if echo "$CSS_CT" | grep -q "css"; then
+if echo "$CSS_CT" | grep >/dev/null "css"; then
     log_pass "dev: archivos CSS servidos con MIME correcto"
 else
     log_fail "dev: MIME incorrecto para CSS (got: $CSS_CT)"

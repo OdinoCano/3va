@@ -21,7 +21,10 @@ fn bundles_simple_js_to_iife() {
     let code = bundler.bundle().unwrap();
 
     assert!(code.contains("console.log"), "should contain console.log");
-    assert!(code.starts_with("(function"), "IIFE should start with (function");
+    assert!(
+        code.starts_with("(function"),
+        "IIFE should start with (function"
+    );
 }
 
 #[test]
@@ -38,7 +41,10 @@ fn bundles_typescript_strips_types() {
     bundler.add_entry(&entry.to_string_lossy()).unwrap();
     let code = bundler.bundle().unwrap();
 
-    assert!(!code.contains(": string"), "type annotations should be stripped");
+    assert!(
+        !code.contains(": string"),
+        "type annotations should be stripped"
+    );
     assert!(code.contains("greet"), "function body should be present");
 }
 
@@ -103,7 +109,7 @@ fn output_format_umd_wraps_with_umd_factory() {
     let code = bundler.bundle().unwrap();
 
     // UMD wraps with a factory function checking for AMD/CJS/global
-    assert!(code.len() > 0, "UMD output should not be empty");
+    assert!(!code.is_empty(), "UMD output should not be empty");
     assert!(code.contains("1.0"), "bundle content should be present");
 }
 
@@ -160,7 +166,10 @@ fn bundle_with_sourcemap_returns_map_json() {
     bundler.add_entry(&entry.to_string_lossy()).unwrap();
     let (code, map) = bundler.bundle_with_sourcemap().unwrap();
 
-    assert!(code.contains("hello"), "bundle should contain source content");
+    assert!(
+        code.contains("hello"),
+        "bundle should contain source content"
+    );
     // map may or may not be Some depending on whether the generator emits one
     let _ = map; // not asserting presence; just that the call succeeds
 }
@@ -173,16 +182,14 @@ fn bundle_file_writes_output_to_disk() {
     let input = write_file(&dir, "main.js", "console.log('bundled');");
     let output = dir.path().join("out.js");
 
-    bundle_file(
-        &input.to_string_lossy(),
-        &output.to_string_lossy(),
-        None,
-    )
-    .unwrap();
+    bundle_file(&input.to_string_lossy(), &output.to_string_lossy(), None).unwrap();
 
     assert!(output.exists(), "output file should be created");
     let content = std::fs::read_to_string(&output).unwrap();
-    assert!(content.contains("bundled"), "output should contain source content");
+    assert!(
+        content.contains("bundled"),
+        "output should contain source content"
+    );
 }
 
 #[test]

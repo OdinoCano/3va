@@ -12,59 +12,55 @@ pub fn inject_child_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Res
         "__execAsync",
         Function::new(
             ctx.clone(),
-            Async(
-                move |cmd: String, args: Vec<String>, timeout_ms: u64| {
-                    let perms = perms.clone();
-                    async move {
-                        if !perms.check(&Capability::SpawnProcess) {
-                            return Err(rquickjs::Error::new_from_js_message(
-                                "permission",
-                                "permission",
-                                "Process spawn denied. Run with --allow-child-process".to_string(),
-                            ));
-                        }
-                        let cmd2 = cmd.clone();
-                        let args2 = args.clone();
-                        let result = tokio::task::spawn_blocking(move || {
-                            let mut c = std::process::Command::new(&cmd2);
-                            c.args(&args2);
-                            if timeout_ms == 0 {
-                                c.output()
-                            } else {
-                                // Run with a rough timeout via thread
-                                c.output()
-                            }
-                        })
-                        .await
-                        .map_err(|e| {
-                            rquickjs::Error::new_from_js_message(
-                                "child_process",
-                                "spawn",
-                                e.to_string(),
-                            )
-                        })?
-                        .map_err(|e| {
-                            rquickjs::Error::new_from_js_message(
-                                "child_process",
-                                "exec",
-                                format!("spawn error: {}", e),
-                            )
-                        })?;
-
-                        let stdout =
-                            String::from_utf8_lossy(&result.stdout).into_owned();
-                        let stderr =
-                            String::from_utf8_lossy(&result.stderr).into_owned();
-                        let code = result.status.code().unwrap_or(-1);
-                        Ok(serde_json::json!({
-                            "stdout": stdout,
-                            "stderr": stderr,
-                            "code": code,
-                        })
-                        .to_string())
+            Async(move |cmd: String, args: Vec<String>, timeout_ms: u64| {
+                let perms = perms.clone();
+                async move {
+                    if !perms.check(&Capability::SpawnProcess) {
+                        return Err(rquickjs::Error::new_from_js_message(
+                            "permission",
+                            "permission",
+                            "Process spawn denied. Run with --allow-child-process".to_string(),
+                        ));
                     }
-                },
-            ),
+                    let cmd2 = cmd.clone();
+                    let args2 = args.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        let mut c = std::process::Command::new(&cmd2);
+                        c.args(&args2);
+                        if timeout_ms == 0 {
+                            c.output()
+                        } else {
+                            // Run with a rough timeout via thread
+                            c.output()
+                        }
+                    })
+                    .await
+                    .map_err(|e| {
+                        rquickjs::Error::new_from_js_message(
+                            "child_process",
+                            "spawn",
+                            e.to_string(),
+                        )
+                    })?
+                    .map_err(|e| {
+                        rquickjs::Error::new_from_js_message(
+                            "child_process",
+                            "exec",
+                            format!("spawn error: {}", e),
+                        )
+                    })?;
+
+                    let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
+                    let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+                    let code = result.status.code().unwrap_or(-1);
+                    Ok(serde_json::json!({
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "code": code,
+                    })
+                    .to_string())
+                }
+            }),
         )?,
     )?;
 

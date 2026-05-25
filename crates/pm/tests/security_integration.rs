@@ -74,18 +74,17 @@ fn malware_scanner_scan_directory_aggregates_results() {
 
     // Un archivo limpio y uno con rm -rf / (patrón exacto del scanner)
     fs::write(dir.path().join("clean.js"), "const x = 1;").unwrap();
-    fs::write(
-        dir.path().join("malicious.js"),
-        "// danger: rm -rf /",
-    )
-    .unwrap();
+    fs::write(dir.path().join("malicious.js"), "// danger: rm -rf /").unwrap();
 
     let scanner = MalwareScanner::new();
     let results = scanner.scan_directory(dir.path());
 
     let has_threat = results.iter().any(|r| !r.threats.is_empty());
     assert!(has_threat, "debe detectar amenaza en al menos un archivo");
-    assert!(!scanner.is_package_safe(dir.path()), "directorio no es seguro");
+    assert!(
+        !scanner.is_package_safe(dir.path()),
+        "directorio no es seguro"
+    );
 }
 
 // ── Secrets scanner ──────────────────────────────────────────────────────────
@@ -231,6 +230,9 @@ async fn audit_lockfile_with_unknown_versions_skips_them() {
         .await
         .expect("audit debe completar filtrando versiones unknown");
 
-    assert_eq!(report.total_packages, 0, "versiones unknown deben filtrarse");
+    assert_eq!(
+        report.total_packages, 0,
+        "versiones unknown deben filtrarse"
+    );
     assert_eq!(report.total_vulns, 0);
 }
