@@ -121,6 +121,11 @@ impl JsEngine {
         Ok(result)
     }
 
+    /// Drive one round of the async runtime — resolves pending Promises and Tokio futures.
+    pub async fn idle(&self) {
+        self.runtime.idle().await;
+    }
+
     /// Read a file, transpile if TypeScript, set `__filename`/`__dirname`, then eval.
     /// Automatically detects ESM (top-level import/export) and uses Module evaluation.
     pub async fn eval_file(&self, path: &Path) -> anyhow::Result<()> {
@@ -273,5 +278,328 @@ mod tests {
             "TS transpiled code should eval: {:?}",
             result
         );
+    }
+}
+
+#[cfg(test)]
+mod builtin_tests {
+    use super::*;
+    use vvva_permissions::Capability;
+
+    async fn engine_no_perms() -> JsEngine {
+        let perms = Arc::new(PermissionState::new());
+        JsEngine::new(perms).await.unwrap()
+    }
+
+    /// Poll the async runtime until `globalThis.__done` is non-empty or timeout.
+    async fn wait_for_result(engine: &JsEngine, global: &str) -> String {
+        for _ in 0..40 {
+            engine.idle().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let v = engine
+                .eval_to_string(&format!("globalThis.{global} || ''"))
+                .await
+                .unwrap_or_default();
+            if !v.is_empty() {
+                return v;
+            }
+        }
+        String::new()
+    }
+
+    // ── zlib ──────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn zlib_require_exposes_api() {
+        let e = engine_no_perms().await;
+        let r = e
+            .eval_to_string(
+                "const z = require('zlib');
+                 typeof z.gzip + ',' + typeof z.gunzip + ',' +
+                 typeof z.deflate + ',' + typeof z.inflate + ',' +
+                 typeof z.deflateRaw + ',' + typeof z.inflateRaw",
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, "function,function,function,function,function,function");
+    }
+
+    #[tokio::test]
+    async fn zlib_constants_are_defined() {
+        let e = engine_no_perms().await;
+        let r = e
+            .eval_to_string(
+                "const c = require('zlib').constants;
+                 '' + c.Z_OK + ',' + c.Z_BEST_SPEED + ',' + c.Z_BEST_COMPRESSION",
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, "0,1,9");
+    }
+
+    #[tokio::test]
+    async fn zlib_gzip_gunzip_round_trip() {
+        let e = engine_no_perms().await;
+        e.eval(
+            r#"globalThis.__zlib1 = null;
+               const zlib = require('zlib');
+               zlib.gzip(Buffer.from('hello world'), function(err, compressed) {
+                   if (err) { globalThis.__zlib1 = 'gzip_err:' + err; return; }
+                   zlib.gunzip(compressed, function(err2, out) {
+                       globalThis.__zlib1 = err2 ? 'gunzip_err:' + err2
+                                                 : Buffer.from(out).toString('utf8');
+                   });
+               });"#,
+        )
+        .await
+        .unwrap();
+        let result = wait_for_result(&e, "__zlib1").await;
+        assert_eq!(result, "hello world", "gzip/gunzip round-trip: {result}");
+    }
+
+    #[tokio::test]
+    async fn zlib_deflate_inflate_round_trip() {
+        let e = engine_no_perms().await;
+        e.eval(
+            r#"globalThis.__zlib2 = null;
+               const zlib = require('zlib');
+               zlib.deflate(Buffer.from('test data'), function(err, compressed) {
+                   if (err) { globalThis.__zlib2 = 'deflate_err'; return; }
+                   zlib.inflate(compressed, function(err2, out) {
+                       globalThis.__zlib2 = err2 ? 'inflate_err'
+                                                 : Buffer.from(out).toString('utf8');
+                   });
+               });"#,
+        )
+        .await
+        .unwrap();
+        let result = wait_for_result(&e, "__zlib2").await;
+        assert_eq!(result, "test data", "deflate/inflate round-trip: {result}");
+    }
+
+    #[tokio::test]
+    async fn zlib_deflate_raw_inflate_raw_round_trip() {
+        let e = engine_no_perms().await;
+        e.eval(
+            r#"globalThis.__zlib3 = null;
+               const zlib = require('zlib');
+               zlib.deflateRaw(Buffer.from('raw deflate'), function(err, compressed) {
+                   if (err) { globalThis.__zlib3 = 'err'; return; }
+                   zlib.inflateRaw(compressed, function(err2, out) {
+                       globalThis.__zlib3 = err2 ? 'err'
+                                                 : Buffer.from(out).toString('utf8');
+                   });
+               });"#,
+        )
+        .await
+        .unwrap();
+        let result = wait_for_result(&e, "__zlib3").await;
+        assert_eq!(
+            result, "raw deflate",
+            "deflateRaw/inflateRaw round-trip: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn zlib_sync_methods_throw_not_available() {
+        let e = engine_no_perms().await;
+        let r = e
+            .eval_to_string(
+                r#"(function() {
+                       const zlib = require('zlib');
+                       var msgs = [];
+                       ['gzipSync','gunzipSync','deflateSync','inflateSync'].forEach(function(fn) {
+                           try { zlib[fn](Buffer.from('x')); msgs.push('no_throw'); }
+                           catch(e) { msgs.push(e.message.includes('not available') ? 'ok' : 'wrong'); }
+                       });
+                       return msgs.join(',');
+                   })()"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, "ok,ok,ok,ok");
+    }
+
+    #[tokio::test]
+    async fn zlib_create_methods_return_stub_objects() {
+        let e = engine_no_perms().await;
+        let r = e
+            .eval_to_string(
+                "const z = require('zlib');
+                 typeof z.createGzip() + ',' + typeof z.createGunzip() + ',' +
+                 typeof z.createDeflate() + ',' + typeof z.createInflate()",
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, "object,object,object,object");
+    }
+
+    #[tokio::test]
+    async fn zlib_node_prefix_alias_works() {
+        let e = engine_no_perms().await;
+        let r = e
+            .eval_to_string(
+                "const z1 = require('zlib');
+                 const z2 = require('node:zlib');
+                 z1 === z2 ? 'same' : 'different'",
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, "same");
+    }
+
+    // ── child_process ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn child_process_require_exposes_api() {
+        let e = engine_no_perms().await;
+        let r = e
+            .eval_to_string(
+                "const cp = require('child_process');
+                 typeof cp.exec + ',' + typeof cp.execFile + ',' +
+                 typeof cp.spawn + ',' + typeof cp.promisify",
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, "function,function,function,function");
+    }
+
+    #[tokio::test]
+    async fn child_process_execsync_always_throws() {
+        let e = engine_no_perms().await;
+        let r = e
+            .eval_to_string(
+                r#"(function() {
+                       try { require('child_process').execSync('echo'); return 'no_throw'; }
+                       catch(e) { return e.message.includes('not available') ? 'ok' : 'wrong:' + e.message; }
+                   })()"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, "ok");
+    }
+
+    #[tokio::test]
+    async fn child_process_spawnsync_always_throws() {
+        let e = engine_no_perms().await;
+        let r = e
+            .eval_to_string(
+                r#"(function() {
+                       try { require('child_process').spawnSync('echo'); return 'no_throw'; }
+                       catch(e) { return e.message.includes('not available') ? 'ok' : 'wrong:' + e.message; }
+                   })()"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, "ok");
+    }
+
+    #[tokio::test]
+    async fn child_process_exec_denied_without_permission() {
+        let e = engine_no_perms().await;
+        e.eval(
+            r#"globalThis.__cp1 = null;
+               const { exec } = require('child_process');
+               exec('echo hello', function(err, stdout, stderr) {
+                   globalThis.__cp1 = err ? 'denied' : 'allowed';
+               });"#,
+        )
+        .await
+        .unwrap();
+        let result = wait_for_result(&e, "__cp1").await;
+        assert_eq!(result, "denied", "exec without permission should be denied");
+    }
+
+    #[tokio::test]
+    async fn child_process_exec_runs_with_permission() {
+        let perms = Arc::new(PermissionState::new());
+        perms.grant(Capability::SpawnProcess);
+        let e = JsEngine::new(perms).await.unwrap();
+        e.eval(
+            r#"globalThis.__cp2 = null;
+               const { exec } = require('child_process');
+               exec('echo hello3va', function(err, stdout, stderr) {
+                   globalThis.__cp2 = err ? 'error:' + err.message : stdout.trim();
+               });"#,
+        )
+        .await
+        .unwrap();
+        let result = wait_for_result(&e, "__cp2").await;
+        assert_eq!(result, "hello3va", "exec with permission: {result}");
+    }
+
+    #[tokio::test]
+    async fn child_process_execfile_runs_with_permission() {
+        let perms = Arc::new(PermissionState::new());
+        perms.grant(Capability::SpawnProcess);
+        let e = JsEngine::new(perms).await.unwrap();
+        e.eval(
+            r#"globalThis.__cp3 = null;
+               const { execFile } = require('child_process');
+               execFile('/bin/echo', ['execfile_ok'], function(err, stdout) {
+                   globalThis.__cp3 = err ? 'error' : stdout.trim();
+               });"#,
+        )
+        .await
+        .unwrap();
+        let result = wait_for_result(&e, "__cp3").await;
+        assert_eq!(result, "execfile_ok", "execFile with permission: {result}");
+    }
+
+    #[tokio::test]
+    async fn child_process_spawn_delivers_stdout_with_permission() {
+        let perms = Arc::new(PermissionState::new());
+        perms.grant(Capability::SpawnProcess);
+        let e = JsEngine::new(perms).await.unwrap();
+        e.eval(
+            r#"globalThis.__cp4 = null;
+               const { spawn } = require('child_process');
+               var child = spawn('/bin/echo', ['spawn_ok']);
+               child.stdout.on('data', function(data) {
+                   globalThis.__cp4 = typeof data === 'string' ? data.trim() : String(data).trim();
+               });
+               child.on('exit', function(code) {
+                   if (globalThis.__cp4 === null) globalThis.__cp4 = 'no_stdout';
+               });"#,
+        )
+        .await
+        .unwrap();
+        let result = wait_for_result(&e, "__cp4").await;
+        assert_eq!(result, "spawn_ok", "spawn with permission: {result}");
+    }
+
+    #[tokio::test]
+    async fn child_process_exec_nonzero_exit_passes_error() {
+        let perms = Arc::new(PermissionState::new());
+        perms.grant(Capability::SpawnProcess);
+        let e = JsEngine::new(perms).await.unwrap();
+        e.eval(
+            r#"globalThis.__cp5 = null;
+               const { exec } = require('child_process');
+               exec('exit 1', function(err, stdout, stderr) {
+                   globalThis.__cp5 = err ? 'got_error' : 'no_error';
+               });"#,
+        )
+        .await
+        .unwrap();
+        let result = wait_for_result(&e, "__cp5").await;
+        assert_eq!(
+            result, "got_error",
+            "non-zero exit should pass error to callback"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_process_node_prefix_alias_works() {
+        let e = engine_no_perms().await;
+        let r = e
+            .eval_to_string(
+                "const cp1 = require('child_process');
+                 const cp2 = require('node:child_process');
+                 cp1 === cp2 ? 'same' : 'different'",
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, "same");
     }
 }

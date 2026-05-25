@@ -1207,15 +1207,3 @@ fn resolve_node_module_entry(pkg_dir: &Path) -> PathBuf {
     // Fallback: index.js / index.ts
     resolve_file_path(pkg_dir)
 }
-
-/// Resolve a bare module specifier from node_modules, reading package.json for entry point.
-#[allow(dead_code)]
-fn resolve_node_module(cwd: &Path, name: &str) -> PathBuf {
-    let (pkg_name, subpath) = split_bare_specifier(name);
-    let pkg_dir = cwd.join("node_modules").join(pkg_name);
-    if pkg_dir.is_dir() {
-        resolve_in_pkg_dir(&pkg_dir, subpath)
-    } else {
-        pkg_dir
-    }
-}

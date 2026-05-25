@@ -25,12 +25,12 @@ pub struct ChunkOutput {
 pub struct Bundler {
     #[allow(dead_code)]
     resolver: ModuleResolver,
-    #[allow(dead_code)]
     tree_shaker: TreeShaker,
     code_gen: CodeGenerator,
     modules: HashMap<String, PathBuf>,
     module_deps: HashMap<String, Vec<String>>,
-    #[allow(dead_code)]
+    /// Maps module name → set of export names imported by other modules.
+    /// Populated during `bundle()` via AST analysis; used for tree shaking.
     used_exports: HashMap<String, HashSet<String>>,
 }
 
@@ -55,6 +55,7 @@ impl Bundler {
         let path = PathBuf::from(entry);
         if path.is_file() {
             self.modules.insert(entry.to_string(), path);
+            self.tree_shaker.add_entry_point(entry);
         } else {
             anyhow::bail!("Entry file not found: {}", entry);
         }
@@ -62,15 +63,40 @@ impl Bundler {
     }
 
     pub fn bundle(&mut self) -> anyhow::Result<String> {
+        // Pass 1: process all modules into source code.
+        let mut processed: Vec<(String, String)> = Vec::new();
         for (name, path) in &self.modules {
             let code = self.process_module(path)?;
-            let deps = self.extract_imports(&code);
+            processed.push((name.clone(), code));
+        }
+
+        // Pass 2: analyze named imports across all modules to build used_exports.
+        // Key: the raw import path string (e.g. "./utils"); matches module names
+        // that were added with the same path via add_entry().
+        for (_name, code) in &processed {
+            let named = self.tree_shaker.analyze_named_imports(code);
+            for (module_path, import_names) in named {
+                self.used_exports
+                    .entry(module_path)
+                    .or_default()
+                    .extend(import_names);
+            }
+        }
+
+        // Pass 3: shake each module and register with the code generator.
+        for (name, code) in &processed {
+            let deps = self.extract_imports(code);
             self.module_deps.insert(name.clone(), deps);
-            self.code_gen.add_module(name.clone(), code);
+
+            let final_code = if let Some(used) = self.used_exports.get(name) {
+                self.tree_shaker.shake(name, code, used)
+            } else {
+                code.clone()
+            };
+            self.code_gen.add_module(name.clone(), final_code);
         }
 
         let options = self.code_gen.get_options();
-
         if options.splitting && self.modules.len() > 1 {
             return self.bundle_with_splitting();
         }
@@ -79,11 +105,32 @@ impl Bundler {
     }
 
     pub fn bundle_with_sourcemap(&mut self) -> anyhow::Result<(String, Option<String>)> {
+        let mut processed: Vec<(String, String)> = Vec::new();
         for (name, path) in &self.modules {
             let code = self.process_module(path)?;
-            let deps = self.extract_imports(&code);
+            processed.push((name.clone(), code));
+        }
+
+        for (_name, code) in &processed {
+            let named = self.tree_shaker.analyze_named_imports(code);
+            for (module_path, import_names) in named {
+                self.used_exports
+                    .entry(module_path)
+                    .or_default()
+                    .extend(import_names);
+            }
+        }
+
+        for (name, code) in &processed {
+            let deps = self.extract_imports(code);
             self.module_deps.insert(name.clone(), deps);
-            self.code_gen.add_module(name.clone(), code);
+
+            let final_code = if let Some(used) = self.used_exports.get(name) {
+                self.tree_shaker.shake(name, code, used)
+            } else {
+                code.clone()
+            };
+            self.code_gen.add_module(name.clone(), final_code);
         }
 
         let (code, map) = self.code_gen.generate_with_sourcemap();

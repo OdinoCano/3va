@@ -119,9 +119,11 @@ Embeds QuickJS via `rquickjs`. Provides JavaScript/TypeScript execution with bui
 | `process` | `builtins/process.rs` |
 | `require()` / ESM | `builtins/modules.rs` + `EsmLoader` |
 | `WebSocket` | `builtins/websocket.rs` |
+| `zlib` | `builtins/zlib.rs` (real compression via `flate2`) |
+| `child_process` | `builtins/child_process.rs` (real exec via `tokio`, requires `--allow-child-process`) |
 
 ### 2.4.3 Node.js Compatibility Stubs
-`http`, `https`, `net`, `tls`, `child_process`, `zlib`, `http2` are registered as no-op stubs so packages that import them don't throw at load time. Full implementations are planned for v0.2.0.
+`http`, `https`, `net`, `tls`, `http2` are registered as JS stubs so packages that import them don't throw at load time. `http`/`https` use `__fetchAsync` for client requests; `net`, `tls`, and `http2` return no-op emitters (server-side TCP is not yet implemented).
 
 ---
 

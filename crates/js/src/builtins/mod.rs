@@ -1,6 +1,7 @@
 pub mod buffer;
 pub mod child_process;
 pub mod console;
+pub mod crypto;
 pub mod fetch;
 pub mod fs;
 pub mod modules;
@@ -31,5 +32,6 @@ pub fn inject_all(
     // These run after inject_require so they can overwrite the placeholder stubs
     zlib::inject_zlib(ctx)?;
     child_process::inject_child_process(ctx, permissions)?;
+    crypto::inject_crypto(ctx)?;
     Ok(())
 }

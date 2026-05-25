@@ -15,9 +15,29 @@ libfuzzer-sys = "0.4"
 [dependencies.vvva_bundler]
 path = "../crates/bundler"
 
+[dependencies.vvva_permissions]
+path = "../crates/permissions"
+
+[dependencies.vvva_pm]
+path = "../crates/pm"
+
 [[bin]]
 name = "fuzz_target_1"
 path = "fuzz_targets/fuzz_target_1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_permission_sandbox"
+path = "fuzz_targets/fuzz_permission_sandbox.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pm_resolver"
+path = "fuzz_targets/fuzz_pm_resolver.rs"
 test = false
 doc = false
 bench = false

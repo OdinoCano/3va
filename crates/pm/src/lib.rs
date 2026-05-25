@@ -84,15 +84,14 @@ impl Registry {
 
 pub struct PackageManager {
     resolver: Resolver,
-    #[allow(dead_code)]
-    cache_dir: PathBuf,
+    _cache_dir: PathBuf,
 }
 
 impl PackageManager {
     pub fn new(cache_dir: PathBuf) -> Self {
         Self {
             resolver: Resolver::new("https://registry.npmjs.org"),
-            cache_dir,
+            _cache_dir: cache_dir,
         }
     }
 
