@@ -21,6 +21,11 @@ thiserror = "1.0"
 url = "2.5"
 base64 = "0.22"
 sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+rand = "0.8"
+pbkdf2 = "0.12"
+scrypt = "0.11"
 tempfile = "3.8"
 ureq = { version = "2", features = ["json"] }
 tungstenite = { version = "0.24", features = ["native-tls"] }

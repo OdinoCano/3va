@@ -45,14 +45,6 @@ fn try_transpile(source: &str) -> Result<String, ()> {
 mod tests {
     use super::*;
 
-    #[allow(dead_code)]
-    fn norm(s: &str) -> String {
-        s.lines()
-            .map(|l| l.trim_end())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     #[test]
     fn test_variable_type_annotation() {
         let input = "const x: string = 'hello';";

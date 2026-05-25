@@ -123,23 +123,29 @@ semgrep --config .semgrep/rules/ .
 
 ### Level 3 - Fuzzing
 
-Fuzzable surfaces:
-- CLI parser (`cargo run ...`)
-- Package manager (tarballs, package.json, lockfiles)
-- Capability parser (`--allow-read`, `--allow-net`, `--deny-env`)
-- JS↔Rust bridge (type conversions, host functions)
+3va ships three coverage-guided libFuzzer targets. All targets enforce hard invariants with `assert!` — any violation is a bug.
 
-### Fuzzing Installation
+| Target | Surface | Key invariants checked |
+|--------|---------|------------------------|
+| `fuzz_target_1` | Bundler `CodeGenerator` (IIFE + ESM) | No panics on arbitrary JS source |
+| `fuzz_permission_sandbox` | `PermissionState`, `VirtualFs`, `VirtualNetwork` | Path-traversal containment; `deny_all` beats any grant; deny beats grant |
+| `fuzz_pm_resolver` | `Semver`, `SemverRange`, `DependencyGraph`, `Resolver` | No panics; parse/resolve determinism |
 
 ```bash
-# Install cargo-fuzz
+# Requires nightly toolchain
+rustup install nightly
 cargo install cargo-fuzz
 
-# Initialize fuzzing
-cargo fuzz init
+# Run a target (Ctrl-C to stop; corpus saved automatically)
+cargo fuzz run fuzz_target_1
+cargo fuzz run fuzz_permission_sandbox
+cargo fuzz run fuzz_pm_resolver
 
-# Fuzz targets are in fuzz/fuzz_targets/
+# Replay existing corpus without fuzzing
+cargo fuzz run fuzz_permission_sandbox -- -runs=0
 ```
+
+Full documentation: `docs/10-security/04-fuzzing.md`.
 
 ---
 

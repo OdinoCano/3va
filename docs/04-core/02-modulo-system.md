@@ -25,13 +25,13 @@
 | `tls` | TLS/SSL | JS stub — same as `net` |
 | `url` | URL parsing | JS implementation (in `modules.rs`) |
 | `util` | Various utilities | JS implementation (`inherits`, `promisify`, etc.) |
-| `zlib` | Compression | JS stub — callbacks fire synchronously with identity |
-| `child_process` | Process spawning | JS stub — `exec` cb returns empty stdout |
+| `zlib` | Compression | Rust builtin (`builtins/zlib.rs`) — real gzip/deflate via `flate2`, async callbacks |
+| `child_process` | Process spawning | Rust builtin (`builtins/child_process.rs`) — real exec via `tokio`, requires `--allow-child-process` |
 | `http2` | HTTP/2 | JS stub — `connect()` returns emitter |
 
-**Rust builtins** are implemented as native Rust functions exposed to QuickJS via `rquickjs`.
+**Rust builtins** are implemented as native Rust functions exposed to QuickJS via `rquickjs`. This includes `zlib` (real compression via `flate2`) and `child_process` (real subprocess execution via `tokio`).
 
-**JS stubs** exist in the inline JS block inside `crates/js/src/builtins/modules.rs`. They allow packages that `require()` these modules to load without throwing, while not providing real I/O. Full implementations require exposing TCP/filesystem primitives directly in QuickJS and are planned after the QuickJS+Tokio event loop integration.
+**JS stubs** exist in the inline JS block inside `crates/js/src/builtins/modules.rs`. They allow packages that `require()` these modules to load without throwing. `http`/`https` back client requests through `__fetchAsync`; `net`, `tls`, `http2` are no-op emitters (server-side TCP is not yet implemented).
 
 ### 2.2.2 Notable Implementations
 

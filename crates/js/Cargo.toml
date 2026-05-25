@@ -6,6 +6,11 @@ edition = "2024"
 
 [dev-dependencies]
 tempfile.workspace = true
+tungstenite = { workspace = true }
+
+[[test]]
+name = "crypto_module"
+path = "tests/crypto_module.rs"
 
 [[test]]
 name = "permission_enforcement"
@@ -15,9 +20,27 @@ path = "tests/permission_enforcement.rs"
 name = "pipeline"
 path = "tests/pipeline.rs"
 
+[[test]]
+name = "websocket_module"
+path = "tests/websocket_module.rs"
+
+[[test]]
+name = "stream_module"
+path = "tests/stream_module.rs"
+
+[[test]]
+name = "blob_file_module"
+path = "tests/blob_file_module.rs"
+
 [dependencies]
 rquickjs.workspace = true
 anyhow.workspace = true
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
+pbkdf2 = { workspace = true }
+scrypt = { workspace = true }
 vvva_core = { path = "../core" }
 vvva_permissions = { path = "../permissions" }
 base64.workspace = true

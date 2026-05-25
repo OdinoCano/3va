@@ -84,15 +84,14 @@ impl DependencyGraph {
 }
 
 pub struct Resolver {
-    #[allow(dead_code)]
-    registry_url: String,
+    _registry_url: String,
     cache: HashMap<String, Vec<DependencyNode>>,
 }
 
 impl Resolver {
     pub fn new(registry_url: &str) -> Self {
         Self {
-            registry_url: registry_url.to_string(),
+            _registry_url: registry_url.to_string(),
             cache: HashMap::new(),
         }
     }

@@ -2289,6 +2289,8 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "vvva_bundler",
+ "vvva_permissions",
+ "vvva_pm",
 ]
 
 [[package]]

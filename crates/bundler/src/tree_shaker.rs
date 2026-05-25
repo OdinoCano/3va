@@ -1,5 +1,7 @@
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Declaration, Expression, ModuleDeclaration, Statement};
+use oxc_ast::ast::{
+    Declaration, Expression, ImportDeclarationSpecifier, ModuleDeclaration, Statement,
+};
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -8,7 +10,8 @@ use std::collections::{HashMap, HashSet};
 /// A robust, AST-based Tree Shaker for JavaScript/TypeScript modules.
 pub struct TreeShaker {
     used_exports: HashMap<String, HashSet<String>>,
-    #[allow(dead_code)]
+    /// Module names that are entry points; their exports are never shaken away
+    /// because external callers may import any of them.
     entry_points: Vec<String>,
 }
 
@@ -19,6 +22,50 @@ impl TreeShaker {
             used_exports: HashMap::new(),
             entry_points,
         }
+    }
+
+    /// Registers a module as an entry point, preventing any of its exports
+    /// from being removed during tree shaking.
+    pub fn add_entry_point(&mut self, module_name: &str) {
+        if !self.entry_points.iter().any(|e| e == module_name) {
+            self.entry_points.push(module_name.to_string());
+        }
+    }
+
+    /// Analyzes named imports in source code.
+    /// Returns a map of `module_path → set of imported export names`.
+    /// Default imports map to `"default"`, namespace imports to `"*"`.
+    pub fn analyze_named_imports(&self, code: &str) -> HashMap<String, HashSet<String>> {
+        let allocator = Allocator::default();
+        let source_type = SourceType::mjs();
+        let ret = Parser::new(&allocator, code, source_type).parse();
+
+        let mut result: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for stmt in &ret.program.body {
+            if let Some(ModuleDeclaration::ImportDeclaration(import)) = stmt.as_module_declaration()
+            {
+                let module_path = import.source.value.to_string();
+                let entry = result.entry(module_path).or_default();
+                if let Some(specifiers) = &import.specifiers {
+                    for specifier in specifiers {
+                        match specifier {
+                            ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                                entry.insert(s.imported.name().to_string());
+                            }
+                            ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => {
+                                entry.insert("default".to_string());
+                            }
+                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {
+                                entry.insert("*".to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     /// Analyzes the source code to find all imported module paths.
@@ -121,10 +168,19 @@ impl TreeShaker {
 
     /// Performs tree shaking on the provided code by removing unused exports.
     ///
-    /// Note: `module_code` is the source to shake, and `used_exports` is the set
-    /// of exports that MUST NOT be removed. Any export not in `used_exports` will
-    /// be stripped.
-    pub fn shake(&mut self, module_code: &str, used_exports: &HashSet<String>) -> String {
+    /// `module_name` is used to skip shaking for registered entry points (their
+    /// exports are the public API and must all be preserved).  `used_exports` is
+    /// the set of exports that MUST NOT be removed in non-entry modules; any
+    /// export absent from that set will be stripped.
+    pub fn shake(
+        &mut self,
+        module_name: &str,
+        module_code: &str,
+        used_exports: &HashSet<String>,
+    ) -> String {
+        if self.entry_points.iter().any(|ep| ep == module_name) {
+            return module_code.to_string();
+        }
         let allocator = Allocator::default();
         let source_type = SourceType::mjs();
         let mut ret = Parser::new(&allocator, module_code, source_type).parse();
@@ -187,17 +243,11 @@ impl TreeShaker {
 }
 
 /// An AST-based eliminator for dead code, specifically unreachable conditionals.
-pub struct DeadCodeEliminator {
-    #[allow(dead_code)]
-    conditionals: Vec<String>,
-}
+pub struct DeadCodeEliminator;
 
 impl DeadCodeEliminator {
-    /// Creates a new DeadCodeEliminator.
     pub fn new() -> Self {
-        Self {
-            conditionals: Vec::new(),
-        }
+        Self
     }
 
     /// Recursively eliminates block statements that are provably unreachable.
@@ -321,13 +371,55 @@ mod tests {
         used.insert("used".to_string());
         used.insert("keep".to_string());
 
-        let result = shaker.shake(code, &used);
+        let result = shaker.shake("utils", code, &used);
 
         assert!(result.contains("used()"));
         assert!(result.contains("keep"));
         assert!(
             !result.contains("unused()"),
             "Unused export should be removed"
+        );
+    }
+
+    #[test]
+    fn test_entry_point_exports_are_preserved() {
+        let mut shaker = TreeShaker::new(vec!["main".to_string()]);
+
+        let code = r#"
+            export function publicApi() { return 1; }
+            export function alsoPublic() { return 2; }
+        "#;
+
+        // Empty used set would normally strip everything, but "main" is an entry point.
+        let result = shaker.shake("main", code, &HashSet::new());
+
+        assert!(
+            result.contains("publicApi"),
+            "entry-point exports must be kept"
+        );
+        assert!(
+            result.contains("alsoPublic"),
+            "entry-point exports must be kept"
+        );
+    }
+
+    #[test]
+    fn test_non_entry_point_shakes_normally() {
+        let mut shaker = TreeShaker::new(vec!["main".to_string()]);
+
+        let code = r#"
+            export function used() { return 1; }
+            export function dropped() { return 2; }
+        "#;
+
+        let mut used = HashSet::new();
+        used.insert("used".to_string());
+
+        let result = shaker.shake("lib", code, &used);
+        assert!(result.contains("used()"));
+        assert!(
+            !result.contains("dropped()"),
+            "non-entry unused export must be removed"
         );
     }
 

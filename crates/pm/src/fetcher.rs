@@ -4,8 +4,7 @@ use std::path::PathBuf;
 
 pub struct PackageFetcher {
     registry: String,
-    #[allow(dead_code)]
-    cache_dir: PathBuf,
+    _cache_dir: PathBuf,
     client: reqwest::Client,
 }
 
@@ -13,7 +12,7 @@ impl PackageFetcher {
     pub fn new(registry: &str, cache_dir: PathBuf) -> Self {
         Self {
             registry: registry.to_string(),
-            cache_dir,
+            _cache_dir: cache_dir,
             client: reqwest::Client::new(),
         }
     }
@@ -73,8 +72,7 @@ impl PackageFetcher {
 }
 
 pub struct PackageCache {
-    #[allow(dead_code)]
-    cache_dir: PathBuf,
+    _cache_dir: PathBuf,
     metadata: HashMap<String, CacheEntry>,
     max_size: u64,
 }
@@ -89,7 +87,7 @@ struct CacheEntry {
 impl PackageCache {
     pub fn new(cache_dir: PathBuf) -> Self {
         Self {
-            cache_dir,
+            _cache_dir: cache_dir,
             metadata: HashMap::new(),
             max_size: 1024 * 1024 * 1024,
         }
@@ -148,8 +146,77 @@ impl PackageCache {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn fake_cache(entries: &[(&str, &str, u64)]) -> PackageCache {
+        let mut cache = PackageCache::new(PathBuf::from("/tmp/3va-cache-test"));
+        for (name, version, size) in entries {
+            let key = format!("{}@{}", name, version);
+            cache.metadata.insert(
+                key,
+                CacheEntry {
+                    path: PathBuf::from(format!("/tmp/3va-cache-test/{}-{}", name, version)),
+                    size: *size,
+                    last_access: std::time::SystemTime::now(),
+                },
+            );
+            cache.max_size = 1024 * 1024; // 1 MB limit for tests
+        }
+        cache
+    }
+
     #[test]
-    fn test_cache_prune() {
-        // Basic test placeholder
+    fn cache_get_returns_none_when_empty() {
+        let cache = PackageCache::new(PathBuf::from("/tmp/3va-test"));
+        assert!(cache.get("lodash", "4.17.21").is_none());
+    }
+
+    #[test]
+    fn cache_put_then_get_returns_path() {
+        let mut cache = PackageCache::new(PathBuf::from("/tmp/3va-test"));
+        let path = PathBuf::from("/tmp/3va-test/lodash-4.17.21");
+        cache.put("lodash", "4.17.21", path.clone());
+        assert_eq!(cache.get("lodash", "4.17.21"), Some(path));
+    }
+
+    #[test]
+    fn cache_get_different_version_returns_none() {
+        let mut cache = PackageCache::new(PathBuf::from("/tmp/3va-test"));
+        cache.put("lodash", "4.17.21", PathBuf::from("/tmp/lodash-4"));
+        assert!(cache.get("lodash", "4.17.0").is_none());
+    }
+
+    #[test]
+    fn prune_noop_when_under_limit() {
+        // 100 bytes total, limit 1 MB → nothing pruned
+        let mut cache = fake_cache(&[("pkg-a", "1.0.0", 50), ("pkg-b", "1.0.0", 50)]);
+        cache.max_size = 1024 * 1024;
+        cache.prune().unwrap();
+        assert_eq!(cache.metadata.len(), 2, "nothing should be pruned");
+    }
+
+    #[test]
+    fn prune_removes_oldest_entries_when_over_limit() {
+        let mut cache = fake_cache(&[
+            ("big-a", "1.0.0", 600 * 1024),
+            ("big-b", "1.0.0", 600 * 1024),
+        ]);
+        // Total 1200 KB > 1 MB limit → prune must remove at least one entry
+        cache.prune().unwrap();
+        // After pruning, total size should be at most max_size/2 = 512 KB
+        let remaining: u64 = cache.metadata.values().map(|e| e.size).sum();
+        assert!(
+            remaining <= cache.max_size / 2,
+            "remaining {remaining} should be ≤ {}",
+            cache.max_size / 2
+        );
+    }
+
+    #[test]
+    fn prune_empty_cache_is_noop() {
+        let mut cache = PackageCache::new(PathBuf::from("/tmp/3va-test"));
+        cache.max_size = 0; // Would prune everything if there were entries
+        cache.prune().unwrap();
+        assert_eq!(cache.metadata.len(), 0);
     }
 }

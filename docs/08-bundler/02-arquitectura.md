@@ -21,7 +21,7 @@
 Builds the module graph (`DependencyGraph`) by analyzing ESM imports (`import x from 'y'`) and CommonJS `require()` calls, resolving relative and absolute paths against the virtual filesystem (`VirtualFs`).
 
 ### 1.2.2 Tree Shaker
-Analyzes the AST (Abstract Syntax Tree) to mark nodes that are actually used (`used_exports`) and purge exported declarations that are never called by any consumer file in the project.
+Analyzes the AST to identify which named exports each module imports from its dependencies (`TreeShaker::analyze_named_imports`). During `bundle()`, a three-pass pipeline populates `used_exports` (a `HashMap<module_path, HashSet<export_name>>`) and then calls `TreeShaker::shake()` to remove export declarations not present in that set. Entry-point modules registered via `add_entry()` are exempt from shaking — their entire export surface is always preserved. See `docs/08-bundler/04-tree-shaking.md` for the full algorithm.
 
 ### 1.2.3 CodeGenerator
 Emits the output code by unifying modules under a target format (IIFE, CommonJS, ESM). Supports instant TypeScript type stripping during the reading process (`process_module`).
