@@ -404,7 +404,10 @@ async fn watch_mode_directory_reruns_pick_up_new_files() {
     let mut runner2 = TestRunner::new(TestConfig::default());
     runner2.run_directory(dir.path()).await.unwrap();
     assert_eq!(runner2.get_results().len(), 2);
-    assert!(runner2.get_results().iter().all(|r| r.status == TestStatus::Passed));
+    assert!(runner2
+        .get_results()
+        .iter()
+        .all(|r| r.status == TestStatus::Passed));
 }
 
 // ── Lifecycle hooks ───────────────────────────────────────────────────────────
@@ -436,7 +439,10 @@ async fn hooks_beforeeach_and_aftereach_run_per_test() {
     assert!(
         results.iter().all(|r| r.status == TestStatus::Passed),
         "ambos tests deben pasar: {:?}",
-        results.iter().filter(|r| r.status != TestStatus::Passed).collect::<Vec<_>>()
+        results
+            .iter()
+            .filter(|r| r.status != TestStatus::Passed)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -466,7 +472,10 @@ async fn hooks_beforeall_and_afterall_run_once() {
     assert!(
         results.iter().all(|r| r.status == TestStatus::Passed),
         "beforeAll debe ejecutarse una sola vez antes de todos los tests: {:?}",
-        results.iter().filter(|r| r.status != TestStatus::Passed).collect::<Vec<_>>()
+        results
+            .iter()
+            .filter(|r| r.status != TestStatus::Passed)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -506,7 +515,10 @@ async fn hooks_scoped_to_describe_block() {
     assert!(
         results.iter().all(|r| r.status == TestStatus::Passed),
         "hooks deben estar correctamente acotados al describe: {:?}",
-        results.iter().filter(|r| r.status != TestStatus::Passed).collect::<Vec<_>>()
+        results
+            .iter()
+            .filter(|r| r.status != TestStatus::Passed)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -532,7 +544,11 @@ async fn hooks_beforeall_failure_fails_all_tests_in_scope() {
         "si beforeAll falla, todos los tests del scope deben fallar"
     );
     assert!(
-        results[0].error.as_deref().unwrap_or("").contains("setup roto"),
+        results[0]
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("setup roto"),
         "el error debe mencionar la causa"
     );
 }
@@ -560,6 +576,10 @@ async fn hooks_beforeeach_failure_fails_only_that_test() {
     let results = runner.get_results();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].status, TestStatus::Passed, "test 1 debe pasar");
-    assert_eq!(results[1].status, TestStatus::Failed,  "test 2 debe fallar por beforeEach");
+    assert_eq!(
+        results[1].status,
+        TestStatus::Failed,
+        "test 2 debe fallar por beforeEach"
+    );
     assert_eq!(results[2].status, TestStatus::Passed, "test 3 debe pasar");
 }

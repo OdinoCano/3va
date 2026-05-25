@@ -44,10 +44,19 @@ fn set_interval_registers_timer() {
 fn clear_timeout_cancels_registered_timer() {
     let mut rt = make_runtime();
     let id = rt.set_timeout(Duration::from_millis(100), || {});
-    assert!(rt.next_timer_duration().is_some(), "timer should be pending before cancel");
+    assert!(
+        rt.next_timer_duration().is_some(),
+        "timer should be pending before cancel"
+    );
     let cancelled = rt.clear_timeout(id);
-    assert!(cancelled, "clear_timeout should return true for existing timer");
-    assert!(rt.next_timer_duration().is_none(), "no timers should remain after cancel");
+    assert!(
+        cancelled,
+        "clear_timeout should return true for existing timer"
+    );
+    assert!(
+        rt.next_timer_duration().is_none(),
+        "no timers should remain after cancel"
+    );
 }
 
 #[test]
@@ -73,13 +82,20 @@ fn poll_timers_returns_expired_timer() {
     });
 
     let timers = rt.poll_timers();
-    assert!(!timers.is_empty(), "at least one timer should have been returned");
+    assert!(
+        !timers.is_empty(),
+        "at least one timer should have been returned"
+    );
 
     // poll() returns timers; the caller is responsible for invoking the callbacks
     for t in &timers {
         (t.callback)();
     }
-    assert_eq!(fired.load(Ordering::SeqCst), 1, "callback should be invoked once by caller");
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "callback should be invoked once by caller"
+    );
 }
 
 #[test]
@@ -94,8 +110,15 @@ fn poll_timers_does_not_fire_future_timer() {
     });
 
     let timers = rt.poll_timers();
-    assert!(timers.is_empty(), "far-future timer should not fire immediately");
-    assert_eq!(fired.load(Ordering::SeqCst), 0, "callback should not have been called");
+    assert!(
+        timers.is_empty(),
+        "far-future timer should not fire immediately"
+    );
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "callback should not have been called"
+    );
 }
 
 #[test]
@@ -110,7 +133,10 @@ fn poll_timers_repeating_interval_has_repeating_flag() {
     assert!(!timers.is_empty(), "interval should be returned by poll");
     let t = &timers[0];
     assert!(t.repeating, "interval timer should have repeating=true");
-    assert!(t.interval.is_some(), "interval timer should carry its interval duration");
+    assert!(
+        t.interval.is_some(),
+        "interval timer should carry its interval duration"
+    );
 }
 
 // ── schedule_task / pending_task_count ────────────────────────────────────────
@@ -151,11 +177,18 @@ fn timer_wheel_poll_returns_zero_delay_timer_and_caller_invokes_callback() {
     });
 
     let timers = wheel.poll();
-    assert!(!timers.is_empty(), "zero-delay timer should be returned by poll");
+    assert!(
+        !timers.is_empty(),
+        "zero-delay timer should be returned by poll"
+    );
     for t in &timers {
         (t.callback)();
     }
-    assert_eq!(fired.load(Ordering::SeqCst), 1, "callback should execute when caller invokes it");
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "callback should execute when caller invokes it"
+    );
 }
 
 #[test]
@@ -175,5 +208,8 @@ fn timer_wheel_next_duration_reflects_nearest_timer() {
     wheel.schedule(Duration::from_millis(100));
     let d = wheel.next_duration().expect("should have pending timers");
     // Nearest timer is ~100 ms; just verify it's less than 500 ms
-    assert!(d <= Duration::from_millis(500), "next_duration should reflect nearest timer");
+    assert!(
+        d <= Duration::from_millis(500),
+        "next_duration should reflect nearest timer"
+    );
 }

@@ -1326,7 +1326,11 @@ async fn main() -> anyhow::Result<()> {
             if let Some((log_path, log)) = audit_log_data {
                 let log = log.lock().unwrap();
                 log.write_to_file(&log_path).unwrap_or_else(|e| {
-                    eprintln!("[AUDIT] Failed to write audit log to {}: {}", log_path.display(), e);
+                    eprintln!(
+                        "[AUDIT] Failed to write audit log to {}: {}",
+                        log_path.display(),
+                        e
+                    );
                 });
                 info!("Audit log written to {:?}", log_path);
             }
@@ -1555,16 +1559,28 @@ mod tests {
     #[test]
     fn mime_type_returns_correct_types() {
         use std::path::Path;
-        assert_eq!(mime_type(Path::new("app.js")),   "application/javascript; charset=utf-8");
-        assert_eq!(mime_type(Path::new("app.mjs")),  "application/javascript; charset=utf-8");
+        assert_eq!(
+            mime_type(Path::new("app.js")),
+            "application/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            mime_type(Path::new("app.mjs")),
+            "application/javascript; charset=utf-8"
+        );
         assert_eq!(mime_type(Path::new("style.css")), "text/css; charset=utf-8");
-        assert_eq!(mime_type(Path::new("index.html")), "text/html; charset=utf-8");
+        assert_eq!(
+            mime_type(Path::new("index.html")),
+            "text/html; charset=utf-8"
+        );
         assert_eq!(mime_type(Path::new("data.json")), "application/json");
-        assert_eq!(mime_type(Path::new("logo.png")),  "image/png");
-        assert_eq!(mime_type(Path::new("icon.svg")),  "image/svg+xml");
+        assert_eq!(mime_type(Path::new("logo.png")), "image/png");
+        assert_eq!(mime_type(Path::new("icon.svg")), "image/svg+xml");
         assert_eq!(mime_type(Path::new("font.woff2")), "font/woff2");
         assert_eq!(mime_type(Path::new("module.wasm")), "application/wasm");
-        assert_eq!(mime_type(Path::new("unknown.xyz")), "application/octet-stream");
+        assert_eq!(
+            mime_type(Path::new("unknown.xyz")),
+            "application/octet-stream"
+        );
     }
 
     // ── Dev server: serve_file via in-process TCP pair ────────────────────────
@@ -1593,15 +1609,22 @@ mod tests {
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let mut response = Vec::new();
         // Drop the write half so the server's unread buffer doesn't cause RST
-        let (mut read_half, write_half) = client.split();
-        drop(write_half);
+        let (mut read_half, _write_half) = client.split();
+
         read_half.read_to_end(&mut response).await.unwrap();
         server.await.unwrap();
 
         let text = String::from_utf8_lossy(&response);
-        assert!(text.starts_with("HTTP/1.1 200 OK"), "debe devolver 200: {}", &text[..text.len().min(120)]);
+        assert!(
+            text.starts_with("HTTP/1.1 200 OK"),
+            "debe devolver 200: {}",
+            &text[..text.len().min(120)]
+        );
         assert!(text.contains("text/css"), "debe incluir Content-Type CSS");
-        assert!(text.contains("body { color: red; }"), "debe incluir el cuerpo del archivo");
+        assert!(
+            text.contains("body { color: red; }"),
+            "debe incluir el cuerpo del archivo"
+        );
     }
 
     #[tokio::test]
@@ -1614,20 +1637,28 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            serve_file(&mut stream, std::path::Path::new("/nonexistent/file.js"), false)
-                .await
-                .unwrap();
+            serve_file(
+                &mut stream,
+                std::path::Path::new("/nonexistent/file.js"),
+                false,
+            )
+            .await
+            .unwrap();
         });
 
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (mut read_half, write_half) = client.split();
-        drop(write_half);
+        let (mut read_half, _write_half) = client.split();
+
         let mut response = Vec::new();
         read_half.read_to_end(&mut response).await.unwrap();
         server.await.unwrap();
 
         let text = String::from_utf8_lossy(&response);
-        assert!(text.starts_with("HTTP/1.1 404"), "debe devolver 404: {}", &text[..text.len().min(80)]);
+        assert!(
+            text.starts_with("HTTP/1.1 404"),
+            "debe devolver 404: {}",
+            &text[..text.len().min(80)]
+        );
     }
 
     #[tokio::test]
@@ -1662,6 +1693,9 @@ mod tests {
         let text = String::from_utf8_lossy(&response);
         assert!(text.contains("HTTP/1.1 200"), "debe devolver 200");
         assert!(text.contains("__hmr"), "debe inyectar el cliente HMR");
-        assert!(text.contains("<h1>App</h1>"), "debe incluir el HTML original");
+        assert!(
+            text.contains("<h1>App</h1>"),
+            "debe incluir el HTML original"
+        );
     }
 }

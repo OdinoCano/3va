@@ -1,6 +1,6 @@
+use flate2::Compression;
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
-use flate2::Compression;
 use rquickjs::function::Async;
 use rquickjs::{Ctx, Function, Result};
 use std::io::{Read, Write};
@@ -54,11 +54,7 @@ macro_rules! inject_async_fn {
                     tokio::task::spawn_blocking(move || $fn(data))
                         .await
                         .map_err(|e| {
-                            rquickjs::Error::new_from_js_message(
-                                "zlib",
-                                "spawn",
-                                e.to_string(),
-                            )
+                            rquickjs::Error::new_from_js_message("zlib", "spawn", e.to_string())
                         })?
                         .map_err(|e| {
                             rquickjs::Error::new_from_js_message("zlib", "zlib", e.to_string())

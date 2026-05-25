@@ -10,6 +10,11 @@
 
 use std::path::{Path, PathBuf};
 
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{StringLiteral, TemplateElement};
+use oxc_ast_visit::Visit;
+use oxc_parser::Parser;
+use oxc_span::SourceType;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -202,6 +207,59 @@ fn build_patterns() -> Vec<Pattern> {
 
 // ── Scanner ───────────────────────────────────────────────────────────────────
 
+fn get_line(source: &str, byte_offset: usize) -> usize {
+    source[..byte_offset].chars().filter(|&c| c == '\n').count() + 1
+}
+
+struct SecretsVisitor<'a, 'b> {
+    patterns: &'b [Pattern],
+    findings: &'b mut Vec<SecretFinding>,
+    file: &'b Path,
+    source: &'a str,
+}
+
+impl<'a, 'b> Visit<'a> for SecretsVisitor<'a, 'b> {
+    fn visit_string_literal(&mut self, lit: &StringLiteral<'a>) {
+        let text = lit.value.as_str();
+        for pat in self.patterns {
+            if pat.name.ends_with("_assignment") || pat.name == "sensitive_env_var" {
+                continue;
+            }
+            if pat.regex.is_match(text) {
+                self.findings.push(SecretFinding {
+                    file: self.file.to_path_buf(),
+                    line: get_line(self.source, lit.span.start as usize),
+                    secret_type: pat.name.to_string(),
+                    severity: pat.severity.clone(),
+                    snippet: redact(text.trim()),
+                    suggestion: pat.suggestion.to_string(),
+                });
+                break;
+            }
+        }
+    }
+
+    fn visit_template_element(&mut self, elem: &TemplateElement<'a>) {
+        let text = elem.value.raw.as_str();
+        for pat in self.patterns {
+            if pat.name.ends_with("_assignment") || pat.name == "sensitive_env_var" {
+                continue;
+            }
+            if pat.regex.is_match(text) {
+                self.findings.push(SecretFinding {
+                    file: self.file.to_path_buf(),
+                    line: get_line(self.source, elem.span.start as usize),
+                    secret_type: pat.name.to_string(),
+                    severity: pat.severity.clone(),
+                    snippet: redact(text.trim()),
+                    suggestion: pat.suggestion.to_string(),
+                });
+                break;
+            }
+        }
+    }
+}
+
 pub struct SecretsScanner {
     patterns: Vec<Pattern>,
 }
@@ -220,30 +278,59 @@ impl SecretsScanner {
     pub fn scan_source(&self, source: &str, file: &Path) -> Vec<SecretFinding> {
         let mut findings: Vec<SecretFinding> = Vec::new();
 
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_js = matches!(ext, "js" | "ts" | "mjs" | "cjs" | "jsx" | "tsx");
+
+        if is_js {
+            let allocator = Allocator::default();
+            let source_type = SourceType::default()
+                .with_module(true)
+                .with_typescript(ext.ends_with("ts") || ext.ends_with("tsx"));
+            let ret = Parser::new(&allocator, source, source_type).parse();
+
+            if ret.errors.is_empty() {
+                let mut visitor = SecretsVisitor {
+                    patterns: &self.patterns,
+                    findings: &mut findings,
+                    file,
+                    source,
+                };
+                visitor.visit_program(&ret.program);
+            }
+        }
+
         for (line_idx, line) in source.lines().enumerate() {
             let line_no = line_idx + 1;
 
-            // Skip comment lines so we don't flag example snippets in docs/README files.
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//")
-                || trimmed.starts_with('#')
-                || trimmed.starts_with('*')
-                || trimmed.starts_with("/*")
-            {
+            let mut text_to_scan = line;
+            if let Some(idx) = line.find("//") {
+                text_to_scan = &line[..idx];
+            } else if let Some(idx) = line.find('#') {
+                text_to_scan = &line[..idx];
+            }
+
+            let trimmed = text_to_scan.trim();
+            if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with("/*") {
                 continue;
             }
 
             for pat in &self.patterns {
-                if pat.regex.is_match(line) {
+                // If it's JS, token patterns are already checked via AST
+                if is_js && !(pat.name.ends_with("_assignment") || pat.name == "sensitive_env_var")
+                {
+                    continue;
+                }
+
+                if pat.regex.is_match(text_to_scan) {
                     findings.push(SecretFinding {
                         file: file.to_path_buf(),
                         line: line_no,
                         secret_type: pat.name.to_string(),
                         severity: pat.severity.clone(),
-                        snippet: redact(line.trim()),
+                        snippet: redact(trimmed),
                         suggestion: pat.suggestion.to_string(),
                     });
-                    break; // one finding per line — highest-priority pattern wins
+                    break;
                 }
             }
         }

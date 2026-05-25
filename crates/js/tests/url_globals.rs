@@ -16,7 +16,10 @@ async fn engine() -> JsEngine {
 #[tokio::test]
 async fn url_exists_as_global() {
     let e = engine().await;
-    let r = e.eval_to_string("String(typeof URL === 'function')").await.unwrap();
+    let r = e
+        .eval_to_string("String(typeof URL === 'function')")
+        .await
+        .unwrap();
     assert_eq!(r, "true");
 }
 
