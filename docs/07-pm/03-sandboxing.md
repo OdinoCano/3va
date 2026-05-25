@@ -143,12 +143,44 @@ impl PackageSandbox {
         Ok(())
     }
     fn extract_restricted(&self, tarball: &[u8], dest: &Path) -> Result<()> {
-        // Extract tarball with checks
-        // - Verify paths do not leave the destination
-        // - Verify total size
-        // - Verify file types
+        // Implemented in PackageFetcher::extract (crates/pm/src/fetcher.rs)
+        // Security layers applied to every entry:
+        //   1. Strip "package/" npm prefix (all npm tarballs use this root)
+        //   2. Reject entries with ".." or absolute path components
+        //   3. Verify resolved path starts_with canonical dest (escape check)
+        //   4. Skip symlinks and hard links (supply-chain risk)
+        //   5. Per-entry errors are logged as warnings, extraction continues
     }
 }
+
+### 3.4.3 Tarball Extraction Security
+
+All npm tarballs use a `package/` root prefix. After stripping that prefix, each
+entry is validated before writing to disk.
+
+**Threat model addressed**
+
+| Threat | Mitigation |
+|---|---|
+| Path traversal (`../../../etc/passwd`) | Components checked for `ParentDir`/`RootDir` before `join()` |
+| Canonical escape (symlink-assisted) | Output path verified against `canonicalize(dest)` |
+| Malicious symlinks | `EntryType::Symlink` and `EntryType::Link` always skipped |
+| One bad entry aborting the install | Per-entry errors logged as `WARN`, extraction continues |
+| Large native packages (e.g. `react-native`) | C++/Java/ObjC files extracted or skipped individually; package lands in `node_modules/` regardless of non-JS content |
+
+**Entry processing flow**
+
+```
+for each entry in tarball:
+    path = entry.path.skip(1)   ← strip "package/" prefix
+
+    if path is empty            → skip (root dir entry)
+    if path has ".." or "/"     → warn + skip (path traversal)
+    if resolved path escapes    → warn + skip (canonical escape)
+    if entry is Directory       → create_dir_all, continue
+    if entry is Symlink/Link    → debug log, skip (security)
+    entry.unpack()              → on error: warn + skip, never abort
+```
 ## 3.5 Script Execution
 ### 3.5.1 Policies
 Policy	Description

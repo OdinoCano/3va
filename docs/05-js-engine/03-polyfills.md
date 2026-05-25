@@ -22,18 +22,77 @@ Buffer.isBuffer(buf);   // true
 
 ### `fs` (`require('fs')`)
 
-Permission-gated (`--allow-read` / `--allow-write`).
+Permission-gated (`--allow-read` / `--allow-write`). All methods have a sync variant, an async callback variant, and a `fs.promises.*` variant.
 
 ```javascript
-const fs = require('fs');
-fs.readFileSync('/path/file', 'utf8');
+const fs = require('fs');  // or require('node:fs')
+
+// ── Sync ──────────────────────────────────────────────────────────────────────
+fs.existsSync('/path/file');                     // boolean
+fs.readFileSync('/path/file', 'utf8');           // string
+fs.readFileSync('/path/file');                   // Buffer (binary)
 fs.writeFileSync('/path/file', 'content');
-fs.existsSync('/path/file');
-fs.mkdirSync('/path/dir', { recursive: true });
-fs.readdirSync('/path/dir');
-fs.statSync('/path/file');
+fs.appendFileSync('/path/file', 'more');
+fs.mkdirSync('/path/dir');                       // recursive by default (create_dir_all)
+fs.readdirSync('/path/dir');                     // string[]
+fs.readdirSync('/path/dir', { withFileTypes: true }); // Dirent[]
+fs.statSync('/path/file');                       // Stats object (see below)
+fs.lstatSync('/path/file');                      // Stats (no symlink follow)
+fs.accessSync('/path/file', fs.constants.R_OK); // throws on failure
+fs.realpathSync('/path/link');                   // canonical path string
+fs.renameSync('/old', '/new');
 fs.unlinkSync('/path/file');
+fs.rmSync('/path/dir');                          // removes file or directory tree
+fs.copyFileSync('/src', '/dest');
+fs.chmodSync('/path/file', 0o644);
+fs.symlinkSync('/target', '/link');
+
+// ── Stats object ──────────────────────────────────────────────────────────────
+const s = fs.statSync('/path/file');
+s.isFile()         // boolean
+s.isDirectory()    // boolean
+s.isSymbolicLink() // boolean
+s.size             // bytes
+s.mode             // Unix mode integer
+s.mtime            // Date
+s.atime            // Date
+s.ctime            // Date
+s.mtimeMs          // number (milliseconds)
+
+// ── fs.constants ─────────────────────────────────────────────────────────────
+fs.constants.F_OK  // 0 — existence check
+fs.constants.R_OK  // 4 — read permission
+fs.constants.W_OK  // 2 — write permission
+fs.constants.X_OK  // 1 — execute permission
+
+// ── Async (callback) ─────────────────────────────────────────────────────────
+fs.readFile('/path/file', 'utf8', (err, data) => console.log(data));
+fs.stat('/path/file', (err, stats) => console.log(stats.isFile()));
+fs.access('/path/file', fs.constants.R_OK, (err) => {
+  if (err) console.error('not readable');
+});
+
+// ── Streams ──────────────────────────────────────────────────────────────────
+const rs = fs.createReadStream('/path/file');
+rs.on('data', (chunk) => process.stdout.write(chunk));
+rs.on('end', () => console.log('done'));
+rs.resume();  // or pipe to a writable
+
+const ws = fs.createWriteStream('/path/out');
+ws.write('hello ');
+ws.end('world');  // flushes to disk
+
+// ── fs.promises ──────────────────────────────────────────────────────────────
+const { promises: fsp } = require('fs');
+const data = await fsp.readFile('/path/file', 'utf8');
+await fsp.writeFile('/path/file', 'content');
+const stats = await fsp.stat('/path/file');
 ```
+
+**Limitations:**
+- `createReadStream`/`createWriteStream` read/write the entire file in a single operation (no chunked streaming). Binary encoding is not supported in `createReadStream`.
+- `watch()` returns a stub emitter — no real filesystem events (inotify is outside the sandbox).
+- `chmod` and `symlink` require Unix (not available on Windows builds).
 
 ### `events` (`require('events')`)
 
@@ -342,7 +401,99 @@ FileReader.LOADING  // 1
 FileReader.DONE     // 2
 ```
 
-## 3.16 Planned Polyfills (not yet implemented)
+## 3.16 `process` (global)
+
+`process` is a global object (no `require()` needed, though `require('process')` also works).
+
+```javascript
+// Identity
+process.pid              // number — OS PID of the 3va process
+process.platform         // 'linux' | 'darwin' | 'win32' | 'unknown'
+process.arch             // 'x64' | 'arm64' | 'unknown'
+process.version          // '3va/0.1.0'
+
+// Versions (Node-compatible keys for package compatibility checks)
+process.versions.node    // '20.0.0'  — fake, but structurally compatible
+process.versions.v8      // '11.3.244.8-node.20'
+process.versions['3va']  // '0.1.0'
+
+// Working directory
+process.cwd()            // string — real CWD via std::env::current_dir()
+process.chdir(path)      // no-op (sandbox does not change working directory)
+
+// Arguments
+process.argv[0]          // path to the 3va binary
+process.argv[1]          // absolute path to the running script
+process.argv[2+]         // arguments passed after -- on the CLI
+
+// Environment (requires --allow-env)
+process.env.HOME         // string | undefined
+
+// Timing
+process.hrtime()         // [seconds, nanoseconds] relative to process start
+process.hrtime.bigint()  // BigInt nanoseconds
+
+// Scheduling
+process.nextTick(fn, ...args)  // schedules fn as a microtask (Promise.resolve().then)
+
+// I/O
+process.stdout.write('text')   // prints without newline
+process.stderr.write('text')
+process.stdout.fd              // 1
+process.stderr.fd              // 2
+process.stdout.isTTY           // false (sandbox, non-interactive)
+
+// Exit
+process.exit(code?)            // terminates the process with std::process::exit
+```
+
+**`setImmediate` / `clearImmediate`** are also available as globals (backed by `setTimeout(fn, 0)`).
+
+---
+
+## 3.17 `module` (`require('module')`)
+
+The built-in `module` package exposes the Node.js `Module` API. Required by frameworks like Next.js that use `Module._resolveFilename` and `Module.createRequire`.
+
+```javascript
+const Module = require('module');  // or require('node:module')
+
+// Resolve a module path from a given file
+Module._resolveFilename('react', { filename: '/app/index.js' });
+// → '/app/node_modules/react/index.js'
+
+// Create a require function scoped to a specific file
+const myRequire = Module.createRequire('/app/index.js');
+myRequire('react');  // resolves relative to /app/
+
+// List of built-in module names
+Module.builtinModules;  // ['assert', 'buffer', 'fs', 'http', ...]
+Module.isBuiltin('fs'); // true
+Module.isBuiltin('axios'); // false
+
+// Cache reference (same as globalThis.__requireCache)
+Module._cache;
+
+// No-op for ESM/CJS interop
+Module.syncBuiltinESMExports();
+```
+
+**Limitations:** `Module._load` is a thin wrapper over `require()`. It does not replicate the full Node.js loader pipeline (no loader hooks, no `--experimental-loader`).
+
+---
+
+## 3.18 `global` / `GLOBAL` (globals)
+
+```javascript
+global === globalThis    // true
+GLOBAL === globalThis    // true
+```
+
+Many npm packages reference `global.xxx` instead of `globalThis.xxx`. Both aliases point to the same QuickJS global object.
+
+---
+
+## 3.19 Planned Polyfills (not yet implemented)
 
 > **Status: PENDING** — these APIs appear in the compatibility roadmap. Using them currently throws `ReferenceError` or silently no-ops.
 

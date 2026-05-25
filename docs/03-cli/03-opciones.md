@@ -45,13 +45,37 @@ Grants network access. Also used by `install`, `update`, and `reinstall` to spec
 3va run app.ts --allow-net=api.example.com --allow-net=cdn.example.com
 ```
 
-### `--allow-env`
+### `--allow-env[=VAR,VAR,...]`
 
-Grants access to environment variables.
+Grants access to environment variables. Supports two modes:
+
+**Unrestricted** — `--allow-env=` (equals sign with no value) or `--allow-env` grants access to all environment variables. `process.env` will contain the full environment.
 
 ```bash
-3va run app.ts --allow-env
+3va run app.ts --allow-env=
 ```
+
+**Scoped** — `--allow-env=VAR1,VAR2,...` grants access only to the listed variable names. Any variable not in the list is invisible in `process.env`, even if it exists in the host environment.
+
+```bash
+# Only NODE_ENV is visible in process.env
+3va run app.ts --allow-env=NODE_ENV
+
+# Multiple specific variables
+3va run app.ts --allow-env=NODE_ENV,PORT,DATABASE_URL
+
+# Combine with other capabilities
+3va run app.ts --allow-env=NODE_ENV --allow-net=api.example.com --allow-read=./config
+```
+
+Not providing `--allow-env` at all means `process.env` is empty — no variables are exposed.
+
+| Usage | Effect on `process.env` |
+|---|---|
+| (omitted) | Empty object `{}` |
+| `--allow-env=` | Full host environment |
+| `--allow-env=NODE_ENV` | Only `{ NODE_ENV: "..." }` |
+| `--allow-env=NODE_ENV,PORT` | Only the two named variables |
 
 ### `--allow-child-process`
 

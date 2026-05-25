@@ -24,7 +24,9 @@ pub fn inject_all(
     console::inject_console(ctx)?;
     timers::inject_timers(ctx, timer_manager)?;
     buffer::inject_buffer(ctx)?;
-    process::inject_process(ctx)?;
+    process::inject_process(ctx, permissions.clone())?;
+    // Node.js packages expect `global` and `globalThis` to be the same object.
+    ctx.eval::<(), _>("globalThis.global = globalThis; globalThis.GLOBAL = globalThis;")?;
     fetch::inject_fetch(ctx, permissions.clone())?;
     fs::inject_fs(ctx, permissions.clone())?;
     modules::inject_require(ctx, permissions.clone())?;

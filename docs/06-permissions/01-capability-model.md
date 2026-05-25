@@ -42,14 +42,17 @@
 // crates/permissions/src/capability.rs
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Capability {
-    /// Allows reading files at the specified path
+    /// Allows reading files at the specified path (prefix match)
     FileRead(PathBuf),
-    /// Allows writing files at the specified path
+    /// Allows writing files at the specified path (prefix match)
     FileWrite(PathBuf),
-    /// Allows network connections to the specified host/IP
+    /// Allows network connections to the specified host (exact or wildcard)
     Network(String),
-    /// Allows access to environment variables
+    /// Allows reading ALL environment variables (--allow-env=)
     EnvAccess,
+    /// Allows reading a specific environment variable by name (--allow-env=VAR).
+    /// Covered by EnvAccess: if EnvAccess is granted, EnvVar(any) is also satisfied.
+    EnvVar(String),
     /// Allows creating child processes
     SpawnProcess,
     /// Allows access to native APIs/FFI
@@ -59,14 +62,42 @@ pub enum Capability {
 
 ### 1.3.2 Capability Descriptions
 
-| Capability | Resource | Description |
-|------------|----------|-------------|
-| FileRead | PathBuf | Allows reading files/directories |
-| FileWrite | PathBuf | Allows writing/creating files |
-| Network | String | Allows TCP/UDP connections |
-| EnvAccess | - | Allows reading environment variables |
-| SpawnProcess | - | Allows creating child processes |
-| FFI | - | Allows native function calls |
+| Capability | Parameter | CLI flag | Description |
+|------------|-----------|----------|-------------|
+| `FileRead` | `PathBuf` | `--allow-read=PATH` | Read access; granted path acts as a prefix |
+| `FileWrite` | `PathBuf` | `--allow-write=PATH` | Write access; granted path acts as a prefix |
+| `Network` | `String` | `--allow-net=HOST` | TCP/UDP; supports `*.domain` wildcards |
+| `EnvAccess` | — | `--allow-env=` | Access to **all** environment variables |
+| `EnvVar` | `String` | `--allow-env=VAR` | Access to one specific named variable |
+| `SpawnProcess` | — | `--allow-child-process` | Spawn child processes |
+| `FFI` | — | (reserved) | Native function calls |
+
+### 1.3.3 `EnvAccess` vs `EnvVar` coverage
+
+`EnvAccess` is the superset capability. When granted, any `EnvVar(x)` check
+automatically passes. The inverse is not true — a specific `EnvVar("NODE_ENV")`
+does not allow reading any other variable.
+
+```
+EnvAccess  ──covers──►  EnvVar("NODE_ENV")
+EnvAccess  ──covers──►  EnvVar("PATH")
+EnvAccess  ──covers──►  EnvVar("SECRET_KEY")
+
+EnvVar("NODE_ENV")  ──does NOT cover──►  EnvVar("PATH")
+EnvVar("NODE_ENV")  ──does NOT cover──►  EnvAccess
+```
+
+Enforced in `caps_match` (`crates/permissions/src/capability.rs`):
+
+```rust
+(Capability::EnvAccess, Capability::EnvAccess) => true,
+(Capability::EnvAccess, Capability::EnvVar(_))  => true,   // all covers specific
+(Capability::EnvVar(a), Capability::EnvVar(b))  => a == b, // exact name only
+```
+
+`process.env` is filtered at injection time — only variables whose name passes a
+`PermissionState::check(&Capability::EnvVar(key))` are populated in the JS object.
+Variables that were not granted are absent (not `undefined`, simply not present).
 
 ## 1.4 PermissionState
 

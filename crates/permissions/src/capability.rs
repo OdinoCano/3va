@@ -15,8 +15,11 @@ pub enum Capability {
     Network(String),
     /// Permite crear procesos hijos.
     SpawnProcess,
-    /// Permite leer variables de entorno.
+    /// Permite leer todas las variables de entorno (equivale a --allow-env sin scope).
     EnvAccess,
+    /// Permite leer una variable de entorno específica (--allow-env=VAR).
+    /// `EnvAccess` (todas) cubre cualquier `EnvVar`; `EnvVar(a)` solo cubre `EnvVar(a)`.
+    EnvVar(String),
     /// Permite llamadas FFI a librerías nativas.
     FFI,
 }
@@ -131,7 +134,7 @@ impl PermissionState {
             Capability::Network(_) if self.deny_all_net => {
                 return false;
             }
-            Capability::EnvAccess if self.deny_all_env => {
+            Capability::EnvAccess | Capability::EnvVar(_) if self.deny_all_env => {
                 return false;
             }
             Capability::SpawnProcess if self.deny_all_process => {
@@ -201,6 +204,11 @@ impl PermissionState {
                 variable: "*".to_string(),
                 allowed,
             },
+            Capability::EnvVar(v) => AuditEvent::EnvAccess {
+                timestamp: Utc::now(),
+                variable: v.clone(),
+                allowed,
+            },
             Capability::FFI => AuditEvent::PermissionDenied {
                 timestamp: Utc::now(),
                 capability: "FFI".to_string(),
@@ -232,7 +240,8 @@ impl PermissionState {
             Capability::FileWrite(p) => format!("escribir el archivo '{}'", p.display()),
             Capability::Network(h) => format!("conectarse a la red '{}'", h),
             Capability::SpawnProcess => "crear procesos hijos".to_string(),
-            Capability::EnvAccess => "acceder a variables de entorno".to_string(),
+            Capability::EnvAccess => "acceder a todas las variables de entorno".to_string(),
+            Capability::EnvVar(v) => format!("acceder a la variable de entorno '{v}'"),
             Capability::FFI => "acceder a llamadas FFI nativas".to_string(),
         };
 
@@ -290,6 +299,10 @@ fn caps_match(granted: &Capability, required: &Capability) -> bool {
         (Capability::Network(allowed), Capability::Network(target)) => {
             host_matches(allowed, target)
         }
+        // EnvAccess (all) covers both EnvAccess and any specific EnvVar.
+        (Capability::EnvAccess, Capability::EnvAccess) => true,
+        (Capability::EnvAccess, Capability::EnvVar(_)) => true,
+        (Capability::EnvVar(a), Capability::EnvVar(b)) => a == b,
         // Capabilities sin parámetros: igualdad de variante
         (a, b) => a == b,
     }

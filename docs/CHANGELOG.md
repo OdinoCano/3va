@@ -9,6 +9,108 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **`--allow-env=VAR[,VAR,...]` scoped environment access** — `--allow-env` now
+  accepts an optional comma-delimited list of variable names.
+  - `--allow-env=` (no value) → grants `EnvAccess` (all variables, previous behaviour).
+  - `--allow-env=NODE_ENV` → grants `EnvVar("NODE_ENV")` only; all other variables
+    are hidden from `process.env`.
+  - `--allow-env=NODE_ENV,PORT` → grants only the two listed names.
+  - Not providing the flag → `process.env` is an empty object `{}`.
+- **`Capability::EnvVar(String)`** — new capability variant for per-variable scoping.
+  `EnvAccess` (all) covers any `EnvVar(x)` via `caps_match`; the reverse does not hold.
+- **`process.env` permission enforcement** — `process.env` is now populated by
+  filtering the host environment through `PermissionState::check(&Capability::EnvVar(key))`
+  at injection time. Variables not granted are absent from the object regardless of
+  whether they exist in the host environment. Previously all variables were exposed
+  unconditionally even without `--allow-env`.
+
+### Fixed
+
+- **Package extraction robustness** (`crates/pm/src/fetcher.rs`) — `PackageFetcher::extract`
+  no longer aborts the entire installation on the first entry error. Changes:
+  - Entries with `..` or absolute path components are rejected (path traversal).
+  - Resolved output paths are verified to stay within the destination directory
+    (prevents canonical-escape attacks).
+  - `EntryType::Symlink` / `EntryType::Link` are always skipped (supply-chain risk).
+  - Directory entries are handled with `create_dir_all` rather than `unpack`.
+  - Per-entry IO errors are logged as `WARN` and skipped; extraction continues.
+  - Fixes silent install failures for large packages that include native code
+    (e.g. `react-native`, `canvas`, `sharp`) — these now extract correctly to
+    `node_modules/` instead of being left absent.
+
+
+
+- **`3va run` script arguments** — arguments after `--` are forwarded to the script via `process.argv[2+]`. Example: `3va run server.ts -- --port 3000 --dev`. `process.argv[0]` = binary path, `process.argv[1]` = absolute script path, `process.argv[2+]` = script args.
+- **`3va install` multi-package** — `install` now accepts multiple packages in one invocation: `3va install next react react-dom`. Previously only one package was accepted.
+- **`--allow-net=` without value** — passing `--allow-net=` (empty value via `=`) grants network access to all hosts (equivalent to `*`). Same semantics for `--allow-read=` (all paths) and `--allow-write=` (all paths). Multiple flags can be combined: `3va run app.js --allow-net= --allow-read= --allow-write=`.
+- **`process.cwd()`** — returns the real working directory. Previously `undefined`.
+- **`process.chdir()`** — no-op stub (sandboxed runtime does not change working directory).
+- **`process.nextTick(cb, ...args)`** — schedules `cb` in a microtask via `Promise.resolve().then()`, matching Node.js semantics. Multiple callbacks queued in the same tick are flushed in order.
+- **`process.hrtime.bigint()`** — returns `BigInt(Date.now()) * 1_000_000n`.
+- **`setImmediate` / `clearImmediate`** — exposed as globals; `setImmediate` is backed by `setTimeout(fn, 0)`.
+- **`process.versions` expanded** — now includes `node: "20.0.0"`, `v8: "11.3.244.8-node.20"`, `uv: "1.44.2"`, `zlib: "1.2.13"`, `openssl: "3.0.0"`, `modules: "115"`. Packages that inspect `process.versions.node` no longer crash.
+- **`process.stdout.fd` / `process.stderr.fd`** — set to `1` and `2` respectively. `isTTY` set to `false`.
+- **`global` / `GLOBAL` globals** — `globalThis.global` and `globalThis.GLOBAL` are now aliases for `globalThis`, unblocking packages that use `global.xxx` (e.g. `node-polyfill-crypto`).
+- **`require('module')` shim** — the built-in `module` package now exposes `Module._resolveFilename()`, `Module._cache`, `Module._load()`, `Module.prototype.require()`, `Module.createRequire()`, `Module.createRequireFromPath()`, `Module.builtinModules`, `Module.isBuiltin()`, and `Module.syncBuiltinESMExports()`. Required by Next.js `require-hook.js` and many other packages.
+- **`fs` expanded** — 15 new functions (sync + async + `fs.promises`):
+  - `existsSync(path)` — now exposed on the `fs` object (was on `globalThis` only).
+  - `statSync(path)` / `stat(path[, cb])` — returns a stat object with `isFile()`, `isDirectory()`, `isSymbolicLink()`, `size`, `mode`, `mtime`, `atime`, `ctime`, `birthtime`, `mtimeMs`, `atimeMs`, `ctimeMs`.
+  - `lstatSync(path)` / `lstat(path[, cb])` — same as `stat` but does not follow symlinks.
+  - `accessSync(path[, mode])` / `access(path[, mode][, cb])` — checks existence and sandbox read/write permissions. `mode` flags: `fs.constants.F_OK` (0), `R_OK` (4), `W_OK` (2), `X_OK` (1).
+  - `realpathSync(path)` / `realpath(path[, cb])` — calls `std::fs::canonicalize`.
+  - `unlinkSync(path)` / `unlink(path[, cb])` — removes a file.
+  - `renameSync(from, to)` / `rename(from, to[, cb])` — moves/renames.
+  - `copyFileSync(src, dest)` / `copyFile(src, dest[, cb])` — copies a file.
+  - `chmodSync(path, mode)` / `chmod(path, mode[, cb])` — changes Unix permissions.
+  - `symlinkSync(target, path)` / `symlink(target, path[, cb])` — creates a symlink.
+  - `appendFileSync(path, data)` / `appendFile(path, data[, cb])` — appends to a file.
+  - `createReadStream(path[, opts])` — returns an EventEmitter that emits `data`/`end`/`error`. Reads are lazy (fired via `setTimeout(0)` so the event loop can drain first).
+  - `createWriteStream(path[, opts])` — returns an object with `write(chunk)` and `end([chunk])`. Flushes the entire buffer to disk on `end()`.
+  - `watch(path[, opts][, cb])` — returns an EventEmitter stub (no inotify; sandbox limitation).
+  - `readdirSync(path, { withFileTypes: true })` — returns `Dirent`-like objects with `name`, `isFile()`, `isDirectory()`, `isSymbolicLink()`.
+  - `fs.constants` — `{ F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1 }`.
+  - `fs.promises.*` — all async methods mirrored (readFile, writeFile, readdir, mkdir, rm, stat, lstat, access, realpath, rename, unlink, copyFile, chmod, symlink, appendFile).
+  - `require('fs')` and `require('node:fs')` now return the full expanded object; `require('fs/promises')` returns `fs.promises`.
+- **JSX transform** — the Oxc transpiler now supports JSX via the Classic runtime (`React.createElement`):
+  - `.jsx` / `.tsx` files: always transformed.
+  - `.ts` / `.mts` / `.cts` files: TypeScript strip only (no JSX).
+  - `.js` / `.mjs` / unknown extensions: auto-detection via `looks_like_jsx()` heuristic — if the source contains `<Tag` or `</Tag`, JSX transform is applied automatically.
+  - JSX fragments use `React.Fragment`.
+  - `transpile_jsx(source)` and `transpile_js(source)` are now public API in `vvva_js::transpiler`.
+  - `looks_like_jsx(source) -> bool` is public for callers that want to pre-check.
+- **Flow type stripping** — `transpile_js()` includes a two-pass Flow fallback:
+  1. Strips `@flow`, `@format`, `import type`, `import typeof` pragmas.
+  2. If Oxc still fails, falls back to `strip_inline_flow_types()` which removes `: Type` annotations from `const`/`let`/`var` declarations and function parameters at character level (no regex). Enables basic Flow-annotated `.js` files from React Native packages to be loaded via `require()`.
+
+### Changed
+
+- `--allow-read`, `--allow-net`, `--allow-write` in `run`, `install`, `update`, `reinstall` now use `require_equals = true` and `value_delimiter = ','`:
+  - **Old:** `--allow-net registry.npmjs.org` (space-separated, consumed next positional arg as value — broken with `--allow-net` followed by FILE).
+  - **New:** `--allow-net=registry.npmjs.org` or `--allow-net=host1,host2` (equals sign required; comma-delimited list; omitting value after `=` grants wildcard).
+- `process.argv` construction moved from `inject_process` (captured all raw CLI args) to `eval_file` / `eval_file_with_args`:
+  - `process.argv[0]` = path to the `3va` binary.
+  - `process.argv[1]` = absolute path to the script being run (set just before execution).
+  - `process.argv[2+]` = script arguments passed after `--` (set by `eval_file_with_args`).
+- `3va install` `package` field renamed from `Option<String>` to `Vec<String>` (`packages`). Backward-compatible: omitting all packages still installs from manifest.
+
+### Fixed
+
+- `--allow-net=` followed immediately by a positional argument (`<FILE>`) no longer silently consumed the file path as the network host value.
+- `--allow-read=` and `--allow-write=` combining multiple empty flags in one command (`--allow-net= --allow-read= --allow-write=`) no longer errors with "a value is required".
+- `process.argv` no longer duplicated script args when `eval_file_with_args` was called (the raw `std::env::args()` snapshot included the `--` args, causing double-appending).
+- `fs.statSync().isFile()` and `fs.statSync().isDirectory()` returned the method function body instead of a boolean (the boolean values from JSON were overwritten before being captured in the closure). Fixed by saving raw booleans before creating method functions.
+
+### Added (previous session)
+
+- `3va dev` — full development server with HMR, SPA fallback, static serving.
+- `3va audit --secrets` — Phase 3 audit for hardcoded secrets in dependencies.
+- `3va audit --json` — machine-readable JSON output.
+- `3va sandbox` — interactive REPL with multi-line support, session commands, TTY detection.
+- `3va test --watch` / `--coverage` / `--update-snapshots`.
+- `3va bundle --split` / `--minify` / `--source-map`.
+- Full ESM support with `EsmResolver` and `EsmLoader`.
+- `3va update` with per-package registry tracking.
+
 - `3va dev` — full development server:
   - Flags `--port <N>` (default 3000), `--host <H>` (default 127.0.0.1), `--open`, `--public-dir <D>`.
   - HMR via Server-Sent Events at the `/__hmr` endpoint.
