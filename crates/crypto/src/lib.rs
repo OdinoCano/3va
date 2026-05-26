@@ -9,8 +9,8 @@ pub use dsa::{
 };
 pub use hkdf::hkdf_expand;
 pub use kem::{
-    MlKemCiphertext, MlKemKeypair, MlKemSharedSecret, decapsulate, encapsulate,
-    encapsulation_key_from_hex, decapsulation_key_from_hex,
+    MlKemCiphertext, MlKemKeypair, MlKemSharedSecret, decapsulate, decapsulation_key_from_hex,
+    encapsulate, encapsulation_key_from_hex,
 };
 pub use lamport::{LamportKeypair, LamportPublicKey, LamportSignature};
 

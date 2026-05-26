@@ -54,7 +54,10 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         // - .js / .mjs / .cjs: always try OXC transpilation (handles JSX and strips Flow-like annotations)
         let source = if path_str.ends_with(".tsx") || path_str.ends_with(".jsx") {
             crate::transpiler::transpile_jsx(&source)
-        } else if path_str.ends_with(".ts") || path_str.ends_with(".mts") || path_str.ends_with(".cts") {
+        } else if path_str.ends_with(".ts")
+            || path_str.ends_with(".mts")
+            || path_str.ends_with(".cts")
+        {
             crate::transpiler::transpile(&source)
         } else {
             crate::transpiler::transpile_js(&source)
@@ -359,7 +362,148 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                         return req;
                     },
                     STATUS_CODES: STATUS_CODES,
-                    createServer: function() { return { listen: function() {}, close: function() {} }; },
+                    createServer: function(opts, handler) {
+                        if (typeof opts === 'function') { handler = opts; opts = {}; }
+                        handler = handler || function() {};
+                        var serverId = null;
+                        var server = {
+                            listening: false,
+                            _host: '0.0.0.0',
+                            _port: 0,
+                            address: function() { return serverId !== null ? { address: server._host, port: server._port, family: 'IPv4' } : null; },
+                            listen: function(port, host, cb) {
+                                if (typeof port === 'object' && port !== null) { var o = port; port = o.port || 0; host = o.host || '0.0.0.0'; cb = host; }
+                                if (typeof host === 'function') { cb = host; host = '0.0.0.0'; }
+                                if (typeof port === 'function') { cb = port; port = 0; host = '0.0.0.0'; }
+                                host = host || '0.0.0.0';
+                                port = port || 0;
+                                server._host = host;
+                                server._port = port;
+                                try {
+                                    serverId = __httpListen(port, host);
+                                    server.listening = true;
+                                } catch(e) {
+                                    server.emit('error', e);
+                                    return server;
+                                }
+                                if (cb) setTimeout(cb, 0);
+                                server.emit('listening');
+                                _acceptNext();
+                                return server;
+                            },
+                            close: function(cb) {
+                                if (serverId !== null) { __httpClose(serverId); serverId = null; server.listening = false; }
+                                if (cb) setTimeout(cb, 0);
+                                return server;
+                            },
+                            _listeners: {},
+                            on: function(ev, fn) { server._listeners[ev] = server._listeners[ev] || []; server._listeners[ev].push(fn); return server; },
+                            once: function(ev, fn) {
+                                function wrapper() { fn.apply(this, arguments); server.off(ev, wrapper); }
+                                return server.on(ev, wrapper);
+                            },
+                            off: function(ev, fn) {
+                                if (server._listeners[ev]) server._listeners[ev] = server._listeners[ev].filter(function(f) { return f !== fn; });
+                                return server;
+                            },
+                            emit: function(ev) {
+                                var args = Array.prototype.slice.call(arguments, 1);
+                                (server._listeners[ev] || []).forEach(function(fn) { fn.apply(server, args); });
+                            }
+                        };
+
+                        function _acceptNext() {
+                            if (serverId === null) return;
+                            __httpAcceptAsync(serverId).then(function(reqJson) {
+                                var reqData = JSON.parse(reqJson);
+                                _handleRequest(reqData);
+                                _acceptNext();
+                            }).catch(function(e) {
+                                if (serverId !== null) {
+                                    server.emit('error', e);
+                                    _acceptNext();
+                                }
+                            });
+                        }
+
+                        function _handleRequest(reqData) {
+                            var connId = reqData.conn_id;
+                            var req = {
+                                method: reqData.method,
+                                url: reqData.url,
+                                httpVersion: '1.1',
+                                headers: reqData.headers,
+                                rawHeaders: (function() {
+                                    var arr = [];
+                                    var h = reqData.headers || {};
+                                    Object.keys(h).forEach(function(k) { arr.push(k, h[k]); });
+                                    return arr;
+                                })(),
+                                socket: { remoteAddress: '127.0.0.1', remotePort: 0 },
+                                _body: reqData.body || '',
+                                _listeners: {},
+                                on: function(ev, fn) { req._listeners[ev] = req._listeners[ev] || []; req._listeners[ev].push(fn); return req; },
+                                emit: function(ev) { var args = Array.prototype.slice.call(arguments, 1); (req._listeners[ev]||[]).forEach(function(fn){fn.apply(req,args);}); },
+                                setEncoding: function() {},
+                                resume: function() { setTimeout(function() { (req._listeners.data||[]).forEach(function(fn){fn(req._body);}); (req._listeners.end||[]).forEach(function(fn){fn();}); }, 0); return req; },
+                                pipe: function(dest) { if (dest && dest.write) dest.write(req._body); if (dest && dest.end) dest.end(); return dest; },
+                                destroy: function() {}
+                            };
+
+                            var _responded = false;
+                            var res = {
+                                statusCode: 200,
+                                statusMessage: '',
+                                _headers: {},
+                                _chunks: [],
+                                writableEnded: false,
+                                setHeader: function(k, v) { res._headers[k] = v; return res; },
+                                getHeader: function(k) { return res._headers[k]; },
+                                removeHeader: function(k) { delete res._headers[k]; return res; },
+                                hasHeader: function(k) { return k in res._headers; },
+                                writeHead: function(status, msg, headers) {
+                                    if (typeof msg === 'object') { headers = msg; msg = ''; }
+                                    res.statusCode = status;
+                                    if (msg) res.statusMessage = msg;
+                                    if (headers) Object.keys(headers).forEach(function(k) { res._headers[k] = headers[k]; });
+                                    return res;
+                                },
+                                write: function(chunk) {
+                                    if (chunk !== undefined && chunk !== null) {
+                                        res._chunks.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk));
+                                    }
+                                    return true;
+                                },
+                                end: function(chunk) {
+                                    if (_responded) return;
+                                    _responded = true;
+                                    if (chunk !== undefined && chunk !== null) res.write(chunk);
+                                    res.writableEnded = true;
+                                    var body = res._chunks.join('');
+                                    var st = res.statusCode || 200;
+                                    var stText = res.statusMessage || STATUS_CODES[st] || 'OK';
+                                    if (!res._headers['Content-Type'] && !res._headers['content-type']) {
+                                        res._headers['Content-Type'] = 'text/plain';
+                                    }
+                                    try { __httpRespond(connId, st, stText, JSON.stringify(res._headers), body); }
+                                    catch(e) { /* connection may have been closed */ }
+                                },
+                                _listeners: {},
+                                on: function(ev, fn) { res._listeners[ev] = res._listeners[ev] || []; res._listeners[ev].push(fn); return res; },
+                                emit: function(ev) { var args = Array.prototype.slice.call(arguments, 1); (res._listeners[ev]||[]).forEach(function(fn){fn.apply(res,args);}); },
+                                destroy: function() { _responded = true; }
+                            };
+
+                            try { handler(req, res); } catch(e) {
+                                if (!_responded) {
+                                    try { __httpRespond(connId, 500, 'Internal Server Error', JSON.stringify({'Content-Type':'text/plain'}), 'Internal Server Error'); } catch(_) {}
+                                    _responded = true;
+                                }
+                            }
+                        }
+
+                        return server;
+                    },
                     Agent: function() {},
                     globalAgent: {}
                 };
@@ -372,16 +516,67 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__requireCache['node:http'] = httpMod;
             globalThis.__requireCache['node:https'] = httpsMod;
 
-            // ── crypto (minimal) ─────────────────────────────────────────────────
-            var crypto = {
-                randomBytes: function(n) { var a = new Uint8Array(n); for (var i=0;i<n;i++) a[i]=Math.random()*256|0; return a; },
-                createHash: function(alg) { return { _data:'', update: function(d){ this._data+=d; return this; }, digest: function(enc){ return enc==='hex'?btoa(this._data):''; } }; },
-                createHmac: function(alg, key) { return { update: function(d){ return this; }, digest: function(enc){ return ''; } }; },
-                randomUUID: function() { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(c){var r=Math.random()*16|0;return(c==='x'?r:(r&0x3|0x8)).toString(16);}); },
-                getRandomValues: function(arr) { for(var i=0;i<arr.length;i++) arr[i]=Math.random()*256|0; return arr; }
+            // ── crypto — wraps globalThis.crypto (SubtleCrypto) + Node.js-compat helpers ─
+            var cryptoMod = {
+                subtle: globalThis.crypto ? globalThis.crypto.subtle : undefined,
+                getRandomValues: function(arr) { return globalThis.crypto.getRandomValues(arr); },
+                randomUUID: function() { return globalThis.crypto.randomUUID(); },
+                randomBytes: function(n) { var a = new Uint8Array(n); globalThis.crypto.getRandomValues(a); return a; },
+                // Node.js streaming hash/hmac — digest() returns a Promise<string|Uint8Array>
+                createHash: function(alg) {
+                    var chunks = [];
+                    var ha = alg === 'sha1' ? 'SHA-1' : alg === 'sha256' || alg === 'sha-256' ? 'SHA-256' : alg === 'sha384' || alg === 'sha-384' ? 'SHA-384' : alg === 'sha512' || alg === 'sha-512' ? 'SHA-512' : alg.toUpperCase();
+                    return {
+                        update: function(d) { chunks.push(typeof d === 'string' ? new TextEncoder().encode(d) : d); return this; },
+                        digest: function(enc) {
+                            var total = chunks.reduce(function(s, c) { return s + c.length; }, 0);
+                            var data = new Uint8Array(total); var off = 0;
+                            chunks.forEach(function(c) { data.set(c, off); off += c.length; });
+                            var p = globalThis.crypto.subtle.digest(ha, data);
+                            if (enc === 'hex') return p.then(function(b) { return Array.from(new Uint8Array(b)).map(function(x) { return x.toString(16).padStart(2,'0'); }).join(''); });
+                            if (enc === 'base64') return p.then(function(b) { return btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(b)))); });
+                            return p.then(function(b) { return new Uint8Array(b); });
+                        }
+                    };
+                },
+                createHmac: function(alg, key) {
+                    var chunks = [];
+                    var kd = typeof key === 'string' ? new TextEncoder().encode(key) : key;
+                    var ha = alg === 'sha1' ? 'SHA-1' : alg === 'sha256' || alg === 'sha-256' ? 'SHA-256' : alg === 'sha384' || alg === 'sha-384' ? 'SHA-384' : alg === 'sha512' || alg === 'sha-512' ? 'SHA-512' : alg.toUpperCase();
+                    return {
+                        update: function(d) { chunks.push(typeof d === 'string' ? new TextEncoder().encode(d) : d); return this; },
+                        digest: function(enc) {
+                            var total = chunks.reduce(function(s, c) { return s + c.length; }, 0);
+                            var data = new Uint8Array(total); var off = 0;
+                            chunks.forEach(function(c) { data.set(c, off); off += c.length; });
+                            var p = globalThis.crypto.subtle.importKey('raw', kd, { name: 'HMAC', hash: ha }, false, ['sign'])
+                                .then(function(k) { return globalThis.crypto.subtle.sign('HMAC', k, data); });
+                            if (enc === 'hex') return p.then(function(b) { return Array.from(new Uint8Array(b)).map(function(x) { return x.toString(16).padStart(2,'0'); }).join(''); });
+                            if (enc === 'base64') return p.then(function(b) { return btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(b)))); });
+                            return p.then(function(b) { return new Uint8Array(b); });
+                        }
+                    };
+                },
+                timingSafeEqual: function(a, b) {
+                    if (a.length !== b.length) return false;
+                    var r = 0; for (var i = 0; i < a.length; i++) r |= a[i] ^ b[i];
+                    return r === 0;
+                },
+                pbkdf2: function(password, salt, iterations, keylen, digest, cb) {
+                    var p = typeof password === 'string' ? new TextEncoder().encode(password) : password;
+                    var s = typeof salt === 'string' ? new TextEncoder().encode(salt) : salt;
+                    var ha = digest === 'sha1' ? 'SHA-1' : digest === 'sha256' ? 'SHA-256' : digest === 'sha512' ? 'SHA-512' : 'SHA-256';
+                    globalThis.crypto.subtle.importKey('raw', p, { name: 'PBKDF2' }, false, ['deriveBits'])
+                        .then(function(k) { return globalThis.crypto.subtle.deriveBits({ name: 'PBKDF2', hash: ha, salt: s, iterations: iterations }, k, keylen * 8); })
+                        .then(function(b) { cb(null, new Uint8Array(b)); }).catch(cb);
+                },
+                pbkdf2Sync: function() { throw new Error('pbkdf2Sync: use async crypto.pbkdf2() in this runtime'); },
+                createCipheriv: function() { throw new Error('createCipheriv: use crypto.subtle.encrypt() instead'); },
+                createDecipheriv: function() { throw new Error('createDecipheriv: use crypto.subtle.decrypt() instead'); },
+                constants: { SSL_OP_NO_SSLv2: 0, SSL_OP_NO_SSLv3: 0, SSL_OP_NO_TLSv1: 0 },
             };
-            globalThis.__requireCache['crypto'] = crypto;
-            globalThis.__requireCache['node:crypto'] = crypto;
+            globalThis.__requireCache['crypto'] = cryptoMod;
+            globalThis.__requireCache['node:crypto'] = cryptoMod;
 
             // ── zlib — real impl injected by zlib.rs builtin after this block ─────
             globalThis.__requireCache['zlib'] = { gzip: function(b,cb){cb(null,b);}, gunzip: function(b,cb){cb(null,b);}, deflate: function(b,cb){cb(null,b);}, inflate: function(b,cb){cb(null,b);}, constants: {} };
@@ -454,32 +649,47 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             Socket.prototype._startPoll = function() {
                 var self = this;
-                self._pollTimer = setInterval(function() {
+                var delay = 1; // ms — starts low, backs off when idle, resets on data
+                function poll() {
                     if (self._destroyed || self._id === null) {
-                        clearInterval(self._pollTimer);
                         self._pollTimer = null;
+                        return;
+                    }
+                    if (self._paused) {
+                        self._pollTimer = setTimeout(poll, 50);
                         return;
                     }
                     try {
                         var chunk = __tcpRead(self._id, 65536);
+                        delay = 1; // data received — reset backoff
                         self.bytesRead += chunk.length;
                         var data = self._encoding
                             ? new TextDecoder(self._encoding).decode(new Uint8Array(chunk))
                             : new Uint8Array(chunk);
                         self.emit('data', data);
+                        // More data may be waiting — schedule immediately
+                        self._pollTimer = setTimeout(poll, 0);
                     } catch(e) {
-                        if (e.code === 'EAGAIN') return; // no data yet
-                        clearInterval(self._pollTimer);
+                        if (e && e.code === 'EAGAIN') {
+                            // No data yet — exponential backoff, cap at 100 ms
+                            delay = Math.min(delay * 2, 100);
+                            self._pollTimer = setTimeout(poll, delay);
+                            return;
+                        }
                         self._pollTimer = null;
-                        if (e.code === 'EOF') {
+                        if (e && e.code === 'EOF') {
+                            self.readable = false;
                             self.emit('end');
+                            if (!self.writable) { self.destroyed = true; self._destroyed = true; }
                             self.emit('close', false);
                         } else {
                             self.emit('error', e);
+                            self.destroyed = true; self._destroyed = true;
                             self.emit('close', true);
                         }
                     }
-                }, 5);
+                }
+                self._pollTimer = setTimeout(poll, 0);
             };
 
             Socket.prototype.write = function(data, encoding, callback) {
@@ -526,7 +736,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 if (this._destroyed) return this;
                 this._destroyed = true;
                 this.destroyed = true;
-                if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+                if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
                 if (this._id !== null) {
                     try { __tcpClose(this._id); } catch(_) {}
                     this._id = null;
@@ -581,9 +791,67 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     return s;
                 },
                 connect: function() { return netMod.createConnection.apply(netMod, arguments); },
-                createServer: function(opts, cb) {
-                    if (typeof opts === 'function') { cb = opts; opts = {}; }
-                    return { listen: function() {}, close: function() {}, address: function() { return {}; } };
+                createServer: function(opts, connectionListener) {
+                    if (typeof opts === 'function') { connectionListener = opts; opts = {}; }
+                    connectionListener = connectionListener || function() {};
+                    var serverId = null;
+                    var server = {
+                        listening: false,
+                        _host: '0.0.0.0',
+                        _port: 0,
+                        address: function() { return serverId !== null ? { address: server._host, port: server._port, family: 'IPv4' } : null; },
+                        listen: function(port, host, cb) {
+                            if (typeof port === 'object' && port !== null) { var o = port; port = o.port || 0; host = o.host || '0.0.0.0'; cb = host; }
+                            if (typeof host === 'function') { cb = host; host = '0.0.0.0'; }
+                            if (typeof port === 'function') { cb = port; port = 0; host = '0.0.0.0'; }
+                            host = host || '0.0.0.0';
+                            port = port || 0;
+                            server._host = host;
+                            server._port = port;
+                            try {
+                                serverId = __netListen(port, host);
+                                server.listening = true;
+                            } catch(e) {
+                                server.emit('error', e);
+                                return server;
+                            }
+                            if (cb) setTimeout(cb, 0);
+                            server.emit('listening');
+                            _acceptNext();
+                            return server;
+                        },
+                        close: function(cb) {
+                            if (serverId !== null) { __netClose(serverId); serverId = null; server.listening = false; }
+                            if (cb) setTimeout(cb, 0);
+                            return server;
+                        },
+                        _listeners: {},
+                        on: function(ev, fn) { server._listeners[ev] = server._listeners[ev] || []; server._listeners[ev].push(fn); return server; },
+                        once: function(ev, fn) { function w() { fn.apply(this, arguments); server.off(ev, w); } return server.on(ev, w); },
+                        off: function(ev, fn) { if (server._listeners[ev]) server._listeners[ev] = server._listeners[ev].filter(function(f){return f!==fn;}); return server; },
+                        emit: function(ev) { var args = Array.prototype.slice.call(arguments,1); (server._listeners[ev]||[]).forEach(function(fn){fn.apply(server,args);}); }
+                    };
+
+                    function _acceptNext() {
+                        if (serverId === null) return;
+                        __netAcceptAsync(serverId).then(function(connId) {
+                            var socket = new Socket({});
+                            socket._id = connId;
+                            socket.readable = true;
+                            socket.writable = true;
+                            socket._startPoll();
+                            server.emit('connection', socket);
+                            connectionListener(socket);
+                            _acceptNext();
+                        }).catch(function(e) {
+                            if (serverId !== null) {
+                                server.emit('error', e);
+                                _acceptNext();
+                            }
+                        });
+                    }
+
+                    return server;
                 },
                 isIP: function(addr) { return /^\d+\.\d+\.\d+\.\d+$/.test(addr) ? 4 : 0; },
                 isIPv4: function(addr) { return /^\d+\.\d+\.\d+\.\d+$/.test(addr); },
@@ -615,8 +883,8 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__requireCache['node:net'] = netMod;
             globalThis.__requireCache['node:tls'] = tlsMod;
 
-            // ── child_process — real impl injected by child_process.rs builtin ────
-            globalThis.__requireCache['child_process'] = { exec: function(cmd,cb){if(cb)cb(null,'','');}, spawn: function(){return new EventEmitter();}, execSync: function(){throw new Error('execSync not available');}};
+            // ── child_process — placeholder; overwritten by child_process.rs inject ─
+            globalThis.__requireCache['child_process'] = {};
             globalThis.__requireCache['node:child_process'] = globalThis.__requireCache['child_process'];
 
             // ── fs (proxy to globalThis.fs) ───────────────────────────────────────
@@ -1261,6 +1529,353 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         })();
     "#)?;
 
+    // ── WinterCG / Web Platform globals ──────────────────────────────────────
+    ctx.eval::<(), _>(r#"
+        // self === globalThis (required by workers and many edge frameworks)
+        globalThis.self = globalThis;
+
+        // structuredClone — spec-compliant deep clone (WHATWG Structured Clone Algorithm subset).
+        // Handles: primitives, Date, RegExp, ArrayBuffer, TypedArray/DataView, Map, Set, Array,
+        // plain objects. Throws DataCloneError for functions, symbols, and circular references.
+        (function() {
+            function _clone(val, seen) {
+                if (val === null || val === undefined) return val;
+                var t = typeof val;
+                if (t === 'number' || t === 'string' || t === 'boolean' || t === 'bigint') return val;
+                if (t === 'symbol' || t === 'function')
+                    throw Object.assign(new TypeError('structuredClone: ' + t + ' values cannot be cloned'), { name: 'DataCloneError' });
+                if (seen.has(val)) throw Object.assign(new TypeError('structuredClone: circular reference detected'), { name: 'DataCloneError' });
+                if (val instanceof Date) return new Date(val.getTime());
+                if (val instanceof RegExp) return new RegExp(val.source, val.flags);
+                if (val instanceof ArrayBuffer) {
+                    var ab = new ArrayBuffer(val.byteLength);
+                    new Uint8Array(ab).set(new Uint8Array(val));
+                    return ab;
+                }
+                if (val instanceof DataView) {
+                    var ab2 = new ArrayBuffer(val.buffer.byteLength);
+                    new Uint8Array(ab2).set(new Uint8Array(val.buffer));
+                    return new DataView(ab2, val.byteOffset, val.byteLength);
+                }
+                if (ArrayBuffer.isView(val)) {
+                    var ab3 = new ArrayBuffer(val.buffer.byteLength);
+                    new Uint8Array(ab3).set(new Uint8Array(val.buffer));
+                    return new val.constructor(ab3, val.byteOffset, val.length);
+                }
+                if (val instanceof Error) {
+                    var e2 = new val.constructor(val.message);
+                    if (val.stack) e2.stack = val.stack;
+                    return e2;
+                }
+                if (val instanceof Map) {
+                    seen.set(val, true);
+                    var m = new Map();
+                    val.forEach(function(v, k) { m.set(_clone(k, seen), _clone(v, seen)); });
+                    seen.delete(val);
+                    return m;
+                }
+                if (val instanceof Set) {
+                    seen.set(val, true);
+                    var s = new Set();
+                    val.forEach(function(v) { s.add(_clone(v, seen)); });
+                    seen.delete(val);
+                    return s;
+                }
+                if (Array.isArray(val)) {
+                    seen.set(val, true);
+                    var arr = new Array(val.length);
+                    for (var i = 0; i < val.length; i++) arr[i] = _clone(val[i], seen);
+                    seen.delete(val);
+                    return arr;
+                }
+                if (t === 'object') {
+                    seen.set(val, true);
+                    var obj = {};
+                    var ks = Object.keys(val);
+                    for (var i = 0; i < ks.length; i++) obj[ks[i]] = _clone(val[ks[i]], seen);
+                    seen.delete(val);
+                    return obj;
+                }
+                return val;
+            }
+            globalThis.structuredClone = function structuredClone(val) {
+                return _clone(val, new WeakMap());
+            };
+        })();
+
+        // navigator — minimal WinterCG-compatible object
+        if (!globalThis.navigator) {
+            globalThis.navigator = Object.freeze({
+                userAgent: '3va/0.1 (QuickJS)',
+                language: 'en-US',
+                languages: Object.freeze(['en-US', 'en']),
+                onLine: true,
+                hardwareConcurrency: 1,
+                platform: 'Linux x86_64',
+                cookieEnabled: false,
+                doNotTrack: '1',
+            });
+        }
+
+        // ── Headers ──────────────────────────────────────────────────────────
+        (function() {
+            function Headers(init) {
+                this._list = []; // [[lowercase-name, value], ...]
+                if (init instanceof Headers) {
+                    for (var i = 0; i < init._list.length; i++) this._list.push([init._list[i][0], init._list[i][1]]);
+                } else if (Array.isArray(init)) {
+                    for (var i = 0; i < init.length; i++) this.append(init[i][0], init[i][1]);
+                } else if (init && typeof init === 'object') {
+                    var ks = Object.keys(init);
+                    for (var i = 0; i < ks.length; i++) this.append(ks[i], init[ks[i]]);
+                }
+            }
+            Headers.prototype.append = function(name, value) {
+                this._list.push([name.toLowerCase(), String(value)]);
+            };
+            Headers.prototype['delete'] = function(name) {
+                var l = name.toLowerCase();
+                this._list = this._list.filter(function(e) { return e[0] !== l; });
+            };
+            Headers.prototype.get = function(name) {
+                var l = name.toLowerCase(); var vals = [];
+                for (var i = 0; i < this._list.length; i++) { if (this._list[i][0] === l) vals.push(this._list[i][1]); }
+                return vals.length ? vals.join(', ') : null;
+            };
+            Headers.prototype.getSetCookie = function() {
+                return this._list.filter(function(e) { return e[0] === 'set-cookie'; }).map(function(e) { return e[1]; });
+            };
+            Headers.prototype.has = function(name) {
+                var l = name.toLowerCase();
+                for (var i = 0; i < this._list.length; i++) { if (this._list[i][0] === l) return true; }
+                return false;
+            };
+            Headers.prototype.set = function(name, value) {
+                var l = name.toLowerCase(); var found = false;
+                this._list = this._list.filter(function(e) {
+                    if (e[0] !== l) return true;
+                    if (!found) { found = true; e[1] = String(value); return true; }
+                    return false;
+                });
+                if (!found) this._list.push([l, String(value)]);
+            };
+            Headers.prototype.forEach = function(cb, thisArg) {
+                for (var i = 0; i < this._list.length; i++) cb.call(thisArg, this._list[i][1], this._list[i][0], this);
+            };
+            function _makeIter(list, mapFn) {
+                var i = 0;
+                var it = { next: function() {
+                    if (i < list.length) return { value: mapFn(list[i++]), done: false };
+                    return { value: undefined, done: true };
+                }};
+                it[Symbol.iterator] = function() { return this; };
+                return it;
+            }
+            Headers.prototype.entries = function() { return _makeIter(this._list, function(e) { return [e[0], e[1]]; }); };
+            Headers.prototype.keys = function() { return _makeIter(this._list, function(e) { return e[0]; }); };
+            Headers.prototype.values = function() { return _makeIter(this._list, function(e) { return e[1]; }); };
+            Headers.prototype[Symbol.iterator] = function() { return this.entries(); };
+            Headers.prototype.toJSON = function() {
+                var obj = {};
+                this.forEach(function(v, k) { obj[k] = obj[k] !== undefined ? obj[k] + ', ' + v : v; });
+                return obj;
+            };
+            globalThis.Headers = Headers;
+        })();
+
+        // ── shared formData body parser (used by Request and Response) ────────
+        globalThis._parseBodyAsFormData = function(ct, body) {
+            ct = (ct || '').toLowerCase();
+            var fd = new FormData();
+            if (ct.indexOf('application/x-www-form-urlencoded') >= 0) {
+                var pairs = body.split('&');
+                for (var i = 0; i < pairs.length; i++) {
+                    if (!pairs[i]) continue;
+                    var idx = pairs[i].indexOf('=');
+                    var k = decodeURIComponent(idx >= 0 ? pairs[i].slice(0, idx) : pairs[i]).replace(/\+/g, ' ');
+                    var v = decodeURIComponent(idx >= 0 ? pairs[i].slice(idx + 1) : '').replace(/\+/g, ' ');
+                    fd.append(k, v);
+                }
+                return fd;
+            }
+            if (ct.indexOf('multipart/form-data') >= 0) {
+                var bm = ct.match(/boundary=([^\s;]+)/);
+                if (!bm) throw new Error('formData: missing boundary in Content-Type');
+                var boundary = '--' + bm[1];
+                var parts = body.split(boundary);
+                for (var i = 1; i < parts.length - 1; i++) {
+                    var part = parts[i];
+                    if (part.startsWith('\r\n')) part = part.slice(2);
+                    if (part.endsWith('\r\n')) part = part.slice(0, -2);
+                    var headerEnd = part.indexOf('\r\n\r\n');
+                    if (headerEnd < 0) continue;
+                    var rawHdrs = part.slice(0, headerEnd);
+                    var partBody = part.slice(headerEnd + 4);
+                    var cd = '';
+                    var hlines = rawHdrs.split('\r\n');
+                    for (var j = 0; j < hlines.length; j++) {
+                        if (hlines[j].toLowerCase().startsWith('content-disposition:')) {
+                            cd = hlines[j].slice(hlines[j].indexOf(':') + 1).trim();
+                        }
+                    }
+                    var nm = cd.match(/name="([^"]*)"/);
+                    var fm = cd.match(/filename="([^"]*)"/);
+                    if (!nm) continue;
+                    if (fm) fd.append(nm[1], new File([partBody], fm[1]));
+                    else fd.append(nm[1], partBody);
+                }
+                return fd;
+            }
+            throw new TypeError('formData: unsupported Content-Type: ' + ct);
+        };
+
+        // ── Request ──────────────────────────────────────────────────────────
+        (function() {
+            function Request(input, init) {
+                init = init || {};
+                if (input && typeof input === 'object' && 'url' in input) {
+                    // Clone from existing Request
+                    this.url = String(input.url);
+                    this.method = (init.method || input.method || 'GET').toUpperCase();
+                    this.headers = new Headers(init.headers != null ? init.headers : input.headers);
+                    this._body = init.body != null ? String(init.body) : (input._body || null);
+                    this.signal = init.signal || input.signal || null;
+                } else {
+                    this.url = String(input);
+                    this.method = (init.method || 'GET').toUpperCase();
+                    this.headers = new Headers(init.headers);
+                    this._body = init.body != null ? String(init.body) : null;
+                    this.signal = init.signal || null;
+                }
+                this.bodyUsed = false;
+                this.duplex = init.duplex || 'half';
+                this.mode = init.mode || 'cors';
+                this.credentials = init.credentials || 'same-origin';
+                this.cache = init.cache || 'default';
+                this.redirect = init.redirect || 'follow';
+                this.referrer = init.referrer || 'about:client';
+                this.integrity = init.integrity || '';
+                this.keepalive = !!init.keepalive;
+            }
+            Request.prototype._consumeBody = function() {
+                if (this.bodyUsed) return Promise.reject(new TypeError('Body already used'));
+                this.bodyUsed = true;
+                return Promise.resolve(this._body || '');
+            };
+            Request.prototype.text = function() { return this._consumeBody(); };
+            Request.prototype.json = function() {
+                return this._consumeBody().then(function(t) {
+                    try { return JSON.parse(t); } catch(e) { throw new SyntaxError('Invalid JSON: ' + e.message); }
+                });
+            };
+            Request.prototype.arrayBuffer = function() {
+                return this._consumeBody().then(function(s) {
+                    var buf = new ArrayBuffer(s.length); var v = new Uint8Array(buf);
+                    for (var i = 0; i < s.length; i++) v[i] = s.charCodeAt(i) & 0xff;
+                    return buf;
+                });
+            };
+            Request.prototype.bytes = function() {
+                return this.arrayBuffer().then(function(b) { return new Uint8Array(b); });
+            };
+            Request.prototype.blob = function() {
+                return this._consumeBody().then(function(s) { return new Blob([s]); });
+            };
+            Request.prototype.formData = function() {
+                var self = this;
+                return this._consumeBody().then(function(body) {
+                    return globalThis._parseBodyAsFormData(self.headers.get('content-type'), body);
+                });
+            };
+            Request.prototype.clone = function() {
+                if (this.bodyUsed) throw new TypeError('Cannot clone: body already read');
+                return new Request(this.url, { method: this.method, headers: this.headers, body: this._body, signal: this.signal });
+            };
+            globalThis.Request = Request;
+        })();
+
+        // ── Response ─────────────────────────────────────────────────────────
+        (function() {
+            function Response(body, init) {
+                init = init || {};
+                this.status = init.status != null ? Number(init.status) : 200;
+                this.statusText = init.statusText != null ? String(init.statusText) : '';
+                this.headers = new Headers(init.headers);
+                this.url = init.url || '';
+                this.redirected = !!init.redirected;
+                this.type = init.type || 'default';
+                this.ok = this.status >= 200 && this.status < 300;
+                this.bodyUsed = false;
+                this._blob = null;
+                if (body == null) {
+                    this._body = null;
+                } else if (body instanceof Blob) {
+                    this._blob = body; this._body = null;
+                } else if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+                    var bytes = body instanceof ArrayBuffer ? new Uint8Array(body) : new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+                    this._body = new TextDecoder().decode(bytes);
+                } else {
+                    this._body = String(body);
+                }
+            }
+            Response.prototype._consumeBody = function() {
+                if (this.bodyUsed) return Promise.reject(new TypeError('Body already used'));
+                this.bodyUsed = true;
+                if (this._blob) return this._blob.text();
+                return Promise.resolve(this._body != null ? this._body : '');
+            };
+            Response.prototype.text = function() { return this._consumeBody(); };
+            Response.prototype.json = function() {
+                return this._consumeBody().then(function(t) {
+                    try { return JSON.parse(t); } catch(e) { throw new SyntaxError('Invalid JSON: ' + e.message); }
+                });
+            };
+            Response.prototype.arrayBuffer = function() {
+                return this._consumeBody().then(function(s) {
+                    var buf = new ArrayBuffer(s.length); var v = new Uint8Array(buf);
+                    for (var i = 0; i < s.length; i++) v[i] = s.charCodeAt(i) & 0xff;
+                    return buf;
+                });
+            };
+            Response.prototype.bytes = function() {
+                return this.arrayBuffer().then(function(b) { return new Uint8Array(b); });
+            };
+            Response.prototype.blob = function() {
+                return this._consumeBody().then(function(s) { return new Blob([s]); });
+            };
+            Response.prototype.formData = function() {
+                var self = this;
+                return this._consumeBody().then(function(body) {
+                    return globalThis._parseBodyAsFormData(self.headers.get('content-type'), body);
+                });
+            };
+            Response.prototype.clone = function() {
+                if (this.bodyUsed) throw new TypeError('Cannot clone: body already read');
+                return new Response(this._blob || this._body, {
+                    status: this.status, statusText: this.statusText,
+                    headers: this.headers, url: this.url,
+                    redirected: this.redirected, type: this.type,
+                });
+            };
+            Response.json = function(data, init) {
+                init = init || {};
+                var h = new Headers(init.headers);
+                if (!h.has('content-type')) h.set('content-type', 'application/json');
+                return new Response(JSON.stringify(data), Object.assign({}, init, { headers: h }));
+            };
+            Response.error = function() {
+                return new Response(null, { status: 0, statusText: '', type: 'error' });
+            };
+            Response.redirect = function(url, status) {
+                status = status || 302;
+                if ([301, 302, 303, 307, 308].indexOf(status) < 0) throw new RangeError('Invalid redirect status code: ' + status);
+                var h = new Headers(); h.set('location', String(url));
+                return new Response(null, { status: status, headers: h });
+            };
+            globalThis.Response = Response;
+        })();
+    "#)?;
+
     // ESM→CJS inline transformer for loading ESM packages via require()
     ctx.eval::<(), _>(r#"
         globalThis.__esmToCjs = function(src) {
@@ -1372,6 +1987,12 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 }
             }
 
+            // Strip jsr: prefix — resolve as a scoped package in node_modules/
+            // e.g. require('jsr:@scope/name') → require('@scope/name')
+            if (path.indexOf('jsr:') === 0) {
+                path = path.slice(4);
+            }
+
             // Check built-ins and bare-name cache first (before path resolution)
             if (globalThis.__requireCache[path] !== undefined) {
                 return globalThis.__requireCache[path];
@@ -1469,6 +2090,9 @@ fn split_bare_specifier(spec: &str) -> (&str, Option<&str>) {
 
 /// Resolve a module path relative to `basedir` (or CWD if None).
 pub fn resolve_path_from(path: &str, basedir: Option<&str>) -> PathBuf {
+    // Strip jsr: specifier prefix — treat as a scoped package in node_modules/
+    let path = path.strip_prefix("jsr:").unwrap_or(path);
+
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let base_dir = basedir
         .map(PathBuf::from)

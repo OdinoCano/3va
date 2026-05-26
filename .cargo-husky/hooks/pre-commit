@@ -1,0 +1,12 @@
+#!/bin/sh
+# Pre-commit hook — installed by cargo-husky
+# Runs on every `git commit`. Blocks commit if formatting or lints fail.
+set -e
+
+echo "[pre-commit] Checking formatting..."
+cargo fmt --check
+
+echo "[pre-commit] Running clippy..."
+cargo clippy --all-targets -- -D warnings
+
+echo "[pre-commit] OK"

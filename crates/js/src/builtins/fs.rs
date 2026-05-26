@@ -15,7 +15,11 @@ fn js_err<'js>(ctx: &Ctx<'js>, msg: String) -> rquickjs::Error {
 fn perm_err<'js>(ctx: &Ctx<'js>, flag: &str, path: &std::path::Path) -> rquickjs::Error {
     js_err(
         ctx,
-        format!("Permission denied: --allow-{}={} is required", flag, path.display()),
+        format!(
+            "Permission denied: --allow-{}={} is required",
+            flag,
+            path.display()
+        ),
     )
 }
 
@@ -29,7 +33,10 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args.0.into_iter().next()
+                let path_str = args
+                    .0
+                    .into_iter()
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsReadFileSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.check(&Capability::FileRead(path.clone())) {
@@ -48,8 +55,9 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args.0.into_iter().next()
-                    .ok_or_else(|| js_err(&ctx, "__fsReadFileBytesSync() requires a path".into()))?;
+                let path_str = args.0.into_iter().next().ok_or_else(|| {
+                    js_err(&ctx, "__fsReadFileBytesSync() requires a path".into())
+                })?;
                 let path = PathBuf::from(&path_str);
                 if !perms.check(&Capability::FileRead(path.clone())) {
                     return Err(perm_err(&ctx, "read", &path));
@@ -70,7 +78,8 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
                 let mut it = args.0.into_iter();
-                let path_str = it.next()
+                let path_str = it
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsWriteFileSync() requires a path".into()))?;
                 let content = it.next().unwrap_or_default();
                 let path = PathBuf::from(&path_str);
@@ -94,7 +103,8 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
                 let mut it = args.0.into_iter();
-                let path_str = it.next()
+                let path_str = it
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsAppendFileSync() requires a path".into()))?;
                 let content = it.next().unwrap_or_default();
                 let path = PathBuf::from(&path_str);
@@ -103,7 +113,9 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 }
                 use std::io::Write;
                 let mut file = std::fs::OpenOptions::new()
-                    .create(true).append(true).open(&path)
+                    .create(true)
+                    .append(true)
+                    .open(&path)
                     .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
                 file.write_all(content.as_bytes())
                     .map_err(|e| js_err(&ctx, format!("{}: '{}'", e, path_str)))
@@ -115,7 +127,9 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
     globals.set(
         "__fsExistsSync",
         Function::new(ctx.clone(), |args: Rest<String>| -> bool {
-            args.0.into_iter().next()
+            args.0
+                .into_iter()
+                .next()
                 .map(|p| PathBuf::from(p).exists())
                 .unwrap_or(false)
         })?,
@@ -177,7 +191,8 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
                 let mut it = args.0.into_iter();
-                let path_str = it.next()
+                let path_str = it
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsAccessSync() requires a path".into()))?;
                 let mode_str = it.next().unwrap_or_else(|| "0".to_string());
                 let mode: u32 = mode_str.parse().unwrap_or(0);
@@ -205,7 +220,10 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args.0.into_iter().next()
+                let path_str = args
+                    .0
+                    .into_iter()
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsRealpathSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.check(&Capability::FileRead(path.clone())) {
@@ -225,7 +243,10 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args.0.into_iter().next()
+                let path_str = args
+                    .0
+                    .into_iter()
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsReaddirSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.check(&Capability::FileRead(path.clone())) {
@@ -233,7 +254,8 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 }
                 let entries = std::fs::read_dir(&path)
                     .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
-                let names: Vec<String> = entries.flatten()
+                let names: Vec<String> = entries
+                    .flatten()
                     .filter_map(|e| e.file_name().into_string().ok())
                     .collect();
                 Ok(serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string()))
@@ -248,7 +270,10 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let path_str = args.0.into_iter().next()
+                let path_str = args
+                    .0
+                    .into_iter()
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsMkdirSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.check(&Capability::FileWrite(path.clone())) {
@@ -267,7 +292,10 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let path_str = args.0.into_iter().next()
+                let path_str = args
+                    .0
+                    .into_iter()
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsRmSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.check(&Capability::FileWrite(path.clone())) {
@@ -290,7 +318,10 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let path_str = args.0.into_iter().next()
+                let path_str = args
+                    .0
+                    .into_iter()
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsUnlinkSync() requires a path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.check(&Capability::FileWrite(path.clone())) {
@@ -310,9 +341,11 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
                 let mut it = args.0.into_iter();
-                let from_str = it.next()
+                let from_str = it
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsRenameSync() requires from, to".into()))?;
-                let to_str = it.next()
+                let to_str = it
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsRenameSync() requires to path".into()))?;
                 let from = PathBuf::from(&from_str);
                 let to = PathBuf::from(&to_str);
@@ -322,8 +355,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 if !perms.check(&Capability::FileWrite(to.clone())) {
                     return Err(perm_err(&ctx, "write", &to));
                 }
-                std::fs::rename(&from, &to)
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}", e)))
+                std::fs::rename(&from, &to).map_err(|e| js_err(&ctx, format!("ENOENT: {}", e)))
             },
         )?,
     )?;
@@ -336,9 +368,11 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
                 let mut it = args.0.into_iter();
-                let src_str = it.next()
+                let src_str = it
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsCopyFileSync() requires src, dest".into()))?;
-                let dest_str = it.next()
+                let dest_str = it
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsCopyFileSync() requires dest path".into()))?;
                 let src = PathBuf::from(&src_str);
                 let dest = PathBuf::from(&dest_str);
@@ -363,7 +397,8 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
                 let mut it = args.0.into_iter();
-                let path_str = it.next()
+                let path_str = it
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsChmodSync() requires a path".into()))?;
                 let mode_str = it.next().unwrap_or_else(|| "0o644".to_string());
                 let path = PathBuf::from(&path_str);
@@ -387,9 +422,11 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
                 let mut it = args.0.into_iter();
-                let target_str = it.next()
-                    .ok_or_else(|| js_err(&ctx, "__fsSymlinkSync() requires target, path".into()))?;
-                let path_str = it.next()
+                let target_str = it.next().ok_or_else(|| {
+                    js_err(&ctx, "__fsSymlinkSync() requires target, path".into())
+                })?;
+                let path_str = it
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsSymlinkSync() requires path".into()))?;
                 let path = PathBuf::from(&path_str);
                 if !perms.check(&Capability::FileWrite(path.clone())) {
@@ -518,6 +555,30 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 stream.readable = true;
                 stream.path = path;
                 stream.bytesRead = 0;
+                stream._flowing = false;
+                stream._doRead = function() {
+                    var self = this;
+                    setTimeout(function() {
+                        try {
+                            var data = __fsReadFileSync(path);
+                            self.bytesRead = data.length;
+                            self.emit('data', data);
+                            self.emit('end');
+                        } catch(e) {
+                            self.emit('error', e);
+                        }
+                    }, 0);
+                };
+                // Override on() to auto-start when a 'data' listener is added (Node.js flowing mode)
+                var _origOn = stream.on.bind(stream);
+                stream.on = function(event, fn) {
+                    _origOn(event, fn);
+                    if (event === 'data' && !this._flowing) {
+                        this._flowing = true;
+                        this._doRead();
+                    }
+                    return this;
+                };
                 stream.pipe = function(dest) {
                     var self = this;
                     setTimeout(function() {
@@ -535,18 +596,11 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                     return dest;
                 };
                 stream.resume = function() {
-                    var self = this;
-                    setTimeout(function() {
-                        try {
-                            var data = __fsReadFileSync(path);
-                            self.bytesRead = data.length;
-                            self.emit('data', data);
-                            self.emit('end');
-                        } catch(e) {
-                            self.emit('error', e);
-                        }
-                    }, 0);
-                    return self;
+                    if (!this._flowing) {
+                        this._flowing = true;
+                        this._doRead();
+                    }
+                    return this;
                 };
                 stream.destroy = function() { this.emit('close'); };
                 return stream;

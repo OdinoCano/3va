@@ -92,10 +92,7 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     )?;
 
     // chdir(): no-op stub — sandboxed runtime doesn't change working dir
-    process.set(
-        "chdir",
-        Function::new(ctx.clone(), |_: Rest<String>| {})?,
-    )?;
+    process.set("chdir", Function::new(ctx.clone(), |_: Rest<String>| {})?)?;
 
     // stdout / stderr: write delegates to console methods installed by inject_console
     let stdout = Object::new(ctx.clone())?;

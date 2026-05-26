@@ -169,7 +169,10 @@ impl EnvEnforcer {
     pub fn get(&self, key: &str) -> Result<Option<String>, PermissionError> {
         // EnvVar(key) is satisfied by either EnvAccess (all) or EnvVar(key) specifically,
         // because caps_match maps EnvAccess → EnvVar(_).
-        if !self.permission_state.check(&Capability::EnvVar(key.to_string())) {
+        if !self
+            .permission_state
+            .check(&Capability::EnvVar(key.to_string()))
+        {
             return Err(PermissionError::EnvAccessDenied);
         }
 

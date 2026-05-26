@@ -31,6 +31,16 @@ fuzz/corpus/
 fuzz/artifacts/
 corpus/
 
+# cargo-tarpaulin coverage outputs
+lcov.info
+tarpaulin-report.html
+cobertura.xml
+
+# cargo-mutants outputs
+mutants.out/
+mutants.out.old/
+
 # Security — estos archivos SÍ van al repo
 # .semgrep/   → reglas de seguridad, deben commitearse
+# .cargo-husky/ → hooks source, debe commitearse
 # Cargo.lock  → trackeado para reproducibilidad y auditoría de supply chain

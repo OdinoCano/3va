@@ -33,8 +33,8 @@ fn do_hash(algorithm: String, data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
 fn do_hmac(algorithm: String, key: Vec<u8>, data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     macro_rules! run_hmac {
         ($T:ty) => {{
-            let mut mac =
-                <$T as hmac::Mac>::new_from_slice(&key).map_err(|e| anyhow::anyhow!("invalid HMAC key: {e}"))?;
+            let mut mac = <$T as hmac::Mac>::new_from_slice(&key)
+                .map_err(|e| anyhow::anyhow!("invalid HMAC key: {e}"))?;
             mac.update(&data);
             Ok(mac.finalize().into_bytes().to_vec())
         }};
@@ -129,17 +129,22 @@ fn do_aes_gcm_encrypt(
         anyhow::bail!("AES-GCM key must be {} bytes, got {}", key_len, key.len());
     }
     let nonce = Nonce::from_slice(&iv);
-    let payload = Payload { msg: &plaintext, aad: &aad };
+    let payload = Payload {
+        msg: &plaintext,
+        aad: &aad,
+    };
     match key_len {
         16 => {
-            let cipher = Aes128Gcm::new_from_slice(&key)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            cipher.encrypt(nonce, payload).map_err(|e| anyhow::anyhow!("{e}"))
+            let cipher = Aes128Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("{e}"))?;
+            cipher
+                .encrypt(nonce, payload)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         }
         32 => {
-            let cipher = Aes256Gcm::new_from_slice(&key)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            cipher.encrypt(nonce, payload).map_err(|e| anyhow::anyhow!("{e}"))
+            let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("{e}"))?;
+            cipher
+                .encrypt(nonce, payload)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         }
         n => anyhow::bail!("unsupported AES key length: {}", n),
     }
@@ -157,17 +162,22 @@ fn do_aes_gcm_decrypt(
         anyhow::bail!("AES-GCM key must be {} bytes, got {}", key_len, key.len());
     }
     let nonce = Nonce::from_slice(&iv);
-    let payload = Payload { msg: &ciphertext_and_tag, aad: &aad };
+    let payload = Payload {
+        msg: &ciphertext_and_tag,
+        aad: &aad,
+    };
     match key_len {
         16 => {
-            let cipher = Aes128Gcm::new_from_slice(&key)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            cipher.decrypt(nonce, payload).map_err(|_| anyhow::anyhow!("decryption failed"))
+            let cipher = Aes128Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("{e}"))?;
+            cipher
+                .decrypt(nonce, payload)
+                .map_err(|_| anyhow::anyhow!("decryption failed"))
         }
         32 => {
-            let cipher = Aes256Gcm::new_from_slice(&key)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            cipher.decrypt(nonce, payload).map_err(|_| anyhow::anyhow!("decryption failed"))
+            let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("{e}"))?;
+            cipher
+                .decrypt(nonce, payload)
+                .map_err(|_| anyhow::anyhow!("decryption failed"))
         }
         n => anyhow::bail!("unsupported AES key length: {}", n),
     }

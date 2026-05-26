@@ -1,8 +1,7 @@
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
-use vvva_permissions::{Capability, PermissionState};
+use vvva_permissions::PermissionState;
 use vvva_wasm::WasmEngine;
 
 // A simple WASI module in WAT format that attempts to read from the current directory
@@ -30,5 +29,9 @@ async fn test_wasm_engine_instantiates() {
 
     let args = vec![];
     let result = engine.eval_file_with_args(path, &args).await;
-    assert!(result.is_ok(), "Engine should execute noop WAT successfully: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Engine should execute noop WAT successfully: {:?}",
+        result
+    );
 }

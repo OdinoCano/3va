@@ -2,13 +2,16 @@
 
 ## 4.1 Overview
 
-3va exposes a subset of browser and Node.js-compatible APIs. The table below reflects what is **actually implemented**.
+3va targets [WinterCG Minimum Common Web Platform API](https://common-min-api.proposal.wintercg.org/) compatibility. The table below reflects what is **actually implemented**.
 
 ## 4.2 API Status
 
 | API | Status | Notes |
 |-----|--------|-------|
-| `fetch` | Implemented | `builtins/fetch.rs` — HTTP via `ureq`; requires `--allow-net` |
+| `fetch` | Implemented | `builtins/fetch.rs` — accepts `Request` or URL string; returns `Response`; requires `--allow-net` |
+| `Request` | Implemented | `modules.rs`; full WinterCG constructor, all body methods, `clone()` |
+| `Response` | Implemented | `modules.rs`; full WinterCG constructor, `Response.json()`, `Response.error()`, `Response.redirect()` |
+| `Headers` | Implemented | `modules.rs`; case-insensitive, iterable (`entries()`/`keys()`/`values()`/`forEach()`/`for..of`) |
 | `WebSocket` | Implemented | `builtins/websocket.rs`; requires `--allow-net` |
 | `TextEncoder` / `TextDecoder` | Implemented | `builtins/buffer.rs`; UTF-8 only |
 | `setTimeout` / `setInterval` | Implemented | `builtins/timers.rs` + `TimerWheel` |
@@ -25,6 +28,10 @@
 | `URL` / `URLSearchParams` | Implemented | `modules.rs`; full parsing, relative resolution, `canParse()`, iteration |
 | `FileReader` | Implemented | `modules.rs`; `readAsText`, `readAsDataURL`, `readAsArrayBuffer`, `abort` |
 | `crypto.subtle` | Implemented | `builtins/crypto.rs`; digest, HMAC, AES-GCM, HKDF, PBKDF2 — see §4.11 |
+| `structuredClone` | Implemented | `modules.rs`; JSON-based deep clone; throws `DataCloneError` for non-serializable values |
+| `navigator` | Implemented | `modules.rs`; `userAgent`, `language`, `languages`, `onLine`, `hardwareConcurrency`, `platform` |
+| `self` | Implemented | `modules.rs`; `globalThis.self === globalThis` |
+| `queueMicrotask` | Implemented | `builtins/timers.rs`; backed by `Promise.resolve().then()` |
 | `perf_hooks` (`performance.now`) | JS stub | `modules.rs`; backed by `Date.now()` |
 | `BroadcastChannel` | Not implemented | Planned |
 
@@ -67,7 +74,85 @@ const form = await res.formData();
 console.log(form.get('name'));  // 'alice'
 ```
 
-## 4.4 `WebSocket`
+## 4.4 `Headers`
+
+```javascript
+// Construction: plain object, [[key,value]] pairs, or another Headers
+const h = new Headers({ 'Content-Type': 'application/json', 'X-Token': 'abc' });
+
+h.get('content-type');          // 'application/json'  (case-insensitive)
+h.has('x-token');               // true
+h.set('x-token', 'xyz');
+h.append('accept', 'text/html');
+h.delete('x-token');
+
+// Iteration
+for (const [name, value] of h) { /* ... */ }
+h.forEach((value, name) => { /* ... */ });
+[...h.keys()];    // ['content-type', 'accept']
+[...h.values()]; // ['application/json', 'text/html']
+[...h.entries()]; // [['content-type', 'application/json'], ...]
+
+// Special: multiple Set-Cookie values are preserved separately
+h.append('set-cookie', 'a=1');
+h.append('set-cookie', 'b=2');
+h.getSetCookie(); // ['a=1', 'b=2']
+```
+
+## 4.5 `Request`
+
+```javascript
+// URL string
+const req = new Request('https://api.example.com/data', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ key: 'value' }),
+});
+
+req.url;                          // 'https://api.example.com/data'
+req.method;                       // 'POST'
+req.headers instanceof Headers;   // true
+req.headers.get('content-type'); // 'application/json'
+
+// Body consumption (each method marks bodyUsed = true)
+const text = await req.text();
+const json = await req.clone().json();
+const blob = await req.clone().blob();
+
+// fetch() accepts a Request directly
+const res = await fetch(req);
+
+// Clone — options override the original
+const req2 = new Request(req, { method: 'GET' });
+```
+
+## 4.6 `Response`
+
+```javascript
+// Constructor
+const res = new Response('Hello world', {
+  status: 200,
+  headers: { 'Content-Type': 'text/plain' },
+});
+
+res.ok;                          // true
+res.status;                      // 200
+res.headers instanceof Headers;  // true
+
+await res.text();                // 'Hello world'
+
+// Static constructors
+const jsonRes = Response.json({ ok: true }, { status: 201 });
+// Content-Type: application/json is set automatically
+
+const errRes = Response.error();
+// status: 0, type: 'error'
+
+const redirect = Response.redirect('https://example.com', 302);
+// status: 302, headers.location = 'https://example.com'
+```
+
+## 4.7 `WebSocket`
 
 ```javascript
 const ws = new WebSocket('wss://echo.example.com');
@@ -82,7 +167,7 @@ ws.close();
 
 Requires `--allow-net=<host>`.
 
-## 4.5 `TextEncoder` / `TextDecoder`
+## 4.8 `TextEncoder` / `TextDecoder`
 
 ```javascript
 const enc = new TextEncoder();          // UTF-8
@@ -92,7 +177,7 @@ const dec = new TextDecoder('utf-8');
 const str = dec.decode(bytes);          // 'hello'
 ```
 
-## 4.6 `AbortController` / `AbortSignal`
+## 4.9 `AbortController` / `AbortSignal`
 
 ```javascript
 const controller = new AbortController();
@@ -112,7 +197,7 @@ const alreadyAborted = AbortSignal.abort('reason');
 
 The abort signal races against the HTTP response using `Promise.race`. Since `ureq` is synchronous, network I/O cannot be cancelled mid-flight, but the rejection propagates immediately.
 
-## 4.7 `Blob` / `File`
+## 4.10 `Blob` / `File`
 
 ```javascript
 const blob = new Blob(['Hello World'], { type: 'text/plain' });
@@ -130,7 +215,7 @@ console.log(file.name);           // 'example.txt'
 console.log(file instanceof Blob);// true
 ```
 
-## 4.8 `FormData`
+## 4.11 `FormData`
 
 ```javascript
 const form = new FormData();
@@ -151,7 +236,7 @@ for (const [key, value] of form) {
 }
 ```
 
-## 4.9 Streams
+## 4.12 Streams
 
 ```javascript
 // ReadableStream
@@ -181,7 +266,7 @@ const transform = new TransformStream({
 // transform.writable instanceof WritableStream  → true
 ```
 
-## 4.10 `perf_hooks` (stub)
+## 4.13 `perf_hooks` (stub)
 
 Available via `require('perf_hooks')`. Backed by `Date.now()` — not high-resolution.
 
@@ -194,7 +279,7 @@ const elapsed = performance.now() - t0;
 
 ---
 
-## 4.11 `crypto.subtle` (Web Crypto API)
+## 4.14 `crypto.subtle` (Web Crypto API)
 
 `globalThis.crypto.subtle` and `require('crypto').subtle` both expose the same
 `SubtleCrypto` object backed by Rust (`builtins/crypto.rs`).

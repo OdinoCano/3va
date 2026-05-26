@@ -9,6 +9,60 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **WinterCG `Headers` class** — `new Headers(init?)` where `init` may be a plain object, a
+  `[[key, value]]` array, or another `Headers`. Case-insensitive; iterable via `for..of`,
+  `entries()`, `keys()`, `values()`, `forEach()`. `getSetCookie()` returns all `set-cookie`
+  values as a separate array. (`modules.rs`)
+
+- **WinterCG `Request` class** — `new Request(url | request, init?)`. Properties: `url`, `method`,
+  `headers` (`Headers`), `bodyUsed`, `signal`, `duplex`, `mode`, `credentials`, `cache`,
+  `redirect`, `referrer`, `integrity`, `keepalive`. Body methods: `text()`, `json()`,
+  `arrayBuffer()`, `bytes()`, `blob()`, `formData()`, `clone()`. `fetch()` now accepts a
+  `Request` object as its first argument. (`modules.rs` + `fetch.rs`)
+
+- **WinterCG `Response` class** — `new Response(body?, init?)`. Properties: `ok`, `status`,
+  `statusText`, `headers` (`Headers`), `url`, `redirected`, `type`, `bodyUsed`. Body methods
+  same as `Request`. Static: `Response.json(data, init?)`, `Response.error()`,
+  `Response.redirect(url, status?)`. `fetch()` now returns a `Response` instance instead of a
+  plain object. (`modules.rs` + `fetch.rs`)
+
+- **`structuredClone(value)`** — global deep-clone function (JSON round-trip). Throws
+  `DataCloneError` for non-serializable values (functions, circular refs), matching browser
+  behaviour. (`modules.rs`)
+
+- **`navigator` global** — read-only object with `userAgent` (`'3va/0.1 (QuickJS)'`), `language`,
+  `languages`, `onLine`, `hardwareConcurrency`, `platform`, `cookieEnabled`, `doNotTrack`.
+  Required by many edge/worker detection checks. (`modules.rs`)
+
+- **`self === globalThis`** — `globalThis.self` is now set to `globalThis`, unblocking worker-
+  compat code that checks `typeof self !== 'undefined'`. (`modules.rs`)
+
+- **`require('crypto')` — real implementation** — no longer a placeholder that returns random
+  garbage. Now wraps `globalThis.crypto` (the Rust-backed SubtleCrypto). Added:
+  `getRandomValues`, `randomBytes`, `randomUUID` (CSPRNG), `createHash(alg)` / `createHmac(alg, key)`
+  (async `.digest(enc)` returning a `Promise`), `timingSafeEqual(a, b)`, `pbkdf2(...)`,
+  `constants`. (`modules.rs`)
+
+- **`jsr:` specifier support** — `require('jsr:@scope/name')` and ESM `import 'jsr:@scope/name'`
+  now resolve by stripping the `jsr:` prefix and looking up the package in `node_modules/` as
+  a regular scoped package. Use `3va install @scope/name --allow-net=jsr.io` to install.
+  (`modules.rs`)
+
+- **`http.createServer(handler)` — real HTTP/1.1 server** — `require('http').createServer(handler)`
+  now binds a real TCP port and serves HTTP/1.1 connections. Backed by `builtins/http_server.rs`
+  (Rust, async Tokio listener). Handler receives Node.js-compatible `IncomingMessage` (`req.method`,
+  `req.url`, `req.headers`, `req._body`) and `ServerResponse` (`res.writeHead()`, `res.write()`,
+  `res.end()`, `res.setHeader()`, `res.statusCode`). Requires `--allow-net=<bind-host>`. Handles
+  multiple sequential requests per server instance.
+
+  ```js
+  const http = require('http');
+  http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ path: req.url }));
+  }).listen(3000, '0.0.0.0');
+  ```
+
 - **ML-KEM-768 (FIPS 203 / Kyber)** — post-quantum Key Encapsulation Mechanism in `vvva_crypto`.
   `MlKemKeypair::generate()`, `encapsulate(&ek)`, `decapsulate(&dk, ct)`. Key sizes: EK=1184 B,
   DK=64 B (seed), CT=1088 B, SS=32 B. Wrong-key decapsulation returns a different shared secret
@@ -34,8 +88,22 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 - **`net` / `tls` — real TCP/TLS sockets** — `require('net')` and `require('tls')` now return
   Rust-backed implementations. `Socket` class wraps `TcpStream` (plain) or `TlsStream` (TLS via
   `native-tls`). API: `connect()`, `write()`, `end()`, `destroy()`, `setEncoding()`, `setTimeout()`,
-  `on('data'|'end'|'error'|'close')`, `pipe()`. Server-side `listen()` is not implemented.
+  `on('data'|'end'|'error'|'close')`, `pipe()`.
   Requires `--allow-net=<host>`. (`builtins/tcp.rs`, `modules.rs`)
+
+- **`net.createServer(handler)` — raw TCP server** — `require('net').createServer(handler)` binds
+  a real TCP port and calls `handler(socket)` for each incoming connection. `Socket` exposes
+  `write(data)`, `end()`, `on('data'|'end'|'error'|'close')`. Server exposes `listen(port, host)` and
+  `server.listening` flag. Backed by `__netListen` / `__netAcceptAsync` in `builtins/tcp.rs`.
+  Requires `--allow-net=<bind-host>`.
+
+  ```js
+  const net = require('net');
+  net.createServer((socket) => {
+    socket.write('hello\n');
+    socket.end();
+  }).listen(4000, '127.0.0.1');
+  ```
 
 - **`http2` client** — `require('http2').connect(authority)` returns an `Http2Session`. Sessions
   expose `request(headers)` which returns an `Http2Request` that emits `response`, `data`, and `end`

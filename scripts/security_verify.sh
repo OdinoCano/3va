@@ -11,7 +11,7 @@ NC='\033[0m'
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-TOTAL_STEPS=22
+TOTAL_STEPS=21
 CURRENT_STEP=0
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -388,6 +388,85 @@ if [ -f "Cargo.lock" ]; then
     log_success "Dependabot puede funcionar con Cargo.lock"
 else
     log_warning "Sin Cargo.lock, Dependabot no funcionará"
+fi
+
+#######################################
+# NIVEL 8 - COVERAGE (TARPAULIN)
+#######################################
+
+log_info "=== NIVEL 8: COVERAGE ==="
+
+step "19. Cargo Tarpaulin — Cobertura de tests"
+if ! check_tool cargo-tarpaulin; then
+    install_tool "cargo-tarpaulin" "cargo install cargo-tarpaulin --locked"
+fi
+if check_tool cargo-tarpaulin; then
+    TARP_OUT=$(cargo tarpaulin --skip-clean --out Lcov 2>&1) || true
+    COV_LINE=$(echo "$TARP_OUT" | grep -oP '\d+\.\d+(?=% coverage)' | tail -1 || echo "0")
+    COV_INT=${COV_LINE%%.*}
+    if [ -n "$COV_INT" ] && [ "$COV_INT" -ge 60 ]; then
+        log_success "Tarpaulin: ${COV_LINE}% cobertura (umbral ≥60%)"
+    elif [ -n "$COV_INT" ]; then
+        log_warning "Tarpaulin: ${COV_LINE}% cobertura (por debajo del umbral 60%)"
+        total_warnings=$((total_warnings + 1))
+    else
+        log_warning "Tarpaulin: no se pudo leer el porcentaje de cobertura"
+        total_warnings=$((total_warnings + 1))
+    fi
+else
+    log_warning "Tarpaulin no disponible"
+    total_warnings=$((total_warnings + 1))
+fi
+
+#######################################
+# NIVEL 9 - DOCUMENTACIÓN
+#######################################
+
+log_info "=== NIVEL 9: DOCUMENTACIÓN ==="
+
+step "20. Cargo Doc — Sin warnings en documentación pública"
+DOC_OUT=$(cargo doc --no-deps --document-private-items 2>&1) || true
+DOC_WARN=$(echo "$DOC_OUT" | grep -c "^warning:" 2>/dev/null || true)
+DOC_ERR=$(echo "$DOC_OUT" | grep -c "^error:" 2>/dev/null || true)
+if [ "$DOC_ERR" -gt "0" ]; then
+    log_error "cargo doc: $DOC_ERR errores — la documentación no compila"
+    echo "$DOC_OUT" | grep "^error:" | head -5
+    total_failures=$((total_failures + 1))
+elif [ "$DOC_WARN" -gt "0" ]; then
+    log_warning "cargo doc: $DOC_WARN warnings en documentación"
+    echo "$DOC_OUT" | grep "^warning:" | head -5
+    total_warnings=$((total_warnings + 1))
+else
+    log_success "cargo doc OK (sin errores ni warnings)"
+fi
+
+#######################################
+# NIVEL 10 - MUTATION TESTING
+#######################################
+
+log_info "=== NIVEL 10: MUTATION TESTING ==="
+
+step "21. Cargo Mutants — Test de mutación en crates críticos"
+if ! check_tool cargo-mutants; then
+    install_tool "cargo-mutants" "cargo install cargo-mutants --locked"
+fi
+if check_tool cargo-mutants; then
+    # Solo ejecutar en crates de alta criticidad de seguridad; limitar tiempo a 3 min
+    MUTANTS_OUT=$(timeout 180 cargo mutants -p vvva_permissions --no-shuffle 2>&1) || true
+    MISSED=$(echo "$MUTANTS_OUT" | grep -c "MISSED\|missed" 2>/dev/null || true)
+    CAUGHT=$(echo "$MUTANTS_OUT" | grep -c "caught\|CAUGHT" 2>/dev/null || true)
+    if [ "${MISSED:-0}" -gt 5 ]; then
+        log_warning "Mutants: $MISSED mutantes sin detectar en vvva_permissions (revisar cobertura)"
+        total_warnings=$((total_warnings + 1))
+    elif [ "${CAUGHT:-0}" -gt 0 ] || [ "${MISSED:-0}" -eq 0 ]; then
+        log_success "Mutants: $CAUGHT capturados, $MISSED sin detectar en vvva_permissions"
+    else
+        log_warning "Mutants: sin resultados claros (timeout o error)"
+        total_warnings=$((total_warnings + 1))
+    fi
+else
+    log_warning "cargo-mutants no disponible"
+    total_warnings=$((total_warnings + 1))
 fi
 
 #######################################
