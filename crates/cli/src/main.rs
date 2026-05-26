@@ -1345,11 +1345,19 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let permissions = Arc::new(permissions);
-            let engine = vvva_js::JsEngine::new(permissions.clone()).await?;
             info!("3va Runtime initialized securely.");
 
-            // Execute file (transpiles TypeScript automatically); event loop runs inside eval_file
-            engine.eval_file_with_args(file, script_args).await?;
+            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext == "wasm" || ext == "wat" {
+                info!("Executing WebAssembly module...");
+                let engine = vvva_wasm::WasmEngine::new(permissions.clone())?;
+                engine.eval_file_with_args(file, script_args).await?;
+            } else {
+                let engine = vvva_js::JsEngine::new(permissions.clone()).await?;
+                // Execute file (transpiles TypeScript automatically); event loop runs inside eval_file
+                engine.eval_file_with_args(file, script_args).await?;
+            }
+
             info!("Execution finished.");
 
             // Write audit log to file if requested

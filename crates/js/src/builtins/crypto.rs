@@ -1,3 +1,5 @@
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce};
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
@@ -32,7 +34,7 @@ fn do_hmac(algorithm: String, key: Vec<u8>, data: Vec<u8>) -> anyhow::Result<Vec
     macro_rules! run_hmac {
         ($T:ty) => {{
             let mut mac =
-                <$T>::new_from_slice(&key).map_err(|e| anyhow::anyhow!("invalid HMAC key: {e}"))?;
+                <$T as hmac::Mac>::new_from_slice(&key).map_err(|e| anyhow::anyhow!("invalid HMAC key: {e}"))?;
             mac.update(&data);
             Ok(mac.finalize().into_bytes().to_vec())
         }};
@@ -112,6 +114,65 @@ async fn do_scrypt(
     .await?
 }
 
+// ── AES-GCM ───────────────────────────────────────────────────────────────────
+
+/// `key_len` must be 16 (AES-128) or 32 (AES-256).
+/// Returns `ciphertext || tag` (GCM appends 16-byte tag).
+fn do_aes_gcm_encrypt(
+    key_len: usize,
+    key: Vec<u8>,
+    iv: Vec<u8>,
+    plaintext: Vec<u8>,
+    aad: Vec<u8>,
+) -> anyhow::Result<Vec<u8>> {
+    if key.len() != key_len {
+        anyhow::bail!("AES-GCM key must be {} bytes, got {}", key_len, key.len());
+    }
+    let nonce = Nonce::from_slice(&iv);
+    let payload = Payload { msg: &plaintext, aad: &aad };
+    match key_len {
+        16 => {
+            let cipher = Aes128Gcm::new_from_slice(&key)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            cipher.encrypt(nonce, payload).map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        32 => {
+            let cipher = Aes256Gcm::new_from_slice(&key)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            cipher.encrypt(nonce, payload).map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        n => anyhow::bail!("unsupported AES key length: {}", n),
+    }
+}
+
+/// `ciphertext_and_tag` is the combined ciphertext||tag output of encrypt.
+fn do_aes_gcm_decrypt(
+    key_len: usize,
+    key: Vec<u8>,
+    iv: Vec<u8>,
+    ciphertext_and_tag: Vec<u8>,
+    aad: Vec<u8>,
+) -> anyhow::Result<Vec<u8>> {
+    if key.len() != key_len {
+        anyhow::bail!("AES-GCM key must be {} bytes, got {}", key_len, key.len());
+    }
+    let nonce = Nonce::from_slice(&iv);
+    let payload = Payload { msg: &ciphertext_and_tag, aad: &aad };
+    match key_len {
+        16 => {
+            let cipher = Aes128Gcm::new_from_slice(&key)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            cipher.decrypt(nonce, payload).map_err(|_| anyhow::anyhow!("decryption failed"))
+        }
+        32 => {
+            let cipher = Aes256Gcm::new_from_slice(&key)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            cipher.decrypt(nonce, payload).map_err(|_| anyhow::anyhow!("decryption failed"))
+        }
+        n => anyhow::bail!("unsupported AES key length: {}", n),
+    }
+}
+
 fn js_err(op: &'static str, e: anyhow::Error) -> rquickjs::Error {
     rquickjs::Error::new_from_js_message("crypto", op, e.to_string())
 }
@@ -161,6 +222,32 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
                         .map_err(|e| js_err("pbkdf2", e))
                 },
             ),
+        )?,
+    )?;
+
+    ctx.globals().set(
+        "__cryptoAesGcmEncrypt",
+        Function::new(
+            ctx.clone(),
+            |key_len: usize, key: Vec<u8>, iv: Vec<u8>, plaintext: Vec<u8>, aad: Vec<u8>| {
+                do_aes_gcm_encrypt(key_len, key, iv, plaintext, aad)
+                    .map_err(|e| js_err("aes-gcm-encrypt", e))
+            },
+        )?,
+    )?;
+
+    ctx.globals().set(
+        "__cryptoAesGcmDecrypt",
+        Function::new(
+            ctx.clone(),
+            |key_len: usize,
+             key: Vec<u8>,
+             iv: Vec<u8>,
+             ciphertext_and_tag: Vec<u8>,
+             aad: Vec<u8>| {
+                do_aes_gcm_decrypt(key_len, key, iv, ciphertext_and_tag, aad)
+                    .map_err(|e| js_err("aes-gcm-decrypt", e))
+            },
         )?,
     )?;
 
@@ -409,17 +496,249 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
             return __cryptoTimingSafeEqual(Array.from(ab), Array.from(bb));
         },
 
-        // Stub: Web Crypto subtle — only available if the runtime provides it.
-        get subtle() {
-            return (globalThis.crypto && globalThis.crypto.subtle) ? globalThis.crypto.subtle : undefined;
-        },
-
         constants: {
             POINT_CONVERSION_COMPRESSED: 2,
             POINT_CONVERSION_HYBRID: 3,
             POINT_CONVERSION_UNCOMPRESSED: 4,
         }
     };
+
+    // ── Web Crypto (crypto.subtle) ────────────────────────────────────────────
+    // Implements the subset of the W3C SubtleCrypto API used by most packages:
+    //   digest, importKey, exportKey, generateKey,
+    //   sign/verify (HMAC), encrypt/decrypt (AES-GCM),
+    //   deriveBits/deriveKey (HKDF, PBKDF2).
+    var subtle = (function() {
+        // Normalise algorithm name to upper-case with hyphens.
+        function normAlg(a) {
+            return (typeof a === 'string' ? a : a.name).toUpperCase().replace(/_/g, '-');
+        }
+        function normHash(a) {
+            return (typeof a === 'string' ? a : (a.hash ? normAlg(a.hash) : normAlg(a))).toUpperCase().replace(/_/g, '-');
+        }
+
+        // Raw-bytes helper: accepts ArrayBuffer, TypedArray or Array<number>.
+        function rawBytes(v) {
+            if (v instanceof ArrayBuffer) return new Uint8Array(v);
+            if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+            return new Uint8Array(v);
+        }
+        function toByteArray(v) { return Array.from(rawBytes(v)); }
+        function toArrayBuffer(arr) {
+            var u = new Uint8Array(arr);
+            return u.buffer;
+        }
+
+        // Internal CryptoKey representation.
+        function CryptoKey(type, extractable, algorithm, usages, raw) {
+            this.type = type;          // "secret" | "public" | "private"
+            this.extractable = extractable;
+            this.algorithm = algorithm; // {name, ...}
+            this.usages = usages;
+            this._raw = raw;           // Uint8Array of raw key bytes
+        }
+
+        return {
+            // ── digest ───────────────────────────────────────────────────────
+            digest: function(algorithm, data) {
+                var alg = normAlg(algorithm);
+                // Map Web Crypto names to Node crypto names
+                var map = { 'SHA-1': 'sha1', 'SHA-224': 'sha224', 'SHA-256': 'sha256', 'SHA-384': 'sha384', 'SHA-512': 'sha512' };
+                var nodeAlg = map[alg];
+                if (!nodeAlg) return Promise.reject(new DOMException('Unsupported algorithm: ' + alg, 'NotSupportedError'));
+                try {
+                    var raw = __cryptoHash(nodeAlg, toByteArray(data));
+                    return Promise.resolve(toArrayBuffer(raw));
+                } catch(e) { return Promise.reject(e); }
+            },
+
+            // ── generateKey ──────────────────────────────────────────────────
+            generateKey: function(algorithm, extractable, keyUsages) {
+                var alg = normAlg(algorithm);
+                try {
+                    if (alg === 'AES-GCM' || alg === 'AES-CBC' || alg === 'AES-CTR') {
+                        var len = (algorithm.length || 256) / 8;
+                        var raw = new Uint8Array(__cryptoRandomBytes(len));
+                        var key = new CryptoKey('secret', extractable,
+                            { name: alg, length: algorithm.length || 256 },
+                            keyUsages, raw);
+                        return Promise.resolve(key);
+                    }
+                    if (alg === 'HMAC') {
+                        var hash = normHash(algorithm.hash || 'SHA-256');
+                        var blen = algorithm.length || ({ 'SHA-1': 160, 'SHA-256': 256, 'SHA-384': 384, 'SHA-512': 512 }[hash] || 256);
+                        var raw = new Uint8Array(__cryptoRandomBytes(blen / 8));
+                        var key = new CryptoKey('secret', extractable,
+                            { name: 'HMAC', hash: { name: hash } },
+                            keyUsages, raw);
+                        return Promise.resolve(key);
+                    }
+                    return Promise.reject(new DOMException('generateKey: unsupported algorithm ' + alg, 'NotSupportedError'));
+                } catch(e) { return Promise.reject(e); }
+            },
+
+            // ── importKey ────────────────────────────────────────────────────
+            importKey: function(format, keyData, algorithm, extractable, keyUsages) {
+                try {
+                    var alg = normAlg(algorithm);
+                    var raw;
+                    if (format === 'raw') {
+                        raw = rawBytes(keyData);
+                    } else if (format === 'jwk') {
+                        // JWK: base64url-decode 'k' field for symmetric keys
+                        if (!keyData.k) return Promise.reject(new DOMException('importKey JWK: missing k field', 'DataError'));
+                        var b64 = keyData.k.replace(/-/g,'+').replace(/_/g,'/');
+                        while (b64.length % 4) b64 += '=';
+                        var bin = atob(b64);
+                        raw = new Uint8Array(bin.length);
+                        for (var i = 0; i < bin.length; i++) raw[i] = bin.charCodeAt(i);
+                    } else {
+                        return Promise.reject(new DOMException('importKey: unsupported format ' + format, 'NotSupportedError'));
+                    }
+                    var keyAlg;
+                    if (alg === 'HMAC') {
+                        var hash = normHash(algorithm.hash || 'SHA-256');
+                        keyAlg = { name: 'HMAC', hash: { name: hash } };
+                    } else if (alg === 'AES-GCM' || alg === 'AES-CBC' || alg === 'AES-CTR') {
+                        keyAlg = { name: alg, length: raw.length * 8 };
+                    } else if (alg === 'HKDF') {
+                        keyAlg = { name: 'HKDF' };
+                    } else if (alg === 'PBKDF2') {
+                        keyAlg = { name: 'PBKDF2' };
+                    } else {
+                        return Promise.reject(new DOMException('importKey: unsupported algorithm ' + alg, 'NotSupportedError'));
+                    }
+                    var key = new CryptoKey('secret', extractable, keyAlg, keyUsages, raw);
+                    return Promise.resolve(key);
+                } catch(e) { return Promise.reject(e); }
+            },
+
+            // ── exportKey ────────────────────────────────────────────────────
+            exportKey: function(format, key) {
+                if (!key.extractable) return Promise.reject(new DOMException('key is not extractable', 'InvalidAccessError'));
+                if (format === 'raw') return Promise.resolve(key._raw.buffer.slice(key._raw.byteOffset, key._raw.byteOffset + key._raw.byteLength));
+                if (format === 'jwk') {
+                    var b64 = btoa(String.fromCharCode.apply(null, key._raw)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
+                    return Promise.resolve({ kty: 'oct', k: b64, alg: 'HS256', key_ops: key.usages, ext: true });
+                }
+                return Promise.reject(new DOMException('exportKey: unsupported format ' + format, 'NotSupportedError'));
+            },
+
+            // ── sign ─────────────────────────────────────────────────────────
+            sign: function(algorithm, key, data) {
+                var alg = normAlg(algorithm);
+                try {
+                    if (alg === 'HMAC') {
+                        var hash = normHash(algorithm.hash || key.algorithm.hash || 'SHA-256');
+                        var map = { 'SHA-1': 'sha1', 'SHA-224': 'sha224', 'SHA-256': 'sha256', 'SHA-384': 'sha384', 'SHA-512': 'sha512' };
+                        var nodeAlg = map[hash];
+                        if (!nodeAlg) return Promise.reject(new DOMException('Unsupported HMAC hash: ' + hash, 'NotSupportedError'));
+                        var raw = __cryptoHmac(nodeAlg, Array.from(key._raw), toByteArray(data));
+                        return Promise.resolve(toArrayBuffer(raw));
+                    }
+                    return Promise.reject(new DOMException('sign: unsupported algorithm ' + alg, 'NotSupportedError'));
+                } catch(e) { return Promise.reject(e); }
+            },
+
+            // ── verify ───────────────────────────────────────────────────────
+            verify: function(algorithm, key, signature, data) {
+                var self = this;
+                return self.sign(algorithm, key, data).then(function(expected) {
+                    var e = new Uint8Array(expected);
+                    var s = rawBytes(signature);
+                    if (e.length !== s.length) return false;
+                    var diff = 0;
+                    for (var i = 0; i < e.length; i++) diff |= e[i] ^ s[i];
+                    return diff === 0;
+                });
+            },
+
+            // ── encrypt ──────────────────────────────────────────────────────
+            encrypt: function(algorithm, key, data) {
+                var alg = normAlg(algorithm);
+                try {
+                    if (alg === 'AES-GCM') {
+                        var iv = toByteArray(algorithm.iv);
+                        var aad = algorithm.additionalData ? toByteArray(algorithm.additionalData) : [];
+                        var keyLen = key._raw.length;
+                        var ct = __cryptoAesGcmEncrypt(keyLen, Array.from(key._raw), iv, toByteArray(data), aad);
+                        return Promise.resolve(toArrayBuffer(ct));
+                    }
+                    return Promise.reject(new DOMException('encrypt: unsupported algorithm ' + alg, 'NotSupportedError'));
+                } catch(e) { return Promise.reject(e); }
+            },
+
+            // ── decrypt ──────────────────────────────────────────────────────
+            decrypt: function(algorithm, key, data) {
+                var alg = normAlg(algorithm);
+                try {
+                    if (alg === 'AES-GCM') {
+                        var iv = toByteArray(algorithm.iv);
+                        var aad = algorithm.additionalData ? toByteArray(algorithm.additionalData) : [];
+                        var keyLen = key._raw.length;
+                        var pt = __cryptoAesGcmDecrypt(keyLen, Array.from(key._raw), iv, toByteArray(data), aad);
+                        return Promise.resolve(toArrayBuffer(pt));
+                    }
+                    return Promise.reject(new DOMException('decrypt: unsupported algorithm ' + alg, 'NotSupportedError'));
+                } catch(e) { return Promise.reject(e); }
+            },
+
+            // ── deriveBits ───────────────────────────────────────────────────
+            deriveBits: function(algorithm, baseKey, length) {
+                var alg = normAlg(algorithm);
+                try {
+                    if (alg === 'HKDF') {
+                        var hash = normHash(algorithm.hash || 'SHA-256');
+                        var map = { 'SHA-1': 'sha1', 'SHA-256': 'sha256', 'SHA-384': 'sha384', 'SHA-512': 'sha512' };
+                        var nodeAlg = map[hash];
+                        if (!nodeAlg) return Promise.reject(new DOMException('HKDF: unsupported hash ' + hash, 'NotSupportedError'));
+                        var salt = algorithm.salt ? toByteArray(algorithm.salt) : [];
+                        var info = algorithm.info ? toByteArray(algorithm.info) : [];
+                        var ikm = Array.from(baseKey._raw);
+                        // HKDF-Extract
+                        var saltBytes = salt.length ? salt : new Array(({ 'sha1': 20, 'sha256': 32, 'sha384': 48, 'sha512': 64 }[nodeAlg] || 32)).fill(0);
+                        var prk = Array.from(__cryptoHmac(nodeAlg, saltBytes, ikm));
+                        // HKDF-Expand
+                        var hashLen = prk.length;
+                        var n = Math.ceil(length / 8 / hashLen);
+                        var okm = [];
+                        var t = [];
+                        for (var i = 1; i <= n; i++) {
+                            var input = t.concat(info).concat([i]);
+                            t = Array.from(__cryptoHmac(nodeAlg, prk, input));
+                            okm = okm.concat(t);
+                        }
+                        return Promise.resolve(toArrayBuffer(okm.slice(0, length / 8)));
+                    }
+                    if (alg === 'PBKDF2') {
+                        var hash = normHash(algorithm.hash || 'SHA-256');
+                        var salt = toByteArray(algorithm.salt);
+                        var iterations = algorithm.iterations || 100000;
+                        return __cryptoPbkdf2(Array.from(baseKey._raw), salt, iterations, length / 8, hash)
+                            .then(function(raw) { return toArrayBuffer(raw); });
+                    }
+                    return Promise.reject(new DOMException('deriveBits: unsupported algorithm ' + alg, 'NotSupportedError'));
+                } catch(e) { return Promise.reject(e); }
+            },
+
+            // ── deriveKey ────────────────────────────────────────────────────
+            deriveKey: function(algorithm, baseKey, derivedKeyAlg, extractable, keyUsages) {
+                var self = this;
+                var targetAlg = normAlg(derivedKeyAlg);
+                var keyLenBits = derivedKeyAlg.length || 256;
+                return self.deriveBits(algorithm, baseKey, keyLenBits).then(function(bits) {
+                    return self.importKey('raw', bits, derivedKeyAlg, extractable, keyUsages);
+                });
+            },
+
+            // ── wrapKey / unwrapKey (stubs) ───────────────────────────────────
+            wrapKey: function() { return Promise.reject(new DOMException('wrapKey not implemented', 'NotSupportedError')); },
+            unwrapKey: function() { return Promise.reject(new DOMException('unwrapKey not implemented', 'NotSupportedError')); },
+        };
+    })();
+
+    crypto.subtle = subtle;
+    globalThis.crypto = { subtle: subtle, getRandomValues: crypto.getRandomValues, randomUUID: crypto.randomUUID };
 
     if (globalThis.__requireCache) {
         globalThis.__requireCache['crypto'] = crypto;

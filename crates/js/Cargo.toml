@@ -50,6 +50,8 @@ tungstenite.workspace = true
 tokio.workspace = true
 url.workspace = true
 flate2.workspace = true
+aes-gcm = { workspace = true }
+native-tls = { workspace = true }
 oxc_transformer = "0.132"
 oxc_codegen = "0.132"
 oxc_parser = "0.132"

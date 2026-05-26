@@ -387,12 +387,233 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__requireCache['zlib'] = { gzip: function(b,cb){cb(null,b);}, gunzip: function(b,cb){cb(null,b);}, deflate: function(b,cb){cb(null,b);}, inflate: function(b,cb){cb(null,b);}, constants: {} };
             globalThis.__requireCache['node:zlib'] = globalThis.__requireCache['zlib'];
 
-            // ── net / tls (stubs) ─────────────────────────────────────────────────
-            var netStub = { createConnection: function() { return new EventEmitter(); }, createServer: function() { return { listen: function() {} }; }, Socket: EventEmitter };
-            globalThis.__requireCache['net'] = netStub;
-            globalThis.__requireCache['tls'] = netStub;
-            globalThis.__requireCache['node:net'] = netStub;
-            globalThis.__requireCache['node:tls'] = netStub;
+            // ── net / tls — backed by __tcpConnect / __tcpConnectTls ─────────────
+            function Socket(opts) {
+                EventEmitter.call(this);
+                opts = opts || {};
+                this._id = null;
+                this._tls = !!(opts.tls);
+                this._connected = false;
+                this._destroyed = false;
+                this._encoding = null;
+                this._pollTimer = null;
+                this.readable = true;
+                this.writable = true;
+                this.connecting = false;
+                this.pending = true;
+                this.destroyed = false;
+                this.bytesRead = 0;
+                this.bytesWritten = 0;
+                this.remoteAddress = '';
+                this.remotePort = 0;
+                this.remoteFamily = 'IPv4';
+                this.localAddress = '127.0.0.1';
+                this.localPort = 0;
+            }
+            util.inherits(Socket, EventEmitter);
+
+            Socket.prototype.connect = function(portOrOpts, host, callback) {
+                if (typeof portOrOpts === 'object' && portOrOpts !== null) {
+                    var o = portOrOpts;
+                    if (typeof host === 'function') callback = host;
+                    host = o.host || 'localhost';
+                    portOrOpts = o.port;
+                    if (o.servername || typeof o.rejectUnauthorized !== 'undefined') this._tls = true;
+                } else {
+                    if (typeof host === 'function') { callback = host; host = 'localhost'; }
+                }
+                host = host || 'localhost';
+                var port = portOrOpts;
+                var self = this;
+                self.connecting = true;
+                self.pending = false;
+                self.remoteAddress = host;
+                self.remotePort = port;
+                if (callback) self.once('connect', callback);
+                setTimeout(function() {
+                    if (self._destroyed) return;
+                    try {
+                        if (self._tls) {
+                            self._id = __tcpConnectTls(host, String(port));
+                        } else {
+                            self._id = __tcpConnect(host, String(port));
+                        }
+                        self.connecting = false;
+                        self._connected = true;
+                        self.emit('connect');
+                        self.emit('ready');
+                        self._startPoll();
+                    } catch(e) {
+                        self.connecting = false;
+                        self.emit('error', e);
+                        self.emit('close', true);
+                    }
+                }, 0);
+                return this;
+            };
+
+            Socket.prototype._startPoll = function() {
+                var self = this;
+                self._pollTimer = setInterval(function() {
+                    if (self._destroyed || self._id === null) {
+                        clearInterval(self._pollTimer);
+                        self._pollTimer = null;
+                        return;
+                    }
+                    try {
+                        var chunk = __tcpRead(self._id, 65536);
+                        self.bytesRead += chunk.length;
+                        var data = self._encoding
+                            ? new TextDecoder(self._encoding).decode(new Uint8Array(chunk))
+                            : new Uint8Array(chunk);
+                        self.emit('data', data);
+                    } catch(e) {
+                        if (e.code === 'EAGAIN') return; // no data yet
+                        clearInterval(self._pollTimer);
+                        self._pollTimer = null;
+                        if (e.code === 'EOF') {
+                            self.emit('end');
+                            self.emit('close', false);
+                        } else {
+                            self.emit('error', e);
+                            self.emit('close', true);
+                        }
+                    }
+                }, 5);
+            };
+
+            Socket.prototype.write = function(data, encoding, callback) {
+                if (typeof encoding === 'function') { callback = encoding; encoding = null; }
+                if (this._destroyed || this._id === null) {
+                    var err = new Error('write after end');
+                    if (callback) callback(err); else this.emit('error', err);
+                    return false;
+                }
+                try {
+                    var bytes;
+                    if (typeof data === 'string') {
+                        var enc = encoding || 'utf8';
+                        if (enc === 'hex') {
+                            var hex = data;
+                            bytes = [];
+                            for (var i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.substr(i, 2), 16));
+                        } else {
+                            bytes = Array.from(new TextEncoder().encode(data));
+                        }
+                    } else {
+                        bytes = Array.from(new Uint8Array(data.buffer ? data.buffer : data));
+                    }
+                    __tcpWrite(this._id, bytes);
+                    this.bytesWritten += bytes.length;
+                    if (callback) callback(null);
+                    return true;
+                } catch(e) {
+                    if (callback) callback(e); else this.emit('error', e);
+                    return false;
+                }
+            };
+
+            Socket.prototype.end = function(data, encoding, callback) {
+                if (typeof data === 'function') { callback = data; data = null; }
+                else if (typeof encoding === 'function') { callback = encoding; encoding = null; }
+                if (data) this.write(data, encoding);
+                this.destroy();
+                if (callback) callback();
+                return this;
+            };
+
+            Socket.prototype.destroy = function(err) {
+                if (this._destroyed) return this;
+                this._destroyed = true;
+                this.destroyed = true;
+                if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+                if (this._id !== null) {
+                    try { __tcpClose(this._id); } catch(_) {}
+                    this._id = null;
+                }
+                if (err) this.emit('error', err);
+                this.emit('close', !!err);
+                return this;
+            };
+
+            Socket.prototype.setEncoding = function(enc) { this._encoding = enc; return this; };
+            Socket.prototype.setTimeout = function(ms, cb) {
+                if (cb) this.once('timeout', cb);
+                if (this._id !== null) { try { __tcpSetTimeout(this._id, ms); } catch(_) {} }
+                return this;
+            };
+            Socket.prototype.setNoDelay = function() { return this; };
+            Socket.prototype.setKeepAlive = function() { return this; };
+            Socket.prototype.ref = function() { return this; };
+            Socket.prototype.unref = function() { return this; };
+            Socket.prototype.pause = function() { return this; };
+            Socket.prototype.resume = function() { return this; };
+            Socket.prototype.address = function() {
+                return { address: this.remoteAddress, port: this.remotePort, family: this.remoteFamily };
+            };
+            Socket.prototype.pipe = function(dest) {
+                this.on('data', function(chunk) { dest.write(chunk); });
+                this.on('end', function() { dest.end(); });
+                return dest;
+            };
+
+            function TLSSocket(socket, opts) {
+                Socket.call(this, opts || {});
+                this._tls = true;
+                if (socket && socket._id != null) this._id = socket._id;
+            }
+            util.inherits(TLSSocket, Socket);
+            TLSSocket.prototype.getCipher = function() { return { name: 'TLS_AES_256_GCM_SHA384', version: 'TLSv1.3' }; };
+            TLSSocket.prototype.getPeerCertificate = function() { return {}; };
+            TLSSocket.prototype.authorized = true;
+
+            var netMod = {
+                Socket: Socket,
+                createConnection: function(opts, cb) {
+                    var s = new Socket();
+                    if (typeof opts === 'number') {
+                        var port = opts, host = typeof cb === 'string' ? cb : 'localhost';
+                        cb = typeof cb === 'function' ? cb : arguments[2];
+                        s.connect(port, host, cb);
+                    } else {
+                        s.connect(opts, cb);
+                    }
+                    return s;
+                },
+                connect: function() { return netMod.createConnection.apply(netMod, arguments); },
+                createServer: function(opts, cb) {
+                    if (typeof opts === 'function') { cb = opts; opts = {}; }
+                    return { listen: function() {}, close: function() {}, address: function() { return {}; } };
+                },
+                isIP: function(addr) { return /^\d+\.\d+\.\d+\.\d+$/.test(addr) ? 4 : 0; },
+                isIPv4: function(addr) { return /^\d+\.\d+\.\d+\.\d+$/.test(addr); },
+                isIPv6: function(addr) { return false; },
+            };
+
+            var tlsMod = {
+                TLSSocket: TLSSocket,
+                connect: function(opts, cb) {
+                    if (typeof opts === 'number') {
+                        var o = { port: opts, host: typeof cb === 'string' ? cb : 'localhost' };
+                        cb = typeof cb === 'function' ? cb : arguments[2];
+                        opts = o;
+                    }
+                    var s = new TLSSocket(null, { tls: true });
+                    s.connect(opts, cb);
+                    return s;
+                },
+                createServer: function(opts, cb) {
+                    if (typeof opts === 'function') { cb = opts; opts = {}; }
+                    return { listen: function() {}, close: function() {}, address: function() { return {}; } };
+                },
+                createSecureContext: function() { return {}; },
+                checkServerIdentity: function(host, cert) { return undefined; },
+            };
+
+            globalThis.__requireCache['net'] = netMod;
+            globalThis.__requireCache['tls'] = tlsMod;
+            globalThis.__requireCache['node:net'] = netMod;
+            globalThis.__requireCache['node:tls'] = tlsMod;
 
             // ── child_process — real impl injected by child_process.rs builtin ────
             globalThis.__requireCache['child_process'] = { exec: function(cmd,cb){if(cb)cb(null,'','');}, spawn: function(){return new EventEmitter();}, execSync: function(){throw new Error('execSync not available');}};
@@ -422,9 +643,121 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             HttpsProxyAgentStub.prototype.callback = function(req, opts) { return opts; };
             globalThis.__requireCache['https-proxy-agent'] = { HttpsProxyAgent: HttpsProxyAgentStub };
 
-            // ── http2 (stub) ──────────────────────────────────────────────────────
-            globalThis.__requireCache['http2'] = { connect: function() { return new EventEmitter(); }, constants: {}, createServer: function() { return { listen: function() {} }; } };
-            globalThis.__requireCache['node:http2'] = globalThis.__requireCache['http2'];
+            // ── http2 — client backed by __fetchAsync ─────────────────────────────
+            var HTTP2_CONSTANTS = {
+                HTTP2_HEADER_METHOD: ':method', HTTP2_HEADER_PATH: ':path',
+                HTTP2_HEADER_SCHEME: ':scheme', HTTP2_HEADER_AUTHORITY: ':authority',
+                HTTP2_HEADER_STATUS: ':status',
+                HTTP_STATUS_OK: 200, HTTP_STATUS_CREATED: 201, HTTP_STATUS_NO_CONTENT: 204,
+                HTTP_STATUS_BAD_REQUEST: 400, HTTP_STATUS_UNAUTHORIZED: 401,
+                HTTP_STATUS_FORBIDDEN: 403, HTTP_STATUS_NOT_FOUND: 404,
+                HTTP_STATUS_INTERNAL_SERVER_ERROR: 500,
+                NGHTTP2_NO_ERROR: 0,
+                DEFAULT_SETTINGS_HEADER_TABLE_SIZE: 4096,
+                DEFAULT_SETTINGS_ENABLE_PUSH: 1,
+                DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE: 65535,
+                DEFAULT_SETTINGS_MAX_FRAME_SIZE: 16384,
+            };
+
+            function Http2Request(authority, headers) {
+                EventEmitter.call(this);
+                this._authority = authority;
+                this._headers = headers || {};
+                this._body = [];
+                this._responseListeners = [];
+                this._dataListeners = [];
+                this._endListeners = [];
+                this._sent = false;
+            }
+            util.inherits(Http2Request, EventEmitter);
+
+            Http2Request.prototype.write = function(chunk) {
+                this._body.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(new Uint8Array(chunk)));
+                return this;
+            };
+
+            Http2Request.prototype.end = function(chunk) {
+                if (chunk) this.write(chunk);
+                if (this._sent) return this;
+                this._sent = true;
+                var self = this;
+                var h = self._headers;
+                var method = (h[':method'] || 'GET').toUpperCase();
+                var path = h[':path'] || '/';
+                var scheme = h[':scheme'] || 'https';
+                var authority = h[':authority'] || self._authority;
+                var url = scheme + '://' + authority + path;
+                var sendHeaders = {};
+                Object.keys(h).forEach(function(k) { if (k.charAt(0) !== ':') sendHeaders[k] = h[k]; });
+                var body = self._body.length ? self._body.join('') : undefined;
+                __fetchAsync(url, method, JSON.stringify(sendHeaders), body).then(function(raw) {
+                    var d = JSON.parse(raw);
+                    var respHeaders = { ':status': d.status };
+                    Object.keys(d.headers).forEach(function(k) { respHeaders[k] = d.headers[k]; });
+                    self.emit('response', respHeaders, 0);
+                    setTimeout(function() {
+                        if (d.body) self.emit('data', d.body);
+                        self.emit('end');
+                        self.emit('close');
+                    }, 0);
+                }).catch(function(e) {
+                    self.emit('error', e);
+                });
+                return this;
+            };
+
+            Http2Request.prototype.setEncoding = function(enc) { return this; };
+            Http2Request.prototype.setTimeout = function(ms, cb) { if (cb) setTimeout(cb, ms); return this; };
+            Http2Request.prototype.close = function() { return this; };
+
+            function Http2Session(authority) {
+                EventEmitter.call(this);
+                this._authority = authority.replace(/^https?:\/\//, '');
+                this._closed = false;
+            }
+            util.inherits(Http2Session, EventEmitter);
+
+            Http2Session.prototype.request = function(headers, opts) {
+                var h = Object.assign({ ':authority': this._authority }, headers || {});
+                var req = new Http2Request(this._authority, h);
+                var self = this;
+                // Emit 'connect' asynchronously so listeners can be attached first.
+                setTimeout(function() { self.emit('connect', self, {}); }, 0);
+                return req;
+            };
+
+            Http2Session.prototype.close = function(cb) {
+                this._closed = true;
+                if (cb) cb();
+                this.emit('close');
+            };
+
+            Http2Session.prototype.destroy = function() { this.close(); };
+            Http2Session.prototype.setTimeout = function(ms, cb) { if (cb) setTimeout(cb, ms); return this; };
+            Http2Session.prototype.ping = function(cb) { if (cb) cb(null, 0, {}); };
+            Http2Session.prototype.settings = function() {};
+            Http2Session.prototype.remoteSettings = { headerTableSize: 4096, enablePush: true, initialWindowSize: 65535, maxFrameSize: 16384, maxHeaderListSize: Infinity };
+            Http2Session.prototype.localSettings = Http2Session.prototype.remoteSettings;
+
+            var http2Mod = {
+                connect: function(authority, opts, cb) {
+                    if (typeof opts === 'function') { cb = opts; opts = {}; }
+                    var session = new Http2Session(authority);
+                    if (cb) session.once('connect', cb);
+                    setTimeout(function() { session.emit('connect', session, {}); }, 0);
+                    return session;
+                },
+                createServer: function(opts, cb) {
+                    if (typeof opts === 'function') { cb = opts; }
+                    return { listen: function() {}, close: function() {}, address: function() { return {}; } };
+                },
+                createSecureServer: function(opts, cb) { return http2Mod.createServer(opts, cb); },
+                constants: HTTP2_CONSTANTS,
+                sensitiveHeaders: Symbol('sensitiveHeaders'),
+            };
+
+            globalThis.__requireCache['http2'] = http2Mod;
+            globalThis.__requireCache['node:http2'] = http2Mod;
 
             // ── debug (common logging utility) ───────────────────────────────────
             globalThis.__requireCache['debug'] = function(ns) { return function() {}; };

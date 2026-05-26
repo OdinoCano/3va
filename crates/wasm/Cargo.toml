@@ -1,0 +1,16 @@
+[package]
+name = "vvva_wasm"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+vvva_permissions = { path = "../permissions" }
+wasmtime = { workspace = true, features = ["async"] }
+wasmtime-wasi = { workspace = true }
+wat = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

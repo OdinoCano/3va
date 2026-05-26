@@ -2,7 +2,7 @@
 
 ## 4.1 Overview
 
-3va exposes a subset of browser and Node.js-compatible APIs. The table below reflects what is **actually implemented** as of v0.2.0.
+3va exposes a subset of browser and Node.js-compatible APIs. The table below reflects what is **actually implemented**.
 
 ## 4.2 API Status
 
@@ -24,9 +24,9 @@
 | `TransformStream` | Implemented | `modules.rs`; `readable` + `writable` pair with shared controller |
 | `URL` / `URLSearchParams` | Implemented | `modules.rs`; full parsing, relative resolution, `canParse()`, iteration |
 | `FileReader` | Implemented | `modules.rs`; `readAsText`, `readAsDataURL`, `readAsArrayBuffer`, `abort` |
+| `crypto.subtle` | Implemented | `builtins/crypto.rs`; digest, HMAC, AES-GCM, HKDF, PBKDF2 — see §4.11 |
 | `perf_hooks` (`performance.now`) | JS stub | `modules.rs`; backed by `Date.now()` |
 | `BroadcastChannel` | Not implemented | Planned |
-| `crypto.subtle` | Not implemented | Planned (requires ML-KEM/ML-DSA crates) |
 
 ## 4.3 `fetch`
 
@@ -44,7 +44,28 @@ const res2 = await fetch('https://api.example.com/submit', {
 console.log(res2.status);
 ```
 
-Response methods: `.json()`, `.text()`, `.arrayBuffer()`, `.bytes()`, `.blob()`. Requires `--allow-net=<host>`.
+Response methods: `.json()`, `.text()`, `.arrayBuffer()`, `.bytes()`, `.blob()`, `.formData()`. Requires `--allow-net=<host>`.
+
+### `response.formData()`
+
+Parses the response body based on the `Content-Type` header:
+
+| Content-Type | Behaviour |
+|---|---|
+| `application/x-www-form-urlencoded` | Decodes `name=value&...` pairs into a `FormData` |
+| `multipart/form-data; boundary=...` | Splits on boundary, parses part headers; file parts become `File` objects |
+| Anything else | Rejects with `TypeError` |
+
+```javascript
+// Form POST
+const res = await fetch('https://api.example.com/upload', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: 'name=alice&role=admin',
+});
+const form = await res.formData();
+console.log(form.get('name'));  // 'alice'
+```
 
 ## 4.4 `WebSocket`
 
@@ -173,20 +194,133 @@ const elapsed = performance.now() - t0;
 
 ---
 
-## 4.11 Planned APIs (not yet implemented)
+## 4.11 `crypto.subtle` (Web Crypto API)
 
-> **Status: PENDING** — these APIs are part of the roadmap but do not work yet.
+`globalThis.crypto.subtle` and `require('crypto').subtle` both expose the same
+`SubtleCrypto` object backed by Rust (`builtins/crypto.rs`).
 
-### `crypto.subtle`
+### Supported operations
+
+| Operation | Algorithms |
+|---|---|
+| `digest` | SHA-1, SHA-224, SHA-256, SHA-384, SHA-512 |
+| `generateKey` | AES-GCM-128/256, AES-CBC, AES-CTR, HMAC |
+| `importKey` | `raw` and `jwk` formats for all symmetric algorithms + HKDF + PBKDF2 |
+| `exportKey` | `raw` and `jwk` formats |
+| `sign` / `verify` | HMAC (all SHA variants) |
+| `encrypt` / `decrypt` | AES-GCM-128 and AES-GCM-256 |
+| `deriveBits` / `deriveKey` | HKDF, PBKDF2 |
+| `wrapKey` / `unwrapKey` | Not implemented — throws `NotSupportedError` |
+
+### `digest`
 
 ```javascript
-// PLANNED — requires ML-KEM/ML-DSA crates (v0.3.0)
+const data = new TextEncoder().encode('hello');
+const hash = await crypto.subtle.digest('SHA-256', data);
+console.log(new Uint8Array(hash));  // 32 bytes
+```
+
+### `generateKey` + `encrypt` / `decrypt` (AES-GCM)
+
+```javascript
 const key = await crypto.subtle.generateKey(
   { name: 'AES-GCM', length: 256 },
   true,
   ['encrypt', 'decrypt']
 );
+
+const iv = crypto.getRandomValues(new Uint8Array(12));
+const plaintext = new TextEncoder().encode('secret message');
+
+const ciphertext = await crypto.subtle.encrypt(
+  { name: 'AES-GCM', iv },
+  key,
+  plaintext
+);
+
+const recovered = await crypto.subtle.decrypt(
+  { name: 'AES-GCM', iv },
+  key,
+  ciphertext
+);
+console.log(new TextDecoder().decode(recovered));  // 'secret message'
 ```
+
+`ciphertext` is the concatenation of the encrypted data and the 16-byte GCM authentication tag.
+Decryption fails (throws) if either the tag or the ciphertext has been tampered with.
+
+### `importKey` + `sign` / `verify` (HMAC)
+
+```javascript
+const rawKey = crypto.getRandomValues(new Uint8Array(32));
+
+const key = await crypto.subtle.importKey(
+  'raw',
+  rawKey,
+  { name: 'HMAC', hash: 'SHA-256' },
+  false,
+  ['sign', 'verify']
+);
+
+const data = new TextEncoder().encode('message');
+const signature = await crypto.subtle.sign('HMAC', key, data);
+const valid = await crypto.subtle.verify('HMAC', key, signature, data);
+console.log(valid);  // true
+```
+
+### `deriveBits` / `deriveKey` (HKDF)
+
+```javascript
+const ikm = await crypto.subtle.importKey(
+  'raw',
+  new TextEncoder().encode('input key material'),
+  'HKDF',
+  false,
+  ['deriveBits', 'deriveKey']
+);
+
+const bits = await crypto.subtle.deriveBits(
+  {
+    name: 'HKDF',
+    hash: 'SHA-256',
+    salt: new TextEncoder().encode('salt'),
+    info: new TextEncoder().encode('context'),
+  },
+  ikm,
+  256   // bits
+);
+console.log(new Uint8Array(bits));  // 32 bytes
+
+// Or derive a ready-to-use AES key:
+const aesKey = await crypto.subtle.deriveKey(
+  { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new Uint8Array() },
+  ikm,
+  { name: 'AES-GCM', length: 256 },
+  true,
+  ['encrypt', 'decrypt']
+);
+```
+
+### `exportKey` (JWK)
+
+```javascript
+const key = await crypto.subtle.generateKey(
+  { name: 'HMAC', hash: 'SHA-256' },
+  true,
+  ['sign', 'verify']
+);
+const jwk = await crypto.subtle.exportKey('jwk', key);
+// { kty: 'oct', k: '<base64url>', alg: 'HS256', key_ops: [...], ext: true }
+```
+
+### AES-GCM limits
+
+| Parameter | Constraint |
+|---|---|
+| Key length | 128 or 256 bits only |
+| IV / nonce | Exactly 12 bytes |
+| Tag length | Fixed 16 bytes (128 bits) |
+| AAD | Optional; `algorithm.additionalData` |
 
 ---
 

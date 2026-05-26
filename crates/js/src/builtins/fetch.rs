@@ -163,7 +163,63 @@ pub fn inject_fetch(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> 
                         return this.arrayBuffer().then(function(b) { return new Uint8Array(b); });
                     },
                     blob: function() { return Promise.resolve(new Blob([this._body], { type: this.headers['content-type'] || '' })); },
-                    formData: function() { return Promise.reject(new Error('formData() not implemented')); },
+                    formData: function() {
+                        try {
+                            var ct = (this.headers['content-type'] || this.headers['Content-Type'] || '').toLowerCase();
+                            var body = this._body;
+                            var fd = new FormData();
+                            if (ct.indexOf('application/x-www-form-urlencoded') >= 0) {
+                                // URL-encoded: name=value&name2=value2
+                                var pairs = body.split('&');
+                                for (var i = 0; i < pairs.length; i++) {
+                                    if (!pairs[i]) continue;
+                                    var idx = pairs[i].indexOf('=');
+                                    var k = decodeURIComponent(idx >= 0 ? pairs[i].slice(0, idx) : pairs[i]).replace(/\+/g, ' ');
+                                    var v = decodeURIComponent(idx >= 0 ? pairs[i].slice(idx + 1) : '').replace(/\+/g, ' ');
+                                    fd.append(k, v);
+                                }
+                                return Promise.resolve(fd);
+                            }
+                            if (ct.indexOf('multipart/form-data') >= 0) {
+                                // Extract boundary
+                                var bm = ct.match(/boundary=([^\s;]+)/);
+                                if (!bm) return Promise.reject(new Error('formData: missing boundary in Content-Type'));
+                                var boundary = '--' + bm[1];
+                                var parts = body.split(boundary);
+                                // parts[0] = preamble (ignore), parts[last] = '--' suffix (ignore)
+                                for (var i = 1; i < parts.length - 1; i++) {
+                                    var part = parts[i];
+                                    // Strip leading \r\n
+                                    if (part.startsWith('\r\n')) part = part.slice(2);
+                                    if (part.endsWith('\r\n')) part = part.slice(0, -2);
+                                    // Split headers from body at first blank line
+                                    var headerEnd = part.indexOf('\r\n\r\n');
+                                    if (headerEnd < 0) continue;
+                                    var rawHeaders = part.slice(0, headerEnd);
+                                    var partBody = part.slice(headerEnd + 4);
+                                    // Parse Content-Disposition
+                                    var cd = '';
+                                    var lines = rawHeaders.split('\r\n');
+                                    for (var j = 0; j < lines.length; j++) {
+                                        if (lines[j].toLowerCase().startsWith('content-disposition:')) {
+                                            cd = lines[j].slice(lines[j].indexOf(':') + 1).trim();
+                                        }
+                                    }
+                                    var namem = cd.match(/name="([^"]*)"/);
+                                    var filenamem = cd.match(/filename="([^"]*)"/);
+                                    if (!namem) continue;
+                                    var fieldName = namem[1];
+                                    if (filenamem) {
+                                        fd.append(fieldName, new File([partBody], filenamem[1]));
+                                    } else {
+                                        fd.append(fieldName, partBody);
+                                    }
+                                }
+                                return Promise.resolve(fd);
+                            }
+                            return Promise.reject(new TypeError('formData: unsupported Content-Type: ' + ct));
+                        } catch(e) { return Promise.reject(e); }
+                    },
                     clone:  function() { return Object.assign({}, this); },
                 };
             });
