@@ -14,5 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 zeroize = "1.8"
+ml-kem = { workspace = true }
+ml-dsa = { workspace = true }
 
 [dev-dependencies]

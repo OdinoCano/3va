@@ -6,6 +6,7 @@ pub mod fetch;
 pub mod fs;
 pub mod modules;
 pub mod process;
+pub mod tcp;
 pub mod timers;
 pub mod websocket;
 pub mod zlib;
@@ -29,6 +30,7 @@ pub fn inject_all(
     ctx.eval::<(), _>("globalThis.global = globalThis; globalThis.GLOBAL = globalThis;")?;
     fetch::inject_fetch(ctx, permissions.clone())?;
     fs::inject_fs(ctx, permissions.clone())?;
+    tcp::inject_tcp(ctx, permissions.clone())?;
     modules::inject_require(ctx, permissions.clone())?;
     websocket::inject_websocket(ctx, permissions.clone())?;
     // These run after inject_require so they can overwrite the placeholder stubs

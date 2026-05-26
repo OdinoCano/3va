@@ -12,26 +12,26 @@
 |--------|-------------|--------|
 | `buffer` | Binary data buffer | Rust builtin (`builtins/buffer.rs`) |
 | `console` | Output console | Rust builtin (`builtins/console.rs`) |
-| `crypto` | Hashing, random | JS stub (SHA-256 via WebCrypto, `Math.random`) |
+| `crypto` | Hashing, HMAC, random | JS + Rust (`builtins/crypto.rs`) — `crypto.subtle` (digest, AES-GCM, HMAC, HKDF, PBKDF2), `getRandomValues`, `randomUUID` |
 | `events` | EventEmitter | JS implementation (in `modules.rs`) |
 | `fs` | File system | Rust builtin (`builtins/fs.rs`, permission-gated) |
-| `http` / `https` | HTTP client/server | JS stub — `request()` returns no-op emitter |
-| `net` / `tls` | TCP/UDP sockets | JS stub — `createConnection()` returns emitter |
+| `http` / `https` | HTTP client/server | JS stub — `request()` backed by `__fetchAsync` |
+| `net` | TCP sockets | Rust-backed (`builtins/tcp.rs`) — real `TcpStream`; permission-gated |
 | `os` | System information | JS stub (static values: `platform`, `hostname`) |
 | `path` | Path utilities | JS implementation (in `modules.rs`) |
 | `process` | Current process | Rust builtin (`builtins/process.rs`) |
 | `querystring` | Query string parsing | JS implementation (in `modules.rs`) |
 | `stream` | Data streams | JS stub (Readable/Writable/Transform classes) |
-| `tls` | TLS/SSL | JS stub — same as `net` |
+| `tls` | TLS/SSL | Rust-backed (`builtins/tcp.rs`) — real `TlsStream` via `native-tls`; permission-gated |
 | `url` | URL parsing | JS implementation (in `modules.rs`) |
 | `util` | Various utilities | JS implementation (`inherits`, `promisify`, etc.) |
 | `zlib` | Compression | Rust builtin (`builtins/zlib.rs`) — real gzip/deflate via `flate2`, async callbacks |
 | `child_process` | Process spawning | Rust builtin (`builtins/child_process.rs`) — real exec via `tokio`, requires `--allow-child-process` |
-| `http2` | HTTP/2 | JS stub — `connect()` returns emitter |
+| `http2` | HTTP/2 client | JS client backed by `__fetchAsync` — `connect()`, `request()`, NGHTTP2 constants |
 
 **Rust builtins** are implemented as native Rust functions exposed to QuickJS via `rquickjs`. This includes `zlib` (real compression via `flate2`) and `child_process` (real subprocess execution via `tokio`).
 
-**JS stubs** exist in the inline JS block inside `crates/js/src/builtins/modules.rs`. They allow packages that `require()` these modules to load without throwing. `http`/`https` back client requests through `__fetchAsync`; `net`, `tls`, `http2` are no-op emitters (server-side TCP is not yet implemented).
+**JS stubs** exist in the inline JS block inside `crates/js/src/builtins/modules.rs`. They allow packages that `require()` these modules to load without throwing. `http`/`https` back client requests through `__fetchAsync`. `net` and `tls` are backed by real TCP/TLS connections via `builtins/tcp.rs`; server-side `listen()` is not yet implemented. `http2` exposes a client API backed by `__fetchAsync`.
 
 ### 2.2.2 Notable Implementations
 

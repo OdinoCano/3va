@@ -4,7 +4,8 @@ members = [
     "crates/*",
     "crates/bundler",
     "crates/crypto",
-    "crates/test"
+    "crates/test",
+    "crates/wasm"
 ]
 
 [workspace.dependencies]
@@ -30,6 +31,15 @@ tempfile = "3.8"
 ureq = { version = "2", features = ["json"] }
 tungstenite = { version = "0.24", features = ["native-tls"] }
 flate2 = "1.0"
+wasmtime = "20.0"
+wasmtime-wasi = "20.0"
+wasi-cap-std-sync = "20.0"
+wat = "1.0"
+ml-kem = { version = "0.3", features = ["getrandom"] }
+ml-dsa = { version = "0.1", features = ["getrandom"] }
+aes-gcm = "0.10"
+native-tls = "0.2"
+
 
 [profile.release]
 opt-level = 3

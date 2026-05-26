@@ -9,6 +9,39 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **ML-KEM-768 (FIPS 203 / Kyber)** — post-quantum Key Encapsulation Mechanism in `vvva_crypto`.
+  `MlKemKeypair::generate()`, `encapsulate(&ek)`, `decapsulate(&dk, ct)`. Key sizes: EK=1184 B,
+  DK=64 B (seed), CT=1088 B, SS=32 B. Wrong-key decapsulation returns a different shared secret
+  (implicit rejection per spec). Hex serialization helpers included.
+  (`crates/crypto/src/kem.rs`)
+
+- **ML-DSA-65 (FIPS 204 / Dilithium)** — post-quantum digital signature scheme in `vvva_crypto`.
+  `generate_signing_key()`, `sign(&sk, msg)`, `verify(&vk, msg, &sig)`. Key sizes: SK=32 B (seed),
+  VK=1952 B, sig=3309 B. Stateless — safe to reuse the same key for multiple messages.
+  (`crates/crypto/src/dsa.rs`)
+
+- **`crypto.subtle` (Web Crypto API)** — full `SubtleCrypto` object on `globalThis.crypto.subtle`
+  and `require('crypto').subtle`. Backed by `builtins/crypto.rs` (Rust) + JS for HKDF/PBKDF2.
+  Supported operations: `digest` (SHA-1/224/256/384/512), `generateKey` (AES-GCM-128/256, AES-CBC,
+  AES-CTR, HMAC), `importKey`/`exportKey` (`raw` + `jwk`), `sign`/`verify` (HMAC), `encrypt`/`decrypt`
+  (AES-GCM), `deriveBits`/`deriveKey` (HKDF, PBKDF2). `wrapKey`/`unwrapKey` throw `NotSupportedError`.
+
+- **`response.formData()`** — `fetch` responses now parse their body into a `FormData` object.
+  Supports `application/x-www-form-urlencoded` (percent-decoding, `+`→space) and
+  `multipart/form-data` (boundary splitting, `Content-Disposition` parsing, file parts become `File`
+  objects). Any other `Content-Type` rejects with `TypeError`. (`builtins/fetch.rs`)
+
+- **`net` / `tls` — real TCP/TLS sockets** — `require('net')` and `require('tls')` now return
+  Rust-backed implementations. `Socket` class wraps `TcpStream` (plain) or `TlsStream` (TLS via
+  `native-tls`). API: `connect()`, `write()`, `end()`, `destroy()`, `setEncoding()`, `setTimeout()`,
+  `on('data'|'end'|'error'|'close')`, `pipe()`. Server-side `listen()` is not implemented.
+  Requires `--allow-net=<host>`. (`builtins/tcp.rs`, `modules.rs`)
+
+- **`http2` client** — `require('http2').connect(authority)` returns an `Http2Session`. Sessions
+  expose `request(headers)` which returns an `Http2Request` that emits `response`, `data`, and `end`
+  events. NGHTTP2 constants available as `http2.constants`. Backed by `__fetchAsync`; does not
+  implement real HTTP/2 framing. (`modules.rs`)
+
 - **`--allow-env=VAR[,VAR,...]` scoped environment access** — `--allow-env` now
   accepts an optional comma-delimited list of variable names.
   - `--allow-env=` (no value) → grants `EnvAccess` (all variables, previous behaviour).
