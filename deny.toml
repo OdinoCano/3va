@@ -2,6 +2,8 @@
 ignore = [
     "RUSTSEC-2023-0051",
     "RUSTSEC-2024-0370",
+    # fxhash is unmaintained; pulled in as transitive dep by wasmtime — no active CVE
+    "RUSTSEC-2025-0057",
 ]
 
 [licenses]
