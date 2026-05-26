@@ -4,6 +4,7 @@ pub mod console;
 pub mod crypto;
 pub mod fetch;
 pub mod fs;
+pub mod http_server;
 pub mod modules;
 pub mod process;
 pub mod tcp;
@@ -31,6 +32,7 @@ pub fn inject_all(
     fetch::inject_fetch(ctx, permissions.clone())?;
     fs::inject_fs(ctx, permissions.clone())?;
     tcp::inject_tcp(ctx, permissions.clone())?;
+    http_server::inject_http_server(ctx, permissions.clone())?;
     modules::inject_require(ctx, permissions.clone())?;
     websocket::inject_websocket(ctx, permissions.clone())?;
     // These run after inject_require so they can overwrite the placeholder stubs

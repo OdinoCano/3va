@@ -66,20 +66,14 @@ fn strip_flow(source: &str) -> String {
 
     while i < len {
         // Skip '@flow' and '@format' in comments (approximate: skip lines containing @flow)
-        if bytes[i] == b'@'
-            && i + 4 < len
-            && &bytes[i..i + 5] == b"@flow"
-        {
+        if bytes[i] == b'@' && i + 4 < len && &bytes[i..i + 5] == b"@flow" {
             // Skip to end of line
             while i < len && bytes[i] != b'\n' {
                 i += 1;
             }
             continue;
         }
-        if bytes[i] == b'@'
-            && i + 7 < len
-            && &bytes[i..i + 8] == b"@format"
-        {
+        if bytes[i] == b'@' && i + 7 < len && &bytes[i..i + 8] == b"@format" {
             while i < len && bytes[i] != b'\n' {
                 i += 1;
             }
@@ -87,9 +81,7 @@ fn strip_flow(source: &str) -> String {
         }
 
         // Remove `import typeof * as X from '...'` or `import typeof * as X from "..."`
-        if i + 14 < len
-            && bytes[i..i + 14].eq_ignore_ascii_case(b"import typeof ")
-        {
+        if i + 14 < len && bytes[i..i + 14].eq_ignore_ascii_case(b"import typeof ") {
             // Skip to end of semicolon or newline at statement level
             let mut j = i;
             while j < len && bytes[j] != b';' && bytes[j] != b'\n' {
@@ -103,9 +95,7 @@ fn strip_flow(source: &str) -> String {
         }
 
         // Remove `import type {` ... `} from '...'`
-        if i + 11 < len
-            && bytes[i..i + 12].eq_ignore_ascii_case(b"import type {")
-        {
+        if i + 11 < len && bytes[i..i + 12].eq_ignore_ascii_case(b"import type {") {
             let mut j = i;
             while j < len && bytes[j] != b';' && bytes[j] != b'\n' {
                 j += 1;
@@ -118,9 +108,7 @@ fn strip_flow(source: &str) -> String {
         }
 
         // Remove `import type X from '...'`
-        if i + 11 < len
-            && bytes[i..i + 12].eq_ignore_ascii_case(b"import type ")
-        {
+        if i + 11 < len && bytes[i..i + 12].eq_ignore_ascii_case(b"import type ") {
             let mut j = i;
             while j < len && bytes[j] != b';' && bytes[j] != b'\n' {
                 j += 1;
@@ -150,7 +138,10 @@ fn strip_inline_flow_types(source: &str) -> String {
         let trimmed = line.trim();
 
         // Process variable declarations: const/let/var name: Type = value
-        if trimmed.starts_with("const ") || trimmed.starts_with("let ") || trimmed.starts_with("var ") {
+        if trimmed.starts_with("const ")
+            || trimmed.starts_with("let ")
+            || trimmed.starts_with("var ")
+        {
             let kw_len = if trimmed.starts_with("const ") { 6 } else { 4 };
             let after_kw = &trimmed[kw_len..];
             // Find first colon (type annotation marker)
@@ -166,7 +157,10 @@ fn strip_inline_flow_types(source: &str) -> String {
                         match ch {
                             '{' | '[' | '(' => depth += 1,
                             '}' | ']' | ')' if depth > 0 => depth -= 1,
-                            '=' if depth == 0 => { eq_pos = Some(k); break; }
+                            '=' if depth == 0 => {
+                                eq_pos = Some(k);
+                                break;
+                            }
                             _ => {}
                         }
                     }
@@ -194,7 +188,11 @@ fn strip_inline_flow_types(source: &str) -> String {
                 while i < bytes.len() {
                     let ch = bytes[i] as char;
                     match ch {
-                        '(' => { depth += 1; clean.push(ch); i += 1; }
+                        '(' => {
+                            depth += 1;
+                            clean.push(ch);
+                            i += 1;
+                        }
                         ')' if depth == 0 => {
                             // End of params — check for return type `: ... {`
                             clean.push(')');
@@ -212,7 +210,11 @@ fn strip_inline_flow_types(source: &str) -> String {
                                 i = bytes.len();
                             }
                         }
-                        ')' => { depth -= 1; clean.push(ch); i += 1; }
+                        ')' => {
+                            depth -= 1;
+                            clean.push(ch);
+                            i += 1;
+                        }
                         ':' if depth == 0 && i > 0 && bytes[i - 1].is_ascii_alphabetic() => {
                             // Type annotation colon — skip to next `,` or `)`
                             i += 1;
@@ -232,7 +234,10 @@ fn strip_inline_flow_types(source: &str) -> String {
                                 i += 1;
                             }
                         }
-                        _ => { clean.push(ch); i += 1; }
+                        _ => {
+                            clean.push(ch);
+                            i += 1;
+                        }
                     }
                 }
                 result.push_str(&clean);
@@ -325,7 +330,9 @@ pub fn looks_like_jsx(source: &str) -> bool {
             let q = bytes[i];
             i += 1;
             while i < len && bytes[i] != q {
-                if bytes[i] == b'\\' { i += 1; }
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
                 i += 1;
             }
         }
@@ -342,8 +349,14 @@ mod tests {
     fn test_variable_type_annotation() {
         let input = "const x: string = 'hello';";
         let output = transpile(input);
-        assert!(!output.contains(": string"), "should strip type annotation, got: {output}");
-        assert!(output.contains("const x"), "should keep variable declaration");
+        assert!(
+            !output.contains(": string"),
+            "should strip type annotation, got: {output}"
+        );
+        assert!(
+            output.contains("const x"),
+            "should keep variable declaration"
+        );
         assert!(output.contains("hello"), "should keep value");
     }
 
@@ -369,9 +382,18 @@ mod tests {
     fn test_jsx_classic_transform() {
         let input = "const el = <div className=\"foo\">hello</div>;";
         let output = transpile_jsx(input);
-        assert!(output.contains("React.createElement"), "should use React.createElement, got: {output}");
-        assert!(!output.contains("<div"), "should not contain JSX, got: {output}");
-        assert!(output.contains("\"foo\""), "should keep props, got: {output}");
+        assert!(
+            output.contains("React.createElement"),
+            "should use React.createElement, got: {output}"
+        );
+        assert!(
+            !output.contains("<div"),
+            "should not contain JSX, got: {output}"
+        );
+        assert!(
+            output.contains("\"foo\""),
+            "should keep props, got: {output}"
+        );
     }
 
     #[test]
@@ -425,7 +447,10 @@ mod tests {
     fn test_generic_function() {
         let input = "function identity<T>(x: T): T { return x; }";
         let output = transpile(input);
-        assert!(!output.contains("<T>"), "should strip generic, got: {output}");
+        assert!(
+            !output.contains("<T>"),
+            "should strip generic, got: {output}"
+        );
         assert!(output.contains("function identity("), "got: {output}");
     }
 

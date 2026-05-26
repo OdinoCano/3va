@@ -70,13 +70,12 @@ impl MlKemCiphertext {
     /// Decode a ciphertext from hex.
     pub fn from_hex(s: &str) -> Result<Self, CryptoError> {
         let bytes = hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
-        let arr: Ciphertext<MlKem768> = Array::try_from(bytes.as_slice())
-            .map_err(|_| {
-                CryptoError::InvalidKey(format!(
-                    "ciphertext: expected 1088 bytes, got {}",
-                    bytes.len()
-                ))
-            })?;
+        let arr: Ciphertext<MlKem768> = Array::try_from(bytes.as_slice()).map_err(|_| {
+            CryptoError::InvalidKey(format!(
+                "ciphertext: expected 1088 bytes, got {}",
+                bytes.len()
+            ))
+        })?;
         Ok(MlKemCiphertext(arr))
     }
 }
@@ -94,10 +93,7 @@ pub fn encapsulate(ek: &EncapsulationKey<MlKem768>) -> (MlKemCiphertext, MlKemSh
 }
 
 /// Decapsulate `ct` using `dk` to recover the shared secret.
-pub fn decapsulate(
-    dk: &DecapsulationKey<MlKem768>,
-    ct: &MlKemCiphertext,
-) -> MlKemSharedSecret {
+pub fn decapsulate(dk: &DecapsulationKey<MlKem768>, ct: &MlKemCiphertext) -> MlKemSharedSecret {
     let ss = dk.decapsulate(&ct.0);
     let mut secret = [0u8; 32];
     secret.copy_from_slice(ss.as_slice());
@@ -109,13 +105,12 @@ pub fn decapsulate(
 /// Decode an encapsulation key from hex.
 pub fn encapsulation_key_from_hex(s: &str) -> Result<EncapsulationKey<MlKem768>, CryptoError> {
     let bytes = hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
-    let arr: Key<EncapsulationKey<MlKem768>> = Array::try_from(bytes.as_slice())
-        .map_err(|_| {
-            CryptoError::InvalidKey(format!(
-                "encapsulation key: expected 1184 bytes, got {}",
-                bytes.len()
-            ))
-        })?;
+    let arr: Key<EncapsulationKey<MlKem768>> = Array::try_from(bytes.as_slice()).map_err(|_| {
+        CryptoError::InvalidKey(format!(
+            "encapsulation key: expected 1184 bytes, got {}",
+            bytes.len()
+        ))
+    })?;
     EncapsulationKey::<MlKem768>::new(&arr)
         .map_err(|_| CryptoError::InvalidKey("invalid encapsulation key encoding".into()))
 }
@@ -123,8 +118,8 @@ pub fn encapsulation_key_from_hex(s: &str) -> Result<EncapsulationKey<MlKem768>,
 /// Decode a decapsulation key from its 64-byte seed hex.
 pub fn decapsulation_key_from_hex(s: &str) -> Result<DecapsulationKey<MlKem768>, CryptoError> {
     let bytes = hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
-    let seed: Key<DecapsulationKey<MlKem768>> = Array::try_from(bytes.as_slice())
-        .map_err(|_| {
+    let seed: Key<DecapsulationKey<MlKem768>> =
+        Array::try_from(bytes.as_slice()).map_err(|_| {
             CryptoError::InvalidKey(format!(
                 "decapsulation key: expected 64 bytes, got {}",
                 bytes.len()

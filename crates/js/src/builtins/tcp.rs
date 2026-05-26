@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use native_tls::TlsStream;
+use rquickjs::function::Async;
 use rquickjs::{Ctx, Function, Result, function::Rest};
 use vvva_permissions::{Capability, PermissionState};
 
@@ -41,8 +42,12 @@ impl TcpConn {
     }
     fn shutdown(&mut self) {
         match self {
-            TcpConn::Plain(s) => { let _ = s.shutdown(std::net::Shutdown::Both); }
-            TcpConn::Tls(s) => { let _ = s.shutdown(); }
+            TcpConn::Plain(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+            TcpConn::Tls(s) => {
+                let _ = s.shutdown();
+            }
         }
     }
 }
@@ -76,19 +81,17 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
     let pool: Arc<Mutex<HashMap<u32, TcpConn>>> = Arc::new(Mutex::new(HashMap::new()));
     let next_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
 
-    let alloc_id = |pool: &Arc<Mutex<HashMap<u32, TcpConn>>>,
-                    nid: &Arc<Mutex<u32>>,
-                    conn: TcpConn|
-     -> u32 {
-        let id = {
-            let mut n = nid.lock().unwrap();
-            let id = *n;
-            *n = n.wrapping_add(1);
+    let alloc_id =
+        |pool: &Arc<Mutex<HashMap<u32, TcpConn>>>, nid: &Arc<Mutex<u32>>, conn: TcpConn| -> u32 {
+            let id = {
+                let mut n = nid.lock().unwrap();
+                let id = *n;
+                *n = n.wrapping_add(1);
+                id
+            };
+            pool.lock().unwrap().insert(id, conn);
             id
         };
-        pool.lock().unwrap().insert(id, conn);
-        id
-    };
 
     // __tcpConnect(host, port) -> id
     {
@@ -97,30 +100,33 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         let nid = next_id.clone();
         ctx.globals().set(
             "__tcpConnect",
-            Function::new(ctx.clone(), move |ctx: Ctx<'_>, args: Rest<String>| -> Result<u32> {
-                let mut it = args.0.into_iter();
-                let host = it.next().unwrap_or_default();
-                let port: u16 = it
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| js_err(&ctx, "tcpConnect: invalid port".into()))?;
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>, args: Rest<String>| -> Result<u32> {
+                    let mut it = args.0.into_iter();
+                    let host = it.next().unwrap_or_default();
+                    let port: u16 = it
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| js_err(&ctx, "tcpConnect: invalid port".into()))?;
 
-                if !perms.check(&Capability::Network(host.clone())) {
-                    return Err(js_code_err(
-                        &ctx,
-                        "EACCES",
-                        format!("Network access denied. Run with --allow-net={}", host),
-                    ));
-                }
+                    if !perms.check(&Capability::Network(host.clone())) {
+                        return Err(js_code_err(
+                            &ctx,
+                            "EACCES",
+                            format!("Network access denied. Run with --allow-net={}", host),
+                        ));
+                    }
 
-                let stream = TcpStream::connect(format!("{}:{}", host, port))
-                    .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
-                stream
-                    .set_nonblocking(true)
-                    .map_err(|e| js_err(&ctx, e.to_string()))?;
+                    let stream = TcpStream::connect(format!("{}:{}", host, port))
+                        .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
+                    stream
+                        .set_nonblocking(true)
+                        .map_err(|e| js_err(&ctx, e.to_string()))?;
 
-                Ok(alloc_id(&pool, &nid, TcpConn::Plain(stream)))
-            }),
+                    Ok(alloc_id(&pool, &nid, TcpConn::Plain(stream)))
+                },
+            ),
         )?;
     }
 
@@ -131,37 +137,40 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         let nid = next_id.clone();
         ctx.globals().set(
             "__tcpConnectTls",
-            Function::new(ctx.clone(), move |ctx: Ctx<'_>, args: Rest<String>| -> Result<u32> {
-                let mut it = args.0.into_iter();
-                let host = it.next().unwrap_or_default();
-                let port: u16 = it
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| js_err(&ctx, "tcpConnectTls: invalid port".into()))?;
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>, args: Rest<String>| -> Result<u32> {
+                    let mut it = args.0.into_iter();
+                    let host = it.next().unwrap_or_default();
+                    let port: u16 = it
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| js_err(&ctx, "tcpConnectTls: invalid port".into()))?;
 
-                if !perms.check(&Capability::Network(host.clone())) {
-                    return Err(js_code_err(
-                        &ctx,
-                        "EACCES",
-                        format!("Network access denied. Run with --allow-net={}", host),
-                    ));
-                }
+                    if !perms.check(&Capability::Network(host.clone())) {
+                        return Err(js_code_err(
+                            &ctx,
+                            "EACCES",
+                            format!("Network access denied. Run with --allow-net={}", host),
+                        ));
+                    }
 
-                let connector = native_tls::TlsConnector::new()
-                    .map_err(|e| js_err(&ctx, format!("TLS init failed: {}", e)))?;
-                let tcp = TcpStream::connect(format!("{}:{}", host, port))
-                    .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
-                // TLS handshake is blocking — keep the stream blocking during handshake,
-                // then switch to non-blocking for data reads.
-                let tls = connector
-                    .connect(&host, tcp)
-                    .map_err(|e| js_code_err(&ctx, "ECONNRESET", format!("TLS handshake failed: {}", e)))?;
-                tls.get_ref()
-                    .set_nonblocking(true)
-                    .map_err(|e| js_err(&ctx, e.to_string()))?;
+                    let connector = native_tls::TlsConnector::new()
+                        .map_err(|e| js_err(&ctx, format!("TLS init failed: {}", e)))?;
+                    let tcp = TcpStream::connect(format!("{}:{}", host, port))
+                        .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
+                    // TLS handshake is blocking — keep the stream blocking during handshake,
+                    // then switch to non-blocking for data reads.
+                    let tls = connector.connect(&host, tcp).map_err(|e| {
+                        js_code_err(&ctx, "ECONNRESET", format!("TLS handshake failed: {}", e))
+                    })?;
+                    tls.get_ref()
+                        .set_nonblocking(true)
+                        .map_err(|e| js_err(&ctx, e.to_string()))?;
 
-                Ok(alloc_id(&pool, &nid, TcpConn::Tls(tls)))
-            }),
+                    Ok(alloc_id(&pool, &nid, TcpConn::Tls(tls)))
+                },
+            ),
         )?;
     }
 
@@ -227,9 +236,9 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 ctx.clone(),
                 move |ctx: Ctx<'_>, id: u32, ms: u32| -> Result<()> {
                     let guard = pool.lock().unwrap();
-                    let conn = guard
-                        .get(&id)
-                        .ok_or_else(|| js_err(&ctx, format!("tcpSetTimeout: unknown socket {}", id)))?;
+                    let conn = guard.get(&id).ok_or_else(|| {
+                        js_err(&ctx, format!("tcpSetTimeout: unknown socket {}", id))
+                    })?;
                     let timeout = if ms == 0 {
                         None
                     } else {
@@ -253,12 +262,129 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         let pool = pool.clone();
         ctx.globals().set(
             "__tcpClose",
+            Function::new(ctx.clone(), move |_ctx: Ctx<'_>, id: u32| -> Result<()> {
+                if let Some(mut conn) = pool.lock().unwrap().remove(&id) {
+                    conn.shutdown();
+                }
+                Ok(())
+            }),
+        )?;
+    }
+
+    // ── Raw TCP server ─────────────────────────────────────────────────────────
+    // __netListen(port, host) → server_id   (sync; port bound immediately)
+    // __netAcceptAsync(server_id) → Promise<conn_id>  (awaits next connection,
+    //   then inserts the accepted stream into the shared tcp pool so __tcpRead /
+    //   __tcpWrite / __tcpClose work on it without any extra plumbing)
+    // __netClose(server_id) → void  (drops the listener)
+
+    let listeners: Arc<Mutex<HashMap<u32, Arc<tokio::net::TcpListener>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let next_listener_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+
+    {
+        let perms = permissions.clone();
+        let listeners = listeners.clone();
+        let nid = next_listener_id.clone();
+        ctx.globals().set(
+            "__netListen",
             Function::new(
                 ctx.clone(),
-                move |_ctx: Ctx<'_>, id: u32| -> Result<()> {
-                    if let Some(mut conn) = pool.lock().unwrap().remove(&id) {
-                        conn.shutdown();
+                move |ctx: Ctx<'_>, port: u16, host: String| -> Result<u32> {
+                    if !perms.check(&Capability::Network(host.clone())) {
+                        return Err(js_code_err(
+                            &ctx,
+                            "EACCES",
+                            format!("Network access denied. Run with --allow-net={}", host),
+                        ));
                     }
+
+                    let std_l = std::net::TcpListener::bind(format!("{}:{}", host, port))
+                        .map_err(|e| js_code_err(&ctx, "EADDRINUSE", e.to_string()))?;
+                    std_l
+                        .set_nonblocking(true)
+                        .map_err(|e| js_err(&ctx, e.to_string()))?;
+                    let tokio_l = tokio::net::TcpListener::from_std(std_l)
+                        .map_err(|e| js_err(&ctx, e.to_string()))?;
+
+                    let id = {
+                        let mut n = nid.lock().unwrap();
+                        let id = *n;
+                        *n = n.wrapping_add(1);
+                        id
+                    };
+                    listeners.lock().unwrap().insert(id, Arc::new(tokio_l));
+                    Ok(id)
+                },
+            ),
+        )?;
+    }
+
+    {
+        let listeners = listeners.clone();
+        let pool = pool.clone();
+        let next_id = next_id.clone();
+        ctx.globals().set(
+            "__netAcceptAsync",
+            Function::new(
+                ctx.clone(),
+                Async(move |server_id: u32| {
+                    let listeners = listeners.clone();
+                    let pool = pool.clone();
+                    let next_id = next_id.clone();
+                    async move {
+                        let listener = {
+                            let g = listeners.lock().unwrap();
+                            g.get(&server_id).cloned()
+                        };
+                        let listener = listener.ok_or_else(|| {
+                            rquickjs::Error::new_from_js_message(
+                                "ENOENT",
+                                "ENOENT",
+                                "unknown server id".to_string(),
+                            )
+                        })?;
+
+                        let (tokio_stream, _addr) = listener.accept().await.map_err(|e| {
+                            rquickjs::Error::new_from_js_message(
+                                "ECONNRESET",
+                                "ECONNRESET",
+                                e.to_string(),
+                            )
+                        })?;
+
+                        // Convert to std for the existing non-blocking pool
+                        let std_stream = tokio_stream.into_std().map_err(|e| {
+                            rquickjs::Error::new_from_js_message("EIO", "EIO", e.to_string())
+                        })?;
+                        std_stream.set_nonblocking(true).map_err(|e| {
+                            rquickjs::Error::new_from_js_message("EIO", "EIO", e.to_string())
+                        })?;
+
+                        let conn_id = {
+                            let mut n = next_id.lock().unwrap();
+                            let id = *n;
+                            *n = n.wrapping_add(1);
+                            id
+                        };
+                        pool.lock()
+                            .unwrap()
+                            .insert(conn_id, TcpConn::Plain(std_stream));
+                        Ok::<u32, rquickjs::Error>(conn_id)
+                    }
+                }),
+            ),
+        )?;
+    }
+
+    {
+        let listeners = listeners.clone();
+        ctx.globals().set(
+            "__netClose",
+            Function::new(
+                ctx.clone(),
+                move |_ctx: Ctx<'_>, server_id: u32| -> Result<()> {
+                    listeners.lock().unwrap().remove(&server_id);
                     Ok(())
                 },
             ),

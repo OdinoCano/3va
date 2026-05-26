@@ -12,11 +12,11 @@
 |--------|-------------|--------|
 | `buffer` | Binary data buffer | Rust builtin (`builtins/buffer.rs`) |
 | `console` | Output console | Rust builtin (`builtins/console.rs`) |
-| `crypto` | Hashing, HMAC, random | JS + Rust (`builtins/crypto.rs`) — `crypto.subtle` (digest, AES-GCM, HMAC, HKDF, PBKDF2), `getRandomValues`, `randomUUID` |
+| `crypto` | Hashing, HMAC, random | JS + Rust (`builtins/crypto.rs`) — `crypto.subtle`, `getRandomValues`, `randomUUID`, `createHash`, `createHmac` (async), `randomBytes`, `timingSafeEqual`, `pbkdf2` |
 | `events` | EventEmitter | JS implementation (in `modules.rs`) |
 | `fs` | File system | Rust builtin (`builtins/fs.rs`, permission-gated) |
-| `http` / `https` | HTTP client/server | JS stub — `request()` backed by `__fetchAsync` |
-| `net` | TCP sockets | Rust-backed (`builtins/tcp.rs`) — real `TcpStream`; permission-gated |
+| `http` / `https` | HTTP client/server | JS + Rust — `request()` backed by `__fetchAsync`; `createServer()` backed by `builtins/http_server.rs` (real Tokio TCP listener, HTTP/1.1 parser); requires `--allow-net` |
+| `net` | TCP sockets + server | Rust-backed (`builtins/tcp.rs`) — `Socket` (client) via `TcpStream`; `createServer(handler)` via `__netListen`/`__netAcceptAsync`; permission-gated |
 | `os` | System information | JS stub (static values: `platform`, `hostname`) |
 | `path` | Path utilities | JS implementation (in `modules.rs`) |
 | `process` | Current process | Rust builtin (`builtins/process.rs`) |
@@ -31,7 +31,9 @@
 
 **Rust builtins** are implemented as native Rust functions exposed to QuickJS via `rquickjs`. This includes `zlib` (real compression via `flate2`) and `child_process` (real subprocess execution via `tokio`).
 
-**JS stubs** exist in the inline JS block inside `crates/js/src/builtins/modules.rs`. They allow packages that `require()` these modules to load without throwing. `http`/`https` back client requests through `__fetchAsync`. `net` and `tls` are backed by real TCP/TLS connections via `builtins/tcp.rs`; server-side `listen()` is not yet implemented. `http2` exposes a client API backed by `__fetchAsync`.
+**Rust builtins** include `http_server.rs`: `__httpListenAsync` / `__httpAcceptAsync` / `__httpRespond` / `__httpClose` expose a Tokio-backed HTTP/1.1 server to JS. The JS `http.createServer(handler)` API is fully Node.js-compatible — `IncomingMessage` and `ServerResponse` objects with `req.method`, `req.url`, `req.headers`, `req._body`, `res.writeHead()`, `res.write()`, `res.end()`.
+
+**JS stubs** exist in the inline JS block inside `crates/js/src/builtins/modules.rs`. They allow packages that `require()` these modules to load without throwing. `http`/`https` back client requests through `__fetchAsync` and expose real `createServer()` via `builtins/http_server.rs`. `net` and `tls` are backed by real TCP/TLS connections via `builtins/tcp.rs`. `http2` exposes a client API backed by `__fetchAsync`.
 
 ### 2.2.2 Notable Implementations
 
@@ -49,7 +51,17 @@ JS `EventEmitter` class with: `on`, `once`, `emit`, `off`, `removeAllListeners`,
 
 #### fs (`builtins/fs.rs`)
 
-Permission-gated. Requires `--allow-read` / `--allow-write`. Supports: `readFileSync`, `writeFileSync`, `existsSync`, `mkdirSync`, `readdirSync`, `statSync`, `unlinkSync`.
+Permission-gated. Requires `--allow-read` / `--allow-write`.
+
+Sync API: `readFileSync`, `writeFileSync`, `appendFileSync`, `existsSync`, `mkdirSync`, `readdirSync(path, {withFileTypes})`, `statSync`, `lstatSync`, `accessSync`, `realpathSync`, `unlinkSync`, `renameSync`, `copyFileSync`, `chmodSync`, `symlinkSync`.
+
+Async (callback): `readFile`, `writeFile`, `appendFile`, `readdir`, `mkdir`, `stat`, `lstat`, `access`, `realpath`, `unlink`, `rename`, `copyFile`, `chmod`, `symlink`.
+
+Promise API: `fs.promises.*` — mirrors all async methods.
+
+Streams: `createReadStream(path)` — EventEmitter emitting `data`/`end`/`error`; `createWriteStream(path)` — `write(chunk)` / `end([chunk])`.
+
+Constants: `fs.constants` — `{ F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 }`.
 
 ---
 

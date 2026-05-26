@@ -108,120 +108,63 @@ pub fn inject_fetch(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> 
         )?,
     )?;
 
-    // JS wrapper: fetch(url, options?) -> Promise<Response>
+    // JS wrapper: fetch(input, options?) -> Promise<Response>
+    // Accepts a URL string or a Request object as first argument.
+    // Returns a proper Response instance (WinterCG-compatible).
     ctx.eval::<(), _>(
         r#"
-        globalThis.fetch = function(url, options) {
+        globalThis.fetch = function(input, options) {
+            // Accept Request object as first argument
+            if (input && typeof input === 'object' && typeof input.url === 'string') {
+                var req = input;
+                options = options ? Object.assign({ method: req.method, signal: req.signal }, options) : { method: req.method, signal: req.signal };
+                if (options.headers == null && req.headers) options.headers = req.headers;
+                if (options.body == null && req._body != null) options.body = req._body;
+                input = req.url;
+            }
             options = options || {};
+
             var method  = (options.method  || 'GET').toUpperCase();
-            var headers = options.headers  || {};
-            var body    = (options.body != null) ? String(options.body) : undefined;
             var signal  = options.signal || null;
+            var body    = (options.body != null) ? String(options.body) : undefined;
+
+            // Normalise headers — accept Headers instance, plain object, or undefined
+            var hdrs = options.headers;
+            var headersObj = {};
+            if (hdrs && typeof hdrs.forEach === 'function') {
+                hdrs.forEach(function(v, k) { headersObj[k] = v; });
+            } else if (hdrs && typeof hdrs === 'object') {
+                headersObj = hdrs;
+            }
 
             // Check AbortSignal before issuing the request
             if (signal && signal.aborted) {
-                var reason = signal.reason || new Error('AbortError');
-                return Promise.reject(reason);
+                return Promise.reject(signal.reason || new Error('AbortError'));
             }
 
-            var req = __fetchAsync(url, method, JSON.stringify(headers), body);
+            var fetchUrl = String(input);
+            var pending = __fetchAsync(fetchUrl, method, JSON.stringify(headersObj), body);
 
-            // If a signal is provided, race against abort
             if (signal) {
                 var abortPromise = new Promise(function(_, reject) {
                     signal.addEventListener('abort', function() {
                         reject(signal.reason || new Error('AbortError'));
                     });
                 });
-                req = Promise.race([req, abortPromise]);
+                pending = Promise.race([pending, abortPromise]);
             }
 
-            return req.then(function(raw) {
+            return pending.then(function(raw) {
                 var data = JSON.parse(raw);
-                return {
-                    ok:          data.ok,
+                var respHeaders = new Headers(data.headers);
+                return new Response(data.body, {
                     status:      data.status,
                     statusText:  data.statusText,
-                    headers:     data.headers,
-                    _body:       data.body,
-                    url:         url,
+                    headers:     respHeaders,
+                    url:         fetchUrl,
                     redirected:  false,
                     type:        'basic',
-                    text:        function() { return Promise.resolve(this._body); },
-                    json:        function() {
-                        try { return Promise.resolve(JSON.parse(this._body)); }
-                        catch(e) { return Promise.reject(new SyntaxError('Invalid JSON: ' + e.message)); }
-                    },
-                    arrayBuffer: function() {
-                        var s = this._body;
-                        var buf = new ArrayBuffer(s.length);
-                        var view = new Uint8Array(buf);
-                        for (var i = 0; i < s.length; i++) view[i] = s.charCodeAt(i);
-                        return Promise.resolve(buf);
-                    },
-                    bytes: function() {
-                        return this.arrayBuffer().then(function(b) { return new Uint8Array(b); });
-                    },
-                    blob: function() { return Promise.resolve(new Blob([this._body], { type: this.headers['content-type'] || '' })); },
-                    formData: function() {
-                        try {
-                            var ct = (this.headers['content-type'] || this.headers['Content-Type'] || '').toLowerCase();
-                            var body = this._body;
-                            var fd = new FormData();
-                            if (ct.indexOf('application/x-www-form-urlencoded') >= 0) {
-                                // URL-encoded: name=value&name2=value2
-                                var pairs = body.split('&');
-                                for (var i = 0; i < pairs.length; i++) {
-                                    if (!pairs[i]) continue;
-                                    var idx = pairs[i].indexOf('=');
-                                    var k = decodeURIComponent(idx >= 0 ? pairs[i].slice(0, idx) : pairs[i]).replace(/\+/g, ' ');
-                                    var v = decodeURIComponent(idx >= 0 ? pairs[i].slice(idx + 1) : '').replace(/\+/g, ' ');
-                                    fd.append(k, v);
-                                }
-                                return Promise.resolve(fd);
-                            }
-                            if (ct.indexOf('multipart/form-data') >= 0) {
-                                // Extract boundary
-                                var bm = ct.match(/boundary=([^\s;]+)/);
-                                if (!bm) return Promise.reject(new Error('formData: missing boundary in Content-Type'));
-                                var boundary = '--' + bm[1];
-                                var parts = body.split(boundary);
-                                // parts[0] = preamble (ignore), parts[last] = '--' suffix (ignore)
-                                for (var i = 1; i < parts.length - 1; i++) {
-                                    var part = parts[i];
-                                    // Strip leading \r\n
-                                    if (part.startsWith('\r\n')) part = part.slice(2);
-                                    if (part.endsWith('\r\n')) part = part.slice(0, -2);
-                                    // Split headers from body at first blank line
-                                    var headerEnd = part.indexOf('\r\n\r\n');
-                                    if (headerEnd < 0) continue;
-                                    var rawHeaders = part.slice(0, headerEnd);
-                                    var partBody = part.slice(headerEnd + 4);
-                                    // Parse Content-Disposition
-                                    var cd = '';
-                                    var lines = rawHeaders.split('\r\n');
-                                    for (var j = 0; j < lines.length; j++) {
-                                        if (lines[j].toLowerCase().startsWith('content-disposition:')) {
-                                            cd = lines[j].slice(lines[j].indexOf(':') + 1).trim();
-                                        }
-                                    }
-                                    var namem = cd.match(/name="([^"]*)"/);
-                                    var filenamem = cd.match(/filename="([^"]*)"/);
-                                    if (!namem) continue;
-                                    var fieldName = namem[1];
-                                    if (filenamem) {
-                                        fd.append(fieldName, new File([partBody], filenamem[1]));
-                                    } else {
-                                        fd.append(fieldName, partBody);
-                                    }
-                                }
-                                return Promise.resolve(fd);
-                            }
-                            return Promise.reject(new TypeError('formData: unsupported Content-Type: ' + ct));
-                        } catch(e) { return Promise.reject(e); }
-                    },
-                    clone:  function() { return Object.assign({}, this); },
-                };
+                });
             });
         };
         "#,

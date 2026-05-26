@@ -7,6 +7,7 @@ edition = "2024"
 [dev-dependencies]
 tempfile.workspace = true
 tungstenite = { workspace = true }
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 
 [[test]]
 name = "crypto_module"
@@ -31,6 +32,38 @@ path = "tests/stream_module.rs"
 [[test]]
 name = "blob_file_module"
 path = "tests/blob_file_module.rs"
+
+[[test]]
+name = "http_server"
+path = "tests/http_server.rs"
+
+[[test]]
+name = "net_server"
+path = "tests/net_server.rs"
+
+[[test]]
+name = "system_modules"
+path = "tests/system_modules.rs"
+
+[[test]]
+name = "zlib_module"
+path = "tests/zlib_module.rs"
+
+[[test]]
+name = "fs_module"
+path = "tests/fs_module.rs"
+
+[[test]]
+name = "url_globals"
+path = "tests/url_globals.rs"
+
+[[test]]
+name = "web_globals"
+path = "tests/web_globals.rs"
+
+[[test]]
+name = "wintercg_globals"
+path = "tests/wintercg_globals.rs"
 
 [dependencies]
 rquickjs.workspace = true

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Pre-push hook — installed by cargo-husky
+# Runs on every `git push`. Blocks push if any test fails.
+set -e
+
+echo "[pre-push] Running test suite..."
+cargo test
+
+echo "[pre-push] OK"

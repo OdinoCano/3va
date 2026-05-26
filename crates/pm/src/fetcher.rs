@@ -94,11 +94,11 @@ impl PackageFetcher {
             }
 
             // Create parent directories before extracting.
-            if let Some(parent) = out_path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    tracing::warn!("Could not create parent dir for {:?}: {}", cleaned, e);
-                    continue;
-                }
+            if let Some(parent) = out_path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                tracing::warn!("Could not create parent dir for {:?}: {}", cleaned, e);
+                continue;
             }
 
             // Handle entry types explicitly.

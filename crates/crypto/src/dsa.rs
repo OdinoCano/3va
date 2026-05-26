@@ -17,8 +17,8 @@
 //! All byte arrays are hex-encoded for easy transport.
 
 use ml_dsa::{
-    EncodedVerifyingKey, Generate, KeyExport, MlDsa65, Signature, SignatureEncoding, SigningKey,
-    Signer, Verifier, VerifyingKey, common::Key,
+    EncodedVerifyingKey, Generate, KeyExport, MlDsa65, Signature, SignatureEncoding, Signer,
+    SigningKey, Verifier, VerifyingKey, common::Key,
 };
 
 use crate::CryptoError;
@@ -64,15 +64,12 @@ pub fn signing_key_to_hex(sk: &SigningKey<MlDsa65>) -> String {
 /// Decode a signing key from its 32-byte seed hex.
 pub fn signing_key_from_hex(s: &str) -> Result<SigningKey<MlDsa65>, CryptoError> {
     let bytes = hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
-    let arr: Key<SigningKey<MlDsa65>> = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| {
-            CryptoError::InvalidKey(format!(
-                "signing key: expected 32 bytes, got {}",
-                bytes.len()
-            ))
-        })?;
+    let arr: Key<SigningKey<MlDsa65>> = bytes.as_slice().try_into().map_err(|_| {
+        CryptoError::InvalidKey(format!(
+            "signing key: expected 32 bytes, got {}",
+            bytes.len()
+        ))
+    })?;
     Ok(SigningKey::<MlDsa65>::from_seed(&arr))
 }
 
@@ -84,15 +81,12 @@ pub fn verifying_key_to_hex(vk: &VerifyingKey<MlDsa65>) -> String {
 /// Decode a verifying key from hex.
 pub fn verifying_key_from_hex(s: &str) -> Result<VerifyingKey<MlDsa65>, CryptoError> {
     let bytes = hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
-    let arr: EncodedVerifyingKey<MlDsa65> = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| {
-            CryptoError::InvalidKey(format!(
-                "verifying key: expected 1952 bytes, got {}",
-                bytes.len()
-            ))
-        })?;
+    let arr: EncodedVerifyingKey<MlDsa65> = bytes.as_slice().try_into().map_err(|_| {
+        CryptoError::InvalidKey(format!(
+            "verifying key: expected 1952 bytes, got {}",
+            bytes.len()
+        ))
+    })?;
     Ok(VerifyingKey::<MlDsa65>::decode(&arr))
 }
 

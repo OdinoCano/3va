@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 use vvva_permissions::{Capability, PermissionState};
 use wasmtime::{Config, Engine, Linker, Module, Store};
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi::preview1::{self, WasiP1Ctx};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 pub struct WasmEngine {
     engine: Engine,
@@ -19,7 +19,10 @@ impl WasmEngine {
         let mut config = Config::new();
         config.async_support(true);
         let engine = Engine::new(&config)?;
-        Ok(Self { engine, permissions })
+        Ok(Self {
+            engine,
+            permissions,
+        })
     }
 
     pub async fn eval_file_with_args(&self, path: &Path, args: &[String]) -> anyhow::Result<()> {
@@ -59,14 +62,14 @@ impl WasmEngine {
                     if p.is_dir() {
                         let _ = builder.preopened_dir(
                             &p,
-                            p.to_string_lossy().to_string(),
+                            p.to_string_lossy().as_ref(),
                             DirPerms::READ,
                             FilePerms::READ,
                         );
                     } else if let Some(parent) = p.parent() {
                         let _ = builder.preopened_dir(
                             parent,
-                            parent.to_string_lossy().to_string(),
+                            parent.to_string_lossy().as_ref(),
                             DirPerms::READ,
                             FilePerms::READ,
                         );
@@ -76,14 +79,14 @@ impl WasmEngine {
                     if p.is_dir() {
                         let _ = builder.preopened_dir(
                             &p,
-                            p.to_string_lossy().to_string(),
+                            p.to_string_lossy().as_ref(),
                             DirPerms::all(),
                             FilePerms::all(),
                         );
                     } else if let Some(parent) = p.parent() {
                         let _ = builder.preopened_dir(
                             parent,
-                            parent.to_string_lossy().to_string(),
+                            parent.to_string_lossy().as_ref(),
                             DirPerms::all(),
                             FilePerms::all(),
                         );
@@ -106,7 +109,9 @@ impl WasmEngine {
         if let Ok(func) = instance.get_typed_func::<(), ()>(&mut store, "_start") {
             func.call_async(&mut store, ()).await?;
         } else {
-            anyhow::bail!("No '_start' function found in WebAssembly module. Only WASI Command modules are supported.");
+            anyhow::bail!(
+                "No '_start' function found in WebAssembly module. Only WASI Command modules are supported."
+            );
         }
 
         Ok(())

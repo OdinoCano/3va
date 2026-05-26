@@ -1373,7 +1373,10 @@ async fn main() -> anyhow::Result<()> {
                 info!("Audit log written to {:?}", log_path);
             }
         }
-        Commands::Install { packages, allow_net } => {
+        Commands::Install {
+            packages,
+            allow_net,
+        } => {
             if packages.is_empty() {
                 info!("Installing dependencies from manifest...");
                 info!("Note: Post-install scripts are DISABLED by default for security.");
