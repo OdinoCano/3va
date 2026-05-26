@@ -1,0 +1,20 @@
+# CODEOWNERS — enforced when branch protection requires review.
+# Changes to these paths require approval from a project maintainer
+# before the PR can be merged, regardless of who opened it.
+
+# Security-critical: permission model, capability enforcement
+/crates/permissions/                  @edgar-sophava
+/crates/js/src/builtins/             @edgar-sophava
+/crates/wasm/src/                    @edgar-sophava
+
+# CI / security pipelines — no one can weaken gates without review
+/.github/                             @edgar-sophava
+
+# Dependency declarations — must be reviewed for supply-chain risk
+/Cargo.toml                           @edgar-sophava
+/Cargo.lock                           @edgar-sophava
+/deny.toml                            @edgar-sophava
+
+# Workspace-wide configuration
+/.cargo/                              @edgar-sophava
+/rust-toolchain.toml                  @edgar-sophava
