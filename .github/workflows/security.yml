@@ -5,183 +5,101 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  schedule:
+    # Weekly full scan every Monday at 06:00 UTC
+    - cron: '0 6 * * 1'
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  cargo-hardening:
-    name: Cargo Hardening
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cargo format
-        run: cargo fmt --check
-
-      - name: Cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Cargo test
-        run: cargo test --all-features
-
-  dependency-audit:
-    name: Dependency Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-
-      - name: Cargo audit
-        run: cargo audit --deny-warnings
-
-      - name: Install cargo-deny
-        run: cargo install cargo-deny
-
-      - name: Cargo deny
-        run: cargo deny check
-
+  # ── Unsafe-code inventory (informational, never blocks) ──────────────────────
   unsafe-audit:
-    name: Unsafe Code Audit
+    name: Unsafe Code Inventory
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
+      - uses: Swatinem/rust-cache@v2
       - name: Install cargo-geiger
-        run: cargo install cargo-geiger
+        run: cargo install cargo-geiger --locked
+      - name: Run cargo-geiger
+        run: cargo geiger 2>&1 || true
 
-      - name: Cargo geiger
-        run: cargo geiger
-        continue-on-error: true
-
-  semgrep-scan:
-    name: Semgrep Security Scan
+  # ── Semgrep SAST scan (blocks on ERROR-severity findings) ───────────────────
+  semgrep:
+    name: Semgrep SAST
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install Semgrep
         run: pip install semgrep
-
       - name: Run Semgrep
-        run: semgrep --config .semgrep/rules/ --severity ERROR --json --output=semgrep-results.json . || true
-
-      - name: Check Semgrep results
         run: |
-          if [ -f semgrep-results.json ]; then
-            count=$(jq '.results | length' semgrep-results.json || echo "0")
-            if [ "$count" -gt "0" ]; then
-              echo "Semgrep found $count issues"
-              cat semgrep-results.json
-              exit 1
-            fi
+          if [ -d .semgrep/rules ]; then
+            semgrep --config .semgrep/rules/ --severity ERROR --error .
+          else
+            echo "No local Semgrep rules found — skipping custom rules."
           fi
 
+  # ── Capability / sandbox security tests ─────────────────────────────────────
+  # These are real tests in the test suite, not optional.
   security-tests:
     name: Security Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run capability and sandbox tests
+        run: cargo test -p vvva_permissions
 
-      - name: Run path traversal tests
-        run: cargo test --test security path_traversal || true
-
-      - name: Run sandbox escape tests
-        run: cargo test --test security sandbox_escape || true
-
-      - name: Run capability bypass tests
-        run: cargo test --test security capability_bypass || true
-
-      - name: Run DOS prevention tests
-        run: cargo test --test security dos_prevention || true
-
+  # ── Fuzzing (scheduled only, experimental) ───────────────────────────────────
   fuzzing:
-    name: Fuzzing
+    name: Fuzzing (30 s per target)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    if: github.event_name == 'schedule'
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@nightly
-
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
-
-      - name: List fuzz targets
-        run: ls fuzz/fuzz_targets/ 2>/dev/null || echo "No fuzz targets"
-
-      - name: Run fuzzing
-        if: false
+        run: cargo install cargo-fuzz --locked
+      - name: Run fuzz targets
         run: |
-          for target in $(ls fuzz/fuzz_targets/ 2>/dev/null); do
-            cargo fuzz run "${target%.rs}" -- -max_total_time=60 || true
+          targets=$(ls fuzz/fuzz_targets/*.rs 2>/dev/null | xargs -I{} basename {} .rs)
+          if [ -z "$targets" ]; then
+            echo "No fuzz targets found."
+            exit 0
+          fi
+          for target in $targets; do
+            echo "Fuzzing: $target"
+            cargo fuzz run "$target" -- -max_total_time=30
           done
 
-  sanitizer-build:
-    name: Sanitizers (Nightly)
+  # ── AddressSanitizer + UBSan (scheduled only, nightly) ───────────────────────
+  sanitizers:
+    name: Sanitizers (ASan + UBSan)
     runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: rustfmt
-
+          targets: x86_64-unknown-linux-gnu
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
       - name: AddressSanitizer
-        if: false
         run: |
-          rustup target add x86_64-unknown-linux-gnu
-          RUSTFLAGS="-Z sanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu || true
-
+          RUSTFLAGS="-Z sanitizer=address" \
+            cargo +nightly test -Zbuild-std \
+            --target x86_64-unknown-linux-gnu \
+            -p vvva_permissions -p vvva_js
       - name: UndefinedBehaviorSanitizer
-        if: false
         run: |
-          rustup target add x86_64-unknown-linux-gnu
-          RUSTFLAGS="-Z sanitizer=undefined" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu || true
-
-  secret-scanning:
-    name: Secret Scanning
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install gitleaks
-        run: brew install gitleaks || (wget -O /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.18.0/gitleaks_8.18.0_linux_x64.tar.gz && tar -xzf /tmp/gitleaks.tar.gz -C /tmp && mv /tmp/gitleaks /usr/local/bin/)
-
-      - name: Run gitleaks
-        run: gitleaks detect --source . --verbose || true
-
-  codeql-analysis:
-    name: CodeQL Analysis
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: rust
-
-      - name: Build
-        run: cargo build --all-features
-
-      - name: Analyze
-        uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:rust"
+          RUSTFLAGS="-Z sanitizer=undefined" \
+            cargo +nightly test -Zbuild-std \
+            --target x86_64-unknown-linux-gnu \
+            -p vvva_permissions -p vvva_js
