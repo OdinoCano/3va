@@ -353,17 +353,101 @@ fn do_bundle(input: &Path, output: &Path, options: Option<BundlerOptions>) -> an
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
-    #[test]
-    fn test_bundler_creation() {
-        let bundler = Bundler::new(PathBuf::from("."));
-        assert!(bundler.modules.is_empty());
+    fn write(dir: &TempDir, name: &str, content: &str) -> String {
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        path.to_string_lossy().into_owned()
     }
 
+    // add_entry rejects a path that does not exist.
     #[test]
-    fn test_bundler_options_default() {
-        let options = BundlerOptions::default();
-        assert!(!options.minify);
-        assert_eq!(options.format, OutputFormat::Iife);
+    fn add_entry_nonexistent_path_returns_error() {
+        let mut b = Bundler::new(PathBuf::from("."));
+        assert!(b.add_entry("/no/such/file.js").is_err());
+    }
+
+    // add_entry accepts an existing file and registers it.
+    #[test]
+    fn add_entry_existing_file_registers_module() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "a.js", "const x = 1;");
+        let mut b = Bundler::new(dir.path().to_path_buf());
+        b.add_entry(&path).unwrap();
+        assert!(!b.modules.is_empty());
+    }
+
+    // bundle() on a JS file produces non-empty output.
+    #[test]
+    fn bundle_single_module_produces_output() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "index.js", "var x = 42;");
+        let mut b = Bundler::new(dir.path().to_path_buf());
+        b.add_entry(&path).unwrap();
+        let code = b.bundle().unwrap();
+        assert!(!code.is_empty(), "bundle output must not be empty");
+        assert!(code.contains("42"), "bundle must include source content");
+    }
+
+    // with_options(Cjs) changes the format used during generate().
+    #[test]
+    fn with_options_changes_output_format() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "index.js", "var x = 1;");
+
+        let mut iife = Bundler::new(dir.path().to_path_buf());
+        iife.add_entry(&path).unwrap();
+        let iife_code = iife.bundle().unwrap();
+
+        let mut cjs = Bundler::new(dir.path().to_path_buf()).with_options(BundlerOptions {
+            format: OutputFormat::Cjs,
+            ..BundlerOptions::default()
+        });
+        cjs.add_entry(&path).unwrap();
+        let cjs_code = cjs.bundle().unwrap();
+
+        assert!(
+            iife_code.starts_with("(function"),
+            "IIFE must start with (function"
+        );
+        assert!(
+            !cjs_code.starts_with("(function"),
+            "CJS must not start with (function"
+        );
+    }
+
+    // extract_imports finds both ESM import and CJS require paths.
+    #[test]
+    fn extract_imports_finds_esm_and_cjs_deps() {
+        let b = Bundler::new(PathBuf::from("."));
+        let code = r#"
+            import foo from './foo.js';
+            const bar = require('./bar.js');
+        "#;
+        let deps = b.extract_imports(code);
+        assert!(
+            deps.contains(&"./foo.js".to_string()),
+            "ESM import must be detected"
+        );
+        assert!(
+            deps.contains(&"./bar.js".to_string()),
+            "CJS require must be detected"
+        );
+    }
+
+    // process_module wraps JSON as module.exports assignment.
+    #[test]
+    fn process_module_wraps_json_as_module_exports() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("data.json");
+        std::fs::write(&path, r#"{"key":"val"}"#).unwrap();
+        let b = Bundler::new(dir.path().to_path_buf());
+        let out = b.process_module(&path).unwrap();
+        assert!(
+            out.starts_with("module.exports ="),
+            "JSON must become module.exports"
+        );
+        assert!(out.contains("\"key\""), "JSON content must be preserved");
     }
 }

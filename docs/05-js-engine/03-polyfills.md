@@ -22,7 +22,7 @@ Buffer.isBuffer(buf);   // true
 
 ### `fs` (`require('fs')`)
 
-Permission-gated (`--allow-read` / `--allow-write`). All methods have a sync variant, an async callback variant, and a `fs.promises.*` variant.
+Permission-gated (`--allow-read` / `--allow-write`). `fs` is the only built-in module that provides all three call styles: sync variants (`readFileSync`, etc.), async callback variants, and `fs.promises.*` Promises. Other modules (`zlib`, `child_process`) are **async-only** by design — their sync counterparts throw with an explanatory message.
 
 ```javascript
 const fs = require('fs');  // or require('node:fs')
@@ -221,7 +221,7 @@ zlib.constants.Z_BEST_SPEED     // 1
 zlib.constants.Z_BEST_COMPRESSION // 9
 ```
 
-**Note:** `gzipSync`/`gunzipSync`/`deflateSync`/`inflateSync` throw — use the async callback forms.
+**Note:** `gzipSync`/`gunzipSync`/`deflateSync`/`inflateSync` throw `Error: not available in 3va` — the module is async-only. Use the callback forms above.
 
 ## 3.7 `child_process` (Rust implementation via `tokio::process`)
 
@@ -257,7 +257,7 @@ function execAsync(cmd) {
 const { stdout } = await execAsync('echo hello');
 ```
 
-**Note:** `execSync` and `spawnSync` throw — use the async forms.
+**Note:** `execSync` and `spawnSync` throw `Error: not available in 3va` — the module is async-only. Use the callback or Promise wrapper forms above.
 
 ## 3.9 `TextEncoder` / `TextDecoder` (global)
 
