@@ -471,3 +471,99 @@ async fn fs_node_prefix_alias() {
         .unwrap();
     assert_eq!(r, "true");
 }
+
+// ── fd-based operations ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn fs_fd_open_read_close() {
+    let dir = TempDir::new().unwrap();
+    let e = engine_rw(&dir).await;
+    let file_path = path_str(&dir, "test_fd.txt");
+    std::fs::write(&file_path, "hello world").unwrap();
+
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+        var fs = require('fs');
+        var fd = fs.openSync({:?}, 'r');
+        var buf = new Uint8Array(5);
+        var n = fs.readSync(fd, buf, 0, 5, 0);
+        fs.closeSync(fd);
+        new TextDecoder().decode(buf.slice(0, n))
+    "#,
+            file_path
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "hello");
+}
+
+#[tokio::test]
+async fn fs_fd_write_sync() {
+    let dir = TempDir::new().unwrap();
+    let e = engine_rw(&dir).await;
+    let file_path = path_str(&dir, "test_fd_write.txt");
+
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+        var fs = require('fs');
+        var fd = fs.openSync({:?}, 'w');
+        var data = new TextEncoder().encode('written');
+        var n = fs.writeSync(fd, data, 0, data.length, null);
+        fs.closeSync(fd);
+        String(n)
+    "#,
+            file_path
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "7");
+    assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "written");
+}
+
+#[tokio::test]
+async fn fs_mkdtemp_creates_directory() {
+    let dir = TempDir::new().unwrap();
+    let e = engine_rw(&dir).await;
+    let prefix = path_str(&dir, "tmp-");
+
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+        var fs = require('fs');
+        var tmpDir = fs.mkdtempSync({:?});
+        fs.existsSync(tmpDir) ? 'ok' : 'fail'
+    "#,
+            prefix
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "ok");
+}
+
+#[tokio::test]
+async fn fs_opendir_iterates_entries() {
+    let dir = TempDir::new().unwrap();
+    let e = engine_rw(&dir).await;
+    std::fs::write(dir.path().join("a.txt"), "").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "").unwrap();
+    let dir_path = dir.path().to_string_lossy().into_owned();
+
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+        var fs = require('fs');
+        var d = fs.opendirSync({:?});
+        var names = [];
+        var entry;
+        while ((entry = d.readSync()) !== null) names.push(entry.name);
+        d.closeSync();
+        names.sort().join(',')
+    "#,
+            dir_path
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "a.txt,b.txt");
+}

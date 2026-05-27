@@ -9,6 +9,107 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **`EventEmitter` — API completa** (`modules.rs`):
+  Nuevos métodos que muchos paquetes npm dan por sentados:
+  - `prependListener(event, fn)` / `prependOnceListener(event, fn)` — agregan listeners al inicio de la cola (en lugar del final).
+  - `rawListeners(event)` — devuelve los wrappers internos de `once` tal como están (a diferencia de `listeners()` que los desenvuelve).
+  - `eventNames()` — array con todos los eventos que tienen listeners registrados.
+  - `getMaxListeners()` — devuelve el límite configurado con `setMaxListeners()`.
+  - `EventEmitter.listenerCount(emitter, event)` — método estático de compatibilidad Node.js.
+  - `EventEmitter.defaultMaxListeners` — propiedad estática equivalente a `EventEmitter.setMaxListeners`.
+  - `listeners()` corregido: ahora devuelve la función original (no el wrapper de `once`).
+
+- **`zlib` — Transform streams reales** (`builtins/zlib.rs`):
+  Las funciones `createGzip`, `createGunzip`, `createDeflate`, `createInflate`, `createDeflateRaw`, `createInflateRaw` ya no devuelven objetos vacíos. Ahora devuelven **Transform streams** con:
+  - `write(chunk[, enc, cb])` — comprime/descomprime asíncronamente; emite `data` con el resultado.
+  - `end([chunk][, cb])` — espera a que todos los `write()` pendientes completen antes de emitir `finish`/`end`.
+  - `pipe(dest)` / `unpipe(dest)` — encadenamiento estándar de streams.
+  - `on/once/off/emit` — interfaz EventEmitter completa.
+  - `pause()`, `resume()`, `destroy()`, `setEncoding()`.
+  - Propagación correcta al destino (`pipe`) en eventos `data` y `end`.
+  - Brotli: `createBrotliCompress` / `createBrotliDecompress` (alias sobre gzip — compresión real pendiente).
+
+- **`zlib` — métodos síncronos reales** (`builtins/zlib.rs`):
+  `gzipSync`, `gunzipSync`, `deflateSync`, `inflateSync`, `deflateRawSync`, `inflateRawSync`,
+  `brotliCompressSync`, `brotliDecompressSync` — ya no lanzan "not available". Están respaldados
+  por las mismas funciones Rust (`flate2`) pero ejecutadas de forma síncrona (sin `spawn_blocking`).
+  Útiles en transformaciones de build-time.
+
+- **`process` — EventEmitter completo** (`builtins/process.rs`):
+  El objeto `process` ahora expone la API EventEmitter completa:
+  `on`, `once`, `off`, `emit`, `removeListener`, `removeAllListeners`, `addListener`,
+  `prependListener`, `prependOnceListener`, `rawListeners`, `eventNames`, `listenerCount`.
+  Los listeners de señales (`SIGINT`, `SIGTERM`, etc.) se registran con la misma API.
+
+- **`process.memoryUsage()` — valores reales en Linux** (`builtins/process.rs`):
+  Lee el RSS real de `/proc/self/status`. Devuelve `{ rss, heapTotal, heapUsed, external, arrayBuffers }`.
+  `process.memoryUsage.rss()` — atajo directo al RSS.
+
+- **`process.cpuUsage([prev])` — valores reales en Linux** (`builtins/process.rs`):
+  Lee tiempos de CPU de `/proc/self/stat`. Devuelve `{ user, system }` en microsegundos.
+  Acepta un valor previo para obtener el diferencial.
+
+- **`process.uptime()`** — segundos transcurridos desde el inicio del proceso.
+- **`process.title`**, **`process.execPath`**, **`process.execArgv`** — propiedades estándar.
+- **`process.abort()`** — llama a `process.exit(1)`.
+- **`process.kill(pid)`** — llama a `process.exit(0)` si `pid === process.pid`.
+- **`process.report`** — objeto stub compatible con `--report-*` de Node.js.
+- **`process.allowedNodeEnvironmentFlags`** — `Set` vacío (compatibilidad).
+- **`process.setUncaughtExceptionCaptureCallback(fn)`** / `hasUncaughtExceptionCaptureCallback()`.
+
+- **`os` — valores reales del sistema** (`builtins/process.rs` + `modules.rs`):
+  - `os.hostname()` — nombre real del host vía `gethostname(3)`.
+  - `os.totalmem()` / `os.freemem()` — memoria real de `/proc/meminfo` en Linux.
+  - `os.uptime()` — uptime real de `/proc/uptime` en Linux.
+  - `os.platform()` / `os.arch()` — derivados de `process.platform` / `process.arch`.
+  - `os.homedir()` / `os.tmpdir()` — respetan `process.env.HOME` / `process.env.TMPDIR`.
+  - `os.EOL` — `'\r\n'` en Windows, `'\n'` en Unix.
+  - `os.availableParallelism()`, `os.getPriority()`, `os.setPriority()`, `os.machine()`.
+  - `os.constants.signals`, `os.constants.errno`, `os.constants.priority` con valores correctos.
+  - `os.userInfo()` — respeta `process.env.USER` y `process.env.HOME`.
+
+- **`path` — reescritura completa** (`modules.rs`):
+  Implementación generada por `makePath(sep, isAbsFn)` — soporta posix y win32 con la misma lógica:
+  - `path.relative(from, to)` — antes devolvía `to` sin modificar. Ahora calcula la ruta relativa real con `..`.
+  - `path.normalize(p)` — colapsa `.` y `..` correctamente.
+  - `path.resolve(...parts)` — sube hasta encontrar una parte absoluta o usa `process.cwd()`.
+  - `path.posix` — submódulo con separador `/` (mismo objeto en Linux/macOS).
+  - `path.win32` — submódulo con separador `\` e `isAbsolute` con regex `C:\`.
+  - `require('path/posix')`, `require('node:path/posix')`, `require('path/win32')`, `require('node:path/win32')`.
+  - `path.toNamespacedPath(p)` — identidad (no-op en POSIX).
+  - `path.matchesGlob()` — stub (devuelve `false`).
+
+- **`fs` — operaciones basadas en file descriptor** (`builtins/fs.rs`):
+  Respaldadas por una tabla de FDs Rust (`Arc<Mutex<FdTable>>`) con `std::fs::File` reales:
+  - `fs.open(path, flags[, mode], cb)` / `fs.openSync(path, flags[, mode])` → `fd` entero.
+    Flags de texto: `'r'`, `'r+'`, `'w'`, `'w+'`, `'a'`, `'a+'`, `'wx'`, `'wx+'`, etc.
+  - `fs.close(fd[, cb])` / `fs.closeSync(fd)`.
+  - `fs.read(fd, buffer, offset, length, position, cb)` / `fs.readSync(...)` → bytes leídos.
+  - `fs.write(fd, buffer, offset, length, position, cb)` / `fs.writeSync(...)` → bytes escritos.
+  - `fs.fstat(fd[, cb])` / `fs.fstatSync(fd)` → objeto stat con las mismas propiedades que `statSync`.
+  - `fs.fsync(fd[, cb])` / `fs.fdatasync(fd[, cb])` — completado silencioso.
+  - `fs.ftruncate(fd[, len][, cb])` / `fs.ftruncateSync`.
+
+- **`fs.mkdtemp(prefix[, opts][, cb])` / `fs.mkdtempSync(prefix)`** — crea un directorio temporal único.
+
+- **`fs.opendir(path[, opts][, cb])` / `fs.opendirSync(path)`** — devuelve un objeto `Dir` con:
+  - `read([cb])` — entrada siguiente como `Dirent` o `null` al terminar; también retorna Promise.
+  - `readSync()` — variante síncrona.
+  - `close([cb])` — cierra el directorio.
+  - `[Symbol.asyncIterator]()` — iterable asíncrono compatible con `for await...of`.
+  - `[Symbol.iterator]()` — iterable síncrono.
+
+- **`fs` — métodos adicionales** (`modules.rs`):
+  `fs.truncate`, `fs.lutimes`, `fs.lutimesSync`, `fs.lchown`, `fs.lchownSync`,
+  `fs.chown`, `fs.chownSync`, `fs.fchown`, `fs.fchownSync`,
+  `fs.fchmod`, `fs.fchmodSync`, `fs.link`, `fs.linkSync`,
+  `fs.readlink`, `fs.readlinkSync`.
+
+- **`stat_meta_to_json` — helper compartido** (`builtins/fs.rs`):
+  Función Rust que serializa `std::fs::Metadata` a JSON. Usada por `statSync`, `lstatSync` y el nuevo `fstatSync`.
+
+### Added
+
 - **WinterCG `Headers` class** — `new Headers(init?)` where `init` may be a plain object, a
   `[[key, value]]` array, or another `Headers`. Case-insensitive; iterable via `for..of`,
   `entries()`, `keys()`, `values()`, `forEach()`. `getSetCookie()` returns all `set-cookie`

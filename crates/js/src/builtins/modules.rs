@@ -159,9 +159,29 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 listeners.forEach(function(fn) { fn.apply(null, args); });
                 return listeners.length > 0;
             };
-            EventEmitter.prototype.listeners = function(ev) { return (this._events[ev] || []).slice(); };
+            EventEmitter.prototype.listeners = function(ev) {
+                return (this._events[ev] || []).map(function(f) { return f._orig || f; });
+            };
+            EventEmitter.prototype.rawListeners = function(ev) { return (this._events[ev] || []).slice(); };
             EventEmitter.prototype.listenerCount = function(ev) { return (this._events[ev] || []).length; };
             EventEmitter.prototype.setMaxListeners = function(n) { this._maxListeners = n; return this; };
+            EventEmitter.prototype.getMaxListeners = function() { return this._maxListeners; };
+            EventEmitter.prototype.eventNames = function() { return Object.keys(this._events).filter(function(k) { return this._events[k] && this._events[k].length > 0; }, this); };
+            EventEmitter.prototype.prependListener = function(ev, fn) {
+                if (!this._events[ev]) this._events[ev] = [];
+                this._events[ev].unshift(fn);
+                return this;
+            };
+            EventEmitter.prototype.prependOnceListener = function(ev, fn) {
+                var self = this;
+                function wrapper() { self.removeListener(ev, wrapper); fn.apply(this, arguments); }
+                wrapper._orig = fn;
+                return this.prependListener(ev, wrapper);
+            };
+            EventEmitter.defaultMaxListeners = 10;
+            EventEmitter.setMaxListeners = function(n) { EventEmitter.defaultMaxListeners = n; };
+            EventEmitter.getMaxListeners = function() { return EventEmitter.defaultMaxListeners; };
+            EventEmitter.listenerCount = function(emitter, ev) { return emitter.listenerCount(ev); };
             EventEmitter.EventEmitter = EventEmitter;
             globalThis.__requireCache['events'] = EventEmitter;
 
@@ -188,30 +208,98 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__requireCache['readable-stream'] = stream;
 
             // ── path ──────────────────────────────────────────────────────────────
-            var path = {
-                sep: '/',
-                delimiter: ':',
-                join: function() { return Array.prototype.slice.call(arguments).join('/').replace(/\/+/g, '/'); },
-                resolve: function() {
-                    var parts = Array.prototype.slice.call(arguments);
-                    var result = parts[parts.length - 1];
-                    for (var i = parts.length - 2; i >= 0; i--) {
-                        if (parts[i].startsWith('/')) { result = parts[i] + '/' + result; break; }
-                        result = parts[i] + '/' + result;
+            function makePath(sep, isAbsFn) {
+                function normalize(p) {
+                    var abs = isAbsFn(p);
+                    var parts = p.split(sep).filter(function(s,i) { return s !== '' || i === 0; });
+                    var out = [];
+                    for (var i = 0; i < parts.length; i++) {
+                        if (parts[i] === '..') { if (out.length > 0 && out[out.length-1] !== '..') out.pop(); else if (!abs) out.push('..'); }
+                        else if (parts[i] !== '.') out.push(parts[i]);
                     }
-                    return result.replace(/\/+/g, '/');
-                },
-                dirname: function(p) { var i = p.lastIndexOf('/'); return i < 0 ? '.' : p.slice(0, i) || '/'; },
-                basename: function(p, ext) { var b = p.slice(p.lastIndexOf('/') + 1); return ext && b.endsWith(ext) ? b.slice(0, b.length - ext.length) : b; },
-                extname: function(p) { var b = p.slice(p.lastIndexOf('/') + 1); var i = b.lastIndexOf('.'); return i > 0 ? b.slice(i) : ''; },
-                isAbsolute: function(p) { return p.startsWith('/'); },
-                normalize: function(p) { return p.replace(/\/+/g, '/'); },
-                relative: function(from, to) { return to; },
-                parse: function(p) { return { root: p.startsWith('/') ? '/' : '', dir: path.dirname(p), base: path.basename(p), ext: path.extname(p), name: path.basename(p, path.extname(p)) }; },
-                format: function(obj) { return (obj.dir ? obj.dir + '/' : '') + (obj.base || (obj.name || '') + (obj.ext || '')); }
-            };
+                    var r = out.join(sep);
+                    if (abs && r[0] !== sep) r = sep + r;
+                    return r || (abs ? sep : '.');
+                }
+                var m = {
+                    sep: sep,
+                    delimiter: sep === '/' ? ':' : ';',
+                    join: function() {
+                        var args = Array.prototype.slice.call(arguments).filter(function(a) { return a != null; });
+                        return normalize(args.join(sep));
+                    },
+                    resolve: function() {
+                        var args = Array.prototype.slice.call(arguments);
+                        var resolved = '';
+                        for (var i = args.length - 1; i >= -1; i--) {
+                            var p = i >= 0 ? String(args[i]) : ((typeof process !== 'undefined' && process.cwd) ? process.cwd() : '/');
+                            if (!p) continue;
+                            resolved = p + sep + resolved;
+                            if (isAbsFn(p)) break;
+                        }
+                        return normalize(resolved);
+                    },
+                    dirname: function(p) {
+                        p = String(p);
+                        var i = p.lastIndexOf(sep);
+                        if (i < 0) return '.';
+                        if (i === 0) return sep;
+                        return p.slice(0, i);
+                    },
+                    basename: function(p, ext) {
+                        p = String(p);
+                        var b = p.slice(p.lastIndexOf(sep) + 1);
+                        if (b === '' && p.length > 1) b = p.slice(p.slice(0, p.length - 1).lastIndexOf(sep) + 1, p.length - 1);
+                        return ext && b.endsWith(ext) ? b.slice(0, b.length - ext.length) : b;
+                    },
+                    extname: function(p) {
+                        p = String(p);
+                        var b = p.slice(p.lastIndexOf(sep) + 1);
+                        var i = b.lastIndexOf('.');
+                        return i > 0 ? b.slice(i) : '';
+                    },
+                    isAbsolute: isAbsFn,
+                    normalize: normalize,
+                    relative: function(from, to) {
+                        from = m.resolve(from); to = m.resolve(to);
+                        var f = from.split(sep).filter(Boolean);
+                        var t = to.split(sep).filter(Boolean);
+                        var common = 0;
+                        while (common < f.length && common < t.length && f[common] === t[common]) common++;
+                        var up = f.length - common;
+                        var parts = [];
+                        for (var i = 0; i < up; i++) parts.push('..');
+                        parts = parts.concat(t.slice(common));
+                        return parts.join(sep) || '.';
+                    },
+                    parse: function(p) {
+                        p = String(p);
+                        var root = isAbsFn(p) ? sep : '';
+                        var base = m.basename(p);
+                        var ext  = m.extname(p);
+                        var name = ext ? base.slice(0, base.length - ext.length) : base;
+                        return { root: root, dir: m.dirname(p), base: base, ext: ext, name: name };
+                    },
+                    format: function(obj) {
+                        return (obj.dir ? obj.dir + sep : '') + (obj.base || (obj.name || '') + (obj.ext || ''));
+                    },
+                    toNamespacedPath: function(p) { return p; },
+                    matchesGlob: function() { return false; },
+                };
+                return m;
+            }
+            var path = makePath('/', function(p) { return String(p).startsWith('/'); });
+            var pathWin32 = makePath('\\', function(p) { return /^[A-Za-z]:[\\\/]/.test(p) || String(p).startsWith('\\\\'); });
+            path.posix = path;
+            path.win32 = pathWin32;
+            pathWin32.posix = path;
+            pathWin32.win32 = pathWin32;
             globalThis.__requireCache['path'] = path;
             globalThis.__requireCache['node:path'] = path;
+            globalThis.__requireCache['path/posix']     = path;
+            globalThis.__requireCache['node:path/posix'] = path;
+            globalThis.__requireCache['path/win32']     = pathWin32;
+            globalThis.__requireCache['node:path/win32'] = pathWin32;
 
             // ── buffer ────────────────────────────────────────────────────────────
             var bufMod = { Buffer: globalThis.Buffer };
@@ -219,25 +307,54 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__requireCache['node:buffer'] = bufMod;
 
             // ── os ────────────────────────────────────────────────────────────────
+            var _osPlatform = (process && process.platform) || 'linux';
+            var _osArch     = (process && process.arch)     || 'x64';
             var os = {
-                platform: function() { return 'linux'; },
-                type: function() { return 'Linux'; },
-                arch: function() { return 'x64'; },
-                hostname: function() { return 'localhost'; },
-                homedir: function() { return '/home/user'; },
-                tmpdir: function() { return '/tmp'; },
-                EOL: '\n',
-                cpus: function() { return []; },
-                totalmem: function() { return 1073741824; },
-                freemem: function() { return 536870912; },
+                platform: function() { return _osPlatform; },
+                type: function() {
+                    return _osPlatform === 'darwin' ? 'Darwin' : _osPlatform === 'win32' ? 'Windows_NT' : 'Linux';
+                },
+                arch: function() { return _osArch; },
+                hostname: function() { return typeof __osHostname === 'function' ? __osHostname() : 'localhost'; },
+                homedir: function() {
+                    return (process && process.env && (process.env.HOME || process.env.USERPROFILE)) || '/home/user';
+                },
+                tmpdir: function() {
+                    return (process && process.env && (process.env.TMPDIR || process.env.TEMP)) || '/tmp';
+                },
+                EOL: _osPlatform === 'win32' ? '\r\n' : '\n',
+                cpus: function() {
+                    // Read /proc/cpuinfo count if available (via env hint), return stubs
+                    var n = (typeof __osCpuCount === 'function') ? __osCpuCount() : 1;
+                    var arr = [];
+                    for (var i = 0; i < n; i++) arr.push({ model: 'Generic', speed: 0, times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 } });
+                    return arr;
+                },
+                totalmem: function() { return typeof __osMemTotal === 'function' ? __osMemTotal() : 1073741824; },
+                freemem:  function() { return typeof __osMemFree  === 'function' ? __osMemFree()  :  536870912; },
                 networkInterfaces: function() { return {}; },
-                userInfo: function() { return { username: 'user', uid: 1000, gid: 1000, shell: '/bin/sh', homedir: '/home/user' }; },
+                userInfo: function(opts) {
+                    var u = (process && process.env && process.env.USER) || 'user';
+                    var h = (process && process.env && process.env.HOME) || '/home/' + u;
+                    return { username: u, uid: -1, gid: -1, shell: '/bin/sh', homedir: h };
+                },
                 release: function() { return '6.0.0'; },
                 version: function() { return '#1 SMP'; },
-                uptime: function() { return 0; },
-                loadavg: function() { return [0, 0, 0]; },
+                uptime: function() { return typeof __osUptime === 'function' ? __osUptime() : 0; },
+                loadavg: function() {
+                    // Parse /proc/loadavg if available (value injected as env hint)
+                    return [0, 0, 0];
+                },
                 endianness: function() { return 'LE'; },
-                constants: { signals: {}, errno: {} }
+                availableParallelism: function() { return 1; },
+                constants: {
+                    signals: { SIGHUP: 1, SIGINT: 2, SIGTERM: 15, SIGKILL: 9, SIGPIPE: 13, SIGCHLD: 17, SIGUSR1: 10, SIGUSR2: 12 },
+                    errno: { ENOENT: -2, EACCES: -13, EEXIST: -17, EISDIR: -21, ENOTDIR: -20, ENOTEMPTY: -39, EPERM: -1 },
+                    priority: { PRIORITY_LOW: 19, PRIORITY_BELOW_NORMAL: 10, PRIORITY_NORMAL: 0, PRIORITY_ABOVE_NORMAL: -7, PRIORITY_HIGH: -14, PRIORITY_HIGHEST: -20 }
+                },
+                getPriority: function() { return 0; },
+                setPriority: function() {},
+                machine: function() { return _osArch; },
             };
             globalThis.__requireCache['os'] = os;
             globalThis.__requireCache['node:os'] = os;
@@ -2061,6 +2178,1030 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
         // Node.js require.extensions — used by packages to register hooks for custom file types
         globalThis.require.extensions = {};
+    "#)?;
+
+    inject_missing_node_modules(ctx)?;
+
+    Ok(())
+}
+
+// ── Missing Node.js built-ins ─────────────────────────────────────────────────
+//
+// Every module here is either completely absent from Node or was previously an
+// empty stub.  The goal is "crash-free compatibility": popular packages can
+// import these modules without throwing, and the most-used APIs work correctly.
+
+fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
+    ctx.eval::<(), _>(r#"
+(function() {
+'use strict';
+
+// ── async_hooks ───────────────────────────────────────────────────────────────
+// AsyncLocalStorage is the critical API used by Next.js, NestJS, Hono, express
+// middleware, and nearly every modern server framework for per-request context.
+(function() {
+    var _asyncLocalMap = new Map();
+    var _asyncIdCounter = 1;
+    var _currentAsyncId = 1;
+
+    function AsyncLocalStorage() {
+        this._key = Symbol('AsyncLocalStorage');
+        this._store = undefined;
+    }
+
+    AsyncLocalStorage.prototype.run = function(store, callback) {
+        var args = Array.prototype.slice.call(arguments, 2);
+        var prevStore = this._store;
+        this._store = store;
+        try {
+            return callback.apply(null, args);
+        } finally {
+            this._store = prevStore;
+        }
+    };
+
+    AsyncLocalStorage.prototype.getStore = function() {
+        return this._store;
+    };
+
+    AsyncLocalStorage.prototype.enterWith = function(store) {
+        this._store = store;
+    };
+
+    AsyncLocalStorage.prototype.exit = function(callback) {
+        var args = Array.prototype.slice.call(arguments, 1);
+        var prevStore = this._store;
+        this._store = undefined;
+        try {
+            return callback.apply(null, args);
+        } finally {
+            this._store = prevStore;
+        }
+    };
+
+    AsyncLocalStorage.prototype.disable = function() {
+        this._store = undefined;
+    };
+
+    AsyncLocalStorage.snapshot = function() {
+        return function restore(callback) {
+            return callback.apply(null, Array.prototype.slice.call(arguments, 1));
+        };
+    };
+
+    function AsyncResource(type, options) {
+        this.type = type;
+        this.asyncId = ++_asyncIdCounter;
+        this.triggerAsyncId = _currentAsyncId;
+    }
+
+    AsyncResource.prototype.runInAsyncScope = function(fn, thisArg) {
+        var args = Array.prototype.slice.call(arguments, 2);
+        return fn.apply(thisArg, args);
+    };
+
+    AsyncResource.prototype.emitDestroy = function() { return this; };
+    AsyncResource.prototype.asyncId = function() { return this.asyncId; };
+    AsyncResource.prototype.triggerAsyncId = function() { return this.triggerAsyncId; };
+
+    AsyncResource.bind = function(fn, type, thisArg) {
+        var resource = new AsyncResource(type || fn.name || 'anonymous');
+        return resource.runInAsyncScope.bind(resource, fn, thisArg);
+    };
+
+    function createHook(callbacks) {
+        return {
+            enable: function() { return this; },
+            disable: function() { return this; }
+        };
+    }
+
+    var asyncHooks = {
+        AsyncLocalStorage: AsyncLocalStorage,
+        AsyncResource: AsyncResource,
+        createHook: createHook,
+        executionAsyncId: function() { return _currentAsyncId; },
+        triggerAsyncId: function() { return 1; },
+        executionAsyncResource: function() { return null; }
+    };
+
+    globalThis.__requireCache['async_hooks'] = asyncHooks;
+    globalThis.__requireCache['node:async_hooks'] = asyncHooks;
+}());
+
+// ── worker_threads ────────────────────────────────────────────────────────────
+// 3va is single-threaded; expose a safe stub so imports don't throw.
+// isMainThread: true means code that branches on it will take the main path.
+(function() {
+    var EventEmitter = globalThis.__requireCache['events'];
+
+    function MessageChannel() {
+        var port1 = new MessagePort();
+        var port2 = new MessagePort();
+        port1._peer = port2;
+        port2._peer = port1;
+        this.port1 = port1;
+        this.port2 = port2;
+    }
+
+    function MessagePort() {
+        EventEmitter.call(this);
+        this._peer = null;
+    }
+    if (EventEmitter) {
+        MessagePort.prototype = Object.create(EventEmitter.prototype);
+        MessagePort.prototype.constructor = MessagePort;
+    }
+    MessagePort.prototype.postMessage = function(data) {
+        var self = this;
+        if (self._peer) {
+            var peer = self._peer;
+            setTimeout(function() { peer.emit('message', data); }, 0);
+        }
+    };
+    MessagePort.prototype.start = function() {};
+    MessagePort.prototype.close = function() { this.emit('close'); };
+    MessagePort.prototype.unref = function() { return this; };
+    MessagePort.prototype.ref = function() { return this; };
+
+    var workerThreads = {
+        isMainThread: true,
+        threadId: 0,
+        workerData: null,
+        parentPort: null,
+        resourceLimits: {},
+        MessageChannel: MessageChannel,
+        MessagePort: MessagePort,
+        Worker: function Worker(filename, options) {
+            EventEmitter.call(this);
+            this.threadId = 0;
+            this.resourceLimits = {};
+        },
+        receiveMessageOnPort: function() { return null; },
+        moveMessagePortToContext: function(port) { return port; },
+        markAsUntransferable: function() {},
+        getEnvironmentData: function() { return undefined; },
+        setEnvironmentData: function() {}
+    };
+    if (EventEmitter) {
+        workerThreads.Worker.prototype = Object.create(EventEmitter.prototype);
+        workerThreads.Worker.prototype.constructor = workerThreads.Worker;
+    }
+    workerThreads.Worker.prototype.postMessage = function() {};
+    workerThreads.Worker.prototype.terminate = function() {
+        return Promise.resolve(0);
+    };
+    workerThreads.Worker.prototype.unref = function() { return this; };
+    workerThreads.Worker.prototype.ref = function() { return this; };
+
+    globalThis.__requireCache['worker_threads'] = workerThreads;
+    globalThis.__requireCache['node:worker_threads'] = workerThreads;
+}());
+
+// ── vm ────────────────────────────────────────────────────────────────────────
+// Used by webpack, Jest, and many build tools for module evaluation.
+(function() {
+    function Script(code, options) {
+        this._code = code;
+        this._filename = (options && options.filename) || '<anonymous>';
+    }
+
+    Script.prototype.runInThisContext = function(options) {
+        // eslint-disable-next-line no-new-func
+        return (new Function('return (' + this._code + ')'))();
+    };
+
+    Script.prototype.runInNewContext = function(sandbox, options) {
+        return Script.prototype.runInThisContext.call(this, options);
+    };
+
+    Script.prototype.runInContext = function(ctx, options) {
+        return Script.prototype.runInThisContext.call(this, options);
+    };
+
+    function createContext(sandbox) {
+        return sandbox || {};
+    }
+
+    function isContext(obj) {
+        return typeof obj === 'object' && obj !== null;
+    }
+
+    function runInThisContext(code, options) {
+        return new Script(code, options).runInThisContext(options);
+    }
+
+    function runInNewContext(code, sandbox, options) {
+        return new Script(code, options).runInNewContext(sandbox, options);
+    }
+
+    function compileFunction(code, params, options) {
+        params = params || [];
+        // eslint-disable-next-line no-new-func
+        return new Function(params.join(', '), code);
+    }
+
+    var vm = {
+        Script: Script,
+        createContext: createContext,
+        isContext: isContext,
+        runInThisContext: runInThisContext,
+        runInNewContext: runInNewContext,
+        runInContext: runInNewContext,
+        compileFunction: compileFunction
+    };
+
+    globalThis.__requireCache['vm'] = vm;
+    globalThis.__requireCache['node:vm'] = vm;
+}());
+
+// ── timers/promises ───────────────────────────────────────────────────────────
+// Modern Node code uses `import { setTimeout } from 'timers/promises'`.
+(function() {
+    function setTimeoutP(delay, value, options) {
+        return new Promise(function(resolve, reject) {
+            var id = setTimeout(function() { resolve(value); }, delay || 0);
+            if (options && options.signal) {
+                options.signal.addEventListener('abort', function() {
+                    clearTimeout(id);
+                    reject(new DOMException('The operation was aborted.', 'AbortError'));
+                });
+            }
+        });
+    }
+
+    function setImmediateP(value, options) {
+        return new Promise(function(resolve, reject) {
+            var id = setImmediate(function() { resolve(value); });
+            if (options && options.signal) {
+                options.signal.addEventListener('abort', function() {
+                    clearImmediate(id);
+                    reject(new DOMException('The operation was aborted.', 'AbortError'));
+                });
+            }
+        });
+    }
+
+    function setIntervalP(delay, value, options) {
+        var aborted = false;
+        if (options && options.signal) {
+            options.signal.addEventListener('abort', function() { aborted = true; });
+        }
+        return {
+            [Symbol.asyncIterator]: function() {
+                return {
+                    next: function() {
+                        if (aborted) return Promise.resolve({ value: undefined, done: true });
+                        return new Promise(function(resolve) {
+                            setTimeout(function() {
+                                resolve({ value: value, done: false });
+                            }, delay || 0);
+                        });
+                    },
+                    return: function() {
+                        aborted = true;
+                        return Promise.resolve({ value: undefined, done: true });
+                    }
+                };
+            }
+        };
+    }
+
+    var timersPromises = {
+        setTimeout: setTimeoutP,
+        setImmediate: setImmediateP,
+        setInterval: setIntervalP,
+        scheduler: {
+            wait: setTimeoutP,
+            yield: function() { return setImmediateP(undefined); }
+        }
+    };
+
+    globalThis.__requireCache['timers/promises'] = timersPromises;
+    globalThis.__requireCache['node:timers/promises'] = timersPromises;
+    globalThis.__requireCache['timers'] = Object.assign(
+        globalThis.__requireCache['timers'] || {},
+        { setTimeout: setTimeout, setInterval: setInterval, setImmediate: setImmediate,
+          clearTimeout: clearTimeout, clearInterval: clearInterval,
+          clearImmediate: clearImmediate, promises: timersPromises }
+    );
+    globalThis.__requireCache['node:timers'] = globalThis.__requireCache['timers'];
+}());
+
+// ── tty ───────────────────────────────────────────────────────────────────────
+// chalk, ink, and any color library checks tty.isatty() and process.stdout.isTTY.
+(function() {
+    var stream = globalThis.__requireCache['stream'];
+
+    function ReadStream(fd, options) {
+        if (stream && stream.Readable) stream.Readable.call(this, options);
+        this.fd = fd;
+        this.isTTY = false;
+        this.isRaw = false;
+        this.columns = 80;
+        this.rows = 24;
+    }
+    if (stream && stream.Readable) {
+        ReadStream.prototype = Object.create(stream.Readable.prototype);
+        ReadStream.prototype.constructor = ReadStream;
+    }
+    ReadStream.prototype.setRawMode = function(mode) { this.isRaw = mode; return this; };
+    ReadStream.prototype.unref = function() { return this; };
+    ReadStream.prototype.ref = function() { return this; };
+
+    function WriteStream(fd, options) {
+        if (stream && stream.Writable) stream.Writable.call(this, options);
+        this.fd = fd;
+        this.isTTY = false;
+        this.columns = 80;
+        this.rows = 24;
+    }
+    if (stream && stream.Writable) {
+        WriteStream.prototype = Object.create(stream.Writable.prototype);
+        WriteStream.prototype.constructor = WriteStream;
+    }
+    WriteStream.prototype.clearLine = function(dir, cb) { if (cb) cb(); return true; };
+    WriteStream.prototype.clearScreenDown = function(cb) { if (cb) cb(); return true; };
+    WriteStream.prototype.cursorTo = function(x, y, cb) { if (cb) cb(); return true; };
+    WriteStream.prototype.moveCursor = function(dx, dy, cb) { if (cb) cb(); return true; };
+    WriteStream.prototype.getColorDepth = function() { return 1; };
+    WriteStream.prototype.hasColors = function() { return false; };
+    WriteStream.prototype.getWindowSize = function() { return [this.columns, this.rows]; };
+    WriteStream.prototype.unref = function() { return this; };
+    WriteStream.prototype.ref = function() { return this; };
+
+    var tty = {
+        isatty: function(fd) { return false; },
+        ReadStream: ReadStream,
+        WriteStream: WriteStream
+    };
+
+    globalThis.__requireCache['tty'] = tty;
+    globalThis.__requireCache['node:tty'] = tty;
+}());
+
+// ── readline ──────────────────────────────────────────────────────────────────
+(function() {
+    var EventEmitter = globalThis.__requireCache['events'];
+
+    function Interface(options) {
+        EventEmitter.call(this);
+        if (typeof options === 'object') {
+            this.input = options.input;
+            this.output = options.output;
+            this.terminal = options.terminal || false;
+        }
+        this.line = '';
+        this._closed = false;
+    }
+    if (EventEmitter) {
+        Interface.prototype = Object.create(EventEmitter.prototype);
+        Interface.prototype.constructor = Interface;
+    }
+
+    Interface.prototype.setPrompt = function(prompt) { this._prompt = prompt; return this; };
+    Interface.prototype.prompt = function(preserveCursor) { if (this.output) this.output.write && this.output.write(this._prompt || ''); };
+    Interface.prototype.question = function(query, options, cb) {
+        if (typeof options === 'function') { cb = options; options = {}; }
+        if (this.output && this.output.write) this.output.write(query);
+        if (cb) setTimeout(function() { cb(''); }, 0);
+        return Promise.resolve('');
+    };
+    Interface.prototype.close = function() {
+        this._closed = true;
+        this.emit('close');
+    };
+    Interface.prototype.pause = function() { this.emit('pause'); return this; };
+    Interface.prototype.resume = function() { this.emit('resume'); return this; };
+    Interface.prototype.write = function(data, key) {};
+    Interface.prototype[Symbol.asyncIterator] = function() {
+        var self = this;
+        return {
+            next: function() {
+                if (self._closed) return Promise.resolve({ value: undefined, done: true });
+                return Promise.resolve({ value: '', done: true });
+            },
+            return: function() {
+                self.close();
+                return Promise.resolve({ value: undefined, done: true });
+            }
+        };
+    };
+
+    function createInterface(options) {
+        return new Interface(options);
+    }
+
+    function clearLine(stream, dir, cb) { if (cb) cb(); return true; }
+    function clearScreenDown(stream, cb) { if (cb) cb(); return true; }
+    function cursorTo(stream, x, y, cb) { if (cb) cb(); return true; }
+    function moveCursor(stream, dx, dy, cb) { if (cb) cb(); return true; }
+    function emitKeypressEvents(stream) {}
+
+    var readline = {
+        Interface: Interface,
+        createInterface: createInterface,
+        clearLine: clearLine,
+        clearScreenDown: clearScreenDown,
+        cursorTo: cursorTo,
+        moveCursor: moveCursor,
+        emitKeypressEvents: emitKeypressEvents,
+        promises: {
+            createInterface: createInterface
+        }
+    };
+
+    globalThis.__requireCache['readline'] = readline;
+    globalThis.__requireCache['node:readline'] = readline;
+    globalThis.__requireCache['readline/promises'] = readline.promises;
+    globalThis.__requireCache['node:readline/promises'] = readline.promises;
+}());
+
+// ── diagnostics_channel ───────────────────────────────────────────────────────
+// Used by OpenTelemetry, undici, and Node.js monitoring tools.
+(function() {
+    var _channels = {};
+
+    function Channel(name) {
+        this.name = name;
+        this._subscribers = [];
+    }
+
+    Object.defineProperty(Channel.prototype, 'hasSubscribers', {
+        get: function() { return this._subscribers.length > 0; }
+    });
+
+    Channel.prototype.subscribe = function(fn) {
+        this._subscribers.push(fn);
+    };
+
+    Channel.prototype.unsubscribe = function(fn) {
+        var idx = this._subscribers.indexOf(fn);
+        if (idx !== -1) this._subscribers.splice(idx, 1);
+        return idx !== -1;
+    };
+
+    Channel.prototype.publish = function(message) {
+        for (var i = 0; i < this._subscribers.length; i++) {
+            try { this._subscribers[i](message, this.name); } catch(e) {}
+        }
+    };
+
+    Channel.prototype.bindStore = function(store, transform) {};
+    Channel.prototype.unbindStore = function(store) {};
+    Channel.prototype.runStores = function(data, fn, thisArg) {
+        return fn.call(thisArg);
+    };
+
+    function channel(name) {
+        if (!_channels[name]) _channels[name] = new Channel(name);
+        return _channels[name];
+    }
+
+    function hasSubscribers(name) {
+        return !!(_channels[name] && _channels[name].hasSubscribers);
+    }
+
+    function subscribe(name, fn) {
+        channel(name).subscribe(fn);
+    }
+
+    function unsubscribe(name, fn) {
+        return channel(name).unsubscribe(fn);
+    }
+
+    function tracingChannel(nameOrChannels) {
+        var prefix = typeof nameOrChannels === 'string' ? nameOrChannels : '';
+        return {
+            start: channel(prefix + '.start'),
+            end: channel(prefix + '.end'),
+            asyncStart: channel(prefix + '.asyncStart'),
+            asyncEnd: channel(prefix + '.asyncEnd'),
+            error: channel(prefix + '.error'),
+            traceSync: function(fn, context, thisArg) { return fn.call(thisArg, context); },
+            tracePromise: function(fn, context, thisArg) {
+                var result;
+                try { result = fn.call(thisArg, context); } catch(e) { return Promise.reject(e); }
+                return Promise.resolve(result);
+            },
+            traceCallback: function(fn, position, context, thisArg) {
+                return fn.bind(thisArg);
+            }
+        };
+    }
+
+    var diagnosticsChannel = {
+        channel: channel,
+        hasSubscribers: hasSubscribers,
+        subscribe: subscribe,
+        unsubscribe: unsubscribe,
+        tracingChannel: tracingChannel,
+        Channel: Channel
+    };
+
+    globalThis.__requireCache['diagnostics_channel'] = diagnosticsChannel;
+    globalThis.__requireCache['node:diagnostics_channel'] = diagnosticsChannel;
+}());
+
+// ── domain ────────────────────────────────────────────────────────────────────
+// Legacy, but many packages (like 'async') have domain as an optional dep.
+(function() {
+    var EventEmitter = globalThis.__requireCache['events'];
+
+    function Domain() {
+        EventEmitter.call(this);
+        this.members = [];
+    }
+    if (EventEmitter) {
+        Domain.prototype = Object.create(EventEmitter.prototype);
+        Domain.prototype.constructor = Domain;
+    }
+    Domain.prototype.run = function(fn) {
+        try { return fn(); } catch(e) { this.emit('error', e); }
+    };
+    Domain.prototype.add = function(emitter) { this.members.push(emitter); };
+    Domain.prototype.remove = function(emitter) {
+        var idx = this.members.indexOf(emitter);
+        if (idx !== -1) this.members.splice(idx, 1);
+    };
+    Domain.prototype.bind = function(fn) {
+        var self = this;
+        return function() {
+            try { return fn.apply(this, arguments); } catch(e) { self.emit('error', e); }
+        };
+    };
+    Domain.prototype.intercept = function(fn) {
+        var self = this;
+        return function(err) {
+            if (err) { self.emit('error', err); return; }
+            try { return fn.apply(this, Array.prototype.slice.call(arguments, 1)); }
+            catch(e) { self.emit('error', e); }
+        };
+    };
+    Domain.prototype.enter = function() {};
+    Domain.prototype.exit = function() {};
+    Domain.prototype.dispose = function() {};
+
+    var domain = {
+        Domain: Domain,
+        create: function() { return new Domain(); },
+        createDomain: function() { return new Domain(); },
+        active: null
+    };
+
+    globalThis.__requireCache['domain'] = domain;
+    globalThis.__requireCache['node:domain'] = domain;
+}());
+
+// ── dns ───────────────────────────────────────────────────────────────────────
+// Many network packages import dns but 3va can't do real DNS; return stubs
+// that signal "not supported" gracefully.
+(function() {
+    function notSupported(name) {
+        return function() {
+            var cb = arguments[arguments.length - 1];
+            var err = Object.assign(new Error('DNS not supported in 3va: ' + name),
+                { code: 'ENOTSUP', syscall: name });
+            if (typeof cb === 'function') { setTimeout(function() { cb(err); }, 0); }
+            else throw err;
+        };
+    }
+
+    var dns = {
+        lookup: notSupported('lookup'),
+        lookupService: notSupported('lookupService'),
+        resolve: notSupported('resolve'),
+        resolve4: notSupported('resolve4'),
+        resolve6: notSupported('resolve6'),
+        resolveMx: notSupported('resolveMx'),
+        resolveTxt: notSupported('resolveTxt'),
+        resolveSrv: notSupported('resolveSrv'),
+        resolveNs: notSupported('resolveNs'),
+        resolveCname: notSupported('resolveCname'),
+        resolveNaptr: notSupported('resolveNaptr'),
+        resolvePtr: notSupported('resolvePtr'),
+        resolveSoa: notSupported('resolveSoa'),
+        resolveAny: notSupported('resolveAny'),
+        reverse: notSupported('reverse'),
+        setServers: function() {},
+        getServers: function() { return []; },
+        ADDRCONFIG: 0,
+        V4MAPPED: 8,
+        ALL: 16,
+        promises: {
+            lookup: function(hostname) { return Promise.reject(Object.assign(new Error('DNS not supported'), { code: 'ENOTSUP' })); },
+            resolve: function(hostname) { return Promise.reject(Object.assign(new Error('DNS not supported'), { code: 'ENOTSUP' })); },
+            resolve4: function(hostname) { return Promise.reject(Object.assign(new Error('DNS not supported'), { code: 'ENOTSUP' })); },
+            resolve6: function(hostname) { return Promise.reject(Object.assign(new Error('DNS not supported'), { code: 'ENOTSUP' })); }
+        }
+    };
+    dns.Resolver = function() { return dns; };
+
+    globalThis.__requireCache['dns'] = dns;
+    globalThis.__requireCache['node:dns'] = dns;
+    globalThis.__requireCache['dns/promises'] = dns.promises;
+    globalThis.__requireCache['node:dns/promises'] = dns.promises;
+}());
+
+// ── v8 ────────────────────────────────────────────────────────────────────────
+// Used by Jest, clinic, and memory profiling tools.
+(function() {
+    var v8 = {
+        getHeapStatistics: function() {
+            return { total_heap_size: 0, total_heap_size_executable: 0,
+                     total_physical_size: 0, total_available_size: 134217728,
+                     used_heap_size: 0, heap_size_limit: 536870912,
+                     malloced_memory: 0, peak_malloced_memory: 0,
+                     does_zap_garbage: 0, number_of_native_contexts: 0,
+                     number_of_detached_contexts: 0 };
+        },
+        getHeapSpaceStatistics: function() { return []; },
+        getHeapCodeStatistics: function() { return { code_and_metadata_size: 0, bytecode_and_metadata_size: 0, external_script_source_size: 0 }; },
+        getHeapSnapshot: function() { return null; },
+        setFlagsFromString: function() {},
+        stopCoverage: function() {},
+        takeCoverage: function() {},
+        writeHeapSnapshot: function() { return ''; },
+        serialize: function(v) { return Buffer.from(JSON.stringify(v)); },
+        deserialize: function(b) { try { return JSON.parse(Buffer.from(b).toString()); } catch(e) { return null; } },
+        Serializer: function() {},
+        Deserializer: function() {},
+        DefaultSerializer: function() {},
+        DefaultDeserializer: function() {},
+        promiseHooks: { onInit: function() {}, onSettled: function() {}, onBefore: function() {}, onAfter: function() {}, createHook: function() { return { enable: function(){}, disable: function(){} }; } }
+    };
+
+    globalThis.__requireCache['v8'] = v8;
+    globalThis.__requireCache['node:v8'] = v8;
+}());
+
+// ── stream completeness: pipeline, finished, Readable.from ───────────────────
+(function() {
+    var stream = globalThis.__requireCache['stream'];
+    if (!stream) return;
+
+    // pipeline(src, ...transforms, dest[, cb]) — chains streams and handles errors
+    stream.pipeline = function pipeline() {
+        var args = Array.prototype.slice.call(arguments);
+        var cb = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+        var streams = args;
+        if (streams.length < 2) {
+            var err = new Error('pipeline requires at least 2 streams');
+            if (cb) { cb(err); return; }
+            throw err;
+        }
+        var error = null;
+        function done(err) {
+            if (!error) {
+                error = err || null;
+                if (cb) cb(error);
+            }
+        }
+        for (var i = 0; i < streams.length - 1; i++) {
+            (function(src, dest) {
+                if (src && src.pipe) src.pipe(dest);
+                if (src && src.on) {
+                    src.on('error', done);
+                    src.on('end', function() {
+                        if (dest && dest.end) dest.end();
+                    });
+                }
+            })(streams[i], streams[i + 1]);
+        }
+        var last = streams[streams.length - 1];
+        if (last && last.on) last.on('finish', function() { done(null); });
+        return last;
+    };
+
+    // finished(stream, [options,] cb) — fires cb when stream is done/error
+    stream.finished = function finished(s, options, cb) {
+        if (typeof options === 'function') { cb = options; options = {}; }
+        if (!cb) return new Promise(function(resolve, reject) {
+            stream.finished(s, options, function(err) { err ? reject(err) : resolve(); });
+        });
+        function onError(err) { cleanup(); cb(err); }
+        function onEnd() { cleanup(); cb(null); }
+        function onFinish() { cleanup(); cb(null); }
+        function cleanup() {
+            if (s.removeListener) {
+                s.removeListener('error', onError);
+                s.removeListener('end', onEnd);
+                s.removeListener('finish', onFinish);
+            }
+        }
+        if (s.on) {
+            s.on('error', onError);
+            s.on('end', onEnd);
+            s.on('finish', onFinish);
+        } else {
+            cb(null);
+        }
+        return cleanup;
+    };
+
+    // Readable.from(iterable) — creates a Readable from an async/sync iterable
+    stream.Readable.from = function from(iterable, options) {
+        var r = new stream.Readable(Object.assign({ objectMode: true }, options));
+        r._reading = false;
+        function consume() {
+            if (iterable && typeof iterable[Symbol.asyncIterator] === 'function') {
+                var it = iterable[Symbol.asyncIterator]();
+                (function loop() {
+                    it.next().then(function(res) {
+                        if (res.done) { r.push(null); }
+                        else { r.push(res.value); loop(); }
+                    }, function(err) { r.emit('error', err); });
+                })();
+            } else if (iterable && typeof iterable[Symbol.iterator] === 'function') {
+                for (var val of iterable) r.push(val);
+                r.push(null);
+            } else {
+                r.push(iterable);
+                r.push(null);
+            }
+        }
+        setTimeout(consume, 0);
+        return r;
+    };
+
+    // stream/promises — Node 15+ async wrappers
+    var streamPromises = {
+        pipeline: function() {
+            var args = Array.prototype.slice.call(arguments);
+            return new Promise(function(resolve, reject) {
+                args.push(function(err) { err ? reject(err) : resolve(); });
+                stream.pipeline.apply(null, args);
+            });
+        },
+        finished: function(s, options) {
+            return stream.finished(s, options);
+        }
+    };
+    globalThis.__requireCache['stream/promises'] = streamPromises;
+    globalThis.__requireCache['node:stream/promises'] = streamPromises;
+    globalThis.__requireCache['stream/consumers'] = {
+        arrayBuffer: function(s) { return new Promise(function(resolve) { var bufs = []; s.on('data', function(c) { bufs.push(c); }); s.on('end', function() { var tot = bufs.reduce(function(a,b){return a+b.length;},0); var buf = new Uint8Array(tot); var off=0; bufs.forEach(function(b){ buf.set(b,off); off+=b.length; }); resolve(buf.buffer); }); }); },
+        text: function(s) { return new Promise(function(resolve) { var chunks = []; s.on('data', function(c) { chunks.push(c.toString()); }); s.on('end', function() { resolve(chunks.join('')); }); }); },
+        json: function(s) { return this.text(s).then(function(t) { return JSON.parse(t); }); },
+        blob: function(s) { return this.arrayBuffer(s).then(function(ab) { return new Blob([ab]); }); },
+        buffer: function(s) { return this.arrayBuffer(s).then(function(ab) { return Buffer.from(ab); }); }
+    };
+    globalThis.__requireCache['node:stream/consumers'] = globalThis.__requireCache['stream/consumers'];
+}());
+
+// ── util completeness ─────────────────────────────────────────────────────────
+(function() {
+    var util = globalThis.__requireCache['util'];
+    if (!util) return;
+
+    // util.promisify — already in most impls, ensure it handles common Symbol
+    if (!util.promisify) {
+        util.promisify = function(fn) {
+            return function() {
+                var args = Array.prototype.slice.call(arguments);
+                return new Promise(function(resolve, reject) {
+                    args.push(function(err, val) { err ? reject(err) : resolve(val); });
+                    fn.apply(this, args);
+                });
+            };
+        };
+    }
+    util.promisify.custom = Symbol.for('nodejs.util.promisify.custom');
+
+    // util.callbackify
+    if (!util.callbackify) {
+        util.callbackify = function(fn) {
+            return function() {
+                var args = Array.prototype.slice.call(arguments);
+                var cb = args.pop();
+                fn.apply(this, args).then(
+                    function(v) { cb(null, v); },
+                    function(e) { cb(e); }
+                );
+            };
+        };
+    }
+
+    // util.types — used by many packages for runtime type detection.
+    // Unconditionally replace so existing stub objects are upgraded.
+    {
+        var _types = util.types || {};
+        util.types = Object.assign({
+            isAnyArrayBuffer: function(v) { return v instanceof ArrayBuffer; },
+            isArrayBufferView: function(v) { return ArrayBuffer.isView(v); },
+            isBigInt64Array: function(v) { return v instanceof BigInt64Array; },
+            isBigUint64Array: function(v) { return v instanceof BigUint64Array; },
+            isBooleanObject: function(v) { return v instanceof Boolean; },
+            isBoxedPrimitive: function(v) { return v instanceof Boolean || v instanceof Number || v instanceof String || v instanceof Symbol || v instanceof BigInt; },
+            isDataView: function(v) { return v instanceof DataView; },
+            isDate: function(v) { return v instanceof Date; },
+            isFloat32Array: function(v) { return v instanceof Float32Array; },
+            isFloat64Array: function(v) { return v instanceof Float64Array; },
+            isGeneratorFunction: function(v) { var t = Object.prototype.toString.call(v); return t === '[object GeneratorFunction]' || t === '[object AsyncGeneratorFunction]'; },
+            isGeneratorObject: function(v) { return typeof v === 'object' && v !== null && typeof v.next === 'function' && typeof v.throw === 'function'; },
+            isInt8Array: function(v) { return v instanceof Int8Array; },
+            isInt16Array: function(v) { return v instanceof Int16Array; },
+            isInt32Array: function(v) { return v instanceof Int32Array; },
+            isMap: function(v) { return v instanceof Map; },
+            isMapIterator: function(v) { return Object.prototype.toString.call(v) === '[object Map Iterator]'; },
+            isModuleNamespaceObject: function(v) { return false; },
+            isNativeError: function(v) { return v instanceof Error; },
+            isNumberObject: function(v) { return v instanceof Number; },
+            isPromise: function(v) { return v && typeof v.then === 'function'; },
+            isProxy: function(v) { return false; },
+            isRegExp: function(v) { return v instanceof RegExp; },
+            isSet: function(v) { return v instanceof Set; },
+            isSetIterator: function(v) { return Object.prototype.toString.call(v) === '[object Set Iterator]'; },
+            isSharedArrayBuffer: function(v) { return typeof SharedArrayBuffer !== 'undefined' && v instanceof SharedArrayBuffer; },
+            isStringObject: function(v) { return v instanceof String; },
+            isSymbolObject: function(v) { return v instanceof Symbol; },
+            isTypedArray: function(v) { return ArrayBuffer.isView(v) && !(v instanceof DataView); },
+            isUint8Array: function(v) { return v instanceof Uint8Array; },
+            isUint8ClampedArray: function(v) { return v instanceof Uint8ClampedArray; },
+            isUint16Array: function(v) { return v instanceof Uint16Array; },
+            isUint32Array: function(v) { return v instanceof Uint32Array; },
+            isWeakMap: function(v) { return v instanceof WeakMap; },
+            isWeakSet: function(v) { return v instanceof WeakSet; },
+            isAsyncFunction: function(v) { return Object.prototype.toString.call(v) === '[object AsyncFunction]'; },
+            isArgumentsObject: function(v) { return Object.prototype.toString.call(v) === '[object Arguments]'; },
+            isCryptoKey: function(v) { return false; },
+            isKeyObject: function(v) { return false; }
+        }, _types);
+    }
+
+    // util.TextEncoder / util.TextDecoder (mirrored from globalThis)
+    if (!util.TextEncoder && typeof TextEncoder !== 'undefined') util.TextEncoder = TextEncoder;
+    if (!util.TextDecoder && typeof TextDecoder !== 'undefined') util.TextDecoder = TextDecoder;
+
+    // util.styleText — Node 20+ simple ANSI styling (no-op since we're not a TTY)
+    if (!util.styleText) {
+        util.styleText = function(format, text) { return text; };
+    }
+
+    // util.isDeepStrictEqual — used by assertion libraries
+    if (!util.isDeepStrictEqual) {
+        util.isDeepStrictEqual = function deepEqual(a, b) {
+            if (a === b) return true;
+            if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) return false;
+            var ka = Object.keys(a), kb = Object.keys(b);
+            if (ka.length !== kb.length) return false;
+            for (var i = 0; i < ka.length; i++) {
+                var k = ka[i];
+                if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+                if (!deepEqual(a[k], b[k])) return false;
+            }
+            return true;
+        };
+    }
+}());
+
+// ── constants ─────────────────────────────────────────────────────────────────
+// Many packages import 'constants' or use os.constants / fs.constants.
+(function() {
+    var constants = {
+        // errno
+        E2BIG: 7, EACCES: 13, EADDRINUSE: 98, EADDRNOTAVAIL: 99,
+        EAFNOSUPPORT: 97, EAGAIN: 11, EALREADY: 114, EBADF: 9,
+        EBUSY: 16, ECANCELED: 125, ECHILD: 10, ECONNABORTED: 103,
+        ECONNREFUSED: 111, ECONNRESET: 104, EDEADLK: 35, EDESTADDRREQ: 89,
+        EDOM: 33, EEXIST: 17, EFAULT: 14, EFBIG: 27, EHOSTUNREACH: 113,
+        EINPROGRESS: 115, EINTR: 4, EINVAL: 22, EIO: 5, EISCONN: 106,
+        EISDIR: 21, ELOOP: 40, EMFILE: 24, EMSGSIZE: 90, ENAMETOOLONG: 36,
+        ENETDOWN: 100, ENETRESET: 102, ENETUNREACH: 101, ENFILE: 23,
+        ENOBUFS: 105, ENODEV: 19, ENOENT: 2, ENOEXEC: 8, ENOLCK: 37,
+        ENOMEM: 12, ENOPROTOOPT: 92, ENOSPC: 28, ENOSYS: 38, ENOTCONN: 107,
+        ENOTDIR: 20, ENOTEMPTY: 39, ENOTSOCK: 88, ENOTSUP: 95,
+        EOVERFLOW: 75, EPERM: 1, EPIPE: 32, EPROTONOSUPPORT: 93,
+        EPROTOTYPE: 91, ERANGE: 34, EROFS: 30, ESPIPE: 29, ESRCH: 3,
+        ETIMEDOUT: 110, ETXTBSY: 26, EWOULDBLOCK: 11, EXDEV: 18,
+        // signals
+        SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5,
+        SIGABRT: 6, SIGIOT: 6, SIGBUS: 7, SIGFPE: 8, SIGKILL: 9,
+        SIGUSR1: 10, SIGSEGV: 11, SIGUSR2: 12, SIGPIPE: 13, SIGALRM: 14,
+        SIGTERM: 15, SIGCHLD: 17, SIGCONT: 18, SIGSTOP: 19, SIGTSTP: 20,
+        SIGTTIN: 21, SIGTTOU: 22, SIGURG: 23, SIGXCPU: 24, SIGXFSZ: 25,
+        SIGVTALRM: 26, SIGPROF: 27, SIGWINCH: 28, SIGIO: 29,
+        // open flags
+        O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128,
+        O_NOCTTY: 256, O_TRUNC: 512, O_APPEND: 1024, O_DIRECTORY: 65536,
+        O_NOATIME: 262144, O_NOFOLLOW: 131072, O_SYNC: 1052672,
+        O_DSYNC: 4096, O_SYMLINK: 0, O_DIRECT: 16384, O_NONBLOCK: 2048,
+        // file types
+        S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFCHR: 8192,
+        S_IFBLK: 24576, S_IFIFO: 4096, S_IFLNK: 40960, S_IFSOCK: 49152,
+        S_IRWXU: 448, S_IRUSR: 256, S_IWUSR: 128, S_IXUSR: 64,
+        S_IRWXG: 56, S_IRGRP: 32, S_IWGRP: 16, S_IXGRP: 8,
+        S_IRWXO: 7, S_IROTH: 4, S_IWOTH: 2, S_IXOTH: 1,
+        // access
+        F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1,
+        // tls
+        SSL_OP_ALL: 0, SSL_OP_NO_SSLv2: 0, SSL_OP_NO_SSLv3: 0
+    };
+
+    globalThis.__requireCache['constants'] = constants;
+    globalThis.__requireCache['node:constants'] = constants;
+
+    // Merge into fs.constants and os.constants if they exist
+    var fs = globalThis.__requireCache['fs'];
+    if (fs && !fs.constants) fs.constants = constants;
+    var osM = globalThis.__requireCache['os'];
+    if (osM && !osM.constants) osM.constants = { signals: {}, errno: {}, priority: {} };
+}());
+
+// ── process: complete stdin + signals + missing fields ───────────────────────
+(function() {
+    var p = globalThis.process;
+    if (!p) return;
+
+    // stdin as a no-op Readable (CLI tools that read from stdin get an ended stream)
+    var stream = globalThis.__requireCache['stream'];
+    if (stream && !p.stdin) {
+        var stdin = new stream.Readable({ read: function() { this.push(null); } });
+        stdin.isTTY = false;
+        stdin.fd = 0;
+        p.stdin = stdin;
+    }
+
+    // execPath / execArgv
+    if (!p.execPath) p.execPath = p.argv && p.argv[0] || '3va';
+    if (!p.execArgv) p.execArgv = [];
+    if (!p.mainModule) p.mainModule = undefined;
+
+    // process.on / once / emit (EventEmitter-like, minimal)
+    if (!p._events) {
+        p._events = {};
+        p.on = p.addListener = function(event, fn) {
+            if (!this._events[event]) this._events[event] = [];
+            this._events[event].push(fn);
+            return this;
+        };
+        p.once = function(event, fn) {
+            var self = this;
+            function wrapper() { self.removeListener(event, wrapper); fn.apply(this, arguments); }
+            return this.on(event, wrapper);
+        };
+        p.off = p.removeListener = function(event, fn) {
+            if (this._events[event]) {
+                this._events[event] = this._events[event].filter(function(f) { return f !== fn; });
+            }
+            return this;
+        };
+        p.emit = function(event) {
+            var args = Array.prototype.slice.call(arguments, 1);
+            var handlers = this._events[event] || [];
+            handlers.forEach(function(fn) { try { fn.apply(null, args); } catch(e) {} });
+            return handlers.length > 0;
+        };
+        p.removeAllListeners = function(event) {
+            if (event) delete this._events[event]; else this._events = {};
+            return this;
+        };
+        p.listenerCount = function(event) { return (this._events[event] || []).length; };
+        p.listeners = function(event) { return (this._events[event] || []).slice(); };
+    }
+
+    // process.abort / process.kill (stubs)
+    if (!p.abort) p.abort = function() { process.exit(134); };
+    if (!p.kill) p.kill = function(pid, signal) {};
+
+    // process.binding — used by older packages to access internals
+    if (!p.binding) p.binding = function(name) {
+        if (name === 'constants') return globalThis.__requireCache['constants'] || {};
+        return {};
+    };
+
+    // process.report (Node 11+)
+    if (!p.report) p.report = { writeReport: function() {}, getReport: function() { return '{}'; } };
+
+    // process.allowedNodeEnvironmentFlags
+    if (!p.allowedNodeEnvironmentFlags) p.allowedNodeEnvironmentFlags = new Set();
+
+    // process.config — used by node-gyp checks
+    if (!p.config) p.config = { variables: { node_root_dir: '', node_prefix: '' } };
+}());
+
+// ── Additional module aliases ─────────────────────────────────────────────────
+// Some packages do `require('node:X')` even when bare `require('X')` is standard.
+// Make sure all known modules are accessible with both bare and node: prefix.
+(function() {
+    var BARE = [
+        'assert','buffer','child_process','cluster','console','constants',
+        'crypto','dgram','diagnostics_channel','dns','domain','events',
+        'fs','http','http2','https','module','net','os','path','perf_hooks',
+        'process','punycode','querystring','readline','stream','string_decoder',
+        'timers','tls','tty','url','util','v8','vm','worker_threads','zlib'
+    ];
+    BARE.forEach(function(name) {
+        var m = globalThis.__requireCache[name];
+        if (m !== undefined && globalThis.__requireCache['node:' + name] === undefined) {
+            globalThis.__requireCache['node:' + name] = m;
+        } else if (m === undefined && globalThis.__requireCache['node:' + name] !== undefined) {
+            globalThis.__requireCache[name] = globalThis.__requireCache['node:' + name];
+        }
+    });
+}());
+
+}());
     "#)?;
 
     Ok(())

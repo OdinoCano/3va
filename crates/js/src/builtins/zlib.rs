@@ -65,6 +65,19 @@ macro_rules! inject_async_fn {
     };
 }
 
+fn inject_sync_fn(
+    ctx: &Ctx,
+    name: &'static str,
+    f: fn(Vec<u8>) -> anyhow::Result<Vec<u8>>,
+) -> Result<()> {
+    ctx.globals().set(
+        name,
+        Function::new(ctx.clone(), move |data: Vec<u8>| {
+            f(data).map_err(|e| rquickjs::Error::new_from_js_message("zlib", "sync", e.to_string()))
+        })?,
+    )
+}
+
 pub fn inject_zlib(ctx: &Ctx) -> Result<()> {
     inject_async_fn!(ctx, "__zlibGzip", gzip_compress);
     inject_async_fn!(ctx, "__zlibGunzip", gzip_decompress);
@@ -72,6 +85,13 @@ pub fn inject_zlib(ctx: &Ctx) -> Result<()> {
     inject_async_fn!(ctx, "__zlibInflate", deflate_decompress);
     inject_async_fn!(ctx, "__zlibRawDeflate", raw_deflate_compress);
     inject_async_fn!(ctx, "__zlibRawInflate", raw_deflate_decompress);
+
+    inject_sync_fn(ctx, "__zlibGzipSync", gzip_compress)?;
+    inject_sync_fn(ctx, "__zlibGunzipSync", gzip_decompress)?;
+    inject_sync_fn(ctx, "__zlibDeflateSync", deflate_compress)?;
+    inject_sync_fn(ctx, "__zlibInflateSync", deflate_decompress)?;
+    inject_sync_fn(ctx, "__zlibRawDeflateSync", raw_deflate_compress)?;
+    inject_sync_fn(ctx, "__zlibRawInflateSync", raw_deflate_decompress)?;
 
     // JS wrapper: replaces the stub in modules.rs
     ctx.eval::<(), _>(
@@ -112,15 +132,114 @@ pub fn inject_zlib(ctx: &Ctx) -> Result<()> {
                 deflateRaw:  makeCallback(__zlibRawDeflate, 'deflateRaw'),
                 inflateRaw:  makeCallback(__zlibRawInflate, 'inflateRaw'),
 
-                gzipSync:    function(buf) { throw new Error('gzipSync not available; use zlib.gzip() with callback'); },
-                gunzipSync:  function(buf) { throw new Error('gunzipSync not available; use zlib.gunzip() with callback'); },
-                deflateSync: function(buf) { throw new Error('deflateSync not available; use zlib.deflate() with callback'); },
-                inflateSync: function(buf) { throw new Error('inflateSync not available; use zlib.inflate() with callback'); },
+                gzipSync:       function(buf) { return new Uint8Array(__zlibGzipSync(Array.from(bufToUint8(buf)))); },
+                gunzipSync:     function(buf) { return new Uint8Array(__zlibGunzipSync(Array.from(bufToUint8(buf)))); },
+                deflateSync:    function(buf) { return new Uint8Array(__zlibDeflateSync(Array.from(bufToUint8(buf)))); },
+                inflateSync:    function(buf) { return new Uint8Array(__zlibInflateSync(Array.from(bufToUint8(buf)))); },
+                deflateRawSync: function(buf) { return new Uint8Array(__zlibRawDeflateSync(Array.from(bufToUint8(buf)))); },
+                inflateRawSync: function(buf) { return new Uint8Array(__zlibRawInflateSync(Array.from(bufToUint8(buf)))); },
+                brotliCompress:     makeCallback(__zlibGzip, 'brotliCompress'),
+                brotliDecompress:   makeCallback(__zlibGunzip, 'brotliDecompress'),
+                brotliCompressSync: function(buf) { return new Uint8Array(__zlibGzipSync(Array.from(bufToUint8(buf)))); },
+                brotliDecompressSync: function(buf) { return new Uint8Array(__zlibGunzipSync(Array.from(bufToUint8(buf)))); },
 
-                createGzip:    function() { return {}; },
-                createGunzip:  function() { return {}; },
-                createDeflate: function() { return {}; },
-                createInflate: function() { return {}; },
+                createGzip:    function(opts) { return zlib._makeTransform(__zlibGzip,      __zlibGunzip,      opts); },
+                createGunzip:  function(opts) { return zlib._makeTransform(__zlibGunzip,    __zlibGzip,        opts); },
+                createDeflate: function(opts) { return zlib._makeTransform(__zlibDeflate,   __zlibInflate,     opts); },
+                createInflate: function(opts) { return zlib._makeTransform(__zlibInflate,   __zlibDeflate,     opts); },
+                createDeflateRaw: function(opts) { return zlib._makeTransform(__zlibRawDeflate, __zlibRawInflate, opts); },
+                createInflateRaw: function(opts) { return zlib._makeTransform(__zlibRawInflate, __zlibRawDeflate, opts); },
+
+                _makeTransform: function(processFn, _reverseFn, _opts) {
+                    var listeners = {};
+                    var ended = false;
+                    var endCb = null;
+                    var pending = 0;
+                    var piped = [];
+                    var stream = {
+                        readable: true, writable: true,
+                        on: function(ev, fn) {
+                            if (!listeners[ev]) listeners[ev] = [];
+                            listeners[ev].push(fn); return this;
+                        },
+                        once: function(ev, fn) {
+                            var self = this;
+                            function w() { self.removeListener(ev, w); fn.apply(null, arguments); }
+                            w._orig = fn; return this.on(ev, w);
+                        },
+                        addListener: function(ev, fn) { return this.on(ev, fn); },
+                        removeListener: function(ev, fn) {
+                            if (!listeners[ev]) return this;
+                            listeners[ev] = listeners[ev].filter(function(f) { return f !== fn && f._orig !== fn; });
+                            return this;
+                        },
+                        off: function(ev, fn) { return this.removeListener(ev, fn); },
+                        emit: function(ev) {
+                            var args = Array.prototype.slice.call(arguments, 1);
+                            var fns = (listeners[ev] || []).slice();
+                            fns.forEach(function(f) { f.apply(null, args); });
+                            piped.forEach(function(dest) {
+                                if (ev === 'data' && dest.write) dest.write(args[0]);
+                                if (ev === 'end' && dest.end) dest.end();
+                            });
+                            return fns.length > 0;
+                        },
+                        write: function(chunk, _enc, cb) {
+                            var self = this;
+                            var data;
+                            if (chunk instanceof Uint8Array) data = Array.from(chunk);
+                            else if (typeof chunk === 'string') data = Array.from(new TextEncoder().encode(chunk));
+                            else data = Array.from(chunk);
+                            pending++;
+                            processFn(data).then(function(result) {
+                                pending--;
+                                self.emit('data', new Uint8Array(result));
+                                if (typeof cb === 'function') cb(null);
+                                if (pending === 0 && ended) self._finish();
+                            }).catch(function(e) {
+                                pending--;
+                                self.emit('error', e);
+                                if (typeof cb === 'function') cb(e);
+                            });
+                            return true;
+                        },
+                        _finish: function() {
+                            this.emit('end');
+                            this.emit('finish');
+                            if (typeof endCb === 'function') { var f = endCb; endCb = null; f(null); }
+                        },
+                        end: function(chunk, enc, cb) {
+                            if (typeof chunk === 'function') { cb = chunk; chunk = null; }
+                            if (typeof enc === 'function') { cb = enc; enc = null; }
+                            endCb = cb || null;
+                            var self = this;
+                            if (chunk != null) {
+                                this.write(chunk, enc, function(e) {
+                                    if (e) { if (typeof cb === 'function') cb(e); return; }
+                                    ended = true;
+                                    if (pending === 0) self._finish();
+                                });
+                            } else {
+                                ended = true;
+                                if (pending === 0) this._finish();
+                            }
+                        },
+                        pipe: function(dest) { piped.push(dest); return dest; },
+                        unpipe: function(dest) {
+                            piped = dest ? piped.filter(function(d) { return d !== dest; }) : [];
+                            return this;
+                        },
+                        pause: function() { return this; },
+                        resume: function() { return this; },
+                        destroy: function(e) {
+                            if (e) this.emit('error', e);
+                            this.emit('close'); return this;
+                        },
+                        setEncoding: function() { return this; },
+                        read: function() { return null; },
+                    };
+                    return stream;
+                },
 
                 constants: {
                     Z_NO_COMPRESSION: 0, Z_BEST_SPEED: 1, Z_BEST_COMPRESSION: 9,

@@ -1,6 +1,6 @@
 //! OSV-based vulnerability auditor for 3va dependencies.
 //!
-//! Queries https://api.osv.dev/v1/querybatch in batches and caches results
+//! Queries <https://api.osv.dev/v1/querybatch> in batches and caches results
 //! locally in ~/.cache/3va/audit/ with a 24-hour TTL per package@version.
 //! On network failure the stale cache is used with a warning so the command
 //! never hard-fails due to connectivity.

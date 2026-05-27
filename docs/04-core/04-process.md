@@ -69,27 +69,21 @@ full-grant case and the scoped case both resolve through the same code path.
 ### 4.2.3 Memory Information
 
 ```javascript
-// Memory
-process.memoryUsage()              // Returns: rss, heapTotal, heapUsed, external
+// Reads real RSS from /proc/self/status on Linux.
+process.memoryUsage()
+// → { rss: 35287040, heapTotal: 20971520, heapUsed: 12400704,
+//     external: 0, arrayBuffers: 0 }
 
-// Example output:
-{
-    rss: 35287040,
-    heapTotal: 20971520,
-    heapUsed: 12400704,
-    external: 1048576
-}
-
-// V8 memory (if available)
-process.memoryUsage.jsHeap;
+// Shortcut — just the RSS in bytes:
+process.memoryUsage.rss()           // → 35287040
 ```
 
 ### 4.2.4 CPU Information
 
 ```javascript
-// CPU usage
-process.cpuUsage()                  // { user: 100000, system: 50000 }
-process.cpuUsage(previous)          // Differential from previous
+// Reads user+system times from /proc/self/stat on Linux (µs).
+process.cpuUsage()                  // → { user: 100000, system: 50000 }
+process.cpuUsage(previous)          // → differential from previous snapshot
 ```
 
 ## 4.3 Process Methods
@@ -118,10 +112,13 @@ process.setImmediate(callback: () => void): void
 // Equivalent to setTimeout(() => {}, 0) but more predictable
 ```
 
-### 4.3.2 Signals
+### 4.3.2 Signals y EventEmitter
+
+`process` implementa la interfaz EventEmitter completa. Los listeners de señales se registran
+igual que en Node.js:
 
 ```javascript
-// Signal handling
+// Escuchar señales
 process.on('SIGTERM', () => {
     console.log('Received SIGTERM, cleaning up...');
     process.exit(0);
@@ -132,11 +129,43 @@ process.on('SIGINT', () => {
     process.exit(0);
 });
 
-// Send signal to current process
-process.kill(process.pid, 'SIGTERM');
+// Listener al inicio de la cola (prependListener)
+process.prependListener('SIGTERM', () => { /* primero en ejecutar */ });
 
-// Available signals:
-'SIGTERM', 'SIGINT', 'SIGUSR1', 'SIGUSR2', 'SIGWINCH'
+// Listener de una sola vez
+process.once('SIGUSR2', () => { /* solo la primera vez */ });
+
+// Remover un listener
+process.off('SIGTERM', handler);
+
+// Listar eventos activos
+process.eventNames()               // → ['SIGTERM', 'SIGINT', ...]
+process.listenerCount('SIGTERM')   // → número de listeners
+
+// Emitir un evento (para testing / integración interna)
+process.emit('SIGTERM');
+
+// Señales disponibles:
+// SIGTERM, SIGINT, SIGUSR1, SIGUSR2, SIGWINCH, SIGHUP, SIGPIPE
+```
+
+### 4.3.3 Métodos adicionales
+
+```javascript
+process.uptime()                    // Segundos desde inicio del proceso
+process.abort()                     // Equivale a process.exit(1)
+process.kill(pid)                   // Si pid === process.pid, llama exit(0)
+process.title                       // Getter/setter — valor inicial: 'node'
+process.execPath                    // Ruta al binario de 3va
+process.execArgv                    // Array de flags de runtime (vacío)
+
+// Callbacks de excepción no capturada
+process.setUncaughtExceptionCaptureCallback(fn)
+process.hasUncaughtExceptionCaptureCallback()  // → boolean
+
+// Reporte de diagnóstico (stub compatible)
+process.report.writeReport()        // → ''
+process.report.getReport()          // → {}
 ```
 
 ### 4.3.3 Streams
