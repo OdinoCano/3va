@@ -25,7 +25,6 @@ impl ContentStore {
         }
     }
 
-    #[cfg(test)]
     pub fn with_root(root: PathBuf) -> Self {
         Self { root }
     }
@@ -144,6 +143,54 @@ impl ContentStore {
             std::fs::remove_dir_all(&dst)?;
         }
         link_or_copy_dir(&src, &dst)
+    }
+
+    /// Link from the global store into the per-project virtual store at
+    /// `node_modules/.3va/{entry}@{version}/node_modules/{name}/`.
+    ///
+    /// This mirrors pnpm's `node_modules/.pnpm/` layout: actual files live here
+    /// (hard-linked from `~/.3va/store`), and the caller creates a symlink from
+    /// `node_modules/{name}` pointing back here.  The result is that the project's
+    /// top-level `node_modules/` contains only symlinks — the real bytes are shared.
+    ///
+    /// Returns the path to the package directory inside `.3va/` so the caller can
+    /// build the symlink target.
+    pub fn link_to_virtual_store(
+        &self,
+        registry: &str,
+        name: &str,
+        version: &str,
+        node_modules: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        let src = self.package_path(registry, name, version);
+        if !src.exists() {
+            anyhow::bail!(
+                "Package {}@{} not in global store — call store_tarball first",
+                name,
+                version
+            );
+        }
+
+        // node_modules/.3va/@scope+pkg@version/node_modules/@scope/pkg/
+        let entry = format!("{}@{}", virtual_entry_name(name), version);
+        let virtual_pkg_dir = node_modules
+            .join(".3va")
+            .join(&entry)
+            .join("node_modules")
+            .join(name); // preserves @scope/pkg directory structure
+
+        if virtual_pkg_dir.join("package.json").exists() {
+            return Ok(virtual_pkg_dir); // already linked — idempotent
+        }
+
+        if let Some(parent) = virtual_pkg_dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if virtual_pkg_dir.exists() {
+            std::fs::remove_dir_all(&virtual_pkg_dir)?;
+        }
+        link_or_copy_dir(&src, &virtual_pkg_dir)?;
+        Ok(virtual_pkg_dir)
     }
 
     // ── Maintenance ───────────────────────────────────────────────────────────
@@ -330,6 +377,13 @@ fn fmt_bytes(b: u64) -> String {
 
 /// Recursively hard-link every file from `src` into `dst`.
 /// Falls back to `fs::copy` for files that fail hard-linking (different mount).
+/// Encode a package name for use as a virtual-store directory entry.
+///
+/// `@scope/pkg` → `@scope+pkg`  (mirrors pnpm's convention)
+pub fn virtual_entry_name(name: &str) -> String {
+    name.replace('/', "+")
+}
+
 pub(crate) fn link_or_copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)
@@ -524,5 +578,109 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         // No package.json → not cached
         assert!(!store.is_cached("registry.npmjs.org", "partial", "1.0.0"));
+    }
+
+    // ── virtual store ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn virtual_entry_name_encodes_scope() {
+        assert_eq!(virtual_entry_name("lodash"), "lodash");
+        assert_eq!(virtual_entry_name("@scope/pkg"), "@scope+pkg");
+        assert_eq!(virtual_entry_name("@a/b"), "@a+b");
+    }
+
+    #[test]
+    fn link_to_virtual_store_creates_correct_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_root = tmp.path().join("store");
+        let store = ContentStore::with_root(store_root);
+        let node_modules = tmp.path().join("nm");
+        std::fs::create_dir_all(&node_modules).unwrap();
+
+        // Seed global store with a fake package.
+        let pkg_path = store.package_path("npm", "lodash", "4.17.21");
+        std::fs::create_dir_all(&pkg_path).unwrap();
+        std::fs::write(
+            pkg_path.join("package.json"),
+            r#"{"name":"lodash","version":"4.17.21"}"#,
+        )
+        .unwrap();
+        std::fs::write(pkg_path.join("index.js"), "module.exports = {};").unwrap();
+
+        let vpath = store
+            .link_to_virtual_store("npm", "lodash", "4.17.21", &node_modules)
+            .unwrap();
+
+        // Virtual store entry exists at the expected location.
+        assert_eq!(
+            vpath,
+            node_modules
+                .join(".3va")
+                .join("lodash@4.17.21")
+                .join("node_modules")
+                .join("lodash")
+        );
+        assert!(
+            vpath.join("package.json").exists(),
+            "package.json must be in virtual store"
+        );
+        assert!(
+            vpath.join("index.js").exists(),
+            "index.js must be in virtual store"
+        );
+    }
+
+    #[test]
+    fn link_to_virtual_store_scoped_package_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::with_root(tmp.path().join("store"));
+        let node_modules = tmp.path().join("nm");
+        std::fs::create_dir_all(&node_modules).unwrap();
+
+        let pkg_path = store.package_path("npm", "@babel/core", "7.24.0");
+        std::fs::create_dir_all(&pkg_path).unwrap();
+        std::fs::write(
+            pkg_path.join("package.json"),
+            r#"{"name":"@babel/core","version":"7.24.0"}"#,
+        )
+        .unwrap();
+
+        let vpath = store
+            .link_to_virtual_store("npm", "@babel/core", "7.24.0", &node_modules)
+            .unwrap();
+
+        // Entry dir encodes scope with '+': .3va/@babel+core@7.24.0/node_modules/@babel/core/
+        let expected = node_modules
+            .join(".3va")
+            .join("@babel+core@7.24.0")
+            .join("node_modules")
+            .join("@babel")
+            .join("core");
+        assert_eq!(vpath, expected);
+        assert!(vpath.join("package.json").exists());
+    }
+
+    #[test]
+    fn link_to_virtual_store_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::with_root(tmp.path().join("store"));
+        let node_modules = tmp.path().join("nm");
+        std::fs::create_dir_all(&node_modules).unwrap();
+
+        let pkg_path = store.package_path("npm", "ms", "2.1.3");
+        std::fs::create_dir_all(&pkg_path).unwrap();
+        std::fs::write(
+            pkg_path.join("package.json"),
+            r#"{"name":"ms","version":"2.1.3"}"#,
+        )
+        .unwrap();
+
+        // Calling twice must not error.
+        store
+            .link_to_virtual_store("npm", "ms", "2.1.3", &node_modules)
+            .unwrap();
+        store
+            .link_to_virtual_store("npm", "ms", "2.1.3", &node_modules)
+            .unwrap();
     }
 }

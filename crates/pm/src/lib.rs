@@ -11,7 +11,7 @@ pub mod store;
 pub mod workspace;
 
 pub use secrets::{SecretFinding, SecretsScanner, Severity as SecretSeverity};
-pub use store::{ContentStore, PruneResult, StoreStats};
+pub use store::{ContentStore, PruneResult, StoreStats, virtual_entry_name};
 pub use workspace::{WorkspaceConfig, WorkspacePackage, create_workspace_symlinks, merged_deps};
 
 pub use auditor::{
@@ -899,6 +899,63 @@ pub async fn update_packages(
     Ok(())
 }
 
+/// Create the top-level symlink `node_modules/{name}` → `.3va/{entry}@{ver}/node_modules/{name}`.
+///
+/// The symlink uses a relative target so the `node_modules/` directory can be
+/// moved without breaking links.  On non-Unix platforms we fall back to a
+/// direct hard-link copy because creating directory symlinks requires elevated
+/// privileges on Windows.
+fn create_virtual_symlink(
+    name: &str,
+    version: &str,
+    node_modules: &Path,
+    _virtual_pkg_path: &Path,
+) -> anyhow::Result<()> {
+    let link_path = if name.contains('/') {
+        let scope_dir = node_modules.join(name.split('/').next().unwrap_or(name));
+        std::fs::create_dir_all(&scope_dir)?;
+        node_modules.join(name)
+    } else {
+        node_modules.join(name)
+    };
+
+    // Remove stale link or directory before (re)creating.
+    if link_path.is_symlink() {
+        std::fs::remove_file(&link_path)?;
+    } else if link_path.exists() {
+        std::fs::remove_dir_all(&link_path)?;
+    }
+
+    #[cfg(unix)]
+    {
+        let entry = format!("{}@{}", store::virtual_entry_name(name), version);
+        // Relative path from the symlink's containing directory to the virtual-store pkg.
+        // Non-scoped: link at node_modules/pkg       → .3va/pkg@ver/node_modules/pkg
+        // Scoped:     link at node_modules/@s/pkg    → ../.3va/@s+pkg@ver/node_modules/@s/pkg
+        let rel_target = if name.contains('/') {
+            format!("../.3va/{}/node_modules/{}", entry, name)
+        } else {
+            format!(".3va/{}/node_modules/{}", entry, name)
+        };
+        std::os::unix::fs::symlink(&rel_target, &link_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot create symlink {} → {}: {}",
+                link_path.display(),
+                rel_target,
+                e
+            )
+        })?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        // Windows fallback: hard-link directly (no virtual store indirection).
+        store::link_or_copy_dir(_virtual_pkg_path, &link_path)?;
+    }
+
+    Ok(())
+}
+
 async fn install_package_impl(
     input: &str,
     force: bool,
@@ -1102,11 +1159,32 @@ async fn install_package_impl(
             global_store.store_tarball(&tarball_bytes, reg_name, &pkg_name, &resolved_version)?;
         }
 
-        // Phase 2: Hard-link (or copy) from global store into this project's node_modules/.
-        println!("  Linking to node_modules/{} ...", pkg_name);
+        // Phase 2: Hard-link into per-project virtual store, then symlink into node_modules/.
+        //
+        // Layout:
+        //   node_modules/.3va/pkg@ver/node_modules/pkg/  ← hard-links from ~/.3va/store
+        //   node_modules/pkg                              ← symlink → .3va/pkg@ver/node_modules/pkg
+        //
+        // This mirrors pnpm's .pnpm topology: top-level node_modules/ contains only
+        // symlinks; actual bytes are shared via the global content-addressable store.
+        println!(
+            "  Linking {}@{} → node_modules/.3va/",
+            pkg_name, resolved_version
+        );
         std::fs::create_dir_all(&node_modules)?;
-        global_store.link_to_node_modules(reg_name, &pkg_name, &resolved_version, &node_modules)?;
-        println!("  ✓ Linked from ~/.3va/store");
+        let virtual_path = global_store.link_to_virtual_store(
+            reg_name,
+            &pkg_name,
+            &resolved_version,
+            &node_modules,
+        )?;
+        create_virtual_symlink(&pkg_name, &resolved_version, &node_modules, &virtual_path)?;
+        println!(
+            "  ✓ node_modules/{} → .3va/{}@{}",
+            pkg_name,
+            store::virtual_entry_name(&pkg_name),
+            resolved_version
+        );
     }
 
     // ── package.json + lockfile ───────────────────────────────────────────────
@@ -1351,14 +1429,40 @@ pub async fn install_workspace(
 /// Print a summary of the global content-addressable store.
 pub fn store_status() {
     let stats = store::ContentStore::global().stats();
+
     println!();
-    println!("Global store: {}", stats.store_path.display());
-    println!("  Packages : {}", stats.total_packages);
-    println!("  Disk use : {}", stats.human_size());
-    println!();
-    if stats.total_packages > 0 {
-        println!(
-            "  Every project that shares a package version uses hard-links — no duplicate files."
-        );
+    println!("Global store  {}", stats.store_path.display());
+    println!("  Packages cached : {}", stats.total_packages);
+    println!("  Disk used       : {}", stats.human_size());
+
+    // Virtual store for the current project (node_modules/.3va/).
+    if let Ok(cwd) = std::env::current_dir() {
+        let virtual_root = cwd.join("node_modules").join(".3va");
+        if virtual_root.exists() {
+            let mut entries: Vec<String> = std::fs::read_dir(&virtual_root)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            entries.sort();
+
+            println!();
+            println!("Virtual store   node_modules/.3va/");
+            println!("  Packages linked : {}", entries.len());
+            for name in &entries {
+                println!("  • {}", name);
+            }
+            println!();
+            println!("  node_modules/<pkg>  →  .3va/<pkg>@<ver>/node_modules/<pkg>");
+            println!("  Files are hard-linked from the global store — zero duplication.");
+        }
     }
+
+    if stats.total_packages > 0 {
+        println!();
+        println!("  Every project sharing a package version reads the same bytes from disk.");
+    }
+    println!();
 }
