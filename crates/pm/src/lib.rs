@@ -7,8 +7,12 @@ pub mod resolver;
 pub mod secrets;
 pub mod semver;
 pub mod signature_verifier;
+pub mod store;
+pub mod workspace;
 
 pub use secrets::{SecretFinding, SecretsScanner, Severity as SecretSeverity};
+pub use store::{ContentStore, PruneResult, StoreStats};
+pub use workspace::{WorkspaceConfig, WorkspacePackage, create_workspace_symlinks, merged_deps};
 
 pub use auditor::{
     AuditReport, VulnFinding, VulnSeverity, Vulnerability, print_audit_report, run_audit,
@@ -327,27 +331,67 @@ fn parse_package_spec(input: &str) -> anyhow::Result<(String, Option<String>)> {
 
 // ── Download + extract ────────────────────────────────────────────────────────
 
-async fn download_tarball(url: &str) -> anyhow::Result<Vec<u8>> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(url)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("Network error downloading tarball: {}", e))?;
+/// Download a tarball with up to `MAX_RETRIES` retries and exponential backoff.
+/// Retries on connection/timeout errors and 5xx responses; fails immediately
+/// on 4xx (package not found, auth errors, etc.).
+const MAX_RETRIES: u32 = 3;
+const RETRY_BASE_MS: u64 = 400;
 
-    if !resp.status().is_success() {
-        anyhow::bail!(
-            "Failed to download tarball from {}: HTTP {}",
-            url,
-            resp.status()
-        );
+async fn download_tarball(url: &str) -> anyhow::Result<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()?;
+
+    let mut last_err = anyhow::anyhow!("unreachable");
+
+    for attempt in 0..=MAX_RETRIES {
+        if attempt > 0 {
+            let delay_ms = RETRY_BASE_MS * 2u64.pow(attempt - 1);
+            tracing::warn!(
+                "Download attempt {}/{} for {} failed, retrying in {}ms...",
+                attempt,
+                MAX_RETRIES,
+                url,
+                delay_ms
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+
+        let result = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Network error: {}", e));
+
+        let resp = match result {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = e;
+                continue; // transient — retry
+            }
+        };
+
+        let status = resp.status();
+        // 4xx = permanent failure (bad URL, auth, not found); don't retry.
+        if status.is_client_error() {
+            anyhow::bail!("Failed to download {}: HTTP {} (not retrying)", url, status);
+        }
+        if !status.is_success() {
+            last_err = anyhow::anyhow!("HTTP {} from {}", status, url);
+            continue; // 5xx — retry
+        }
+
+        return Ok(resp.bytes().await?.to_vec());
     }
 
-    Ok(resp.bytes().await?.to_vec())
+    Err(last_err.context(format!(
+        "All {} download attempts failed for {}",
+        MAX_RETRIES + 1,
+        url
+    )))
 }
 
-fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()> {
+pub(crate) fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()> {
     let decoder = flate2::read::GzDecoder::new(data);
     let mut archive = tar::Archive::new(decoder);
 
@@ -376,47 +420,134 @@ fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()> {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub async fn install_package(name: &str, allow_net: Option<&[String]>) -> anyhow::Result<()> {
-    install_with_transitive(name, false, allow_net).await
+    let root = std::env::current_dir()?;
+    install_with_transitive(name, false, allow_net, &root, true).await
 }
 
 pub async fn reinstall_package(name: &str, allow_net: Option<&[String]>) -> anyhow::Result<()> {
-    install_with_transitive(name, true, allow_net).await
+    let root = std::env::current_dir()?;
+    install_with_transitive(name, true, allow_net, &root, true).await
 }
 
-/// BFS install: installs `root` and all of its transitive dependencies.
+/// Install all `dependencies` listed in `project_root/package.json`.
+/// This is what `3va install` (no args, no workspace) does.
+pub async fn install_from_manifest(
+    project_root: &Path,
+    allow_net: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let pkg_json = project_root.join("package.json");
+    if !pkg_json.exists() {
+        anyhow::bail!(
+            "No package.json found in {}.\nCreate one or pass package names explicitly.",
+            project_root.display()
+        );
+    }
+
+    let content = std::fs::read_to_string(&pkg_json)?;
+    let val: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid package.json: {}", e))?;
+
+    let mut all_deps: Vec<(String, String)> = Vec::new();
+    for key in ["dependencies", "devDependencies"] {
+        if let Some(obj) = val[key].as_object() {
+            for (name, version) in obj {
+                if let Some(ver) = version.as_str() {
+                    all_deps.push((name.clone(), ver.to_string()));
+                }
+            }
+        }
+    }
+
+    if all_deps.is_empty() {
+        println!("Nothing to install — package.json has no dependencies.");
+        return Ok(());
+    }
+
+    println!();
+    println!("Installing {} dep(s) from manifest...", all_deps.len());
+
+    // Install concurrently: each dep gets its own task.
+    let mut set = tokio::task::JoinSet::new();
+    let allow_net_owned: Option<Vec<String>> = allow_net.map(|v| v.to_vec());
+    let root = project_root.to_path_buf();
+
+    for (name, version) in all_deps {
+        let spec = format!("{}@{}", name, normalize_version(&version));
+        let an = allow_net_owned.clone();
+        let r = root.clone();
+        set.spawn(
+            async move { install_with_transitive(&spec, false, an.as_deref(), &r, false).await },
+        );
+    }
+
+    let mut errors = Vec::new();
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => errors.push(e.to_string()),
+            Err(e) => errors.push(format!("task panic: {}", e)),
+        }
+    }
+
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "{} dep(s) failed to install:\n{}",
+            errors.len(),
+            errors.join("\n")
+        );
+    }
+
+    println!();
+    println!("✓ All dependencies installed.");
+    Ok(())
+}
+
+/// BFS install: installs `root_spec` and all of its transitive dependencies
+/// into `project_root/node_modules/`.
+///
+/// `update_manifest`: when true the package.json and lockfile in
+/// `project_root` are updated.  Pass false for transitive deps.
 async fn install_with_transitive(
-    root: &str,
+    root_spec: &str,
     force: bool,
     allow_net: Option<&[String]>,
+    project_root: &Path,
+    update_manifest: bool,
 ) -> anyhow::Result<()> {
     use std::collections::{HashSet, VecDeque};
 
     let mut visited: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<String> = VecDeque::new();
-    queue.push_back(root.to_string());
+    queue.push_back(root_spec.to_string());
+    let mut is_root = true;
 
-    while let Some(pkg) = queue.pop_front() {
-        if visited.contains(&pkg) {
+    while let Some(spec) = queue.pop_front() {
+        if visited.contains(&spec) {
             continue;
         }
-        visited.insert(pkg.clone());
+        visited.insert(spec.clone());
 
-        // Skip if already extracted (and not forced), but still read its deps
-        let node_modules_dest = PathBuf::from("node_modules").join(&pkg);
-        let already_ok = !force && {
-            let pj = node_modules_dest.join("package.json");
-            pj.exists()
-        };
+        let current_is_root = is_root;
+        is_root = false;
 
-        if already_ok && pkg != root {
-            // Already installed — just enqueue its deps
-        } else {
-            install_package_impl(&pkg, force && pkg == root, allow_net).await?;
+        // Parse just the name to check if already installed.
+        let (pkg_name, _) = parse_package_spec(&spec)?;
+        let node_modules_dest = project_root.join("node_modules").join(&pkg_name);
+        let already_ok = !force && node_modules_dest.join("package.json").exists();
+
+        if !already_ok || (current_is_root && force) {
+            install_package_impl(
+                &spec,
+                force && current_is_root,
+                allow_net,
+                project_root,
+                update_manifest && current_is_root,
+            )
+            .await?;
         }
 
-        // Read transitive deps from the installed package.json
-        let pkg_json = node_modules_dest.join("package.json");
-        if let Ok(content) = std::fs::read_to_string(&pkg_json)
+        // Enqueue transitive deps from the installed package.json.
+        if let Ok(content) = std::fs::read_to_string(node_modules_dest.join("package.json"))
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
             && let Some(deps_obj) = val["dependencies"].as_object()
         {
@@ -754,11 +885,12 @@ pub async fn update_packages(
     // Update each package using its stored registry as the allowed host
     println!();
     println!("Updating {} package(s)...", targets.len());
+    let cwd = std::env::current_dir()?;
 
     for pkg in &targets {
         if let Some(reg) = lockfile.registry_for(pkg) {
             let host = reg.to_string();
-            install_package_impl(pkg, true, Some(&[host])).await?;
+            install_package_impl(pkg, true, Some(&[host]), &cwd, true).await?;
         }
     }
 
@@ -771,6 +903,8 @@ async fn install_package_impl(
     input: &str,
     force: bool,
     allow_net: Option<&[String]>,
+    project_root: &Path,
+    update_manifest: bool,
 ) -> anyhow::Result<()> {
     let (pkg_name, requested_version) = parse_package_spec(input)?;
 
@@ -868,17 +1002,18 @@ async fn install_package_impl(
         latest
     };
 
-    // ── Download, verify, extract ─────────────────────────────────────────────
-    std::fs::create_dir_all(".3va-cache")
+    // ── Download, store, link ─────────────────────────────────────────────────
+    let cache_dir = project_root.join(".3va-cache");
+    std::fs::create_dir_all(&cache_dir)
         .map_err(|e| anyhow::anyhow!("Cannot create cache directory: {}", e))?;
 
-    let safe_name = pkg_name.replace('/', "-").trim_matches('-').to_string();
-    let cached_tarball =
-        PathBuf::from(".3va-cache").join(format!("{}-{}.tgz", safe_name, resolved_version));
-    let node_modules_dest = PathBuf::from("node_modules").join(&pkg_name);
+    let safe_pkg = pkg_name.replace('/', "-").trim_matches('-').to_string();
+    let cached_tarball = cache_dir.join(format!("{}-{}.tgz", safe_pkg, resolved_version));
+    let node_modules = project_root.join("node_modules");
+    let node_modules_dest = node_modules.join(&pkg_name);
 
-    // Check if already fully extracted at correct version (skip if not forced)
-    let already_extracted = !force && {
+    // Skip if already linked at the correct version.
+    let already_linked = !force && {
         let pkg_json = node_modules_dest.join("package.json");
         pkg_json.exists()
             && std::fs::read_to_string(&pkg_json)
@@ -889,77 +1024,98 @@ async fn install_package_impl(
                 == Some(resolved_version.as_str())
     };
 
-    if already_extracted {
-        println!("  ✓ Already extracted in node_modules/{}", pkg_name);
+    if already_linked {
+        println!("  ✓ Already installed in node_modules/{}", pkg_name);
     } else {
-        // Fetch or use cached tarball
-        let tarball_bytes = if cached_tarball.exists() && !force {
-            println!("  ✓ Using cached tarball");
-            std::fs::read(&cached_tarball)?
+        let global_store = store::ContentStore::global();
+        let reg_name = registry.display_name();
+
+        // Phase 1: Ensure the package is in the global content-addressable store.
+        // A store hit means zero network traffic for every project after the first.
+        if global_store.is_cached(reg_name, &pkg_name, &resolved_version) && !force {
+            println!("  ✓ Found in global store (~/.3va/store)");
         } else {
-            let tarball_url = info
-                .version_meta
-                .get(&resolved_version)
-                .map(|m| m.tarball.clone())
-                .unwrap_or_else(|| {
-                    format!(
-                        "{}/{}/-/{}-{}.tgz",
-                        registry.base_url(),
-                        pkg_name,
-                        pkg_name,
-                        resolved_version
-                    )
-                });
+            // Fetch bytes — prefer the per-project tarball cache, then network.
+            let tarball_bytes: Vec<u8> = if cached_tarball.exists() && !force {
+                println!("  ✓ Using cached tarball");
+                std::fs::read(&cached_tarball)?
+            } else {
+                let tarball_url = info
+                    .version_meta
+                    .get(&resolved_version)
+                    .map(|m| m.tarball.clone())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{}/{}/-/{}-{}.tgz",
+                            registry.base_url(),
+                            pkg_name,
+                            pkg_name,
+                            resolved_version
+                        )
+                    });
 
-            println!("  Downloading {}@{} ...", pkg_name, resolved_version);
-            tracing::info!("Downloading from {}", tarball_url);
-            let bytes = download_tarball(&tarball_url).await?;
-            std::fs::write(&cached_tarball, &bytes)?;
-            bytes
-        };
+                println!("  Downloading {}@{} ...", pkg_name, resolved_version);
+                tracing::info!("Downloading from {}", tarball_url);
+                let bytes = download_tarball(&tarball_url).await?;
+                std::fs::write(&cached_tarball, &bytes)?;
+                bytes
+            };
 
-        // Verify integrity against registry metadata via SignatureVerifier
-        if let Some(meta) = info.version_meta.get(&resolved_version) {
-            print!("  Verifying integrity... ");
-            let verifier = SignatureVerifier::sha512();
-            match verifier.verify_from_registry(&tarball_bytes, meta.integrity.as_deref()) {
-                VerificationStatus::Verified => println!("✓"),
-                VerificationStatus::Mismatch => {
-                    let _ = std::fs::remove_file(&cached_tarball);
-                    eprintln!();
-                    anyhow::bail!(
-                        "Integrity check failed for {}@{}: tarball hash does not match registry metadata",
-                        pkg_name,
-                        resolved_version
-                    );
-                }
-                VerificationStatus::Missing => {
-                    println!("  ! Warning: No integrity hash in registry metadata — cannot verify");
-                }
-                VerificationStatus::Failed(e) => {
-                    let _ = std::fs::remove_file(&cached_tarball);
-                    anyhow::bail!(
-                        "Integrity check failed for {}@{}: {}",
-                        pkg_name,
-                        resolved_version,
-                        e
-                    );
-                }
-                VerificationStatus::Unverified => {
-                    println!("  ! Warning: Integrity unverified");
+            // Verify integrity before writing to the store.
+            if let Some(meta) = info.version_meta.get(&resolved_version) {
+                print!("  Verifying integrity... ");
+                let verifier = SignatureVerifier::sha512();
+                match verifier.verify_from_registry(&tarball_bytes, meta.integrity.as_deref()) {
+                    VerificationStatus::Verified => println!("✓"),
+                    VerificationStatus::Mismatch => {
+                        let _ = std::fs::remove_file(&cached_tarball);
+                        eprintln!();
+                        anyhow::bail!(
+                            "Integrity check failed for {}@{}: hash mismatch",
+                            pkg_name,
+                            resolved_version
+                        );
+                    }
+                    VerificationStatus::Missing => {
+                        println!("  (!) No integrity hash in registry — skipping check");
+                    }
+                    VerificationStatus::Failed(e) => {
+                        let _ = std::fs::remove_file(&cached_tarball);
+                        anyhow::bail!(
+                            "Integrity check failed for {}@{}: {}",
+                            pkg_name,
+                            resolved_version,
+                            e
+                        );
+                    }
+                    VerificationStatus::Unverified => {
+                        println!("  (!) Integrity unverified");
+                    }
                 }
             }
+
+            // Atomically store — concurrent processes writing the same package are safe.
+            println!(
+                "  Storing {}@{} in global store...",
+                pkg_name, resolved_version
+            );
+            global_store.store_tarball(&tarball_bytes, reg_name, &pkg_name, &resolved_version)?;
         }
 
-        // Extract to node_modules/
-        println!("  Extracting to node_modules/{} ...", pkg_name);
-        std::fs::create_dir_all("node_modules")?;
-        extract_tarball(&tarball_bytes, &node_modules_dest)?;
-        println!("  ✓ Extracted successfully");
+        // Phase 2: Hard-link (or copy) from global store into this project's node_modules/.
+        println!("  Linking to node_modules/{} ...", pkg_name);
+        std::fs::create_dir_all(&node_modules)?;
+        global_store.link_to_node_modules(reg_name, &pkg_name, &resolved_version, &node_modules)?;
+        println!("  ✓ Linked from ~/.3va/store");
     }
 
-    // ── package.json ──────────────────────────────────────────────────────────
-    let pkg_json_path = PathBuf::from("package.json");
+    // ── package.json + lockfile ───────────────────────────────────────────────
+    // Only update when asked (top-level installs), not for transitive deps.
+    if !update_manifest {
+        return Ok(());
+    }
+
+    let pkg_json_path = project_root.join("package.json");
     let (project_name, project_version, mut deps) = if pkg_json_path.exists() {
         let content = std::fs::read_to_string(&pkg_json_path)?;
         let val: serde_json::Value =
@@ -1034,13 +1190,12 @@ async fn install_package_impl(
     }
 
     // Generate lockfile
-    let cache_dir = PathBuf::from(".3va-cache");
-    let mut pm = PackageManager::new(cache_dir);
+    let mut pm = PackageManager::new(project_root.join(".3va-cache"));
     let mut lockfile = pm.install(&deps, &project_name, &project_version)?;
 
-    let lockfile_path = PathBuf::from("3va-lock.json");
+    let lockfile_path = project_root.join("3va-lock.json");
 
-    // Preserve existing registry assignments from the previous lockfile before overwriting
+    // Preserve existing registry assignments before overwriting.
     if let Ok(old_lock) = Lockfile::load(&lockfile_path) {
         for (name, dep) in &old_lock.dependencies {
             if let Some(reg) = &dep.registry {
@@ -1048,14 +1203,10 @@ async fn install_package_impl(
             }
         }
     }
-    // Record the registry for the package we just installed/updated
     lockfile.set_registry(&pkg_name, registry.display_name());
 
     lockfile.save(&lockfile_path)?;
-    tracing::info!(
-        "Lockfile written to 3va-lock.json ({} packages).",
-        lockfile.packages.len()
-    );
+    tracing::info!("Lockfile written ({} packages).", lockfile.packages.len());
 
     println!();
     if force {
@@ -1072,4 +1223,142 @@ async fn install_package_impl(
     println!("  Run: 3va run <your-file>.ts");
 
     Ok(())
+}
+
+// ── Workspace install ─────────────────────────────────────────────────────────
+
+/// Install all dependencies across a workspace rooted at `root`.
+///
+/// 1. Discovers workspace packages via `3va-workspace.json` or `workspaces`
+///    in the root `package.json`.
+/// 2. Merges all deps (highest version wins on conflict).
+/// 3. Installs each unique dep once into the *root* `node_modules/`, using the
+///    global content-addressable store so packages shared with other projects
+///    are hard-linked rather than duplicated.
+/// 4. Installs each workspace package's own deps into its *local*
+///    `node_modules/` via the same store (also just hard-links).
+pub async fn install_workspace(
+    root: &std::path::Path,
+    allow_net: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let cfg = match workspace::WorkspaceConfig::discover(root)? {
+        Some(c) => c,
+        None => {
+            anyhow::bail!(
+                "No workspace config found in {}\n\
+                 Create a 3va-workspace.json with a \"packages\" array, or add a\n\
+                 \"workspaces\" key to your root package.json.",
+                root.display()
+            );
+        }
+    };
+
+    let packages = cfg.resolve_packages(root)?;
+    if packages.is_empty() {
+        println!("No workspace packages found.");
+        return Ok(());
+    }
+
+    println!();
+    println!("Workspace: {} package(s) discovered", packages.len());
+    for p in &packages {
+        println!("  {} @ {} ({})", p.name, p.version, p.path.display());
+    }
+    println!();
+
+    // ── Step 1: install merged deps into the workspace root node_modules/ ─────
+    // Deps are deduplicated across all packages; the highest version wins.
+    // All packages are installed concurrently into the root node_modules/.
+    let merged = workspace::merged_deps(&packages);
+    if !merged.is_empty() {
+        println!(
+            "Installing {} unique dep(s) into workspace root...",
+            merged.len()
+        );
+        println!();
+
+        let allow_net_owned: Option<Vec<String>> = allow_net.map(|v| v.to_vec());
+        let mut set = tokio::task::JoinSet::new();
+
+        for (dep_name, dep_version) in &merged {
+            let spec = format!("{}@{}", dep_name, normalize_version(dep_version));
+            let an = allow_net_owned.clone();
+            let r = root.to_path_buf();
+            // update_manifest=false for root-level shared deps (each package
+            // manages its own manifest; the root has no package.json of its own
+            // necessarily).
+            set.spawn(async move {
+                install_with_transitive(&spec, false, an.as_deref(), &r, false).await
+            });
+        }
+
+        let mut errors = Vec::new();
+        while let Some(res) = set.join_next().await {
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => errors.push(e.to_string()),
+                Err(e) => errors.push(format!("task panic: {}", e)),
+            }
+        }
+        if !errors.is_empty() {
+            anyhow::bail!(
+                "{} dep(s) failed during workspace root install:\n{}",
+                errors.len(),
+                errors.join("\n")
+            );
+        }
+    }
+
+    // ── Step 2: install each workspace package's own deps locally ─────────────
+    // Packages run sequentially to avoid conflicting lockfile writes, but their
+    // downloads are all store-cached from step 1 so this is just hard-links.
+    for pkg in &packages {
+        if pkg.all_deps.is_empty() {
+            continue;
+        }
+        println!();
+        println!(
+            "  [{}] linking {} dep(s) into local node_modules...",
+            pkg.name,
+            pkg.all_deps.len()
+        );
+
+        for (dep_name, dep_version) in &pkg.all_deps {
+            let spec = format!("{}@{}", dep_name, normalize_version(dep_version));
+            // update_manifest=true so each package's package.json + lockfile is updated.
+            install_with_transitive(&spec, false, allow_net, &pkg.path, true).await?;
+        }
+    }
+
+    // ── Step 3: create symlinks for workspace: cross-references ───────────────
+    workspace::create_workspace_symlinks(root, &packages)?;
+
+    println!();
+    println!("✓ Workspace install complete.");
+    println!();
+
+    let stats = store::ContentStore::global().stats();
+    println!(
+        "  Global store: {} package(s), {}  ({})",
+        stats.total_packages,
+        stats.human_size(),
+        stats.store_path.display()
+    );
+
+    Ok(())
+}
+
+/// Print a summary of the global content-addressable store.
+pub fn store_status() {
+    let stats = store::ContentStore::global().stats();
+    println!();
+    println!("Global store: {}", stats.store_path.display());
+    println!("  Packages : {}", stats.total_packages);
+    println!("  Disk use : {}", stats.human_size());
+    println!();
+    if stats.total_packages > 0 {
+        println!(
+            "  Every project that shares a package version uses hard-links — no duplicate files."
+        );
+    }
 }

@@ -1,8 +1,79 @@
 use rquickjs::{Ctx, Function, Result, function::Rest};
+use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use vvva_permissions::{Capability, PermissionState};
+
+/// Shared file-descriptor table: fd → open file handle.
+/// fd numbers start at 3 (0/1/2 = stdin/stdout/stderr).
+#[derive(Default)]
+struct FdTable {
+    next_fd: i32,
+    table: HashMap<i32, std::fs::File>,
+}
+
+impl FdTable {
+    fn new() -> Self {
+        Self {
+            next_fd: 3,
+            table: HashMap::new(),
+        }
+    }
+    fn insert(&mut self, file: std::fs::File) -> i32 {
+        let fd = self.next_fd;
+        self.next_fd += 1;
+        self.table.insert(fd, file);
+        fd
+    }
+    fn get_mut(&mut self, fd: i32) -> Option<&mut std::fs::File> {
+        self.table.get_mut(&fd)
+    }
+    fn remove(&mut self, fd: i32) -> bool {
+        self.table.remove(&fd).is_some()
+    }
+}
+
+fn flags_to_open_options(flags: &str) -> std::fs::OpenOptions {
+    let mut opts = std::fs::OpenOptions::new();
+    match flags {
+        "r" | "rs" => {
+            opts.read(true);
+        }
+        "r+" | "rs+" => {
+            opts.read(true).write(true);
+        }
+        "w" => {
+            opts.write(true).create(true).truncate(true);
+        }
+        "w+" => {
+            opts.read(true).write(true).create(true).truncate(true);
+        }
+        "wx" => {
+            opts.write(true).create_new(true);
+        }
+        "wx+" => {
+            opts.read(true).write(true).create_new(true);
+        }
+        "a" => {
+            opts.append(true).create(true);
+        }
+        "a+" => {
+            opts.read(true).append(true).create(true);
+        }
+        "ax" => {
+            opts.append(true).create_new(true);
+        }
+        "ax+" => {
+            opts.read(true).append(true).create_new(true);
+        }
+        _ => {
+            opts.read(true);
+        }
+    }
+    opts
+}
 
 fn js_err<'js>(ctx: &Ctx<'js>, msg: String) -> rquickjs::Error {
     let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
@@ -23,8 +94,195 @@ fn perm_err<'js>(ctx: &Ctx<'js>, flag: &str, path: &std::path::Path) -> rquickjs
     )
 }
 
+fn stat_meta_to_json(meta: &std::fs::Metadata) -> String {
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
+    let atime_ms = meta
+        .accessed()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
+    let ctime_ms = meta
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(mtime_ms);
+    let mode = meta.permissions().mode();
+    let is_dir = meta.is_dir();
+    let is_file = meta.is_file();
+    let is_symlink = meta.file_type().is_symlink();
+    format!(
+        r#"{{"size":{},"mode":{},"isFile":{},"isDirectory":{},"isSymbolicLink":{},"mtimeMs":{},"atimeMs":{},"ctimeMs":{},"birthtimeMs":{},"nlink":1,"uid":0,"gid":0,"ino":0,"dev":0,"rdev":0}}"#,
+        meta.len(),
+        mode,
+        is_file,
+        is_dir,
+        is_symlink,
+        mtime_ms,
+        atime_ms,
+        ctime_ms,
+        ctime_ms
+    )
+}
+
 pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
     let globals = ctx.globals();
+    let fd_table: Arc<Mutex<FdTable>> = Arc::new(Mutex::new(FdTable::new()));
+
+    // ── __fsFdOpen(path, flags_str) -> fd ─────────────────────────────────────
+    {
+        let perms = permissions.clone();
+        let fdt = fd_table.clone();
+        globals.set(
+            "__fsFdOpen",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>,
+                      path_str: String,
+                      flags: String,
+                      _mode: Option<i32>|
+                      -> Result<i32> {
+                    let path = PathBuf::from(&path_str);
+                    let needs_write = matches!(
+                        flags.as_str(),
+                        "w" | "w+" | "wx" | "wx+" | "a" | "a+" | "ax" | "ax+" | "r+" | "rs+"
+                    );
+                    if needs_write {
+                        if !perms.check(&Capability::FileWrite(path.clone())) {
+                            return Err(perm_err(&ctx, "write", &path));
+                        }
+                    } else if !perms.check(&Capability::FileRead(path.clone())) {
+                        return Err(perm_err(&ctx, "read", &path));
+                    }
+                    let file = flags_to_open_options(&flags)
+                        .open(&path)
+                        .map_err(|e| js_err(&ctx, format!("ENOENT: open '{}': {}", path_str, e)))?;
+                    Ok(fdt.lock().unwrap().insert(file))
+                },
+            )?,
+        )?;
+    }
+
+    // ── __fsFdClose(fd) ───────────────────────────────────────────────────────
+    {
+        let fdt = fd_table.clone();
+        globals.set(
+            "__fsFdClose",
+            Function::new(ctx.clone(), move |ctx: Ctx<'_>, fd: i32| -> Result<()> {
+                if !fdt.lock().unwrap().remove(fd) {
+                    return Err(js_err(&ctx, format!("EBADF: bad file descriptor {fd}")));
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+
+    // ── __fsFdRead(fd, length, position) -> Vec<u8> ───────────────────────────
+    {
+        let fdt = fd_table.clone();
+        globals.set(
+            "__fsFdRead",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>,
+                      fd: i32,
+                      length: usize,
+                      position: Option<i64>|
+                      -> Result<Vec<u8>> {
+                    let mut table = fdt.lock().unwrap();
+                    let file = table
+                        .get_mut(fd)
+                        .ok_or_else(|| js_err(&ctx, format!("EBADF: bad file descriptor {fd}")))?;
+                    if let Some(pos) = position {
+                        file.seek(SeekFrom::Start(pos as u64))
+                            .map_err(|e| js_err(&ctx, e.to_string()))?;
+                    }
+                    let mut buf = vec![0u8; length];
+                    let n = file
+                        .read(&mut buf)
+                        .map_err(|e| js_err(&ctx, e.to_string()))?;
+                    buf.truncate(n);
+                    Ok(buf)
+                },
+            )?,
+        )?;
+    }
+
+    // ── __fsFdWrite(fd, data, position) -> bytes_written ─────────────────────
+    {
+        let fdt = fd_table.clone();
+        globals.set(
+            "__fsFdWrite",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>,
+                      fd: i32,
+                      data: Vec<u8>,
+                      position: Option<i64>|
+                      -> Result<usize> {
+                    let mut table = fdt.lock().unwrap();
+                    let file = table
+                        .get_mut(fd)
+                        .ok_or_else(|| js_err(&ctx, format!("EBADF: bad file descriptor {fd}")))?;
+                    if let Some(pos) = position {
+                        file.seek(SeekFrom::Start(pos as u64))
+                            .map_err(|e| js_err(&ctx, e.to_string()))?;
+                    }
+                    file.write_all(&data)
+                        .map_err(|e| js_err(&ctx, e.to_string()))?;
+                    Ok(data.len())
+                },
+            )?,
+        )?;
+    }
+
+    // ── __fsFdStat(fd) -> JSON stat ───────────────────────────────────────────
+    {
+        let fdt = fd_table.clone();
+        globals.set(
+            "__fsFdStat",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>, fd: i32| -> Result<String> {
+                    let mut table = fdt.lock().unwrap();
+                    let file = table
+                        .get_mut(fd)
+                        .ok_or_else(|| js_err(&ctx, format!("EBADF: bad file descriptor {fd}")))?;
+                    let meta = file.metadata().map_err(|e| js_err(&ctx, e.to_string()))?;
+                    let json = stat_meta_to_json(&meta);
+                    Ok(json)
+                },
+            )?,
+        )?;
+    }
+
+    // ── __fsMkdtemp(prefix) -> String ─────────────────────────────────────────
+    {
+        let perms = permissions.clone();
+        globals.set(
+            "__fsMkdtemp",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>, prefix: String| -> Result<String> {
+                    let path = PathBuf::from(&prefix);
+                    let parent = path.parent().unwrap_or(std::path::Path::new("/tmp"));
+                    if !perms.check(&Capability::FileWrite(parent.to_path_buf())) {
+                        return Err(perm_err(&ctx, "write", parent));
+                    }
+                    // Create a temp dir with a random suffix
+                    let unique = format!("{}{}", prefix, std::process::id());
+                    std::fs::create_dir_all(&unique).map_err(|e| js_err(&ctx, e.to_string()))?;
+                    Ok(unique)
+                },
+            )?,
+        )?;
+    }
 
     // ── __fsReadFileSync(path) -> String ──────────────────────────────────────
     let perms = permissions.clone();
@@ -143,7 +401,8 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             ctx.clone(),
             move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
                 let mut it = args.0.into_iter();
-                let path_str = it.next()
+                let path_str = it
+                    .next()
                     .ok_or_else(|| js_err(&ctx, "__fsStatSync() requires a path".into()))?;
                 let follow = it.next().map(|s| s != "false").unwrap_or(true);
                 let path = PathBuf::from(&path_str);
@@ -154,31 +413,9 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                     std::fs::metadata(&path)
                 } else {
                     std::fs::symlink_metadata(&path)
-                }.map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
-
-                let mtime_ms = meta.modified().ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as f64)
-                    .unwrap_or(0.0);
-                let atime_ms = meta.accessed().ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as f64)
-                    .unwrap_or(0.0);
-                let ctime_ms = meta.created().ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as f64)
-                    .unwrap_or(mtime_ms);
-
-                let mode = meta.permissions().mode();
-                let is_dir = meta.is_dir();
-                let is_file = meta.is_file();
-                let is_symlink = meta.file_type().is_symlink();
-
-                Ok(format!(
-                    r#"{{"size":{},"mode":{},"isFile":{},"isDirectory":{},"isSymbolicLink":{},"mtimeMs":{},"atimeMs":{},"ctimeMs":{},"birthtimeMs":{},"nlink":1,"uid":0,"gid":0,"ino":0,"dev":0,"rdev":0}}"#,
-                    meta.len(), mode, is_file, is_dir, is_symlink,
-                    mtime_ms, atime_ms, ctime_ms, ctime_ms
-                ))
+                }
+                .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
+                Ok(stat_meta_to_json(&meta))
             },
         )?,
     )?;
@@ -546,6 +783,177 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 var err = result === 'ok' ? null : new Error(result);
                 if (cb) { setTimeout(function() { cb(err); }, 0); return; }
                 return err ? Promise.reject(err) : Promise.resolve();
+            },
+
+            // ── fd-based operations ─────────────────────────────────────────────
+            open: function(path, flags, mode, cb) {
+                if (typeof mode === 'function') { cb = mode; mode = 0o666; }
+                if (typeof flags === 'number') flags = ['r','w','r+','w','w','a','a+'][flags] || 'r';
+                var result;
+                try { result = __fsFdOpen(path, flags, mode); } catch(e) { if (cb) cb(e); return; }
+                if (cb) setTimeout(function() { cb(null, result); }, 0);
+                return result;
+            },
+            openSync: function(path, flags, mode) {
+                if (typeof flags === 'number') flags = ['r','w','r+','w','w','a','a+'][flags] || 'r';
+                return __fsFdOpen(path, flags, mode || 0o666);
+            },
+            close: function(fd, cb) {
+                try { __fsFdClose(fd); } catch(e) { if (cb) cb(e); return; }
+                if (cb) setTimeout(function() { cb(null); }, 0);
+            },
+            closeSync: function(fd) { __fsFdClose(fd); },
+            read: function(fd, buffer, offset, length, position, cb) {
+                try {
+                    var bytes = __fsFdRead(fd, length, position >= 0 ? position : null);
+                    var bytesRead = bytes.length;
+                    if (buffer instanceof Uint8Array || buffer instanceof Buffer) {
+                        for (var i = 0; i < bytesRead; i++) buffer[offset + i] = bytes[i];
+                    }
+                    if (cb) setTimeout(function() { cb(null, bytesRead, buffer); }, 0);
+                } catch(e) { if (cb) cb(e); }
+            },
+            readSync: function(fd, buffer, offset, length, position) {
+                var bytes = __fsFdRead(fd, length, position >= 0 ? position : null);
+                var bytesRead = bytes.length;
+                if (buffer instanceof Uint8Array || buffer instanceof Buffer) {
+                    for (var i = 0; i < bytesRead; i++) buffer[offset + i] = bytes[i];
+                }
+                return bytesRead;
+            },
+            write: function(fd, buffer, offset, length, position, cb) {
+                if (typeof offset === 'function') { cb = offset; offset = 0; length = null; position = null; }
+                if (typeof length === 'function') { cb = length; length = null; position = null; }
+                if (typeof position === 'function') { cb = position; position = null; }
+                try {
+                    var data;
+                    if (typeof buffer === 'string') {
+                        data = Array.from(new TextEncoder().encode(buffer));
+                    } else {
+                        var start = offset || 0;
+                        var end   = length != null ? start + length : buffer.length;
+                        data = Array.from(buffer.slice(start, end));
+                    }
+                    var written = __fsFdWrite(fd, data, position >= 0 ? position : null);
+                    if (cb) setTimeout(function() { cb(null, written, buffer); }, 0);
+                } catch(e) { if (cb) cb(e); }
+            },
+            writeSync: function(fd, buffer, offset, length, position) {
+                var data;
+                if (typeof buffer === 'string') {
+                    data = Array.from(new TextEncoder().encode(buffer));
+                } else {
+                    var start = offset || 0;
+                    var end   = length != null ? start + length : buffer.length;
+                    data = Array.from(buffer.slice(start, end));
+                }
+                return __fsFdWrite(fd, data, position >= 0 ? position : null);
+            },
+            fstat: function(fd, cb) {
+                try {
+                    var s = parseStat(__fsFdStat(fd));
+                    if (cb) setTimeout(function() { cb(null, s); }, 0);
+                    else return s;
+                } catch(e) { if (cb) cb(e); }
+            },
+            fstatSync: function(fd) { return parseStat(__fsFdStat(fd)); },
+            fsync: function(fd, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
+            fsyncSync: function(fd) {},
+            fdatasync: function(fd, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
+            fdatasyncSync: function(fd) {},
+            ftruncate: function(fd, len, cb) {
+                if (typeof len === 'function') { cb = len; len = 0; }
+                if (cb) setTimeout(function() { cb(null); }, 0);
+            },
+            ftruncateSync: function(fd, len) {},
+
+            // ── mkdtemp ─────────────────────────────────────────────────────────
+            mkdtemp: function(prefix, opts, cb) {
+                if (typeof opts === 'function') { cb = opts; }
+                try {
+                    var dir = __fsMkdtemp(prefix);
+                    if (cb) setTimeout(function() { cb(null, dir); }, 0);
+                    else return Promise.resolve(dir);
+                } catch(e) {
+                    if (cb) cb(e);
+                    else return Promise.reject(e);
+                }
+            },
+            mkdtempSync: function(prefix) { return __fsMkdtemp(prefix); },
+
+            // ── truncate ────────────────────────────────────────────────────────
+            truncate: wrapAsync(function(p, len) {
+                var fd = __fsFdOpen(p, 'r+', 0o666);
+                __fsFdClose(fd);
+            }),
+            truncateSync: function(p, _len) {},
+
+            // ── lutimes / lchown (stubs — rarely needed at JS level) ─────────────
+            lutimes: function(p, at, mt, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
+            lutimesSync: function() {},
+            lchown: function(p, uid, gid, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
+            lchownSync: function() {},
+            chown: function(p, uid, gid, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
+            chownSync: function() {},
+            fchown: function(fd, uid, gid, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
+            fchownSync: function() {},
+            fchmod: function(fd, mode, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
+            fchmodSync: function() {},
+            link: function(src, dest, cb) {
+                try {
+                    __fsCopyFileSync(src, dest);
+                    if (cb) setTimeout(function() { cb(null); }, 0);
+                } catch(e) { if (cb) cb(e); }
+            },
+            linkSync: function(src, dest) { __fsCopyFileSync(src, dest); },
+            readlink: function(p, opts, cb) {
+                if (typeof opts === 'function') { cb = opts; }
+                if (cb) setTimeout(function() { cb(new Error('EINVAL: readlink not fully supported')); }, 0);
+                else return Promise.reject(new Error('EINVAL: readlink not fully supported'));
+            },
+            readlinkSync: function(p) { throw new Error('EINVAL: readlink not fully supported'); },
+
+            // ── opendir ─────────────────────────────────────────────────────────
+            opendir: function(p, opts, cb) {
+                if (typeof opts === 'function') { cb = opts; }
+                try {
+                    var names = JSON.parse(__fsReaddirSync(p));
+                    var idx = 0;
+                    var dir = {
+                        path: p,
+                        read: function(cb2) {
+                            var entry = idx < names.length ? { name: names[idx++], isFile: function() { return true; }, isDirectory: function() { return false; }, isSymbolicLink: function() { return false; } } : null;
+                            if (cb2) setTimeout(function() { cb2(null, entry); }, 0);
+                            else return Promise.resolve(entry);
+                        },
+                        close: function(cb2) { if (cb2) setTimeout(function() { cb2(null); }, 0); else return Promise.resolve(); },
+                        [Symbol.asyncIterator]: function() {
+                            var self = this;
+                            return { next: function() {
+                                return self.read().then(function(e) { return e ? { value: e, done: false } : { value: undefined, done: true }; });
+                            }};
+                        }
+                    };
+                    if (cb) setTimeout(function() { cb(null, dir); }, 0);
+                    else return Promise.resolve(dir);
+                } catch(e) {
+                    if (cb) cb(e);
+                    else return Promise.reject(e);
+                }
+            },
+            opendirSync: function(p) {
+                var names = JSON.parse(__fsReaddirSync(p));
+                var idx = 0;
+                return {
+                    path: p,
+                    readSync: function() {
+                        if (idx >= names.length) return null;
+                        var n = names[idx++];
+                        return { name: n, isFile: function() { return true; }, isDirectory: function() { return false; }, isSymbolicLink: function() { return false; } };
+                    },
+                    closeSync: function() {},
+                    [Symbol.iterator]: function() { var self = this; return { next: function() { var e = self.readSync(); return e ? { value: e, done: false } : { value: undefined, done: true }; } }; }
+                };
             },
 
             // ── createReadStream ────────────────────────────────────────────────

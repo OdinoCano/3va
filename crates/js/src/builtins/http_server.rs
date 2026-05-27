@@ -2,7 +2,7 @@
 //!
 //! Rust primitives exposed to JS:
 //!   __httpListen(port, host) → server_id   synchronous; binds immediately via std + Tokio
-//!   __httpAcceptAsync(server_id) → Promise<JSON>   awaits next connection
+//!   __httpAcceptAsync(server_id) → `Promise<JSON>`   awaits next connection
 //!   __httpRespond(conn_id, status, status_text, headers_json, body) → void  (sync)
 //!   __httpClose(server_id) → void  (sync)
 //!

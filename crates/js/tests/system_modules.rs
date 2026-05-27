@@ -277,3 +277,166 @@ async fn http_create_server_returns_object() {
         .unwrap();
     assert_eq!(r, "true");
 }
+
+// ── path ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn path_relative_works() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var path = require('path');
+        [
+            path.relative('/a/b/c', '/a/b/d'),
+            path.relative('/a/b', '/a/b/c/d'),
+            path.relative('/a/b/c', '/a/b/c'),
+        ].join('|')
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "../d|c/d|.");
+}
+
+#[tokio::test]
+async fn path_posix_and_win32_exist() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var path = require('path');
+        String(typeof path.posix === 'object' && typeof path.win32 === 'object'
+               && path.posix.sep === '/' && path.win32.sep === '\\')
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn path_normalize_collapses_dots() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var path = require('path');
+        [path.normalize('/a/b/../c'), path.normalize('./a/./b')].join('|')
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "/a/c|a/b");
+}
+
+// ── os ───────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn os_returns_real_hostname() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var os = require('os');
+        typeof os.hostname() === 'string' && os.hostname().length > 0 ? 'ok' : 'fail'
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "ok");
+}
+
+#[tokio::test]
+async fn os_memory_values_are_positive() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var os = require('os');
+        (os.totalmem() > 0 && os.freemem() >= 0) ? 'ok' : 'fail'
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "ok");
+}
+
+#[tokio::test]
+async fn os_path_submodules_exist() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var os = require('os');
+        String(typeof os.platform() === 'string' &&
+               typeof os.arch() === 'string' &&
+               typeof os.uptime() === 'number' &&
+               Array.isArray(os.cpus()))
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+// ── EventEmitter completeness ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn eventemitter_prepend_listener() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var EE = require('events');
+        var ee = new EE();
+        var order = [];
+        ee.on('x', function() { order.push('second'); });
+        ee.prependListener('x', function() { order.push('first'); });
+        ee.emit('x');
+        order.join(',')
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "first,second");
+}
+
+#[tokio::test]
+async fn eventemitter_event_names_and_raw_listeners() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var EE = require('events');
+        var ee = new EE();
+        function fn1() {}
+        ee.on('foo', fn1);
+        ee.on('bar', function() {});
+        var names = ee.eventNames().sort().join(',');
+        var raw = ee.rawListeners('foo');
+        var unwrapped = ee.listeners('foo');
+        [names, raw.length, unwrapped[0] === fn1].join('|')
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "bar,foo|1|true");
+}
+
+#[tokio::test]
+async fn eventemitter_get_max_listeners() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var EE = require('events');
+        var ee = new EE();
+        ee.setMaxListeners(20);
+        String(ee.getMaxListeners())
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "20");
+}

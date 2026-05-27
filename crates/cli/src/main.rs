@@ -956,6 +956,37 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum WorkspaceAction {
+    /// Install all dependencies across every workspace package
+    Install {
+        /// Registry host(s) to allow network access to.
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_net: Option<Vec<String>>,
+    },
+    /// List all workspace packages
+    List,
+    /// Show workspace + store statistics
+    Info,
+    /// Run a script in every workspace package that defines it
+    Run {
+        /// Script name from the "scripts" field in each package.json
+        script: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum StoreAction {
+    /// Show global content-addressable store statistics
+    Status,
+    /// Remove corrupt (incomplete) entries left by a prior crash
+    Repair,
+    /// Remove packages not referenced by any lockfile in the current project
+    Prune,
+    /// Verify every cached package has a complete extraction
+    Verify,
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Run a JavaScript or TypeScript file
     Run {
@@ -1005,13 +1036,25 @@ enum Commands {
     },
     /// Install dependencies from 3va registry
     Install {
-        /// Packages to install (e.g. axios axios@1.7.9 react react-dom). Omit to install from manifest.
+        /// Packages to install (e.g. axios axios@1.7.9 react react-dom).
+        /// Omit to install from manifest; if a workspace config is present the
+        /// entire workspace is installed automatically.
         #[arg(num_args = 0..)]
         packages: Vec<String>,
 
         /// Registry host to allow network access to (e.g. registry.npmjs.org). Use --allow-net= to allow all.
         #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
         allow_net: Option<Vec<String>>,
+    },
+    /// Manage workspace (monorepo) packages
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
+    /// Manage the global content-addressable package store
+    Store {
+        #[command(subcommand)]
+        action: StoreAction,
     },
     /// Update installed packages to their latest version, preserving their original registry
     Update {
@@ -1396,12 +1439,177 @@ async fn main() -> anyhow::Result<()> {
             allow_net,
         } => {
             if packages.is_empty() {
-                info!("Installing dependencies from manifest...");
-                info!("Note: Post-install scripts are DISABLED by default for security.");
+                let cwd = std::env::current_dir()?;
+                if vvva_pm::WorkspaceConfig::discover(&cwd)?.is_some() {
+                    info!("Workspace detected — installing all packages...");
+                    vvva_pm::install_workspace(&cwd, allow_net.as_deref()).await?;
+                } else {
+                    info!("Installing from manifest (post-install scripts DISABLED)...");
+                    vvva_pm::install_from_manifest(&cwd, allow_net.as_deref()).await?;
+                }
             } else {
                 for pkg in packages {
                     info!("Installing package '{}'", pkg);
                     vvva_pm::install_package(pkg, allow_net.as_deref()).await?;
+                }
+            }
+        }
+        Commands::Workspace { action } => {
+            let cwd = std::env::current_dir()?;
+            match action {
+                WorkspaceAction::Install { allow_net } => {
+                    vvva_pm::install_workspace(&cwd, allow_net.as_deref()).await?;
+                }
+                WorkspaceAction::List => match vvva_pm::WorkspaceConfig::discover(&cwd)? {
+                    None => {
+                        eprintln!("No workspace config found in {}.", cwd.display());
+                        eprintln!(
+                                "Create 3va-workspace.json or add a \"workspaces\" key to package.json."
+                            );
+                        std::process::exit(1);
+                    }
+                    Some(cfg) => {
+                        let pkgs = cfg.resolve_packages(&cwd)?;
+                        if pkgs.is_empty() {
+                            println!("Workspace configured but no packages found.");
+                        } else {
+                            println!();
+                            println!("Workspace packages ({}):", pkgs.len());
+                            for p in &pkgs {
+                                println!(
+                                    "  {:<30} {}  ({})",
+                                    format!("{}@{}", p.name, p.version),
+                                    p.path.strip_prefix(&cwd).unwrap_or(&p.path).display(),
+                                    if p.all_deps.is_empty() {
+                                        "no deps".to_string()
+                                    } else {
+                                        format!("{} dep(s)", p.all_deps.len())
+                                    }
+                                );
+                            }
+                            println!();
+                        }
+                    }
+                },
+                WorkspaceAction::Info => {
+                    match vvva_pm::WorkspaceConfig::discover(&cwd)? {
+                        None => println!("Not a workspace root."),
+                        Some(cfg) => {
+                            let pkgs = cfg.resolve_packages(&cwd)?;
+                            let merged = vvva_pm::merged_deps(&pkgs);
+                            println!();
+                            println!("Workspace root : {}", cwd.display());
+                            println!("Packages       : {}", pkgs.len());
+                            println!("Unique deps    : {}", merged.len());
+                        }
+                    }
+                    vvva_pm::store_status();
+                }
+                WorkspaceAction::Run { script } => {
+                    match vvva_pm::WorkspaceConfig::discover(&cwd)? {
+                        None => {
+                            eprintln!("Not a workspace root.");
+                            std::process::exit(1);
+                        }
+                        Some(cfg) => {
+                            let pkgs = cfg.resolve_packages(&cwd)?;
+                            let mut ran = 0usize;
+                            for pkg in &pkgs {
+                                let pkg_json = pkg.path.join("package.json");
+                                let cmd_str_opt = std::fs::read_to_string(&pkg_json)
+                                    .ok()
+                                    .and_then(|c| {
+                                        serde_json::from_str::<serde_json::Value>(&c).ok()
+                                    })
+                                    .and_then(|v| {
+                                        v["scripts"][script.as_str()]
+                                            .as_str()
+                                            .map(|s| s.to_string())
+                                    });
+
+                                if let Some(cmd_str) = cmd_str_opt {
+                                    println!();
+                                    println!("> {} — {}", pkg.name, cmd_str);
+                                    let status = std::process::Command::new("sh")
+                                        .arg("-c")
+                                        .arg(&cmd_str)
+                                        .current_dir(&pkg.path)
+                                        .status();
+                                    match status {
+                                        Ok(s) if s.success() => ran += 1,
+                                        Ok(s) => eprintln!(
+                                            "  ✗ {} exited with {}",
+                                            pkg.name,
+                                            s.code().unwrap_or(-1)
+                                        ),
+                                        Err(e) => eprintln!("  ✗ {}: {}", pkg.name, e),
+                                    }
+                                }
+                            }
+                            println!();
+                            println!("Ran '{}' in {}/{} packages.", script, ran, pkgs.len());
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Store { action } => {
+            let store = vvva_pm::ContentStore::global();
+            match action {
+                StoreAction::Status => {
+                    vvva_pm::store_status();
+                }
+                StoreAction::Repair => {
+                    print!("Scanning for corrupt entries... ");
+                    let removed = store.repair()?;
+                    if removed == 0 {
+                        println!("✓ Store is clean.");
+                    } else {
+                        println!("✓ Removed {} corrupt entry(s).", removed);
+                    }
+                }
+                StoreAction::Verify => {
+                    print!("Verifying store integrity... ");
+                    let corrupt = store.verify();
+                    if corrupt.is_empty() {
+                        println!("✓ All {} entries are intact.", store.stats().total_packages);
+                    } else {
+                        eprintln!();
+                        eprintln!("✗ {} corrupt entry(s) found:", corrupt.len());
+                        for p in &corrupt {
+                            eprintln!("  {}", p.display());
+                        }
+                        eprintln!();
+                        eprintln!("Run '3va store repair' to remove them.");
+                        std::process::exit(1);
+                    }
+                }
+                StoreAction::Prune => {
+                    // Collect all packages referenced by the current project's lockfile.
+                    let lockfile_path = std::env::current_dir()?.join("3va-lock.json");
+                    let keep = if lockfile_path.exists() {
+                        match vvva_pm::Lockfile::load(&lockfile_path) {
+                            Ok(lf) => vvva_pm::ContentStore::keys_from_lockfile(&lf),
+                            Err(_) => std::collections::HashSet::new(),
+                        }
+                    } else {
+                        std::collections::HashSet::new()
+                    };
+
+                    println!(
+                        "Pruning store (keeping {} referenced packages)...",
+                        keep.len()
+                    );
+                    let result = store.prune(&keep)?;
+                    if result.removed == 0 {
+                        println!("✓ Nothing to prune — store is minimal.");
+                    } else {
+                        println!(
+                            "✓ Removed {} package(s), freed {}.",
+                            result.removed,
+                            result.human_freed()
+                        );
+                    }
                 }
             }
         }

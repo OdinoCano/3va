@@ -17,15 +17,15 @@
 | `fs` | File system | Rust builtin (`builtins/fs.rs`, permission-gated) |
 | `http` / `https` | HTTP client/server | JS + Rust — `request()` backed by `__fetchAsync`; `createServer()` backed by `builtins/http_server.rs` (real Tokio TCP listener, HTTP/1.1 parser); requires `--allow-net` |
 | `net` | TCP sockets + server | Rust-backed (`builtins/tcp.rs`) — `Socket` (client) via `TcpStream`; `createServer(handler)` via `__netListen`/`__netAcceptAsync`; permission-gated |
-| `os` | System information | JS stub (static values: `platform`, `hostname`) |
-| `path` | Path utilities | JS implementation (in `modules.rs`) |
+| `os` | System information | JS real — `hostname()` vía `gethostname(3)`, `totalmem/freemem` de `/proc/meminfo`, `uptime` de `/proc/uptime`, `posix/win32`, `constants.signals/errno/priority` |
+| `path` | Path utilities | JS real — `relative`, `normalize`, `resolve` con `..`, `path.posix`, `path.win32`, `path/posix`, `path/win32` |
 | `process` | Current process | Rust builtin (`builtins/process.rs`) |
 | `querystring` | Query string parsing | JS implementation (in `modules.rs`) |
 | `stream` | Data streams | JS stub (Readable/Writable/Transform classes) |
 | `tls` | TLS/SSL | Rust-backed (`builtins/tcp.rs`) — real `TlsStream` via `native-tls`; permission-gated |
 | `url` | URL parsing | JS implementation (in `modules.rs`) |
 | `util` | Various utilities | JS implementation (`inherits`, `promisify`, etc.) |
-| `zlib` | Compression | Rust builtin (`builtins/zlib.rs`) — real gzip/deflate via `flate2`, async callbacks |
+| `zlib` | Compression | Rust builtin (`builtins/zlib.rs`) — gzip/deflate async callbacks + **sync** (`gzipSync`, `deflateSync`, etc.) + **Transform streams** (`createGzip`, `createGunzip`, `createDeflate`, `createInflate`, `createDeflateRaw`, `createInflateRaw`) con `pipe/write/end/on` reales |
 | `child_process` | Process spawning | Rust builtin (`builtins/child_process.rs`) — real exec via `tokio`, requires `--allow-child-process` |
 | `http2` | HTTP/2 client | JS client backed by `__fetchAsync` — `connect()`, `request()`, NGHTTP2 constants |
 
@@ -47,21 +47,40 @@ Rust implementation. Supports: `Buffer.from()`, `Buffer.alloc()`, `Buffer.concat
 
 #### events (JS in `modules.rs`)
 
-JS `EventEmitter` class with: `on`, `once`, `emit`, `off`, `removeAllListeners`, `listeners`, `listenerCount`.
+JS `EventEmitter` class completa: `on`, `once`, `emit`, `off`, `removeAllListeners`, `addListener`,
+`prependListener`, `prependOnceListener`, `listeners`, `rawListeners`, `listenerCount`,
+`eventNames`, `getMaxListeners`, `setMaxListeners`.
+Métodos estáticos: `EventEmitter.listenerCount`, `EventEmitter.defaultMaxListeners`.
 
 #### fs (`builtins/fs.rs`)
 
-Permission-gated. Requires `--allow-read` / `--allow-write`.
+Protegido por permisos. Requiere `--allow-read` / `--allow-write`.
 
-Sync API: `readFileSync`, `writeFileSync`, `appendFileSync`, `existsSync`, `mkdirSync`, `readdirSync(path, {withFileTypes})`, `statSync`, `lstatSync`, `accessSync`, `realpathSync`, `unlinkSync`, `renameSync`, `copyFileSync`, `chmodSync`, `symlinkSync`.
+**Sync API:** `readFileSync`, `writeFileSync`, `appendFileSync`, `existsSync`, `mkdirSync`,
+`readdirSync(path, {withFileTypes})`, `statSync`, `lstatSync`, `accessSync`, `realpathSync`,
+`unlinkSync`, `renameSync`, `copyFileSync`, `chmodSync`, `symlinkSync`.
 
-Async (callback): `readFile`, `writeFile`, `appendFile`, `readdir`, `mkdir`, `stat`, `lstat`, `access`, `realpath`, `unlink`, `rename`, `copyFile`, `chmod`, `symlink`.
+**Async (callback):** `readFile`, `writeFile`, `appendFile`, `readdir`, `mkdir`, `stat`, `lstat`,
+`access`, `realpath`, `unlink`, `rename`, `copyFile`, `chmod`, `symlink`.
 
-Promise API: `fs.promises.*` — mirrors all async methods.
+**Promise API:** `fs.promises.*` — mirrors all async methods.
 
-Streams: `createReadStream(path)` — EventEmitter emitting `data`/`end`/`error`; `createWriteStream(path)` — `write(chunk)` / `end([chunk])`.
+**File Descriptor API:** `open`/`openSync`, `close`/`closeSync`, `read`/`readSync`,
+`write`/`writeSync`, `fstat`/`fstatSync`, `fsync`, `fdatasync`, `ftruncate/ftruncateSync`.
+Respaldados por `Arc<Mutex<FdTable>>` en Rust con `std::fs::File` reales.
 
-Constants: `fs.constants` — `{ F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 }`.
+**Directory API:** `opendir`/`opendirSync` → objeto `Dir` con `read()`, `readSync()`, `close()`,
+`[Symbol.asyncIterator]()`, `[Symbol.iterator]()`.
+
+**Temp dirs:** `mkdtemp(prefix[, cb])` / `mkdtempSync(prefix)`.
+
+**Extra:** `truncate`, `link`, `readlink`, `lutimes`, `lutimesSync`, `lchown`, `chown`,
+`fchown`, `fchmod`.
+
+**Streams:** `createReadStream(path)` — EventEmitter con `data`/`end`/`error`;
+`createWriteStream(path)` — `write(chunk)` / `end([chunk])`.
+
+**Constants:** `fs.constants` — `{ F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1 }`.
 
 ---
 

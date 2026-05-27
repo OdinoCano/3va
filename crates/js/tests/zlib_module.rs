@@ -173,23 +173,29 @@ async fn zlib_callback_without_opts() {
 // ── sync stubs throw ──────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn zlib_sync_methods_throw() {
+async fn zlib_sync_methods_roundtrip() {
     let e = engine().await;
     let r = e
         .eval_to_string(
             r#"
             var z = require('zlib');
-            var threw = 0;
-            try { z.gzipSync([]); } catch(e) { threw++; }
-            try { z.gunzipSync([]); } catch(e) { threw++; }
-            try { z.deflateSync([]); } catch(e) { threw++; }
-            try { z.inflateSync([]); } catch(e) { threw++; }
-            String(threw)
+            var ok = 0;
+            try {
+                var gz = z.gzipSync(new Uint8Array([104,101,108,108,111]));
+                var raw = z.gunzipSync(gz);
+                if (raw.length === 5 && raw[0] === 104) ok++;
+            } catch(e) {}
+            try {
+                var df = z.deflateSync(new Uint8Array([119,111,114,108,100]));
+                var raw2 = z.inflateSync(df);
+                if (raw2.length === 5 && raw2[0] === 119) ok++;
+            } catch(e) {}
+            String(ok)
             "#,
         )
         .await
         .unwrap();
-    assert_eq!(r, "4");
+    assert_eq!(r, "2");
 }
 
 // ── constants ─────────────────────────────────────────────────────────────────
@@ -225,4 +231,56 @@ async fn zlib_node_prefix_same_object() {
         .await
         .unwrap();
     assert_eq!(r, "true");
+}
+
+// ── Transform streams ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_gzip_stream_pipes_data() {
+    let e = engine().await;
+    let r = eval_async(
+        &e,
+        r#"
+        globalThis.__result = undefined;
+        var zlib = require('zlib');
+        var gz = zlib.createGzip();
+        var chunks = [];
+        gz.on('data', function(c) { chunks.push(c); });
+        gz.on('end', function() {
+            var total = 0;
+            chunks.forEach(function(c) { total += c.length; });
+            globalThis.__result = total > 0 ? 'ok' : 'empty';
+        });
+        gz.write(new Uint8Array([104,101,108,108,111]));
+        gz.end();
+    "#,
+        "__result",
+    )
+    .await;
+    assert_eq!(r, "ok");
+}
+
+#[tokio::test]
+async fn create_gunzip_decompresses_gzip_data() {
+    let e = engine().await;
+    let r = eval_async(
+        &e,
+        r#"
+        globalThis.__result = undefined;
+        var zlib = require('zlib');
+        var compressed = zlib.gzipSync(new Uint8Array([104,101,108,108,111]));
+        var gz = zlib.createGunzip();
+        var out = [];
+        gz.on('data', function(c) { for (var i=0;i<c.length;i++) out.push(c[i]); });
+        gz.on('end', function() {
+            var s = String.fromCharCode.apply(null, out);
+            globalThis.__result = s === 'hello' ? 'ok' : 'got:' + s;
+        });
+        gz.write(compressed);
+        gz.end();
+    "#,
+        "__result",
+    )
+    .await;
+    assert_eq!(r, "ok");
 }

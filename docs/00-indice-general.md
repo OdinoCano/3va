@@ -33,6 +33,7 @@
 - [02-modulo-loader.md](05-js-engine/02-modulo-loader.md) - Module loading
 - [03-polyfills.md](05-js-engine/03-polyfills.md) - Polyfills and shims
 - [04-web-apis.md](05-js-engine/04-web-apis.md) - Compatible web APIs
+- [05-node-compat.md](05-js-engine/05-node-compat.md) - Node.js compatibility — EventEmitter, path, os, fs-fd, zlib streams, process
 
 ## Volume 6: Permissions System
 
@@ -95,7 +96,7 @@
 
 **Document Identifier:** 3VA-SPEC-2026-001
 **Version:** 1.1.0
-**Date:** 2026-05-22
+**Date:** 2026-05-27
 **Classification:** Public
 **Status:** Draft
 

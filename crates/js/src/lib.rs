@@ -438,37 +438,51 @@ mod builtin_tests {
     }
 
     #[tokio::test]
-    async fn zlib_sync_methods_throw_not_available() {
+    async fn zlib_sync_methods_work() {
         let e = engine_no_perms().await;
         let r = e
             .eval_to_string(
                 r#"(function() {
                        const zlib = require('zlib');
                        var msgs = [];
-                       ['gzipSync','gunzipSync','deflateSync','inflateSync'].forEach(function(fn) {
-                           try { zlib[fn](Buffer.from('x')); msgs.push('no_throw'); }
-                           catch(e) { msgs.push(e.message.includes('not available') ? 'ok' : 'wrong'); }
-                       });
+                       // gzipSync → gunzipSync round-trip
+                       try {
+                           var compressed = zlib.gzipSync(Buffer.from('hello'));
+                           var decompressed = zlib.gunzipSync(compressed);
+                           msgs.push(new TextDecoder().decode(decompressed) === 'hello' ? 'ok' : 'wrong');
+                       } catch(e) { msgs.push('err:' + e.message); }
+                       // deflateSync → inflateSync round-trip
+                       try {
+                           var c2 = zlib.deflateSync(Buffer.from('world'));
+                           var d2 = zlib.inflateSync(c2);
+                           msgs.push(new TextDecoder().decode(d2) === 'world' ? 'ok' : 'wrong');
+                       } catch(e) { msgs.push('err:' + e.message); }
                        return msgs.join(',');
                    })()"#,
             )
             .await
             .unwrap();
-        assert_eq!(r, "ok,ok,ok,ok");
+        assert_eq!(r, "ok,ok");
     }
 
     #[tokio::test]
-    async fn zlib_create_methods_return_stub_objects() {
+    async fn zlib_create_methods_return_transform_streams() {
         let e = engine_no_perms().await;
         let r = e
             .eval_to_string(
-                "const z = require('zlib');
-                 typeof z.createGzip() + ',' + typeof z.createGunzip() + ',' +
-                 typeof z.createDeflate() + ',' + typeof z.createInflate()",
+                r#"(function() {
+                    const z = require('zlib');
+                    var streams = [z.createGzip(), z.createGunzip(), z.createDeflate(), z.createInflate()];
+                    // Each stream must have write, end, pipe, on methods
+                    return streams.map(function(s) {
+                        return (typeof s.write === 'function' && typeof s.pipe === 'function' &&
+                                typeof s.end === 'function' && typeof s.on === 'function') ? 'ok' : 'stub';
+                    }).join(',');
+                })()"#,
             )
             .await
             .unwrap();
-        assert_eq!(r, "object,object,object,object");
+        assert_eq!(r, "ok,ok,ok,ok");
     }
 
     #[tokio::test]
