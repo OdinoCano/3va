@@ -866,6 +866,7 @@ fn build_permissions(
     allow_net: Option<&[String]>,
     allow_env: Option<&[String]>,
     allow_child_process: bool,
+    allow_ffi: Option<&[String]>,
     interactive: bool,
 ) -> vvva_permissions::PermissionState {
     let mut permissions = vvva_permissions::PermissionState::new();
@@ -911,6 +912,16 @@ fn build_permissions(
     }
     if allow_child_process {
         permissions.grant(vvva_permissions::Capability::SpawnProcess);
+    }
+    if let Some(ffi_paths) = allow_ffi {
+        if ffi_paths.is_empty() || ffi_paths.iter().any(|s| s.is_empty()) {
+            // --allow-ffi with no value → grant access to all libraries.
+            permissions.grant(vvva_permissions::Capability::FFI(PathBuf::from("/")));
+        } else {
+            for path in ffi_paths {
+                permissions.grant(vvva_permissions::Capability::FFI(PathBuf::from(path)));
+            }
+        }
     }
 
     permissions
@@ -974,6 +985,11 @@ enum Commands {
         /// Allow spawning child processes
         #[arg(long = "allow-child-process")]
         allow_child_process: bool,
+
+        /// Allow FFI calls to native libraries. Use --allow-ffi= (no value) to allow all paths,
+        /// or --allow-ffi=/path/to/lib.so to restrict to specific libraries.
+        #[arg(long = "allow-ffi", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_ffi: Option<Vec<String>>,
 
         /// Write a JSON audit log to this file after execution
         #[arg(long = "audit-log")]
@@ -1320,6 +1336,7 @@ async fn main() -> anyhow::Result<()> {
             allow_write,
             allow_env,
             allow_child_process,
+            allow_ffi,
             audit_log,
             audit_level,
             script_args,
@@ -1331,6 +1348,7 @@ async fn main() -> anyhow::Result<()> {
                 allow_net.as_deref(),
                 allow_env.as_deref(),
                 *allow_child_process,
+                allow_ffi.as_deref(),
                 std::io::stderr().is_terminal(), // solo prompt si stderr es visible (no capturado)
             );
 
@@ -1507,7 +1525,7 @@ mod tests {
 
     #[test]
     fn no_flags_produces_deny_by_default() {
-        let state = build_permissions(None, None, None, None, false, false);
+        let state = build_permissions(None, None, None, None, false, None, false);
         assert!(!state.check(&Capability::FileRead(PathBuf::from("/etc/passwd"))));
         assert!(!state.check(&Capability::FileWrite(PathBuf::from("/tmp/x"))));
         assert!(!state.check(&Capability::Network("registry.npmjs.org".to_string())));
@@ -1521,7 +1539,7 @@ mod tests {
     #[test]
     fn allow_read_flag_grants_file_read_for_path() {
         let reads = vec!["/app".to_string()];
-        let state = build_permissions(Some(&reads), None, None, None, false, false);
+        let state = build_permissions(Some(&reads), None, None, None, false, None, false);
 
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/config.json"))));
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/subdir/main.ts"))));
@@ -1531,7 +1549,7 @@ mod tests {
     #[test]
     fn allow_read_multiple_paths_all_granted() {
         let reads = vec!["/app".to_string(), "/tmp".to_string()];
-        let state = build_permissions(Some(&reads), None, None, None, false, false);
+        let state = build_permissions(Some(&reads), None, None, None, false, None, false);
 
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/main.js"))));
         assert!(state.check(&Capability::FileRead(PathBuf::from("/tmp/cache.json"))));
@@ -1544,7 +1562,7 @@ mod tests {
     #[test]
     fn allow_net_flag_grants_network_for_host() {
         let nets = vec!["registry.npmjs.org".to_string()];
-        let state = build_permissions(None, None, Some(&nets), None, false, false);
+        let state = build_permissions(None, None, Some(&nets), None, false, None, false);
 
         assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
         assert!(!state.check(&Capability::Network("evil.com".to_string())));
@@ -1559,7 +1577,7 @@ mod tests {
             "registry.yarnpkg.com".to_string(),
             "jsr.io".to_string(),
         ];
-        let state = build_permissions(None, None, Some(&nets), None, false, false);
+        let state = build_permissions(None, None, Some(&nets), None, false, None, false);
 
         assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
         assert!(state.check(&Capability::Network("registry.yarnpkg.com".to_string())));
@@ -1572,7 +1590,7 @@ mod tests {
     #[test]
     fn allow_env_no_scope_grants_all_env_access() {
         // --allow-env (no value) → Some(vec![]) → EnvAccess (all)
-        let state = build_permissions(None, None, None, Some(&[]), false, false);
+        let state = build_permissions(None, None, None, Some(&[]), false, None, false);
         assert!(state.check(&Capability::EnvAccess));
         assert!(state.check(&Capability::EnvVar("PATH".to_string())));
         assert!(state.check(&Capability::EnvVar("SECRET_KEY".to_string())));
@@ -1583,7 +1601,7 @@ mod tests {
     fn allow_env_scoped_grants_only_named_vars() {
         // --allow-env=NODE_ENV,PORT → EnvVar grants for each name
         let vars = vec!["NODE_ENV".to_string(), "PORT".to_string()];
-        let state = build_permissions(None, None, None, Some(&vars), false, false);
+        let state = build_permissions(None, None, None, Some(&vars), false, None, false);
 
         assert!(state.check(&Capability::EnvVar("NODE_ENV".to_string())));
         assert!(state.check(&Capability::EnvVar("PORT".to_string())));
@@ -1595,14 +1613,14 @@ mod tests {
 
     #[test]
     fn allow_env_not_provided_denies_everything() {
-        let state = build_permissions(None, None, None, None, false, false);
+        let state = build_permissions(None, None, None, None, false, None, false);
         assert!(!state.check(&Capability::EnvAccess));
         assert!(!state.check(&Capability::EnvVar("PATH".to_string())));
     }
 
     #[test]
     fn allow_child_process_flag_grants_spawn_process() {
-        let state = build_permissions(None, None, None, None, true, false);
+        let state = build_permissions(None, None, None, None, true, None, false);
         assert!(state.check(&Capability::SpawnProcess));
         assert!(!state.check(&Capability::EnvAccess));
     }
@@ -1613,7 +1631,15 @@ mod tests {
     fn combined_flags_each_grant_only_their_capability() {
         let reads = vec!["/app".to_string()];
         let nets = vec!["api.example.com".to_string()];
-        let state = build_permissions(Some(&reads), None, Some(&nets), Some(&[]), false, false);
+        let state = build_permissions(
+            Some(&reads),
+            None,
+            Some(&nets),
+            Some(&[]),
+            false,
+            None,
+            false,
+        );
 
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/main.js"))));
         assert!(state.check(&Capability::Network("api.example.com".to_string())));

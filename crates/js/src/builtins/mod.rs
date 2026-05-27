@@ -3,6 +3,7 @@ pub mod child_process;
 pub mod console;
 pub mod crypto;
 pub mod fetch;
+pub mod ffi;
 pub mod fs;
 pub mod http_server;
 pub mod modules;
@@ -37,7 +38,8 @@ pub fn inject_all(
     websocket::inject_websocket(ctx, permissions.clone())?;
     // These run after inject_require so they can overwrite the placeholder stubs
     zlib::inject_zlib(ctx)?;
-    child_process::inject_child_process(ctx, permissions)?;
+    child_process::inject_child_process(ctx, permissions.clone())?;
     crypto::inject_crypto(ctx)?;
+    ffi::inject_ffi(ctx, permissions)?;
     Ok(())
 }

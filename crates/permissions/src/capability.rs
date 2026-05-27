@@ -20,8 +20,9 @@ pub enum Capability {
     /// Permite leer una variable de entorno específica (--allow-env=VAR).
     /// `EnvAccess` (todas) cubre cualquier `EnvVar`; `EnvVar(a)` solo cubre `EnvVar(a)`.
     EnvVar(String),
-    /// Permite llamadas FFI a librerías nativas.
-    FFI,
+    /// Permite llamadas FFI a librerías nativas en el path especificado.
+    /// `FFI(PathBuf::from("/"))` equivale a `--allow-ffi` sin restricción de path.
+    FFI(PathBuf),
 }
 
 use std::io::Write;
@@ -209,10 +210,10 @@ impl PermissionState {
                 variable: v.clone(),
                 allowed,
             },
-            Capability::FFI => AuditEvent::PermissionDenied {
+            Capability::FFI(p) => AuditEvent::PermissionDenied {
                 timestamp: Utc::now(),
                 capability: "FFI".to_string(),
-                resource: "native".to_string(),
+                resource: p.display().to_string(),
                 reason: if allowed {
                     "allowed".to_string()
                 } else {
@@ -242,7 +243,7 @@ impl PermissionState {
             Capability::SpawnProcess => "crear procesos hijos".to_string(),
             Capability::EnvAccess => "acceder a todas las variables de entorno".to_string(),
             Capability::EnvVar(v) => format!("acceder a la variable de entorno '{v}'"),
-            Capability::FFI => "acceder a llamadas FFI nativas".to_string(),
+            Capability::FFI(p) => format!("llamar a librería nativa '{}'", p.display()),
         };
 
         eprint!(
@@ -303,6 +304,8 @@ fn caps_match(granted: &Capability, required: &Capability) -> bool {
         (Capability::EnvAccess, Capability::EnvAccess) => true,
         (Capability::EnvAccess, Capability::EnvVar(_)) => true,
         (Capability::EnvVar(a), Capability::EnvVar(b)) => a == b,
+        // FFI: el path requerido debe comenzar con el path concedido.
+        (Capability::FFI(allowed), Capability::FFI(target)) => target.starts_with(allowed),
         // Capabilities sin parámetros: igualdad de variante
         (a, b) => a == b,
     }

@@ -54,6 +54,10 @@ name = "fs_module"
 path = "tests/fs_module.rs"
 
 [[test]]
+name = "ffi_module"
+path = "tests/ffi_module.rs"
+
+[[test]]
 name = "url_globals"
 path = "tests/url_globals.rs"
 
@@ -85,6 +89,8 @@ url.workspace = true
 flate2.workspace = true
 aes-gcm = { workspace = true }
 native-tls = { workspace = true }
+libloading = "0.8"
+libffi = "3.2"
 oxc_transformer = "0.132"
 oxc_codegen = "0.132"
 oxc_parser = "0.132"
