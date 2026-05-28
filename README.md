@@ -26,7 +26,7 @@ The JavaScript ecosystem is broken from a supply chain security perspective. `3v
 ### Build
 
 ```bash
-git clone https://github.com/yourusername/3va.git
+git clone https://github.com/OdinoCano/3va.git
 cd 3va
 cargo build --release
 ```
