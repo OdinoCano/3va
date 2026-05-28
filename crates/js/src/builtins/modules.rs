@@ -614,8 +614,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 },
                 EOL: _osPlatform === 'win32' ? '\r\n' : '\n',
                 cpus: function() {
-                    // Read /proc/cpuinfo count if available (via env hint), return stubs
-                    var n = (typeof __osCpuCount === 'function') ? __osCpuCount() : 1;
+                    var n = __osCpuCount();
                     var arr = [];
                     for (var i = 0; i < n; i++) arr.push({ model: 'Generic', speed: 0, times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 } });
                     return arr;
@@ -628,15 +627,13 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     var h = (process && process.env && process.env.HOME) || '/home/' + u;
                     return { username: u, uid: -1, gid: -1, shell: '/bin/sh', homedir: h };
                 },
-                release: function() { return '6.0.0'; },
-                version: function() { return '#1 SMP'; },
+                release: function() { return typeof __osRelease === 'function' ? __osRelease() : '6.0.0'; },
                 uptime: function() { return typeof __osUptime === 'function' ? __osUptime() : 0; },
                 loadavg: function() {
-                    // Parse /proc/loadavg if available (value injected as env hint)
-                    return [0, 0, 0];
+                    return typeof __osLoadAvg === 'function' ? __osLoadAvg() : [0, 0, 0];
                 },
                 endianness: function() { return 'LE'; },
-                availableParallelism: function() { return 1; },
+                availableParallelism: function() { return __osCpuCount(); },
                 constants: {
                     signals: { SIGHUP: 1, SIGINT: 2, SIGTERM: 15, SIGKILL: 9, SIGPIPE: 13, SIGCHLD: 17, SIGUSR1: 10, SIGUSR2: 12 },
                     errno: { ENOENT: -2, EACCES: -13, EEXIST: -17, EISDIR: -21, ENOTDIR: -20, ENOTEMPTY: -39, EPERM: -1 },
@@ -645,6 +642,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 getPriority: function() { return 0; },
                 setPriority: function() {},
                 machine: function() { return _osArch; },
+                devNull: '/dev/null',
             };
             globalThis.__requireCache['os'] = os;
             globalThis.__requireCache['node:os'] = os;

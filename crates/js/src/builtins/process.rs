@@ -51,6 +51,47 @@ fn parse_meminfo_kb(key: &str) -> u64 {
     0
 }
 
+fn cpu_count() -> u32 {
+    #[cfg(target_os = "linux")]
+    if let Ok(s) = std::fs::read_to_string("/proc/cpuinfo") {
+        let count = s.lines().filter(|l| l.starts_with("processor")).count();
+        if count > 0 {
+            return count as u32;
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1)
+}
+
+fn os_release() -> String {
+    #[cfg(target_os = "linux")]
+    if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+        return s.trim().to_string();
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(s) = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+    {
+        if let Ok(v) = String::from_utf8(s.stdout) {
+            return v.trim().to_string();
+        }
+    }
+    "1.0.0".to_string()
+}
+
+fn load_avg() -> Vec<f64> {
+    #[cfg(target_os = "linux")]
+    if let Ok(s) = std::fs::read_to_string("/proc/loadavg") {
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.len() >= 3 {
+            return parts[..3].iter().filter_map(|v| v.parse().ok()).collect();
+        }
+    }
+    vec![0.0, 0.0, 0.0]
+}
+
 fn uptime_secs() -> f64 {
     #[cfg(target_os = "linux")]
     if let Ok(s) = std::fs::read_to_string("/proc/uptime") {
@@ -242,9 +283,12 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 .unwrap_or_else(|| "localhost".to_string())
         })?,
     )?;
+    globals.set("__osCpuCount", Function::new(ctx.clone(), cpu_count)?)?;
     globals.set("__osMemTotal", Function::new(ctx.clone(), mem_total_bytes)?)?;
     globals.set("__osMemFree", Function::new(ctx.clone(), mem_free_bytes)?)?;
     globals.set("__osUptime", Function::new(ctx.clone(), uptime_secs)?)?;
+    globals.set("__osRelease", Function::new(ctx.clone(), os_release)?)?;
+    globals.set("__osLoadAvg", Function::new(ctx.clone(), load_avg)?)?;
 
     // cpuUsage(): returns "user,sys" microseconds — JS wrapper parses to {user, system}
     process.set(
