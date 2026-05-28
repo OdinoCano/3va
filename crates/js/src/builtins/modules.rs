@@ -804,7 +804,110 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     return req;
                 }
 
-                return {
+                // ── IncomingMessage ─────────────────────────────────────────
+                function IncomingMessage(socket) {
+                    Readable.call(this);
+                    this.socket = socket || null;
+                    this.headers = {};
+                    this.rawHeaders = [];
+                    this.method = 'GET';
+                    this.url = '/';
+                    this.httpVersion = '1.1';
+                    this.statusCode = null;
+                    this.statusMessage = null;
+                    this._body = '';
+                    this._consumed = false;
+                }
+                util.inherits(IncomingMessage, Readable);
+                IncomingMessage.prototype._read = function(size) {
+                    if (!this._consumed && this._body !== '') {
+                        this._consumed = true;
+                        this.push(this._body);
+                    }
+                    if (this._consumed || this._body === '') {
+                        this.push(null);
+                    }
+                };
+                IncomingMessage.prototype.setEncoding = function(enc) { this._encoding = enc; return this; };
+                IncomingMessage.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
+
+                // ── ServerResponse ─────────────────────────────────────────
+                function ServerResponse(req) {
+                    Writable.call(this);
+                    this.req = req || null;
+                    this.statusCode = 200;
+                    this.statusMessage = '';
+                    this._headers = {};
+                    this._chunks = [];
+                    this.writableEnded = false;
+                    this._responded = false;
+                    this._connId = null;
+                    this.headersSent = false;
+                }
+                util.inherits(ServerResponse, Writable);
+                ServerResponse.prototype._write = function(chunk, encoding, callback) {
+                    if (chunk !== undefined && chunk !== null) {
+                        this._chunks.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk));
+                    }
+                    callback();
+                };
+                ServerResponse.prototype._final = function(callback) {
+                    this._sendResponse();
+                    callback();
+                };
+                ServerResponse.prototype._sendResponse = function() {
+                    if (this._responded || !this._connId) return;
+                    this._responded = true;
+                    this.headersSent = true;
+                    var body = this._chunks.join('');
+                    var st = this.statusCode || 200;
+                    var stText = this.statusMessage || STATUS_CODES[st] || 'OK';
+                    if (!this._headers['Content-Type'] && !this._headers['content-type']) {
+                        this._headers['Content-Type'] = 'text/plain';
+                    }
+                    try { __httpRespond(this._connId, st, stText, JSON.stringify(this._headers), body); }
+                    catch(e) { /* connection may have been closed */ }
+                };
+                ServerResponse.prototype.setHeader = function(k, v) { this._headers[k] = v; return this; };
+                ServerResponse.prototype.getHeader = function(k) { return this._headers[k]; };
+                ServerResponse.prototype.removeHeader = function(k) { delete this._headers[k]; return this; };
+                ServerResponse.prototype.hasHeader = function(k) { return k in this._headers; };
+                ServerResponse.prototype.writeHead = function(status, msg, headers) {
+                    if (typeof msg === 'object') { headers = msg; msg = ''; }
+                    this.statusCode = status;
+                    if (msg) this.statusMessage = msg;
+                    if (headers) {
+                        var self = this;
+                        Object.keys(headers).forEach(function(k) { self._headers[k] = headers[k]; });
+                    }
+                    return this;
+                };
+                ServerResponse.prototype.end = function(chunk, encoding, cb) {
+                    if (typeof chunk === 'function') { cb = chunk; chunk = null; }
+                    if (typeof encoding === 'function') { cb = encoding; encoding = null; }
+                    var self = this;
+                    function finish() {
+                        self.writableEnded = true;
+                        self._writableState.finished = true;
+                        self._final(function(err) {
+                            if (err) self.emit('error', err);
+                            self.emit('finish');
+                            self.emit('close');
+                            if (cb) cb(err || null);
+                        });
+                    }
+                    if (chunk != null) { this.write(chunk, encoding, function(err) { if (!err) finish(); else if (cb) cb(err); }); }
+                    else { finish(); }
+                    return this;
+                };
+                ServerResponse.prototype.destroy = function(err) {
+                    if (err) this.emit('error', err);
+                    this._responded = true;
+                    this.emit('close');
+                    return this;
+                };
+
+                var modObj = {
                     request: request,
                     get: function(url, opts, cb) {
                         if (typeof opts === 'function') { cb = opts; opts = {}; }
@@ -879,85 +982,46 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
                         function _handleRequest(reqData) {
                             var connId = reqData.conn_id;
-                            var req = {
-                                method: reqData.method,
-                                url: reqData.url,
-                                httpVersion: '1.1',
-                                headers: reqData.headers,
-                                rawHeaders: (function() {
-                                    var arr = [];
-                                    var h = reqData.headers || {};
-                                    Object.keys(h).forEach(function(k) { arr.push(k, h[k]); });
-                                    return arr;
-                                })(),
-                                socket: { remoteAddress: '127.0.0.1', remotePort: 0 },
-                                _body: reqData.body || '',
-                                _listeners: {},
-                                on: function(ev, fn) { req._listeners[ev] = req._listeners[ev] || []; req._listeners[ev].push(fn); return req; },
-                                emit: function(ev) { var args = Array.prototype.slice.call(arguments, 1); (req._listeners[ev]||[]).forEach(function(fn){fn.apply(req,args);}); },
-                                setEncoding: function() {},
-                                resume: function() { setTimeout(function() { (req._listeners.data||[]).forEach(function(fn){fn(req._body);}); (req._listeners.end||[]).forEach(function(fn){fn();}); }, 0); return req; },
-                                pipe: function(dest) { if (dest && dest.write) dest.write(req._body); if (dest && dest.end) dest.end(); return dest; },
-                                destroy: function() {}
+                            var socket = {
+                                remoteAddress: reqData.remoteAddress || '127.0.0.1',
+                                remotePort: reqData.remotePort || 0,
+                                localAddress: reqData.localAddress || '0.0.0.0',
+                                localPort: reqData.port || 0,
                             };
 
-                            var _responded = false;
-                            var res = {
-                                statusCode: 200,
-                                statusMessage: '',
-                                _headers: {},
-                                _chunks: [],
-                                writableEnded: false,
-                                setHeader: function(k, v) { res._headers[k] = v; return res; },
-                                getHeader: function(k) { return res._headers[k]; },
-                                removeHeader: function(k) { delete res._headers[k]; return res; },
-                                hasHeader: function(k) { return k in res._headers; },
-                                writeHead: function(status, msg, headers) {
-                                    if (typeof msg === 'object') { headers = msg; msg = ''; }
-                                    res.statusCode = status;
-                                    if (msg) res.statusMessage = msg;
-                                    if (headers) Object.keys(headers).forEach(function(k) { res._headers[k] = headers[k]; });
-                                    return res;
-                                },
-                                write: function(chunk) {
-                                    if (chunk !== undefined && chunk !== null) {
-                                        res._chunks.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk));
-                                    }
-                                    return true;
-                                },
-                                end: function(chunk) {
-                                    if (_responded) return;
-                                    _responded = true;
-                                    if (chunk !== undefined && chunk !== null) res.write(chunk);
-                                    res.writableEnded = true;
-                                    var body = res._chunks.join('');
-                                    var st = res.statusCode || 200;
-                                    var stText = res.statusMessage || STATUS_CODES[st] || 'OK';
-                                    if (!res._headers['Content-Type'] && !res._headers['content-type']) {
-                                        res._headers['Content-Type'] = 'text/plain';
-                                    }
-                                    try { __httpRespond(connId, st, stText, JSON.stringify(res._headers), body); }
-                                    catch(e) { /* connection may have been closed */ }
-                                },
-                                _listeners: {},
-                                on: function(ev, fn) { res._listeners[ev] = res._listeners[ev] || []; res._listeners[ev].push(fn); return res; },
-                                emit: function(ev) { var args = Array.prototype.slice.call(arguments, 1); (res._listeners[ev]||[]).forEach(function(fn){fn.apply(res,args);}); },
-                                destroy: function() { _responded = true; }
-                            };
+                            var req = new IncomingMessage(socket);
+                            req.method = reqData.method;
+                            req.url = reqData.url;
+                            req.headers = reqData.headers || {};
+                            req.rawHeaders = (function() {
+                                var arr = [];
+                                var h = reqData.headers || {};
+                                Object.keys(h).forEach(function(k) { arr.push(k, h[k]); });
+                                return arr;
+                            })();
+                            req._body = reqData.body || '';
+                            req.socket = socket;
+
+                            var res = new ServerResponse(req);
+                            res._connId = connId;
 
                             try { handler(req, res); } catch(e) {
-                                if (!_responded) {
+                                if (!res._responded) {
                                     try { __httpRespond(connId, 500, 'Internal Server Error', JSON.stringify({'Content-Type':'text/plain'}), 'Internal Server Error'); } catch(_) {}
-                                    _responded = true;
+                                    res._responded = true;
                                 }
                             }
                         }
 
                         return server;
-                    },
-                    Agent: function() {},
-                    globalAgent: {}
+                    }
                 };
+
+                // ── Export classes on http module ──────────────────────────
+                modObj.IncomingMessage = IncomingMessage;
+                modObj.ServerResponse = ServerResponse;
+
+                return modObj;
             }
 
             var httpMod = makeHttpModule('http:');
