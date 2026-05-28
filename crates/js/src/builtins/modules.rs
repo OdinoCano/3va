@@ -501,6 +501,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             function makePath(sep, isAbsFn) {
                 function normalize(p) {
                     var abs = isAbsFn(p);
+                    var hasTrailing = p.length > 1 && p[p.length-1] === sep;
                     var parts = p.split(sep).filter(function(s,i) { return s !== '' || i === 0; });
                     var out = [];
                     for (var i = 0; i < parts.length; i++) {
@@ -509,6 +510,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     }
                     var r = out.join(sep);
                     if (abs && r[0] !== sep) r = sep + r;
+                    if (hasTrailing && r.length > 1 && r[r.length-1] !== sep) r += sep;
                     return r || (abs ? sep : '.');
                 }
                 var m = {
@@ -520,14 +522,15 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     },
                     resolve: function() {
                         var args = Array.prototype.slice.call(arguments);
-                        var resolved = '';
+                        var resolvedParts = [];
                         for (var i = args.length - 1; i >= -1; i--) {
                             var p = i >= 0 ? String(args[i]) : ((typeof process !== 'undefined' && process.cwd) ? process.cwd() : '/');
                             if (!p) continue;
-                            resolved = p + sep + resolved;
+                            resolvedParts.push(p);
                             if (isAbsFn(p)) break;
                         }
-                        return normalize(resolved);
+                        resolvedParts.reverse();
+                        return normalize(resolvedParts.join(sep));
                     },
                     dirname: function(p) {
                         p = String(p);
