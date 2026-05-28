@@ -8,6 +8,7 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 pub mod accessibility;
+pub mod proc;
 
 fn collect_test_files(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -412,6 +413,202 @@ fn discover_entry() -> PathBuf {
     cwd.join("index.js")
 }
 
+/// Metadata about a JavaScript/TypeScript framework with a dev server.
+struct FrameworkInfo {
+    name: &'static str,
+    config_files: &'static [&'static str],
+    bin: &'static str,
+    dev_args: &'static [&'static str],
+    dep_name: &'static [&'static str],
+}
+
+const FRAMEWORKS: &[FrameworkInfo] = &[
+    FrameworkInfo {
+        name: "Astro",
+        config_files: &[
+            "astro.config.mjs",
+            "astro.config.js",
+            "astro.config.ts",
+            "astro.config.mts",
+        ],
+        bin: "astro",
+        dev_args: &["dev"],
+        dep_name: &["astro"],
+    },
+    FrameworkInfo {
+        name: "Next.js",
+        config_files: &["next.config.mjs", "next.config.js", "next.config.ts"],
+        bin: "next",
+        dev_args: &["dev"],
+        dep_name: &["next"],
+    },
+    FrameworkInfo {
+        name: "Nuxt",
+        config_files: &[
+            "nuxt.config.js",
+            "nuxt.config.ts",
+            "nuxt.config.mjs",
+            "nuxt.config.mts",
+        ],
+        bin: "nuxi",
+        dev_args: &["dev"],
+        dep_name: &["nuxt", "nuxt3"],
+    },
+    FrameworkInfo {
+        name: "SvelteKit",
+        config_files: &["svelte.config.js", "svelte.config.ts", "svelte.config.mjs"],
+        bin: "vite",
+        dev_args: &["dev"],
+        dep_name: &["@sveltejs/kit"],
+    },
+    FrameworkInfo {
+        name: "Remix",
+        config_files: &["remix.config.js", "remix.config.ts"],
+        bin: "remix",
+        dev_args: &["dev"],
+        dep_name: &["@remix-run/dev"],
+    },
+    FrameworkInfo {
+        name: "Gatsby",
+        config_files: &["gatsby-config.js", "gatsby-config.ts"],
+        bin: "gatsby",
+        dev_args: &["develop"],
+        dep_name: &["gatsby"],
+    },
+    FrameworkInfo {
+        name: "SolidStart",
+        config_files: &[
+            "app.config.js",
+            "app.config.ts",
+            "app.config.mjs",
+            "app.config.mts",
+        ],
+        bin: "vinxi",
+        dev_args: &["dev"],
+        dep_name: &["solid-start", "@solidjs/start"],
+    },
+    FrameworkInfo {
+        name: "Qwik",
+        config_files: &["qwik.config.js", "qwik.config.ts"],
+        bin: "qwik",
+        dev_args: &["dev"],
+        dep_name: &["@builder.io/qwik"],
+    },
+];
+
+/// Detect which framework (if any) the current project uses.
+fn detect_framework() -> Option<&'static FrameworkInfo> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let pkg_json = std::fs::read_to_string(cwd.join("package.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+
+    for fw in FRAMEWORKS {
+        // Config file detection takes priority
+        for config in fw.config_files {
+            if cwd.join(config).exists() {
+                return Some(fw);
+            }
+        }
+        // Fallback: check package.json dependencies
+        if let Some(ref json) = pkg_json {
+            let has_dep = json["dependencies"]
+                .as_object()
+                .into_iter()
+                .chain(json["devDependencies"].as_object())
+                .any(|m| fw.dep_name.iter().any(|d| m.contains_key(*d)));
+            if has_dep {
+                return Some(fw);
+            }
+        }
+    }
+    None
+}
+
+/// Locate a CLI binary (local node_modules first, then PATH).
+fn find_binary(bin_name: &str) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let local = cwd.join("node_modules/.bin").join(bin_name);
+    if local.exists() {
+        return Some(local);
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join(bin_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Run a framework's dev server as a child process, forwarding flags and signals.
+async fn run_framework_dev_server(
+    fw: &FrameworkInfo,
+    port: u16,
+    host: String,
+    open: bool,
+) -> anyhow::Result<()> {
+    let banner = format!("{} project detected", fw.name);
+    let msg = format!("Delegating to {}'s dev server...", fw.name);
+    let inner = banner.len().max(msg.len()) + 2;
+
+    println!();
+    println!("  ╔{}╗", "═".repeat(inner + 2));
+    println!("  ║ {:<inner$} ║", banner);
+    println!("  ║ {:<inner$} ║", msg);
+    println!("  ╚{}╝", "═".repeat(inner + 2));
+    println!();
+
+    let mut cmd = if let Some(bin) = find_binary(fw.bin) {
+        let mut c = tokio::process::Command::new(bin);
+        c.args(fw.dev_args);
+        c
+    } else {
+        let mut c = tokio::process::Command::new("npx");
+        let mut args = vec![fw.bin];
+        args.extend(fw.dev_args);
+        c.args(&args);
+        c
+    };
+
+    cmd.arg("--port")
+        .arg(port.to_string())
+        .arg("--host")
+        .arg(&host);
+
+    if open {
+        cmd.arg("--open");
+    }
+
+    cmd.stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+
+    let mut child = cmd.spawn()?;
+
+    tokio::select! {
+        status = child.wait() => {
+            match status {
+                Ok(s) if !s.success() => {
+                    anyhow::bail!("{} dev server exited with status: {}", fw.name, s);
+                }
+                Err(e) => {
+                    anyhow::bail!("Error waiting for {} dev server: {}", fw.name, e);
+                }
+                _ => {}
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            println!("\n[dev] Shutting down (killing {})...", fw.name);
+            let _ = child.start_kill();
+        }
+    }
+
+    Ok(())
+}
+
 /// Shared build state broadcast over SSE to connected browsers.
 #[derive(Clone, Debug)]
 enum BuildEvent {
@@ -427,11 +624,26 @@ async fn run_dev_server(
     open: bool,
     public_dir: PathBuf,
 ) -> anyhow::Result<()> {
+    // Detect framework (Astro, Next.js, Nuxt, etc.) and delegate
+    if let Some(fw) = detect_framework() {
+        return run_framework_dev_server(fw, port, host, open).await;
+    }
+
     use tokio::net::TcpListener;
     use tokio::signal;
     use tokio::sync::broadcast;
 
     let entry = discover_entry();
+    if !entry.exists() {
+        anyhow::bail!(
+            "Entry file not found: {}\n\
+             Tried: package.json \"main\" field, src/index.ts, src/index.js, index.ts, index.js\n\
+             Hint: This project may use a framework (Astro, Next.js, Nuxt, etc.)\n\
+             If so, ensure the corresponding config file (astro.config.*, next.config.*, etc.) exists.",
+            entry.display()
+        );
+    }
+
     let output = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("dist/bundle.js");
@@ -1089,6 +1301,45 @@ enum Commands {
         #[arg(long = "public-dir", default_value = "public")]
         public_dir: PathBuf,
     },
+    /// Start a managed process in production (daemon)
+    Start {
+        /// Name to identify the process (default: derived from entry filename)
+        #[arg(long, short)]
+        name: Option<String>,
+        /// Entry file to run
+        entry: PathBuf,
+        /// Arguments passed to the entry script
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Stop a managed process
+    Stop {
+        /// Process name to stop
+        name: String,
+    },
+    /// Restart a managed process
+    Restart {
+        /// Process name to restart
+        name: String,
+    },
+    /// Show status of managed processes
+    Status {
+        /// Optional process name; list all if omitted
+        name: Option<String>,
+    },
+    /// Show logs for a managed process
+    Logs {
+        /// Process name to show logs for
+        name: String,
+        /// Number of lines to show from the tail (default: 50)
+        #[arg(long, short, default_value = "50")]
+        lines: usize,
+    },
+    /// Remove a managed process from 3VA
+    Delete {
+        /// Process name to delete
+        name: String,
+    },
     /// Bundle the application
     Bundle {
         /// The entry file to bundle
@@ -1717,6 +1968,72 @@ async fn main() -> anyhow::Result<()> {
             public_dir,
         } => {
             run_dev_server(*port, host.clone(), *open, public_dir.clone()).await?;
+        }
+        Commands::Start { name, entry, args } => {
+            let cwd = std::env::current_dir()?;
+            let process_name = match name {
+                Some(n) => n.clone(),
+                None => entry
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "app".to_string()),
+            };
+            let info = proc::start_process(&process_name, entry, &cwd, args)?;
+            println!();
+            println!("  ✓ Started process '{}' (PID {})", info.name, info.pid);
+            println!("    Logs: {}", info.log_path.display());
+            println!();
+        }
+        Commands::Stop { name } => {
+            proc::stop_process(name)?;
+            println!("  ✓ Stopped process '{}'", name);
+        }
+        Commands::Restart { name } => {
+            let info = proc::restart_process(name)?;
+            println!("  ✓ Restarted process '{}' (PID {})", info.name, info.pid);
+        }
+        Commands::Status { name } => {
+            let processes = match name {
+                Some(n) => vec![proc::status_process(n)?],
+                None => proc::list_processes(),
+            };
+            if processes.is_empty() {
+                println!("  No managed processes.");
+            } else {
+                println!();
+                println!(
+                    "  {:<20} {:<8} {:<8} {:<10} Entry",
+                    "Name", "PID", "Status", "Restarts"
+                );
+                println!(
+                    "  {:-<20} {:-<8} {:-<8} {:-<10} {:-<20}",
+                    "", "", "", "", ""
+                );
+                for p in &processes {
+                    let status_icon = match p.status.as_str() {
+                        "running" => "\x1b[32mrunning\x1b[0m",
+                        "stopped" => "\x1b[33mstopped\x1b[0m",
+                        "error" => "\x1b[31merror\x1b[0m",
+                        _ => &p.status,
+                    };
+                    println!(
+                        "  {:<20} {:<8} {} {:<10} {}",
+                        p.name,
+                        p.pid,
+                        status_icon,
+                        p.restarts,
+                        p.entry.display()
+                    );
+                }
+                println!();
+            }
+        }
+        Commands::Logs { name, lines } => {
+            proc::print_logs(name, *lines)?;
+        }
+        Commands::Delete { name } => {
+            proc::delete_process(name)?;
+            println!("  ✓ Deleted process '{}'", name);
         }
     }
 
