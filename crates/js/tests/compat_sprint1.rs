@@ -951,3 +951,97 @@ async fn process_env_own_keys_works() {
         .unwrap();
     assert_eq!(r, "true");
 }
+
+// ── net.Socket as stream.Duplex ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn socket_instanceof_duplex() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var net = require('net');
+            var stream = require('stream');
+            var s = new net.Socket({});
+            String(s instanceof stream.Duplex)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn socket_instanceof_readable_writable() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var net = require('net');
+            var stream = require('stream');
+            var s = new net.Socket({});
+            var ok = s instanceof stream.Readable;
+            ok = ok && s instanceof stream.Writable;
+            String(ok)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn socket_has_readable_writable_state() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var net = require('net');
+            var s = new net.Socket({});
+            var ok = typeof s._readableState === 'object';
+            ok = ok && typeof s._writableState === 'object';
+            ok = ok && s.readable === true;
+            ok = ok && s.writable === true;
+            String(ok)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn socket_set_timeout_no_delay_keep_alive() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var net = require('net');
+            var s = new net.Socket({});
+            s.setTimeout(0);
+            s.setNoDelay();
+            s.setKeepAlive();
+            'ok'
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "ok");
+}
+
+#[tokio::test]
+async fn tls_socket_instanceof_duplex() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var tls = require('tls');
+            var stream = require('stream');
+            var s = new tls.TLSSocket({}, {});
+            String(s instanceof stream.Duplex)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}

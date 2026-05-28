@@ -281,6 +281,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 if (opts && typeof opts.read === 'function') this._read = opts.read;
             }
             util.inherits(Readable, Stream);
+            Object.defineProperty(Readable, Symbol.hasInstance, {
+                value: function(instance) { return !!(instance && instance._readableState); }
+            });
             Readable.prototype._read = function(size) {};
             Readable.prototype.read = function(n) {
                 if (!this._readableState.flowing) this._read(n || 0);
@@ -333,6 +336,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 if (opts && typeof opts.final === 'function') this._final = opts.final;
             }
             util.inherits(Writable, Stream);
+            Object.defineProperty(Writable, Symbol.hasInstance, {
+                value: function(instance) { return !!(instance && instance._writableState); }
+            });
             Writable.prototype._write = function(chunk, encoding, callback) { callback(); };
             Writable.prototype._final = function(callback) { callback(); };
             Writable.prototype.write = function(chunk, encoding, cb) {
@@ -982,12 +988,16 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
                         function _handleRequest(reqData) {
                             var connId = reqData.conn_id;
-                            var socket = {
-                                remoteAddress: reqData.remoteAddress || '127.0.0.1',
-                                remotePort: reqData.remotePort || 0,
-                                localAddress: reqData.localAddress || '0.0.0.0',
-                                localPort: reqData.port || 0,
-                            };
+                            var socket = new Socket({});
+                            socket._id = connId;
+                            socket.pending = false;
+                            socket.connecting = false;
+                            socket._connected = true;
+                            socket.server = server;
+                            socket.remoteAddress = reqData.remoteAddress || '127.0.0.1';
+                            socket.remotePort = reqData.remotePort || 0;
+                            socket.localAddress = reqData.localAddress || '0.0.0.0';
+                            socket.localPort = reqData.port || 0;
 
                             var req = new IncomingMessage(socket);
                             req.method = reqData.method;
@@ -1099,7 +1109,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             // ── net / tls — backed by __tcpConnect / __tcpConnectTls ─────────────
             function Socket(opts) {
-                EventEmitter.call(this);
+                Duplex.call(this, opts);
                 opts = opts || {};
                 this._id = null;
                 this._tls = !!(opts.tls);
@@ -1107,8 +1117,6 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 this._destroyed = false;
                 this._encoding = null;
                 this._pollTimer = null;
-                this.readable = true;
-                this.writable = true;
                 this.connecting = false;
                 this.pending = true;
                 this.destroyed = false;
@@ -1120,7 +1128,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 this.localAddress = '127.0.0.1';
                 this.localPort = 0;
             }
-            util.inherits(Socket, EventEmitter);
+            util.inherits(Socket, Duplex);
 
             Socket.prototype.connect = function(portOrOpts, host, callback) {
                 if (typeof portOrOpts === 'object' && portOrOpts !== null) {
