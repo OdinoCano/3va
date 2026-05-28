@@ -440,3 +440,57 @@ async fn eventemitter_get_max_listeners() {
         .unwrap();
     assert_eq!(r, "20");
 }
+
+#[tokio::test]
+async fn crypto_create_hash_is_synchronous() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var crypto = require('crypto');
+        var h = crypto.createHash('sha256').update('hello').digest('hex');
+        typeof h === 'string' ? 'sync:' + h.slice(0,8) : 'async:Promise'
+    "#,
+        )
+        .await
+        .unwrap();
+    assert!(
+        r.starts_with("sync:"),
+        "createHash.digest() must be sync, got: {r}"
+    );
+    assert_eq!(&r, "sync:2cf24dba", "wrong sha256 of 'hello'");
+}
+
+#[tokio::test]
+async fn crypto_create_hmac_is_synchronous() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var crypto = require('crypto');
+        var h = crypto.createHmac('sha256', 'key').update('data').digest('hex');
+        typeof h === 'string' ? 'sync:' + h.slice(0,8) : 'async:Promise'
+    "#,
+        )
+        .await
+        .unwrap();
+    assert!(
+        r.starts_with("sync:"),
+        "createHmac.digest() must be sync, got: {r}"
+    );
+}
+
+#[tokio::test]
+async fn crypto_hash_shorthand() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var crypto = require('crypto');
+        crypto.hash('sha256', 'hello', 'hex').slice(0,8)
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "2cf24dba");
+}
