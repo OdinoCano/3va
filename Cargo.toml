@@ -43,3 +43,6 @@ native-tls = "0.2"
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+[patch.crates-io]
+rquickjs-sys = { path = "vendor/rquickjs-sys" }

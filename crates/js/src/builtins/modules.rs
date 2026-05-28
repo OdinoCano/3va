@@ -2197,91 +2197,157 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
 'use strict';
 
 // ── async_hooks ───────────────────────────────────────────────────────────────
-// AsyncLocalStorage is the critical API used by Next.js, NestJS, Hono, express
-// middleware, and nearly every modern server framework for per-request context.
+// AsyncLocalStorage backed by the patched QuickJS job hook.
+//
+// Architecture (from the root up):
+//   C layer  — JS_ExecutePendingJob calls job_before_execute_hook(ctx_id)
+//              before each Promise continuation, which updates a Rust
+//              thread-local with the ctx_id captured at enqueue time.
+//   Rust layer — __asyncCtxGet/__asyncCtxSet read/write that thread-local;
+//                __asyncCtxAlloc/__asyncCtxRead/__asyncCtxFree manage data.
+//   JS layer  — AsyncLocalStorage.run() allocates a child ctx, sets it as
+//               the active ID, calls fn(), then restores the parent.
+//               getStore() reads from the currently active ctx_id.
+//
+// Because the C hook fires at the runtime level — not via Promise.prototype.then
+// monkey-patching — context propagates correctly across concurrent request
+// chains and nested async operations without any userland overhead.
 (function() {
-    var _asyncLocalMap = new Map();
-    var _asyncIdCounter = 1;
-    var _currentAsyncId = 1;
+    // Guard: native functions must be present (installed by async_context.rs).
+    if (typeof __asyncCtxGet !== 'function') return;
+
+    var _alsKeyCounter = 0;
 
     function AsyncLocalStorage() {
-        this._key = Symbol('AsyncLocalStorage');
-        this._store = undefined;
+        // Each instance gets a unique string key into the context data map.
+        this._key = '__als_' + (++_alsKeyCounter);
+        this._disabled = false;
     }
 
-    AsyncLocalStorage.prototype.run = function(store, callback) {
+    AsyncLocalStorage.prototype.run = function(store, fn) {
+        if (this._disabled) return fn.apply(null, Array.prototype.slice.call(arguments, 2));
         var args = Array.prototype.slice.call(arguments, 2);
-        var prevStore = this._store;
-        this._store = store;
+        var parentId = __asyncCtxGet();
+        var json = JSON.stringify(store === undefined ? null : store);
+        var newId = __asyncCtxAlloc(parentId, this._key, json);
+        var freeId = newId;
+
+        __asyncCtxSet(newId);
+        var result;
         try {
-            return callback.apply(null, args);
+            result = fn.apply(null, args);
         } finally {
-            this._store = prevStore;
+            // Restore parent context so code after run() runs in the right scope.
+            __asyncCtxSet(parentId);
         }
+
+        // Free context data only after the entire async chain completes.
+        // For async functions fn() returns a pending Promise; we attach cleanup
+        // to its settlement so continuations can still read the store.
+        // For sync functions we free immediately.
+        // We do NOT use Promise.resolve().then(cleanup) here because that would
+        // enqueue cleanup before the async chain's continuations, freeing data
+        // that is still needed.
+        if (result !== null && result !== undefined && typeof result.then === 'function') {
+            var cleanup = function() { __asyncCtxFree(freeId); };
+            result.then(cleanup, cleanup);
+        } else {
+            __asyncCtxFree(freeId);
+        }
+
+        return result;
     };
 
     AsyncLocalStorage.prototype.getStore = function() {
-        return this._store;
+        if (this._disabled) return undefined;
+        var ctxId = __asyncCtxGet();
+        if (ctxId === 0) return undefined;
+        var raw = __asyncCtxRead(ctxId, this._key);
+        if (raw === undefined || raw === null) return undefined;
+        try {
+            var v = JSON.parse(raw);
+            return v === null ? undefined : v;
+        } catch(e) { return undefined; }
     };
 
     AsyncLocalStorage.prototype.enterWith = function(store) {
-        this._store = store;
-    };
-
-    AsyncLocalStorage.prototype.exit = function(callback) {
-        var args = Array.prototype.slice.call(arguments, 1);
-        var prevStore = this._store;
-        this._store = undefined;
-        try {
-            return callback.apply(null, args);
-        } finally {
-            this._store = prevStore;
+        if (this._disabled) return;
+        var ctxId = __asyncCtxGet();
+        var json = JSON.stringify(store === undefined ? null : store);
+        if (ctxId === 0) {
+            var newId = __asyncCtxAlloc(0, this._key, json);
+            __asyncCtxSet(newId);
+        } else {
+            // Re-allocate current context with the new value.
+            var newId2 = __asyncCtxAlloc(ctxId, this._key, json);
+            __asyncCtxSet(newId2);
         }
     };
 
+    AsyncLocalStorage.prototype.exit = function(fn) {
+        var args = Array.prototype.slice.call(arguments, 1);
+        var prev = __asyncCtxGet();
+        __asyncCtxSet(0);
+        try { return fn.apply(null, args); }
+        finally { __asyncCtxSet(prev); }
+    };
+
     AsyncLocalStorage.prototype.disable = function() {
-        this._store = undefined;
+        this._disabled = true;
     };
 
     AsyncLocalStorage.snapshot = function() {
-        return function restore(callback) {
-            return callback.apply(null, Array.prototype.slice.call(arguments, 1));
+        var capturedId = __asyncCtxGet();
+        return function restore(fn) {
+            var args = Array.prototype.slice.call(arguments, 1);
+            var prev = __asyncCtxGet();
+            __asyncCtxSet(capturedId);
+            try { return fn.apply(null, args); }
+            finally { __asyncCtxSet(prev); }
         };
     };
 
-    function AsyncResource(type, options) {
-        this.type = type;
-        this.asyncId = ++_asyncIdCounter;
-        this.triggerAsyncId = _currentAsyncId;
+    function AsyncResource(type) {
+        this.type = type || 'AsyncResource';
+        this._ctxId = __asyncCtxGet();
+        this._destroyed = false;
+        // Retain the context so it outlives the run() call that created it.
+        if (this._ctxId !== 0) __asyncCtxRetain(this._ctxId);
     }
 
     AsyncResource.prototype.runInAsyncScope = function(fn, thisArg) {
         var args = Array.prototype.slice.call(arguments, 2);
-        return fn.apply(thisArg, args);
+        var prev = __asyncCtxGet();
+        __asyncCtxSet(this._ctxId);
+        try { return fn.apply(thisArg, args); }
+        finally { __asyncCtxSet(prev); }
     };
 
-    AsyncResource.prototype.emitDestroy = function() { return this; };
-    AsyncResource.prototype.asyncId = function() { return this.asyncId; };
-    AsyncResource.prototype.triggerAsyncId = function() { return this.triggerAsyncId; };
+    AsyncResource.prototype.emitDestroy = function() {
+        if (!this._destroyed && this._ctxId !== 0) {
+            this._destroyed = true;
+            __asyncCtxFree(this._ctxId);
+        }
+        return this;
+    };
+
+    AsyncResource.prototype.bind = function(fn, thisArg) {
+        var self = this;
+        return function() {
+            return self.runInAsyncScope(fn, thisArg || this, ...arguments);
+        };
+    };
 
     AsyncResource.bind = function(fn, type, thisArg) {
-        var resource = new AsyncResource(type || fn.name || 'anonymous');
-        return resource.runInAsyncScope.bind(resource, fn, thisArg);
+        return new AsyncResource(type || fn.name || 'bound').bind(fn, thisArg);
     };
-
-    function createHook(callbacks) {
-        return {
-            enable: function() { return this; },
-            disable: function() { return this; }
-        };
-    }
 
     var asyncHooks = {
         AsyncLocalStorage: AsyncLocalStorage,
         AsyncResource: AsyncResource,
-        createHook: createHook,
-        executionAsyncId: function() { return _currentAsyncId; },
-        triggerAsyncId: function() { return 1; },
+        createHook: function() { return { enable: function() { return this; }, disable: function() { return this; } }; },
+        executionAsyncId: function() { return __asyncCtxGet(); },
+        triggerAsyncId: function() { return 0; },
         executionAsyncResource: function() { return null; }
     };
 

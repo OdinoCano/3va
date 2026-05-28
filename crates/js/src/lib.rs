@@ -1,3 +1,4 @@
+pub mod async_context;
 pub mod builtins;
 pub mod esm;
 pub mod transpiler;
@@ -78,6 +79,13 @@ impl JsEngine {
             let tm = timer_manager.clone();
             context
                 .with(|ctx: rquickjs::Ctx| {
+                    // Install async context hook FIRST — must be wired before any
+                    // Promises are created so continuations capture context IDs.
+                    let rt_ptr = ctx.as_raw().as_ptr();
+                    let rt_ptr =
+                        unsafe { rquickjs_sys::JS_GetRuntime(rt_ptr) } as *mut std::ffi::c_void;
+                    unsafe { async_context::install(&ctx, rt_ptr) }?;
+
                     builtins::inject_all(&ctx, perms, tm)?;
                     Ok::<(), rquickjs::Error>(())
                 })
