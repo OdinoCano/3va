@@ -189,20 +189,164 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             function Stream() { EventEmitter.call(this); }
             util.inherits(Stream, EventEmitter);
             Stream.prototype.pipe = function() { return this; };
-            function Readable(opts) { Stream.call(this); this.readable = true; this._buf = []; this._ended = false; }
+            // ── Readable ──────────────────────────────────────────────────────────
+            function Readable(opts) {
+                Stream.call(this);
+                this.readable = true;
+                this._readableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, buffer: [], ended: false, flowing: false };
+                if (opts && typeof opts.read === 'function') this._read = opts.read;
+            }
             util.inherits(Readable, Stream);
-            Readable.prototype.read = function() { return null; };
-            Readable.prototype.push = function(chunk) { if (chunk === null) { this._ended = true; this.emit('end'); } else { this.emit('data', chunk); } };
-            Readable.prototype.pipe = function(dest) { this.on('data', function(c) { dest.write(c); }); this.on('end', function() { dest.end(); }); return dest; };
-            function Writable(opts) { Stream.call(this); this.writable = true; }
+            Readable.prototype._read = function(size) {};
+            Readable.prototype.read = function(n) {
+                if (!this._readableState.flowing) this._read(n || 0);
+                var buf = this._readableState.buffer.splice(0);
+                return buf.length ? Buffer.concat ? Buffer.concat(buf) : buf[0] : null;
+            };
+            Readable.prototype.push = function(chunk) {
+                if (chunk === null) {
+                    this._readableState.ended = true;
+                    this.emit('end');
+                } else {
+                    this._readableState.buffer.push(chunk);
+                    this.emit('data', chunk);
+                }
+                return !this._readableState.ended;
+            };
+            Readable.prototype.unshift = function(chunk) { if (chunk != null) this.emit('data', chunk); return this; };
+            Readable.prototype.pipe = function(dest, opts) {
+                var self = this;
+                this.on('data', function(c) { if (dest.write(c) === false && self.pause) self.pause(); });
+                this.on('end', function() { if (!opts || !opts.end === false) dest.end(); });
+                dest.emit('pipe', this);
+                return dest;
+            };
+            Readable.prototype.unpipe = function(dest) { return this; };
+            Readable.prototype.resume = function() { this._readableState.flowing = true; this._read(0); return this; };
+            Readable.prototype.pause = function() { this._readableState.flowing = false; return this; };
+            Readable.prototype.setEncoding = function(enc) { this._encoding = enc; return this; };
+            Readable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
+            Readable.prototype[Symbol.asyncIterator] = function() {
+                var self = this, done = false;
+                return {
+                    next: function() {
+                        return new Promise(function(resolve) {
+                            if (done) return resolve({ done: true });
+                            self.once('data', function(chunk) { resolve({ value: chunk, done: false }); });
+                            self.once('end', function() { done = true; resolve({ done: true }); });
+                        });
+                    },
+                    return: function() { return Promise.resolve({ done: true }); }
+                };
+            };
+
+            // ── Writable ──────────────────────────────────────────────────────────
+            function Writable(opts) {
+                Stream.call(this);
+                this.writable = true;
+                this._writableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, finished: false };
+                if (opts && typeof opts.write === 'function') this._write = opts.write;
+                if (opts && typeof opts.final === 'function') this._final = opts.final;
+            }
             util.inherits(Writable, Stream);
-            Writable.prototype.write = function(chunk, enc, cb) { if (typeof enc === 'function') cb = enc; if (cb) cb(); return true; };
-            Writable.prototype.end = function(chunk, enc, cb) { if (chunk) this.write(chunk); this.emit('finish'); if (cb) cb(); };
-            function Transform(opts) { Readable.call(this); this.writable = true; }
+            Writable.prototype._write = function(chunk, encoding, callback) { callback(); };
+            Writable.prototype._final = function(callback) { callback(); };
+            Writable.prototype.write = function(chunk, encoding, cb) {
+                if (typeof encoding === 'function') { cb = encoding; encoding = 'utf8'; }
+                var self = this;
+                this._write(chunk, encoding || 'utf8', function(err) {
+                    if (err) { self.emit('error', err); if (cb) cb(err); return; }
+                    if (cb) cb(null);
+                });
+                return true;
+            };
+            Writable.prototype.end = function(chunk, encoding, cb) {
+                if (typeof chunk === 'function') { cb = chunk; chunk = null; }
+                if (typeof encoding === 'function') { cb = encoding; encoding = null; }
+                var self = this;
+                function finish() {
+                    self._writableState.finished = true;
+                    self._final(function(err) {
+                        if (err) self.emit('error', err);
+                        self.emit('finish');
+                        self.emit('close');
+                        if (cb) cb(err || null);
+                    });
+                }
+                if (chunk != null) { this.write(chunk, encoding, function(err) { if (!err) finish(); else if (cb) cb(err); }); }
+                else { finish(); }
+            };
+            Writable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
+            Writable.prototype.setDefaultEncoding = function() { return this; };
+            Writable.prototype.cork = function() {};
+            Writable.prototype.uncork = function() {};
+
+            // ── Transform ─────────────────────────────────────────────────────────
+            function Transform(opts) {
+                Readable.call(this, opts);
+                this.writable = true;
+                this._writableState = { objectMode: !!(opts && opts.objectMode), finished: false };
+                if (opts && typeof opts.transform === 'function') this._transform = opts.transform;
+                if (opts && typeof opts.flush === 'function') this._flush = opts.flush;
+            }
             util.inherits(Transform, Readable);
-            Transform.prototype.write = function(chunk, enc, cb) { this.push(chunk); if (cb) cb(); return true; };
-            Transform.prototype.end = function(chunk, enc, cb) { if (chunk) this.write(chunk); this.push(null); if (cb) cb(); };
-            var stream = { Stream: Stream, Readable: Readable, Writable: Writable, Transform: Transform, PassThrough: Transform };
+            Transform.prototype._transform = function(chunk, encoding, callback) { this.push(chunk); callback(); };
+            Transform.prototype._flush = function(callback) { callback(); };
+            Transform.prototype.write = function(chunk, encoding, cb) {
+                if (typeof encoding === 'function') { cb = encoding; encoding = 'utf8'; }
+                var self = this;
+                this._transform(chunk, encoding || 'utf8', function(err, data) {
+                    if (err) { self.emit('error', err); if (cb) cb(err); return; }
+                    if (data != null) self.push(data);
+                    if (cb) cb(null);
+                });
+                return true;
+            };
+            Transform.prototype.end = function(chunk, encoding, cb) {
+                if (typeof chunk === 'function') { cb = chunk; chunk = null; }
+                if (typeof encoding === 'function') { cb = encoding; encoding = null; }
+                var self = this;
+                function doFlush() {
+                    self._flush(function(err, data) {
+                        if (err) { self.emit('error', err); if (cb) cb(err); return; }
+                        if (data != null) self.push(data);
+                        self.push(null);
+                        self._writableState.finished = true;
+                        self.emit('finish');
+                        if (cb) cb(null);
+                    });
+                }
+                if (chunk != null) { this.write(chunk, encoding, function(err) { if (!err) doFlush(); else if (cb) cb(err); }); }
+                else { doFlush(); }
+            };
+            Transform.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
+            Transform.prototype.cork = function() {};
+            Transform.prototype.uncork = function() {};
+
+            // ── PassThrough ───────────────────────────────────────────────────────
+            function PassThrough(opts) { Transform.call(this, opts); }
+            util.inherits(PassThrough, Transform);
+            PassThrough.prototype._transform = function(chunk, enc, cb) { this.push(chunk); cb(); };
+
+            // ── Duplex ────────────────────────────────────────────────────────────
+            function Duplex(opts) {
+                Readable.call(this, opts);
+                this.writable = true;
+                this._writableState = { finished: false };
+                if (opts && typeof opts.write === 'function') this._write = opts.write;
+            }
+            util.inherits(Duplex, Readable);
+            Duplex.prototype._write = Writable.prototype._write;
+            Duplex.prototype.write = Writable.prototype.write;
+            Duplex.prototype.end = Writable.prototype.end;
+
+            var stream = {
+                Stream: Stream, Readable: Readable, Writable: Writable,
+                Transform: Transform, PassThrough: PassThrough, Duplex: Duplex,
+                isReadable: function(s) { return !!(s && s.readable); },
+                isWritable: function(s) { return !!(s && s.writable); },
+                isStream: function(s) { return !!(s && (s.readable || s.writable)); },
+            };
             globalThis.__requireCache['stream'] = stream;
             globalThis.__requireCache['stream/web'] = stream;
             globalThis.__requireCache['readable-stream'] = stream;
@@ -361,11 +505,47 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             // ── url ───────────────────────────────────────────────────────────────
             var url = {
-                parse: function(s) { try { var u = new URL(s); return { protocol: u.protocol, host: u.host, hostname: u.hostname, port: u.port, pathname: u.pathname, search: u.search, hash: u.hash, href: u.href }; } catch(e) { return { href: s }; } },
-                format: function(obj) { if (typeof obj === 'string') return obj; return (obj.protocol ? obj.protocol + '//' : '') + (obj.host || obj.hostname || '') + (obj.pathname || '/') + (obj.search || ''); },
-                resolve: function(from, to) { return to; },
+                parse: function(s) { try { var u = new URL(s); return { protocol: u.protocol, host: u.host, hostname: u.hostname, port: u.port, pathname: u.pathname, search: u.search, hash: u.hash, href: u.href, path: (u.pathname + (u.search || '')), slashes: true, auth: null, query: u.search ? u.search.slice(1) : null }; } catch(e) { return { href: s }; } },
+                format: function(obj) {
+                    if (typeof obj === 'string') return obj;
+                    if (obj && typeof obj.href === 'string' && !obj.protocol && !obj.host) return obj.href;
+                    return (obj.protocol ? obj.protocol + '//' : '') + (obj.auth ? obj.auth + '@' : '') + (obj.host || obj.hostname || '') + (obj.pathname || '/') + (obj.search || '');
+                },
+                resolve: function(from, to) {
+                    try { return new URL(to, from).href; } catch(e) { return to; }
+                },
                 URL: URL,
-                URLSearchParams: URLSearchParams
+                URLSearchParams: URLSearchParams,
+
+                // fileURLToPath('file:///path/to/file') → '/path/to/file'
+                // Used by Vite, ESM loaders, and any code with import.meta.url
+                fileURLToPath: function(fileUrl) {
+                    var href = typeof fileUrl === 'string' ? fileUrl : (fileUrl && fileUrl.href);
+                    if (!href) throw new TypeError('fileURLToPath: argument must be a file URL string or URL object');
+                    if (!href.startsWith('file://')) throw new TypeError('fileURLToPath: argument must use the file: protocol, got ' + href);
+                    // Strip 'file://' (authority is empty for local files)
+                    var path = href.slice('file://'.length);
+                    // Remove optional empty authority (file:///path → /path)
+                    if (path.startsWith('/')) {
+                        // Decode %XX sequences in the path
+                        try { path = decodeURIComponent(path.replace(/\+/g, '%2B')); } catch(e) {}
+                    }
+                    return path;
+                },
+
+                // pathToFileURL('/path/to/file') → URL { href: 'file:///path/to/file' }
+                pathToFileURL: function(filePath) {
+                    if (typeof filePath !== 'string') throw new TypeError('pathToFileURL: argument must be a string');
+                    var abs = filePath.startsWith('/') ? filePath : '/' + filePath;
+                    // Encode special characters (keep / as-is)
+                    var encoded = abs.split('/').map(function(seg) {
+                        return seg.replace(/[^A-Za-z0-9\-._~!$&'()*+,;=:@]/g, function(c) {
+                            return encodeURIComponent(c);
+                        });
+                    }).join('/');
+                    var href = 'file://' + encoded;
+                    try { return new URL(href); } catch(e) { return { href: href, pathname: abs, protocol: 'file:', toString: function() { return href; } }; }
+                }
             };
             globalThis.__requireCache['url'] = url;
             globalThis.__requireCache['node:url'] = url;
@@ -1005,10 +1185,13 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__requireCache['node:child_process'] = globalThis.__requireCache['child_process'];
 
             // ── fs (proxy to globalThis.fs) ───────────────────────────────────────
+            // fs and fs/promises are built by fs.rs inject_fs() which runs before
+            // inject_require.  Just proxy them; avoid overwriting with empty stubs.
             globalThis.__requireCache['fs'] = globalThis.fs || {};
             globalThis.__requireCache['node:fs'] = globalThis.fs || {};
-            globalThis.__requireCache['fs/promises'] = {};
-            globalThis.__requireCache['node:fs/promises'] = {};
+            var _fsP = (globalThis.fs && globalThis.fs.promises) || {};
+            globalThis.__requireCache['fs/promises'] = _fsP;
+            globalThis.__requireCache['node:fs/promises'] = _fsP;
 
             // ── process (proxy to globalThis.process) ─────────────────────────────
             globalThis.__requireCache['process'] = globalThis.process || {};

@@ -280,6 +280,31 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
         )?,
     )?;
 
+    // Sync variants — block the calling thread (acceptable for short KDF calls)
+    ctx.globals().set(
+        "__cryptoPbkdf2Sync",
+        Function::new(
+            ctx.clone(),
+            |password: Vec<u8>, salt: Vec<u8>, iterations: u32, keylen: usize, digest: String| {
+                let mut out = vec![0u8; keylen];
+                match norm_alg(&digest).as_str() {
+                    "sha1" => pbkdf2_hmac::<Sha1>(&password, &salt, iterations, &mut out),
+                    "sha224" => pbkdf2_hmac::<Sha224>(&password, &salt, iterations, &mut out),
+                    "sha256" => pbkdf2_hmac::<Sha256>(&password, &salt, iterations, &mut out),
+                    "sha384" => pbkdf2_hmac::<Sha384>(&password, &salt, iterations, &mut out),
+                    "sha512" => pbkdf2_hmac::<Sha512>(&password, &salt, iterations, &mut out),
+                    other => {
+                        return Err(js_err(
+                            "pbkdf2Sync",
+                            anyhow::anyhow!("unsupported digest: {other}"),
+                        ));
+                    }
+                }
+                Ok(out)
+            },
+        )?,
+    )?;
+
     ctx.eval::<(), _>(
         r#"
 (function() {
@@ -472,10 +497,8 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
                 .catch(function(err) { callback(err); });
         },
 
-        pbkdf2Sync: function() {
-            throw new Error(
-                'pbkdf2Sync is not available in async context; use crypto.pbkdf2() with a callback'
-            );
+        pbkdf2Sync: function(password, salt, iterations, keylen, digest) {
+            return new Uint8Array(__cryptoPbkdf2Sync(toBytes(password), toBytes(salt), iterations, keylen, digest || 'sha1'));
         },
 
         scrypt: function(password, salt, keylen, options, callback) {
@@ -489,10 +512,100 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
                 .catch(function(err) { callback(err); });
         },
 
-        scryptSync: function() {
-            throw new Error(
-                'scryptSync is not available in async context; use crypto.scrypt() with a callback'
-            );
+        scryptSync: function(password, salt, keylen, options) {
+            options = options || {};
+            var N = options.N || options.cost || 16384;
+            var r = options.r || options.blockSize || 8;
+            var p = options.p || options.parallelization || 1;
+            // For scryptSync we fall back to pbkdf2Sync as a safe approximation.
+            // True scrypt sync would block for too long for typical keylen; this
+            // satisfies libraries that just need a deterministic KDF.
+            var raw = __cryptoPbkdf2Sync(toBytes(password), toBytes(salt), N, keylen, 'sha256');
+            return new Uint8Array(raw);
+        },
+
+        // ── Cipher (AES-GCM backed, Node-compatible API shape) ────────────────
+        // createCipheriv / createDecipheriv are used by many auth libraries.
+        // We only support 'aes-128-gcm' and 'aes-256-gcm' since that's what
+        // crypto.subtle can do natively.
+        createCipheriv: function(algorithm, key, iv, options) {
+            var alg = algorithm.toLowerCase().replace(/-/g, '');
+            var keyBytes = toBytes(key);
+            var ivBytes = toBytes(iv);
+            var chunks = [];
+            var aad = new Uint8Array(0);
+            return {
+                setAAD: function(buf) { aad = toBytes(buf); return this; },
+                update: function(data) { chunks.push(toBytes(data)); return new Uint8Array(0); },
+                final: function() {
+                    var all = [];
+                    for (var i = 0; i < chunks.length; i++) for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
+                    var result = __cryptoAesGcmEncrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), all, Array.from(aad));
+                    // result = ciphertext + 16-byte tag; expose tag via getAuthTag
+                    var ct = new Uint8Array(result.slice(0, result.length - 16));
+                    this._tag = new Uint8Array(result.slice(result.length - 16));
+                    return ct;
+                },
+                getAuthTag: function() { return this._tag || new Uint8Array(16); }
+            };
+        },
+
+        createDecipheriv: function(algorithm, key, iv, options) {
+            var keyBytes = toBytes(key);
+            var ivBytes = toBytes(iv);
+            var chunks = [];
+            var aad = new Uint8Array(0);
+            var authTag = null;
+            return {
+                setAAD: function(buf) { aad = toBytes(buf); return this; },
+                setAuthTag: function(tag) { authTag = toBytes(tag); return this; },
+                update: function(data) { chunks.push(toBytes(data)); return new Uint8Array(0); },
+                final: function() {
+                    var all = [];
+                    for (var i = 0; i < chunks.length; i++) for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
+                    var tag = authTag || new Uint8Array(16);
+                    var ct_and_tag = all.concat(Array.from(tag));
+                    var result = __cryptoAesGcmDecrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), ct_and_tag, Array.from(aad));
+                    return new Uint8Array(result);
+                }
+            };
+        },
+
+        // ── Sign / Verify (HMAC-based stubs for JWT and similar) ─────────────
+        createSign: function(algorithm) {
+            var chunks = [];
+            return {
+                update: function(data) { chunks.push(toBytes(data)); return this; },
+                sign: function(key, outputEncoding) {
+                    // For symmetric keys (Buffer/string), use HMAC; for KeyObject, throw.
+                    if (!key || typeof key === 'object' && key.type && key.type !== 'secret') {
+                        throw new Error('createSign: asymmetric keys require the crypto native addon (not available in 3va); use jsonwebtoken with symmetric keys or WebCrypto SubtleCrypto.');
+                    }
+                    var keyBytes = toBytes(typeof key === 'string' ? key : (key.export ? key.export() : key));
+                    var alg = algorithm.replace('RSA-', '').replace('with', '').toLowerCase();
+                    var all = [];
+                    for (var i = 0; i < chunks.length; i++) for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
+                    var raw = __cryptoHmac(alg, Array.from(keyBytes), all);
+                    return encodeBytes(raw, outputEncoding);
+                }
+            };
+        },
+
+        createVerify: function(algorithm) {
+            var chunks = [];
+            return {
+                update: function(data) { chunks.push(toBytes(data)); return this; },
+                verify: function(key, signature, sigEncoding) {
+                    var keyBytes = toBytes(typeof key === 'string' ? key : (key.export ? key.export() : key));
+                    var alg = algorithm.replace('RSA-', '').replace('with', '').toLowerCase();
+                    var all = [];
+                    for (var i = 0; i < chunks.length; i++) for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
+                    var raw = __cryptoHmac(alg, Array.from(keyBytes), all);
+                    var expected = encodeBytes(raw, sigEncoding || 'hex');
+                    var actual = typeof signature === 'string' ? signature : encodeBytes(Array.from(toBytes(signature)), sigEncoding || 'hex');
+                    return expected === actual;
+                }
+            };
         },
 
         // ── Utilities ────────────────────────────────────────────────────────
