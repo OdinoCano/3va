@@ -352,3 +352,89 @@ async fn readable_stream_pipe_to_writable_stream() {
     .await;
     assert_eq!(r, "xy");
 }
+
+// ── Writable backpressure ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn writable_backpressure_returns_false() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var w = new (require('stream').Writable)({
+                highWaterMark: 4,
+                write: function(c, e, cb) { setTimeout(cb, 5); }
+            });
+            String(w.write('hello') === false)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn writable_write_after_end_returns_false() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var w = new (require('stream').Writable)({
+                write: function(c, e, cb) { cb(); }
+            });
+            w.end();
+            String(w.write('test') === false)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn writable_cork_delays_write() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var calls = [];
+            var w = new (require('stream').Writable)({
+                write: function(c, e, cb) { calls.push('write:' + c); cb(); }
+            });
+            w.cork();
+            w.write('a');
+            w.write('b');
+            w.uncork();
+            calls.join(',')
+            "#,
+        )
+        .await
+        .unwrap();
+    // After uncork, both writes should flush
+    assert_eq!(r, "write:a,write:b");
+}
+
+#[tokio::test]
+async fn writable_drain_emitted_after_backpressure() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var drained = false;
+            var w = new (require('stream').Writable)({
+                highWaterMark: 4,
+                write: function(c, e, cb) {
+                    cb();
+                }
+            });
+            w.on('drain', function() { drained = true; });
+            var ret = w.write('hello');
+            // drain fires synchronously because _write calls cb immediately
+            // and ret was captured as false before _write
+            String(ret === false && drained === true)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}

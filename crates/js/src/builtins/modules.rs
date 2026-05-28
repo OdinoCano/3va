@@ -327,11 +327,16 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 };
             };
 
-            // ── Writable ──────────────────────────────────────────────────────────
+            // ── Writable (with backpressure) ──────────────────────────────────────
             function Writable(opts) {
                 Stream.call(this);
                 this.writable = true;
-                this._writableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, finished: false };
+                this._writableState = {
+                    objectMode: !!(opts && opts.objectMode),
+                    highWaterMark: (opts && opts.highWaterMark) || 16384,
+                    length: 0, corked: 0, ended: false, finished: false,
+                    needDrain: false, pendingcb: 0, buffered: [],
+                };
                 if (opts && typeof opts.write === 'function') this._write = opts.write;
                 if (opts && typeof opts.final === 'function') this._final = opts.final;
             }
@@ -343,19 +348,50 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             Writable.prototype._final = function(callback) { callback(); };
             Writable.prototype.write = function(chunk, encoding, cb) {
                 if (typeof encoding === 'function') { cb = encoding; encoding = 'utf8'; }
+                var state = this._writableState;
+                if (state.ended) {
+                    var err = new Error('write after end');
+                    this.emit('error', err);
+                    if (cb) cb(err);
+                    return false;
+                }
+                var chunkLen = 1;
+                if (Buffer.isBuffer(chunk)) {
+                    chunkLen = chunk.length;
+                } else if (typeof chunk === 'string') {
+                    chunkLen = new TextEncoder().encode(chunk).length;
+                }
+                state.length += chunkLen;
+                state.pendingcb++;
                 var self = this;
-                this._write(chunk, encoding || 'utf8', function(err) {
+                function onflush(err) {
+                    state.length = Math.max(0, state.length - chunkLen);
+                    state.pendingcb--;
                     if (err) { self.emit('error', err); if (cb) cb(err); return; }
                     if (cb) cb(null);
-                });
-                return true;
+                    if (state.needDrain && state.length < state.highWaterMark) {
+                        state.needDrain = false;
+                        self.emit('drain');
+                    }
+                }
+                var ret = state.length < state.highWaterMark;
+                if (!ret) state.needDrain = true;
+                if (state.corked > 0) {
+                    state.buffered.push({ chunk: chunk, encoding: encoding, cb: cb, onflush: onflush, chunkLen: chunkLen });
+                    return true;
+                }
+                this._write(chunk, encoding || 'utf8', onflush);
+                return ret;
             };
             Writable.prototype.end = function(chunk, encoding, cb) {
                 if (typeof chunk === 'function') { cb = chunk; chunk = null; }
                 if (typeof encoding === 'function') { cb = encoding; encoding = null; }
                 var self = this;
+                var state = this._writableState;
+                state.ended = true;
                 function finish() {
-                    self._writableState.finished = true;
+                    if (state.pendingcb > 0) { setTimeout(finish, 0); return; }
+                    state.finished = true;
                     self._final(function(err) {
                         if (err) self.emit('error', err);
                         self.emit('finish');
@@ -368,14 +404,29 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             };
             Writable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
             Writable.prototype.setDefaultEncoding = function() { return this; };
-            Writable.prototype.cork = function() {};
-            Writable.prototype.uncork = function() {};
+            Writable.prototype.cork = function() { this._writableState.corked++; };
+            Writable.prototype.uncork = function() {
+                var state = this._writableState;
+                if (state.corked > 0) state.corked--;
+                if (state.corked === 0 && state.buffered.length > 0) {
+                    var buf = state.buffered.splice(0);
+                    var self = this;
+                    buf.forEach(function(item) {
+                        self._write(item.chunk, item.encoding || 'utf8', item.onflush);
+                    });
+                }
+            };
 
             // ── Transform ─────────────────────────────────────────────────────────
             function Transform(opts) {
                 Readable.call(this, opts);
                 this.writable = true;
-                this._writableState = { objectMode: !!(opts && opts.objectMode), finished: false };
+                this._writableState = {
+                    objectMode: !!(opts && opts.objectMode),
+                    highWaterMark: (opts && opts.highWaterMark) || 16384,
+                    length: 0, corked: 0, ended: false, finished: false,
+                    needDrain: false, pendingcb: 0, buffered: [],
+                };
                 if (opts && typeof opts.transform === 'function') this._transform = opts.transform;
                 if (opts && typeof opts.flush === 'function') this._flush = opts.flush;
             }
@@ -422,7 +473,12 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             function Duplex(opts) {
                 Readable.call(this, opts);
                 this.writable = true;
-                this._writableState = { finished: false };
+                this._writableState = {
+                    objectMode: !!(opts && opts.objectMode),
+                    highWaterMark: (opts && opts.highWaterMark) || 16384,
+                    length: 0, corked: 0, ended: false, finished: false,
+                    needDrain: false, pendingcb: 0, buffered: [],
+                };
                 if (opts && typeof opts.write === 'function') this._write = opts.write;
             }
             util.inherits(Duplex, Readable);
