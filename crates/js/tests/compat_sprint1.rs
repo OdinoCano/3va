@@ -845,3 +845,109 @@ async fn subtle_rsa_wrong_data_fails_verify() {
     .await;
     assert_eq!(r, "ok");
 }
+
+// ── process.stdout/stderr as Writable streams ─────────────────────────────────
+
+#[tokio::test]
+async fn process_stdout_is_writable() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var stream = require('stream');
+            String(process.stdout instanceof stream.Writable)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn process_stderr_is_writable() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var stream = require('stream');
+            String(process.stderr instanceof stream.Writable)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn process_stdout_fd_is_1() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string("String(process.stdout.fd === 1)")
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn process_stderr_fd_is_2() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string("String(process.stderr.fd === 2)")
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+// ── process.env as dynamic Proxy ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn process_env_is_proxy() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string("String(process.env.__isProxy === true)")
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn process_env_set_get_delete() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            process.env.TEST_VAR = 'hello';
+            var ok = process.env.TEST_VAR === 'hello';
+            ok = ok && ('TEST_VAR' in process.env);
+            process.env.TEST_VAR = 'world';
+            ok = ok && (process.env.TEST_VAR === 'world');
+            delete process.env.TEST_VAR;
+            ok = ok && !('TEST_VAR' in process.env);
+            String(ok)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn process_env_own_keys_works() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            process.env.A = '1';
+            process.env.B = '2';
+            var keys = Object.keys(process.env);
+            var ok = Array.isArray(keys);
+            ok = ok && keys.indexOf('A') !== -1;
+            ok = ok && keys.indexOf('B') !== -1;
+            ok = ok && keys.indexOf('PATH') === -1;
+            String(ok)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
