@@ -705,3 +705,143 @@ async fn http_server_response_status_code_default() {
         .unwrap();
     assert_eq!(r, "200");
 }
+
+// ── crypto.subtle asymmetric sign/verify (RSA + ECDSA) ────────────────────────
+
+#[tokio::test]
+async fn subtle_rsa_pkcs1_sign_verify() {
+    let e = engine().await;
+    let r = eval_async_result(
+        &e,
+        r#"
+        var crypto = require('crypto');
+        var encoder = new TextEncoder();
+        (async function() {
+            try {
+                var keyPair = await crypto.subtle.generateKey(
+                    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, hash: 'SHA-256' },
+                    true, ['sign', 'verify']
+                );
+                var data = encoder.encode('test data');
+                var sig = await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, keyPair.privateKey, data);
+                var ok = await crypto.subtle.verify({ name: 'RSASSA-PKCS1-v1_5' }, keyPair.publicKey, sig, data);
+                globalThis.__rsaPkcs1 = ok ? 'ok' : 'fail';
+            } catch(e) { globalThis.__rsaPkcs1 = 'error:' + (e.message || e); }
+        })();
+        "#,
+        "__rsaPkcs1",
+    )
+    .await;
+    assert_eq!(r, "ok");
+}
+
+#[tokio::test]
+async fn subtle_rsa_pss_sign_verify() {
+    let e = engine().await;
+    let r = eval_async_result(
+        &e,
+        r#"
+        var crypto = require('crypto');
+        var encoder = new TextEncoder();
+        (async function() {
+            try {
+                var keyPair = await crypto.subtle.generateKey(
+                    { name: 'RSA-PSS', modulusLength: 2048, hash: 'SHA-256' },
+                    true, ['sign', 'verify']
+                );
+                var data = encoder.encode('test pss');
+                var sig = await crypto.subtle.sign({ name: 'RSA-PSS', saltLength: 32 }, keyPair.privateKey, data);
+                var ok = await crypto.subtle.verify({ name: 'RSA-PSS', saltLength: 32 }, keyPair.publicKey, sig, data);
+                globalThis.__rsaPss = ok ? 'ok' : 'fail';
+            } catch(e) { globalThis.__rsaPss = 'error:' + (e.message || e); }
+        })();
+        "#,
+        "__rsaPss",
+    )
+    .await;
+    assert_eq!(r, "ok");
+}
+
+#[tokio::test]
+async fn subtle_ecdsa_p256_sign_verify() {
+    let e = engine().await;
+    let r = eval_async_result(
+        &e,
+        r#"
+        var crypto = require('crypto');
+        var encoder = new TextEncoder();
+        (async function() {
+            try {
+                var keyPair = await crypto.subtle.generateKey(
+                    { name: 'ECDSA', namedCurve: 'P-256', hash: 'SHA-256' },
+                    true, ['sign', 'verify']
+                );
+                var data = encoder.encode('test ecdsa');
+                var sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keyPair.privateKey, data);
+                if (sig.byteLength !== 64) { globalThis.__ecdsa256 = 'bad-sig-length:' + sig.byteLength; return; }
+                var ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, keyPair.publicKey, sig, data);
+                globalThis.__ecdsa256 = ok ? 'ok' : 'fail';
+            } catch(e) { globalThis.__ecdsa256 = 'error:' + (e.message || e); }
+        })();
+        "#,
+        "__ecdsa256",
+    )
+    .await;
+    assert_eq!(r, "ok");
+}
+
+#[tokio::test]
+async fn subtle_ecdsa_p384_sign_verify() {
+    let e = engine().await;
+    let r = eval_async_result(
+        &e,
+        r#"
+        var crypto = require('crypto');
+        var encoder = new TextEncoder();
+        (async function() {
+            try {
+                var keyPair = await crypto.subtle.generateKey(
+                    { name: 'ECDSA', namedCurve: 'P-384', hash: 'SHA-384' },
+                    true, ['sign', 'verify']
+                );
+                var data = encoder.encode('test ecdsa p384');
+                var sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-384' }, keyPair.privateKey, data);
+                if (sig.byteLength !== 96) { globalThis.__ecdsa384 = 'bad-sig-length:' + sig.byteLength; return; }
+                var ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-384' }, keyPair.publicKey, sig, data);
+                globalThis.__ecdsa384 = ok ? 'ok' : 'fail';
+            } catch(e) { globalThis.__ecdsa384 = 'error:' + (e.message || e); }
+        })();
+        "#,
+        "__ecdsa384",
+    )
+    .await;
+    assert_eq!(r, "ok");
+}
+
+#[tokio::test]
+async fn subtle_rsa_wrong_data_fails_verify() {
+    let e = engine().await;
+    let r = eval_async_result(
+        &e,
+        r#"
+        var crypto = require('crypto');
+        var encoder = new TextEncoder();
+        (async function() {
+            try {
+                var keyPair = await crypto.subtle.generateKey(
+                    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, hash: 'SHA-256' },
+                    true, ['sign', 'verify']
+                );
+                var good = encoder.encode('good');
+                var wrong = encoder.encode('bad');
+                var sig = await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, keyPair.privateKey, good);
+                var ok = await crypto.subtle.verify({ name: 'RSASSA-PKCS1-v1_5' }, keyPair.publicKey, sig, wrong);
+                globalThis.__rsaWrong = ok ? 'should-fail' : 'ok';
+            } catch(e) { globalThis.__rsaWrong = 'error:' + (e.message || e); }
+        })();
+        "#,
+        "__rsaWrong",
+    )
+    .await;
+    assert_eq!(r, "ok");
+}
