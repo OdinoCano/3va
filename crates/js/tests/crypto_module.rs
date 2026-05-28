@@ -140,13 +140,25 @@ async fn hash_shorthand() {
 }
 
 #[tokio::test]
-async fn hash_unsupported_algorithm_throws() {
+async fn hash_md5_now_supported() {
+    // MD5 was unsupported before; it's now enabled for fingerprinting/compat use.
+    let e = engine().await;
+    let r = e
+        .eval_to_string(r#"require('crypto').createHash('md5').update('x').digest('hex')"#)
+        .await
+        .unwrap();
+    // md5('x') = 9dd4e461268c8034f5c8564e155c67a6
+    assert_eq!(r, "9dd4e461268c8034f5c8564e155c67a6");
+}
+
+#[tokio::test]
+async fn hash_truly_unsupported_algorithm_throws() {
     let e = engine().await;
     let r = e
         .eval_to_string(
             r#"
             try {
-                require('crypto').createHash('md5').update('x').digest('hex');
+                require('crypto').createHash('blake2b').update('x').digest('hex');
                 'no-throw'
             } catch(e) { 'threw' }
             "#,

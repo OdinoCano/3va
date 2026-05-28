@@ -337,7 +337,24 @@ Starts the development server with hot module replacement (HMR) and static file 
 | `--open` | | Opens the browser automatically on start |
 | `--public-dir <D>` | `public/` | Static files directory to serve |
 
-**Behavior:**
+**Framework detection:**
+
+3va automatically detects the project framework when running `3va dev`. If any of the following frameworks is detected, 3va delegates to the framework's own dev server instead of using the built-in bundler:
+
+| Framework | Detection file | Delegates to |
+|-----------|---------------|--------------|
+| Astro | `astro.config.*` | `astro dev` |
+| Next.js | `next.config.*` | `next dev` |
+| Nuxt | `nuxt.config.*` | `nuxi dev` |
+| SvelteKit | `svelte.config.*` + `@sveltejs/kit` | `vite dev` |
+| Remix | `remix.config.*` | `remix dev` |
+| Gatsby | `gatsby-config.*` | `gatsby develop` |
+| SolidStart | `app.config.*` | `vinxi dev` |
+| Qwik | `qwik.config.*` | `qwik dev` |
+
+When a framework is detected, the flags `--port`, `--host`, and `--open` are forwarded to the framework's CLI. The `--public-dir` flag is ignored in delegation mode.
+
+**Behavior (without framework detection):**
 1. Performs an initial compilation on startup.
 2. Watches for changes in `.js`, `.ts`, `.jsx`, `.tsx` files with a 300 ms debounce.
 3. On detecting changes, rebuilds and notifies connected clients via HMR.
@@ -533,7 +550,213 @@ Verifies the binary installation, environment configuration, lock files, and oth
 
 ---
 
-## 2.8 Global Option
+## 2.8 Process Manager Commands
+
+3va includes a built-in process manager for production deployments, similar to PM2. Managed processes run as daemons with log capture, PID tracking, and graceful shutdown.
+
+Process metadata is stored in `~/.3va/processes/<name>.json`. Logs are written to `~/.3va/processes/<name>.log`.
+
+### 2.8.1 `start`
+
+Starts an entry file as a managed background process (daemon). The process runs in a new session (`setsid`) and continues running after the CLI exits.
+
+**Signature:**
+```
+3va start [--name <NAME>] <ENTRY> [-- <ARGS>...]
+```
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `ENTRY` | `path` (required) | Entry file (`.js`, `.ts`, `.jsx`, `.tsx`) to execute |
+| `--name <NAME>` / `-n` | `string` | Custom process name (default: derived from the entry filename stem) |
+| `ARGS` | `string...` | Arguments forwarded to the script. Must appear after `--`. |
+
+**Behavior:**
+1. Resolves the entry file path relative to the current directory.
+2. Spawns `3va run <ENTRY>` in a new process group via `setsid()`.
+3. Captures stdout and stderr to `~/.3va/processes/<name>.log`.
+4. Writes process metadata (PID, CWD, arguments, timestamps) to `~/.3va/processes/<name>.json`.
+5. Returns immediately — the daemon continues running independently.
+
+**Examples:**
+```bash
+# Start with auto-naming (process name: "app")
+3va start app.js
+
+# Start with a custom name
+3va start --name my-api server.js
+
+# Start with arguments forwarded to the script
+3va start --name worker worker.js -- --queue emails --concurrency 5
+
+# Start in a project subdirectory
+cd /opt/myapp && 3va start dist/bundle.js
+```
+
+---
+
+### 2.8.2 `stop`
+
+Stops a managed process gracefully (SIGTERM), then forcibly (SIGKILL) if it does not exit within 1.5 seconds.
+
+**Signature:**
+```
+3va stop <NAME>
+```
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `NAME` | `string` (required) | Name of the process to stop |
+
+**Behavior:**
+1. Loads the process metadata from `~/.3va/processes/<name>.json`.
+2. Sends `SIGTERM` to the process.
+3. Waits 1.5 seconds.
+4. If the process is still alive, sends `SIGKILL`.
+5. Updates the process status to `stopped`.
+
+**Examples:**
+```bash
+3va stop my-api
+3va stop worker
+```
+
+---
+
+### 2.8.3 `restart`
+
+Restarts a managed process by stopping it and starting it again with the same entry, arguments, and working directory.
+
+**Signature:**
+```
+3va restart <NAME>
+```
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `NAME` | `string` (required) | Name of the process to restart |
+
+**Behavior:**
+1. Loads the process metadata (entry, CWD, arguments).
+2. Stops the existing process (if running).
+3. Starts a new process with the same configuration.
+4. The new PID is different from the previous one.
+
+**Examples:**
+```bash
+3va restart my-api
+3va restart worker
+```
+
+---
+
+### 2.8.4 `status`
+
+Displays the status of one or all managed processes. Status is colour-coded in terminals
+(green = `running`, yellow = `stopped`, red = `error`). If `NAME` is omitted, all processes are listed.
+
+**Signature:**
+```
+3va status [<NAME>]
+```
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `NAME` | `string` (optional) | Process name to inspect. Lists all processes if omitted. |
+
+**Status values:**
+| Status | Meaning |
+|--------|---------|
+| `running` | Process is alive according to PID check |
+| `stopped` | Process was deliberately stopped |
+| `error` | Process exited unexpectedly |
+
+**Examples:**
+```bash
+# List all processes
+3va status
+
+# Inspect a specific process
+3va status my-api
+```
+
+**Sample output:**
+```
+  Name                 PID      Status   Restarts   Entry
+  -------------------- -------- -------- ---------- --------------------
+  my-api               574912   running  0          /opt/myapp/server.js
+  worker               574988   stopped  1          /opt/myapp/worker.js
+```
+
+---
+
+### 2.8.5 `logs`
+
+Displays the log file of a managed process.
+
+**Signature:**
+```
+3va logs <NAME> [--lines <N>]
+```
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `NAME` | `string` (required) | Process name to view logs for |
+| `--lines <N>` / `-n` | `integer` | Number of lines to show from the tail (default: 50) |
+
+**Behavior:**
+1. Loads the process metadata to locate the log file at `~/.3va/processes/<name>.log`.
+2. Reads the last N lines from the log file.
+3. Prints them to stdout.
+
+**Examples:**
+```bash
+# Show last 50 lines
+3va logs my-api
+
+# Show last 200 lines
+3va logs worker --lines 200
+
+# Follow log (via tail)
+tail -f $(3va logs my-api)
+```
+
+---
+
+### 2.8.6 `delete`
+
+Stops (if running) and permanently removes a process from 3va's management, including its log file and metadata.
+
+**Signature:**
+```
+3va delete <NAME>
+```
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `NAME` | `string` (required) | Process name to delete |
+
+**Behavior:**
+1. If the process is running, stops it (SIGTERM → SIGKILL).
+2. Removes `~/.3va/processes/<name>.json`.
+3. Removes `~/.3va/processes/<name>.log`.
+4. The process cannot be managed again until `start` is called.
+
+**Examples:**
+```bash
+3va delete my-api
+3va delete worker
+```
+
+---
+
+## 2.9 Global Option
 
 ### `--accessible`
 

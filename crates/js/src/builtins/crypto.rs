@@ -1,6 +1,7 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce};
 use hmac::{Hmac, Mac};
+use md5::Md5;
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -8,6 +9,111 @@ use rquickjs::function::Async;
 use rquickjs::{Ctx, Function, Result};
 use sha1::Sha1;
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
+
+/// Encode DER bytes as a PEM block (64-char line wrapping).
+fn to_pem(label: &str, der: &[u8]) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let b64 = STANDARD.encode(der);
+    let lines = b64
+        .as_bytes()
+        .chunks(64)
+        .map(|c| std::str::from_utf8(c).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("-----BEGIN {label}-----\n{lines}\n-----END {label}-----\n")
+}
+
+async fn do_generate_keypair(key_type: String, options_json: String) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || do_generate_keypair_sync_inner(&key_type, &options_json))
+        .await?
+}
+
+fn do_generate_keypair_sync_inner(key_type: &str, options_json: &str) -> anyhow::Result<String> {
+    let opts: serde_json::Value =
+        serde_json::from_str(options_json).unwrap_or(serde_json::Value::Null);
+
+    match key_type.to_lowercase().as_str() {
+        "rsa" | "rsa-pss" => {
+            use rsa::{
+                RsaPrivateKey,
+                pkcs8::{EncodePrivateKey, EncodePublicKey},
+            };
+            let bits = opts
+                .get("modulusLength")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2048) as usize;
+            let mut rng = OsRng;
+            let private_key = RsaPrivateKey::new(&mut rng, bits)
+                .map_err(|e| anyhow::anyhow!("RSA keygen failed: {e}"))?;
+            let public_key = private_key.to_public_key();
+            let priv_der = private_key
+                .to_pkcs8_der()
+                .map_err(|e| anyhow::anyhow!("RSA private key encode failed: {e}"))?;
+            let pub_der = public_key
+                .to_public_key_der()
+                .map_err(|e| anyhow::anyhow!("RSA public key encode failed: {e}"))?;
+            let priv_pem = to_pem("PRIVATE KEY", priv_der.as_bytes());
+            let pub_pem = to_pem("PUBLIC KEY", pub_der.as_bytes());
+            Ok(
+                serde_json::json!({ "privateKeyPem": priv_pem, "publicKeyPem": pub_pem })
+                    .to_string(),
+            )
+        }
+        "ec" => {
+            use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
+            let curve = opts
+                .get("namedCurve")
+                .and_then(|v| v.as_str())
+                .unwrap_or("P-256")
+                .to_string();
+            let mut rng = OsRng;
+            match curve.as_str() {
+                "P-256" | "prime256v1" | "secp256r1" => {
+                    let sk = p256::SecretKey::random(&mut rng);
+                    let pk = sk.public_key();
+                    let priv_der = sk
+                        .to_pkcs8_der()
+                        .map_err(|e| anyhow::anyhow!("EC P-256 private key encode failed: {e}"))?;
+                    let pub_der = pk
+                        .to_public_key_der()
+                        .map_err(|e| anyhow::anyhow!("EC P-256 public key encode failed: {e}"))?;
+                    let priv_pem = to_pem("PRIVATE KEY", priv_der.as_bytes());
+                    let pub_pem = to_pem("PUBLIC KEY", pub_der.as_bytes());
+                    Ok(
+                        serde_json::json!({ "privateKeyPem": priv_pem, "publicKeyPem": pub_pem })
+                            .to_string(),
+                    )
+                }
+                "P-384" | "secp384r1" => {
+                    use p384::pkcs8::{EncodePrivateKey, EncodePublicKey};
+                    let sk = p384::SecretKey::random(&mut rng);
+                    let pk = sk.public_key();
+                    let priv_der = sk
+                        .to_pkcs8_der()
+                        .map_err(|e| anyhow::anyhow!("EC P-384 private key encode failed: {e}"))?;
+                    let pub_der = pk
+                        .to_public_key_der()
+                        .map_err(|e| anyhow::anyhow!("EC P-384 public key encode failed: {e}"))?;
+                    let priv_pem = to_pem("PRIVATE KEY", priv_der.as_bytes());
+                    let pub_pem = to_pem("PUBLIC KEY", pub_der.as_bytes());
+                    Ok(
+                        serde_json::json!({ "privateKeyPem": priv_pem, "publicKeyPem": pub_pem })
+                            .to_string(),
+                    )
+                }
+                other => Err(anyhow::anyhow!("unsupported EC curve: {other}")),
+            }
+        }
+        "ed25519" => {
+            // Ed25519 via random bytes + PKCS#8 encoding approximation
+            // Use P-256 as fallback since ed25519 crate isn't in the workspace
+            Err(anyhow::anyhow!(
+                "ed25519 generateKeyPair: use crypto.subtle.generateKey with {{name:'Ed25519'}} instead"
+            ))
+        }
+        other => Err(anyhow::anyhow!("unsupported key type: {other}")),
+    }
+}
 
 type HmacSha1 = Hmac<Sha1>;
 type HmacSha224 = Hmac<Sha224>;
@@ -21,12 +127,116 @@ fn norm_alg(alg: &str) -> String {
 
 fn do_hash(algorithm: String, data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     match norm_alg(&algorithm).as_str() {
+        "md5" | "md-5" => Ok(Md5::digest(&data).to_vec()),
         "sha1" => Ok(Sha1::digest(&data).to_vec()),
         "sha224" => Ok(Sha224::digest(&data).to_vec()),
         "sha256" => Ok(Sha256::digest(&data).to_vec()),
         "sha384" => Ok(Sha384::digest(&data).to_vec()),
         "sha512" => Ok(Sha512::digest(&data).to_vec()),
         other => Err(anyhow::anyhow!("unsupported hash algorithm: {other}")),
+    }
+}
+
+// ── Asymmetric signing / verification ─────────────────────────────────────────
+
+fn do_rsa_sign(digest_alg: &str, pem: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::signature::{SignatureEncoding, Signer};
+
+    let priv_key = rsa::RsaPrivateKey::from_pkcs8_pem(pem)
+        .map_err(|e| anyhow::anyhow!("RSA private key parse error: {e}"))?;
+    let sig_bytes: Vec<u8> = match norm_alg(digest_alg).as_str() {
+        "sha1" => SigningKey::<Sha1>::new(priv_key).sign(data).to_vec(),
+        "sha224" => SigningKey::<Sha224>::new(priv_key).sign(data).to_vec(),
+        "sha384" => SigningKey::<Sha384>::new(priv_key).sign(data).to_vec(),
+        "sha512" => SigningKey::<Sha512>::new(priv_key).sign(data).to_vec(),
+        _ => SigningKey::<Sha256>::new(priv_key).sign(data).to_vec(),
+    };
+    Ok(sig_bytes)
+}
+
+fn do_rsa_verify(
+    digest_alg: &str,
+    pem: &str,
+    data: &[u8],
+    sig_bytes: &[u8],
+) -> anyhow::Result<bool> {
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::signature::Verifier;
+
+    let pub_key = rsa::RsaPublicKey::from_public_key_pem(pem)
+        .map_err(|e| anyhow::anyhow!("RSA public key parse error: {e}"))?;
+    let sig = Signature::try_from(sig_bytes)
+        .map_err(|_| anyhow::anyhow!("RSA signature parse error: invalid bytes"))?;
+    let ok = match norm_alg(digest_alg).as_str() {
+        "sha1" => VerifyingKey::<Sha1>::new(pub_key).verify(data, &sig),
+        "sha224" => VerifyingKey::<Sha224>::new(pub_key).verify(data, &sig),
+        "sha384" => VerifyingKey::<Sha384>::new(pub_key).verify(data, &sig),
+        "sha512" => VerifyingKey::<Sha512>::new(pub_key).verify(data, &sig),
+        _ => VerifyingKey::<Sha256>::new(pub_key).verify(data, &sig),
+    };
+    Ok(ok.is_ok())
+}
+
+fn do_ec_sign(named_curve: &str, pem: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    match norm_alg(named_curve).as_str() {
+        "p256" | "prime256v1" | "secp256r1" => {
+            use p256::ecdsa::signature::Signer;
+            use p256::ecdsa::{Signature, SigningKey};
+            use p256::pkcs8::DecodePrivateKey;
+            let key = SigningKey::from_pkcs8_pem(pem)
+                .map_err(|e| anyhow::anyhow!("P-256 private key: {e}"))?;
+            let sig: Signature = key.sign(data);
+            Ok(sig.to_der().as_ref().to_vec())
+        }
+        "p384" | "secp384r1" => {
+            use p384::ecdsa::signature::Signer;
+            use p384::ecdsa::{Signature, SigningKey};
+            use p384::pkcs8::DecodePrivateKey;
+            let key = SigningKey::from_pkcs8_pem(pem)
+                .map_err(|e| anyhow::anyhow!("P-384 private key: {e}"))?;
+            let sig: Signature = key.sign(data);
+            Ok(sig.to_der().as_ref().to_vec())
+        }
+        other => Err(anyhow::anyhow!("unsupported EC curve for signing: {other}")),
+    }
+}
+
+fn do_ec_verify(
+    named_curve: &str,
+    pem: &str,
+    data: &[u8],
+    sig_bytes: &[u8],
+) -> anyhow::Result<bool> {
+    match norm_alg(named_curve).as_str() {
+        "p256" | "prime256v1" | "secp256r1" => {
+            use p256::ecdsa::signature::Verifier;
+            use p256::ecdsa::{Signature, VerifyingKey};
+            use p256::pkcs8::DecodePublicKey;
+            let pub_key = p256::PublicKey::from_public_key_pem(pem)
+                .map_err(|e| anyhow::anyhow!("P-256 public key: {e}"))?;
+            let vk = VerifyingKey::from(&pub_key);
+            // Accept DER (variable length) or fixed P1363 (64 bytes)
+            let sig = Signature::from_der(sig_bytes)
+                .or_else(|_| Signature::try_from(sig_bytes))
+                .map_err(|e| anyhow::anyhow!("P-256 signature parse: {e}"))?;
+            Ok(vk.verify(data, &sig).is_ok())
+        }
+        "p384" | "secp384r1" => {
+            use p384::ecdsa::signature::Verifier;
+            use p384::ecdsa::{Signature, VerifyingKey};
+            use p384::pkcs8::DecodePublicKey;
+            let pub_key = p384::PublicKey::from_public_key_pem(pem)
+                .map_err(|e| anyhow::anyhow!("P-384 public key: {e}"))?;
+            let vk = VerifyingKey::from(&pub_key);
+            let sig = Signature::from_der(sig_bytes)
+                .or_else(|_| Signature::try_from(sig_bytes))
+                .map_err(|e| anyhow::anyhow!("P-384 signature parse: {e}"))?;
+            Ok(vk.verify(data, &sig).is_ok())
+        }
+        other => Err(anyhow::anyhow!("unsupported EC curve for verify: {other}")),
     }
 }
 
@@ -280,6 +490,92 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
         )?,
     )?;
 
+    // ── asymmetric sign / verify ─────────────────────────────────────────────────
+    ctx.globals().set(
+        "__cryptoRsaSign",
+        Function::new(
+            ctx.clone(),
+            |digest_alg: String, pem: String, data: Vec<u8>| {
+                do_rsa_sign(&digest_alg, &pem, &data).map_err(|e| js_err("rsaSign", e))
+            },
+        )?,
+    )?;
+
+    ctx.globals().set(
+        "__cryptoRsaVerify",
+        Function::new(
+            ctx.clone(),
+            |digest_alg: String, pem: String, data: Vec<u8>, sig: Vec<u8>| {
+                do_rsa_verify(&digest_alg, &pem, &data, &sig).map_err(|e| js_err("rsaVerify", e))
+            },
+        )?,
+    )?;
+
+    ctx.globals().set(
+        "__cryptoEcSign",
+        Function::new(
+            ctx.clone(),
+            |named_curve: String, pem: String, data: Vec<u8>| {
+                do_ec_sign(&named_curve, &pem, &data).map_err(|e| js_err("ecSign", e))
+            },
+        )?,
+    )?;
+
+    ctx.globals().set(
+        "__cryptoEcVerify",
+        Function::new(
+            ctx.clone(),
+            |named_curve: String, pem: String, data: Vec<u8>, sig: Vec<u8>| {
+                do_ec_verify(&named_curve, &pem, &data, &sig).map_err(|e| js_err("ecVerify", e))
+            },
+        )?,
+    )?;
+
+    // ── scrypt sync ──────────────────────────────────────────────────────────────
+    ctx.globals().set(
+        "__cryptoScryptSync",
+        Function::new(
+            ctx.clone(),
+            |password: Vec<u8>, salt: Vec<u8>, n: u64, r: u32, p: u32, keylen: usize| {
+                if n == 0 || (n & (n - 1)) != 0 {
+                    return Err(js_err(
+                        "scryptSync",
+                        anyhow::anyhow!("N must be a power of 2 greater than 1"),
+                    ));
+                }
+                let log_n = n.ilog2() as u8;
+                let params = scrypt::Params::new(log_n, r, p, keylen).map_err(|e| {
+                    js_err("scryptSync", anyhow::anyhow!("invalid scrypt params: {e}"))
+                })?;
+                let mut out = vec![0u8; keylen];
+                scrypt::scrypt(&password, &salt, &params, &mut out)
+                    .map_err(|e| js_err("scryptSync", anyhow::anyhow!("scrypt error: {e}")))?;
+                Ok(out)
+            },
+        )?,
+    )?;
+
+    // ── key pair generation (async + sync) ────────────────────────────────────
+    ctx.globals().set(
+        "__cryptoGenerateKeyPair",
+        Function::new(
+            ctx.clone(),
+            Async(move |key_type: String, options_json: String| async move {
+                do_generate_keypair(key_type, options_json)
+                    .await
+                    .map_err(|e| js_err("generateKeyPair", e))
+            }),
+        )?,
+    )?;
+
+    ctx.globals().set(
+        "__cryptoGenerateKeyPairSync",
+        Function::new(ctx.clone(), |key_type: String, options_json: String| {
+            do_generate_keypair_sync_inner(&key_type, &options_json)
+                .map_err(|e| js_err("generateKeyPairSync", e))
+        })?,
+    )?;
+
     // Sync variants — block the calling thread (acceptable for short KDF calls)
     ctx.globals().set(
         "__cryptoPbkdf2Sync",
@@ -517,11 +813,7 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
             var N = options.N || options.cost || 16384;
             var r = options.r || options.blockSize || 8;
             var p = options.p || options.parallelization || 1;
-            // For scryptSync we fall back to pbkdf2Sync as a safe approximation.
-            // True scrypt sync would block for too long for typical keylen; this
-            // satisfies libraries that just need a deterministic KDF.
-            var raw = __cryptoPbkdf2Sync(toBytes(password), toBytes(salt), N, keylen, 'sha256');
-            return new Uint8Array(raw);
+            return new Uint8Array(__cryptoScryptSync(toBytes(password), toBytes(salt), N, r, p, keylen));
         },
 
         // ── Cipher (AES-GCM backed, Node-compatible API shape) ────────────────
@@ -571,22 +863,108 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
             };
         },
 
-        // ── Sign / Verify (HMAC-based stubs for JWT and similar) ─────────────
+        // ── Key objects ──────────────────────────────────────────────────────
+        // createPrivateKey / createPublicKey / createSecretKey return KeyObject-like
+        // objects. These wrap a PEM/Buffer/string and expose .type, .asymmetricKeyType,
+        // and .export(). The asymmetricKeyType is inferred from the PEM header:
+        //   RSA: "rsa"   EC P-256/P-384: "ec"   symmetric: "secret"
+
+        createPrivateKey: function(key) {
+            var pem = typeof key === 'string' ? key : (key && key.key ? key.key : (key && typeof key.toString === 'function' ? key.toString() : String(key)));
+            var kt = pem.indexOf('EC PRIVATE') !== -1 ? 'ec' : 'rsa';
+            // Detect EC curve from PEM OID heuristics
+            var curve = pem.indexOf('P-384') !== -1 || pem.indexOf('secp384r1') !== -1 ? 'P-384' : 'P-256';
+            return {
+                type: 'private', asymmetricKeyType: kt, _pem: pem, _curve: curve,
+                export: function(opts) {
+                    if (!opts || opts.format === 'pem') return pem;
+                    // DER export: strip PEM armor and decode base64
+                    var b64 = pem.replace(/-----[^-]+-----/g,'').replace(/\s/g,'');
+                    var bin = atob(b64), bytes = new Uint8Array(bin.length);
+                    for (var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+                    return bytes;
+                },
+                toString: function() { return pem; }
+            };
+        },
+
+        createPublicKey: function(key) {
+            var pem;
+            if (typeof key === 'string') {
+                pem = key;
+            } else if (key && key.type === 'private') {
+                // extracting public from private is complex without native; return stub
+                pem = key._pem;
+            } else {
+                pem = key && typeof key.toString === 'function' ? key.toString() : String(key);
+            }
+            var kt = pem.indexOf('EC') !== -1 || pem.indexOf('BEGIN PUBLIC KEY') !== -1 ? 'rsa' : 'rsa';
+            var curve = pem.indexOf('P-384') !== -1 || pem.indexOf('secp384r1') !== -1 ? 'P-384' : 'P-256';
+            return {
+                type: 'public', asymmetricKeyType: kt, _pem: pem, _curve: curve,
+                export: function(opts) {
+                    if (!opts || opts.format === 'pem') return pem;
+                    var b64 = pem.replace(/-----[^-]+-----/g,'').replace(/\s/g,'');
+                    var bin = atob(b64), bytes = new Uint8Array(bin.length);
+                    for (var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+                    return bytes;
+                },
+                toString: function() { return pem; }
+            };
+        },
+
+        createSecretKey: function(key, encoding) {
+            var bytes = key instanceof Uint8Array ? key : toBytes(key);
+            return {
+                type: 'secret', symmetricKeySize: bytes.length, _raw: bytes,
+                export: function() { return new Uint8Array(bytes); }
+            };
+        },
+
+        // ── Sign / Verify — RSA PKCS1v15 + ECDSA ────────────────────────────
+        // Algorithm name mapping (Node.js style → digest + key-type):
+        //   'RSA-SHA256'  → rsa + sha256
+        //   'SHA256'      → determined by key type at sign() time
+        //   'SHA384'      → determined by key type
+        //   'id-ecPublicKey' → ec
+
         createSign: function(algorithm) {
             var chunks = [];
             return {
-                update: function(data) { chunks.push(toBytes(data)); return this; },
+                update: function(data, enc) { chunks.push(toBytes(data)); return this; },
                 sign: function(key, outputEncoding) {
-                    // For symmetric keys (Buffer/string), use HMAC; for KeyObject, throw.
-                    if (!key || typeof key === 'object' && key.type && key.type !== 'secret') {
-                        throw new Error('createSign: asymmetric keys require the crypto native addon (not available in 3va); use jsonwebtoken with symmetric keys or WebCrypto SubtleCrypto.');
-                    }
-                    var keyBytes = toBytes(typeof key === 'string' ? key : (key.export ? key.export() : key));
-                    var alg = algorithm.replace('RSA-', '').replace('with', '').toLowerCase();
                     var all = [];
-                    for (var i = 0; i < chunks.length; i++) for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
-                    var raw = __cryptoHmac(alg, Array.from(keyBytes), all);
-                    return encodeBytes(raw, outputEncoding);
+                    for (var i=0;i<chunks.length;i++) for (var j=0;j<chunks[i].length;j++) all.push(chunks[i][j]);
+                    var data = new Uint8Array(all);
+
+                    // Resolve key to {pem, keyType, curve}
+                    var pem, keyType, curve;
+                    if (key && key._pem) {
+                        pem = key._pem; keyType = key.asymmetricKeyType; curve = key._curve;
+                    } else if (key && typeof key.export === 'function') {
+                        pem = key.export();
+                        keyType = key.asymmetricKeyType || 'rsa';
+                        curve = key._curve || (pem.indexOf('P-384') !== -1 ? 'P-384' : 'P-256');
+                    } else if (typeof key === 'string' && key.indexOf('-----') !== -1) {
+                        pem = key;
+                        keyType = (key.indexOf('EC PRIVATE') !== -1) ? 'ec' : 'rsa';
+                        curve = key.indexOf('P-384') !== -1 ? 'P-384' : 'P-256';
+                    } else if (key && key.type === 'secret') {
+                        var alg = algorithm.replace('RSA-','').replace('with','').toLowerCase();
+                        var raw = __cryptoHmac(alg || 'sha256', Array.from(key._raw), Array.from(data));
+                        return encodeBytes(raw, outputEncoding);
+                    } else {
+                        throw new TypeError('createSign.sign: unsupported key type');
+                    }
+
+                    var digestAlg = algorithm.replace(/^RSA-/i,'').replace(/withRSA$/i,'').toLowerCase() || 'sha256';
+                    var raw;
+                    if (keyType === 'ec') {
+                        raw = __cryptoEcSign(curve, pem, Array.from(data));
+                    } else {
+                        raw = __cryptoRsaSign(digestAlg, pem, Array.from(data));
+                    }
+                    return encodeBytes(Array.from(raw), outputEncoding);
                 }
             };
         },
@@ -594,18 +972,105 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
         createVerify: function(algorithm) {
             var chunks = [];
             return {
-                update: function(data) { chunks.push(toBytes(data)); return this; },
+                update: function(data, enc) { chunks.push(toBytes(data)); return this; },
                 verify: function(key, signature, sigEncoding) {
-                    var keyBytes = toBytes(typeof key === 'string' ? key : (key.export ? key.export() : key));
-                    var alg = algorithm.replace('RSA-', '').replace('with', '').toLowerCase();
                     var all = [];
-                    for (var i = 0; i < chunks.length; i++) for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
-                    var raw = __cryptoHmac(alg, Array.from(keyBytes), all);
-                    var expected = encodeBytes(raw, sigEncoding || 'hex');
-                    var actual = typeof signature === 'string' ? signature : encodeBytes(Array.from(toBytes(signature)), sigEncoding || 'hex');
-                    return expected === actual;
+                    for (var i=0;i<chunks.length;i++) for (var j=0;j<chunks[i].length;j++) all.push(chunks[i][j]);
+                    var data = new Uint8Array(all);
+                    var sigBytes;
+                    if (typeof signature === 'string') {
+                        sigBytes = toBytes(Buffer && Buffer.from ? Buffer.from(signature, sigEncoding || 'hex') : signature);
+                    } else {
+                        sigBytes = toBytes(signature);
+                    }
+
+                    var pem, keyType, curve;
+                    if (key && key._pem) {
+                        pem = key._pem; keyType = key.asymmetricKeyType; curve = key._curve;
+                    } else if (key && typeof key.export === 'function') {
+                        pem = key.export();
+                        keyType = key.asymmetricKeyType || 'rsa';
+                        curve = key._curve || (pem.indexOf('P-384') !== -1 ? 'P-384' : 'P-256');
+                    } else if (typeof key === 'string' && key.indexOf('-----') !== -1) {
+                        pem = key;
+                        keyType = 'rsa';
+                        curve = 'P-256';
+                    } else if (key && key.type === 'secret') {
+                        var alg = algorithm.replace('RSA-','').replace('with','').toLowerCase();
+                        var expected = __cryptoHmac(alg || 'sha256', Array.from(key._raw), Array.from(data));
+                        var actual = Array.from(sigBytes);
+                        if (expected.length !== actual.length) return false;
+                        for (var i=0;i<expected.length;i++) if (expected[i]!==actual[i]) return false;
+                        return true;
+                    } else {
+                        throw new TypeError('createVerify.verify: unsupported key type');
+                    }
+
+                    var digestAlg = algorithm.replace(/^RSA-/i,'').replace(/withRSA$/i,'').toLowerCase() || 'sha256';
+                    if (keyType === 'ec') {
+                        return __cryptoEcVerify(curve, pem, Array.from(data), Array.from(sigBytes));
+                    } else {
+                        return __cryptoRsaVerify(digestAlg, pem, Array.from(data), Array.from(sigBytes));
+                    }
                 }
             };
+        },
+
+        // One-shot sign/verify (Node.js 15+)
+        sign: function(algorithm, data, key, callback) {
+            var signer = this.createSign(algorithm || 'sha256');
+            signer.update(data);
+            var sig = signer.sign(key);
+            if (typeof callback === 'function') { Promise.resolve().then(function() { callback(null, sig); }); return; }
+            return sig;
+        },
+
+        verify: function(algorithm, data, key, signature) {
+            var verifier = this.createVerify(algorithm || 'sha256');
+            verifier.update(data);
+            return verifier.verify(key, signature);
+        },
+
+        // Enumerate supported algorithms
+        getCiphers: function() { return ['aes-128-gcm','aes-256-gcm']; },
+        getHashes: function() { return ['md5','sha1','sha224','sha256','sha384','sha512']; },
+        getCurves: function() { return ['P-256','P-384','prime256v1','secp384r1']; },
+
+        // ── Key pair generation ───────────────────────────────────────────────
+        // Supports 'rsa', 'rsa-pss', 'ec'. Returns KeyObject-like objects with
+        // .export() that returns PEM. Options mirror Node.js crypto.generateKeyPair.
+
+        generateKeyPair: function(type, options, callback) {
+            if (typeof options === 'function') { callback = options; options = {}; }
+            options = options || {};
+            var curve = options.namedCurve || 'P-256';
+            __cryptoGenerateKeyPair(type, JSON.stringify(options)).then(function(raw) {
+                var r = JSON.parse(raw);
+                var makeKey = function(pem, keyType) {
+                    return {
+                        type: keyType, asymmetricKeyType: type,
+                        _pem: pem, _curve: curve,
+                        export: function(opts) { return pem; },
+                        toString: function() { return pem; }
+                    };
+                };
+                callback(null, makeKey(r.publicKeyPem, 'public'), makeKey(r.privateKeyPem, 'private'));
+            }).catch(function(err) { callback(err); });
+        },
+
+        generateKeyPairSync: function(type, options) {
+            options = options || {};
+            var curve = options.namedCurve || 'P-256';
+            var raw = JSON.parse(__cryptoGenerateKeyPairSync(type, JSON.stringify(options)));
+            var makeKey = function(pem, keyType) {
+                return {
+                    type: keyType, asymmetricKeyType: type,
+                    _pem: pem, _curve: curve,
+                    export: function() { return pem; },
+                    toString: function() { return pem; }
+                };
+            };
+            return { publicKey: makeKey(raw.publicKeyPem, 'public'), privateKey: makeKey(raw.privateKeyPem, 'private') };
         },
 
         // ── Utilities ────────────────────────────────────────────────────────
@@ -861,6 +1326,7 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
     })();
 
     crypto.subtle = subtle;
+    crypto.webcrypto = { subtle: subtle };
     globalThis.crypto = { subtle: subtle, getRandomValues: crypto.getRandomValues, randomUUID: crypto.randomUUID };
 
     if (globalThis.__requireCache) {

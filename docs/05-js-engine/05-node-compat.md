@@ -293,4 +293,265 @@ process.hasUncaughtExceptionCaptureCallback()  // → boolean
 
 ---
 
-*Última actualización: 2026-05-27. Compatible con Node.js 20 LTS como referencia.*
+## `Buffer` — subclase real de `Uint8Array`
+
+```javascript
+const buf = Buffer.from([0x41, 0x42, 0x43]);
+
+buf instanceof Uint8Array   // → true  (antes: false)
+buf instanceof Buffer       // → true
+buf[0]                      // → 65 (byte directo, sin ._b)
+[...buf]                    // → [65, 66, 67]  (spread nativo)
+
+// Compatible con APIs de TypedArray
+const u = new Uint8Array(4);
+u.set(buf, 0);              // funciona sin conversión
+
+// DataView sobre el mismo buffer
+const view = new DataView(buf.buffer, buf.byteOffset);
+view.getUInt8(0);           // → 65
+
+// Todas las operaciones de Buffer siguen funcionando
+buf.readUInt32BE(0);
+buf.readFloatLE(0);
+buf.readBigUInt64LE(0);
+buf.subarray(1, 3);         // → Buffer (no Uint8Array genérico)
+```
+
+Impacto: `ws`, `msgpackr`, `protobufjs`, `bl`, y cualquier librería que comprueba
+`instanceof Uint8Array` o accede a bytes por índice ya funcionan sin conversiones.
+
+---
+
+## `crypto` — Firma y verificación asimétrica
+
+```javascript
+const crypto = require('crypto');
+
+// ── Generar y usar claves RSA ────────────────────────────────────────────────
+const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+});
+
+const data = Buffer.from('payload a firmar');
+const sig = crypto.createSign('RSA-SHA256').update(data).sign(privateKey);
+const ok  = crypto.createVerify('RSA-SHA256').update(data).verify(publicKey, sig);
+// ok → true
+
+// ── Algoritmos RSA soportados ────────────────────────────────────────────────
+// RSA-SHA1, RSA-SHA224, RSA-SHA256, RSA-SHA384, RSA-SHA512
+// También: SHA256, SHA384, SHA512 (la clave determina el padding)
+
+// ── ECDSA (P-256 / P-384) ────────────────────────────────────────────────────
+const ecPair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+const ecSig  = crypto.createSign('SHA256').update(data).sign(ecPair.privateKey);
+const ecOk   = crypto.createVerify('SHA256').update(data).verify(ecPair.publicKey, ecSig);
+// ecOk → true
+
+// ── Importar claves PEM existentes (createPrivateKey / createPublicKey) ──────
+const priv = crypto.createPrivateKey('-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----');
+const pub  = crypto.createPublicKey('-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----');
+const sec  = crypto.createSecretKey(crypto.randomBytes(32));  // clave simétrica
+
+priv.type              // → 'private'
+priv.asymmetricKeyType // → 'rsa' o 'ec'
+priv.export()          // → PEM string
+
+// ── API one-shot (Node.js 15+) ────────────────────────────────────────────────
+const sig2 = crypto.sign('SHA256', data, privateKey);
+const ok2  = crypto.verify('SHA256', data, publicKey, sig2);
+
+// ── MD5 (para fingerprinting, no seguridad) ───────────────────────────────────
+crypto.createHash('md5').update('hello').digest('hex');
+// → '5d41402abc4b2a76b9719d911017c592'
+
+// ── Enumerar algoritmos soportados ────────────────────────────────────────────
+crypto.getHashes();  // → ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512']
+crypto.getCurves();  // → ['P-256', 'P-384', 'prime256v1', 'secp384r1']
+```
+
+**Formato de firmas:** DER por defecto (compatible con `jsonwebtoken`, `passport-jwt`, `jose`).
+La verificación acepta tanto DER como P1363 (raw r‖s de 64/96 bytes).
+
+---
+
+## `assert` — deepStrictEqual completo
+
+```javascript
+const assert = require('assert');
+
+// Objetos, arrays, anidados
+assert.deepStrictEqual({ a: 1, b: { c: 2 } }, { a: 1, b: { c: 2 } });
+assert.deepStrictEqual([1, [2, 3]], [1, [2, 3]]);
+
+// TypedArrays — el impl anterior (JSON.stringify) fallaba aquí
+assert.deepStrictEqual(new Uint8Array([1,2,3]), new Uint8Array([1,2,3]));
+
+// Valores undefined — JSON.stringify los elimina, deepStrictEqual no
+assert.deepStrictEqual({ x: undefined }, { x: undefined });
+
+// Date, RegExp
+assert.deepStrictEqual(new Date('2024-01-01'), new Date('2024-01-01'));
+
+// Referencias circulares — ya no lanza
+const obj = {}; obj.self = obj;
+assert.deepStrictEqual(obj, obj);  // ok (mismo objeto → true)
+
+// API extendida
+assert.notDeepStrictEqual({ a: 1 }, { a: 2 });
+assert.ifError(null);            // no lanza
+assert.ifError(new Error('!'));  // lanza
+assert.fail('mensaje');          // siempre lanza
+```
+
+---
+
+## `crypto` — Pares de claves asimétricas (nuevo)
+
+```javascript
+const crypto = require('crypto');
+
+// RSA — síncrono
+const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,  // 1024, 2048, 4096
+});
+console.log(publicKey.export());   // → "-----BEGIN PUBLIC KEY-----\n..."
+console.log(privateKey.export());  // → "-----BEGIN PRIVATE KEY-----\n..."
+
+// RSA — asíncrono
+crypto.generateKeyPair('rsa', { modulusLength: 2048 }, (err, pub, priv) => {
+  if (err) throw err;
+  console.log(pub.export());
+});
+
+// EC — curvas soportadas: P-256 (prime256v1), P-384 (secp384r1)
+const { publicKey: ecPub, privateKey: ecPriv } =
+  crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+
+// webcrypto — accesible tanto por crypto.subtle como crypto.webcrypto.subtle
+const subtle = crypto.webcrypto.subtle;  // equivalente a crypto.subtle
+
+// scryptSync — implementación real (ya no es un alias de PBKDF2)
+const key = crypto.scryptSync('password', 'salt', 32, { N: 16384, r: 8, p: 1 });
+// key es Uint8Array de 32 bytes
+```
+
+**Formatos de clave devueltos:** PEM PKCS#8 para privadas, PEM SPKI para públicas.
+Compatibles directamente con `jsonwebtoken`, `passport-jwt`, `node-jose`.
+
+---
+
+## `Buffer.isBuffer` — acepta `Uint8Array` nativo
+
+```javascript
+Buffer.isBuffer(new Uint8Array(4))   // → true  (antes: false)
+Buffer.isBuffer(Buffer.from('hi'))   // → true
+Buffer.isBuffer('hello')             // → false
+```
+
+Esto permite que librerías como `msgpackr`, `bl`, y otros stream helpers funcionen
+sin necesidad de envolver todos los bytes en `Buffer`.
+
+---
+
+## `util.inspect` — referencias circulares y custom symbol
+
+```javascript
+const util = require('util');
+
+// Referencia circular → [Circular *]
+const obj = {}; obj.self = obj;
+util.inspect(obj); // → "{\n  self: [Circular *]\n}"
+
+// Symbol.for('nodejs.util.inspect.custom')
+class MyClass {
+  [Symbol.for('nodejs.util.inspect.custom')]() { return 'MyClass { x: 1 }'; }
+}
+util.inspect(new MyClass()); // → "MyClass { x: 1 }"
+
+// Control de profundidad
+util.inspect({ a: { b: { c: 1 } } }, { depth: 1 }); // anida hasta nivel 1
+```
+
+---
+
+## `util.parseArgs` (Node.js 18+)
+
+```javascript
+const { parseArgs } = require('util');
+
+const { values, positionals } = parseArgs({
+  args: process.argv.slice(2),
+  options: {
+    port:    { type: 'string', default: '3000' },
+    verbose: { type: 'boolean', default: false },
+    host:    { type: 'string' },
+  },
+  allowPositionals: true,
+});
+
+// $ node app.js --port=8080 --verbose file.txt
+// values   → { port: '8080', verbose: true, host: undefined }
+// positionals → ['file.txt']
+```
+
+Soporta: `--flag`, `--key value`, `--key=value`, `--`, defaults, valores múltiples (`multiple: true`), y el campo `tokens`.
+
+---
+
+## `reflect-metadata` — decoradores TypeScript
+
+```javascript
+require('reflect-metadata');  // inicializa el polyfill
+
+// Definir metadata en una clase (patrón NestJS)
+@Injectable()
+class MyService {}
+
+function Injectable() {
+  return (target) => Reflect.defineMetadata('injectable', true, target);
+}
+
+Reflect.getMetadata('injectable', MyService);    // → true
+Reflect.hasOwnMetadata('injectable', MyService); // → true
+Reflect.getOwnMetadataKeys(MyService);           // → ['injectable']
+
+// Patrón de decoradores de propiedad (TypeORM, tsyringe)
+Reflect.defineMetadata('design:type', String, MyClass.prototype, 'name');
+Reflect.getMetadata('design:type', MyClass.prototype, 'name'); // → String
+```
+
+También accesible como `globalThis.Reflect` (los decoradores TS lo usan directamente).
+
+---
+
+## `child_process.execSync` / `spawnSync`
+
+```javascript
+const { execSync, spawnSync } = require('child_process');
+
+// execSync — bloquea hasta que el comando termina
+const output = execSync('echo hello', { encoding: 'utf8' });
+// → 'hello\n'
+
+// Lanza si exit code ≠ 0
+try {
+  execSync('exit 1');
+} catch (err) {
+  err.status;  // → 1
+  err.stderr;  // → ''
+}
+
+// spawnSync — control granular de args
+const result = spawnSync('ls', ['-la', '/tmp'], { encoding: 'utf8' });
+result.status;   // → 0
+result.stdout;   // → '...'
+result.stderr;   // → ''
+```
+
+> **Requiere** `--allow-child-process`. Sin este flag, ambas funciones lanzan un error de permisos.
+> El hilo se bloquea durante la ejecución (comportamiento idéntico a Node.js).
+
+---
+
+*Última actualización: 2026-05-28 (Sprint 1). Compatible con Node.js 20 LTS como referencia.*

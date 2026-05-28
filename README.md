@@ -226,6 +226,8 @@ REPL commands available inside the sandbox:
 
 Start a development server with hot module replacement (HMR) via Server-Sent Events.
 
+**Framework detection:** 3va automatically detects the project framework (Astro, Next.js, Nuxt, SvelteKit, Remix, Gatsby, SolidStart, Qwik) and delegates to its native dev server.
+
 ```bash
 3va dev
 3va dev --port 3000 --host 0.0.0.0
@@ -245,6 +247,78 @@ Start a development server with hot module replacement (HMR) via Server-Sent Eve
 - An HMR client script is automatically injected before `</body>` in HTML responses.
 - Unknown routes fall back to `public/index.html` (SPA mode).
 - Static files are served with correct MIME types.
+
+---
+
+### `3va start`
+
+Start an entry file as a managed background daemon (production process manager).
+
+```bash
+3va start app.js
+3va start --name my-api server.js -- --port 3000
+```
+
+| Flag | Description |
+|------|-------------|
+| `-n, --name <NAME>` | Custom process name (default: derived from entry filename) |
+| `-- <ARGS>` | Arguments forwarded to the script |
+
+---
+
+### `3va stop`
+
+Stop a managed process (SIGTERM → SIGKILL after 1.5 s).
+
+```bash
+3va stop my-api
+```
+
+---
+
+### `3va restart`
+
+Restart a managed process with the same configuration.
+
+```bash
+3va restart my-api
+```
+
+---
+
+### `3va status`
+
+Show status of one or all managed processes.
+
+```bash
+3va status
+3va status my-api
+```
+
+---
+
+### `3va logs`
+
+Show logs for a managed process.
+
+```bash
+3va logs my-api
+3va logs worker --lines 200
+```
+
+| Flag | Description |
+|------|-------------|
+| `-n, --lines <N>` | Number of tail lines (default: 50) |
+
+---
+
+### `3va delete`
+
+Stop (if running) and permanently remove a managed process including its logs.
+
+```bash
+3va delete my-api
+```
 
 ---
 

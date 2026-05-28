@@ -106,7 +106,42 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                         return m;
                     });
                 },
-                inspect: function(obj) { try { return JSON.stringify(obj, null, 2); } catch(e) { return String(obj); } },
+                inspect: function(obj, opts) {
+                    var customSym = typeof Symbol !== 'undefined' && Symbol.for ? Symbol.for('nodejs.util.inspect.custom') : null;
+                    var depth = (opts && typeof opts.depth === 'number') ? opts.depth : 2;
+                    function _ins(val, d, seen) {
+                        if (val === null) return 'null';
+                        if (val === undefined) return 'undefined';
+                        if (typeof val === 'string') return "'" + val.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\t/g,'\\t') + "'";
+                        if (typeof val === 'number' || typeof val === 'boolean' || typeof val === 'bigint') return String(val);
+                        if (typeof val === 'function') return '[Function: ' + (val.name || 'anonymous') + ']';
+                        if (typeof val === 'symbol') return val.toString();
+                        if (val instanceof RegExp) return val.toString();
+                        if (val instanceof Date) return val.toISOString();
+                        if (val instanceof Error) return '[' + (val.constructor && val.constructor.name || 'Error') + ': ' + val.message + ']';
+                        if (customSym && typeof val[customSym] === 'function') {
+                            try { return String(val[customSym](d, opts || {})); } catch(e) {}
+                        }
+                        if (seen.indexOf(val) !== -1) return '[Circular *]';
+                        var seen2 = seen.concat([val]);
+                        if (Array.isArray(val)) {
+                            if (d > depth) return '[Array]';
+                            return '[ ' + val.map(function(v) { return _ins(v, d+1, seen2); }).join(', ') + ' ]';
+                        }
+                        if (typeof val === 'object') {
+                            if (d > depth) return '[Object]';
+                            var keys = Object.keys(val);
+                            if (keys.length === 0) return '{}';
+                            var indent = '  '.repeat ? '  '.repeat(d+1) : Array(d+2).join('  ');
+                            var close = '  '.repeat ? '  '.repeat(d) : Array(d+1).join('  ');
+                            return '{\n' + keys.map(function(k) {
+                                return indent + k + ': ' + _ins(val[k], d+1, seen2);
+                            }).join(',\n') + '\n' + close + '}';
+                        }
+                        return String(val);
+                    }
+                    return _ins(obj, 0, []);
+                },
                 promisify: function(fn) {
                     return function() {
                         var args = Array.prototype.slice.call(arguments);
@@ -126,6 +161,55 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 isUndefined: function(obj) { return obj === undefined; },
                 isObject: function(obj) { return typeof obj === 'object' && obj !== null; },
                 deprecate: function(fn) { return fn; },
+                parseArgs: function(config) {
+                    config = config || {};
+                    var argv = config.args || (typeof process !== 'undefined' && Array.isArray(process.argv) ? process.argv.slice(2) : []);
+                    var options = config.options || {};
+                    var strict = config.strict !== false;
+                    var allowPositionals = config.allowPositionals !== false;
+                    var values = {};
+                    var positionals = [];
+                    var tokens = [];
+                    Object.keys(options).forEach(function(key) { if (options[key].default !== undefined) values[key] = options[key].default; });
+                    var i = 0;
+                    while (i < argv.length) {
+                        var arg = argv[i];
+                        if (arg === '--') {
+                            for (var j = i + 1; j < argv.length; j++) { positionals.push(argv[j]); tokens.push({ kind: 'positional', value: argv[j] }); }
+                            break;
+                        }
+                        if (arg.slice(0, 2) === '--') {
+                            var eqIdx = arg.indexOf('=');
+                            var name = eqIdx !== -1 ? arg.slice(2, eqIdx) : arg.slice(2);
+                            var opt = options[name];
+                            if (!opt && strict) throw new TypeError('Unknown option \'' + arg + '\'');
+                            var type = opt ? (opt.type || 'string') : 'string';
+                            var val;
+                            if (eqIdx !== -1) {
+                                val = arg.slice(eqIdx + 1);
+                            } else if (type === 'boolean') {
+                                val = true;
+                            } else {
+                                val = (i + 1 < argv.length && argv[i + 1].slice(0, 1) !== '-') ? argv[++i] : '';
+                            }
+                            if (type === 'boolean') val = (val === true || val === 'true' || val === '1');
+                            if (opt && opt.multiple) { if (!Array.isArray(values[name])) values[name] = []; values[name].push(val); }
+                            else values[name] = val;
+                            tokens.push({ kind: 'option', name: name, rawName: '--' + name, value: typeof val === 'boolean' ? undefined : val, inlineValue: eqIdx !== -1 });
+                        } else if (arg.slice(0, 1) === '-' && arg.length > 1) {
+                            var sname = arg.slice(1);
+                            tokens.push({ kind: 'option', name: sname, rawName: '-' + sname, value: undefined, inlineValue: false });
+                        } else {
+                            if (!allowPositionals && strict) throw new TypeError('Unexpected positional argument \'' + arg + '\'');
+                            positionals.push(arg);
+                            tokens.push({ kind: 'positional', value: arg });
+                        }
+                        i++;
+                    }
+                    var result = { values: values, positionals: positionals };
+                    if (config.tokens) result.tokens = tokens;
+                    return result;
+                },
                 types: { isRegExp: function(v) { return v instanceof RegExp; }, isDate: function(v) { return v instanceof Date; } },
                 TextEncoder: globalThis.TextEncoder,
                 TextDecoder: globalThis.TextDecoder
@@ -570,13 +654,83 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             // ── assert ────────────────────────────────────────────────────────────
             function assert(val, msg) { if (!val) throw new Error(msg || 'Assertion failed'); }
+            // Structural deep equality — handles circular refs, TypedArrays, Maps, Sets, Dates
+            function _deepEq(a, b, strict, seen) {
+                if (strict ? a === b : a == b) return true;
+                if (a === null || b === null || a === undefined || b === undefined) return a === b;
+                if (typeof a !== typeof b) return false;
+                if (typeof a !== 'object' && typeof a !== 'function') return strict ? a === b : a == b;
+                // Circular reference guard
+                for (var i = 0; i < seen.length; i++) { if (seen[i][0] === a && seen[i][1] === b) return true; }
+                var seen2 = seen.concat([[a, b]]);
+                // Date
+                if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+                // RegExp
+                if (a instanceof RegExp && b instanceof RegExp) return a.toString() === b.toString();
+                // TypedArray / Buffer
+                if (a instanceof Uint8Array && b instanceof Uint8Array) {
+                    if (a.length !== b.length) return false;
+                    for (var i=0;i<a.length;i++) if (a[i]!==b[i]) return false;
+                    return true;
+                }
+                // Map
+                if (typeof Map !== 'undefined' && a instanceof Map && b instanceof Map) {
+                    if (a.size !== b.size) return false;
+                    var ok = true;
+                    a.forEach(function(v,k) { if (!b.has(k) || !_deepEq(v, b.get(k), strict, seen2)) ok = false; });
+                    return ok;
+                }
+                // Set
+                if (typeof Set !== 'undefined' && a instanceof Set && b instanceof Set) {
+                    if (a.size !== b.size) return false;
+                    var ok = true;
+                    a.forEach(function(v) {
+                        var found = false;
+                        b.forEach(function(w) { if (!found && _deepEq(v, w, strict, seen2)) found = true; });
+                        if (!found) ok = false;
+                    });
+                    return ok;
+                }
+                // Array
+                if (Array.isArray(a) !== Array.isArray(b)) return false;
+                if (Array.isArray(a)) {
+                    if (a.length !== b.length) return false;
+                    for (var i=0;i<a.length;i++) if (!_deepEq(a[i],b[i],strict,seen2)) return false;
+                    return true;
+                }
+                // Plain object
+                var ka = Object.keys(a), kb = Object.keys(b);
+                if (ka.length !== kb.length) return false;
+                for (var i=0;i<ka.length;i++) {
+                    var k = ka[i];
+                    if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+                    if (!_deepEq(a[k], b[k], strict, seen2)) return false;
+                }
+                return true;
+            }
+
             assert.ok = assert;
             assert.equal = function(a, b, msg) { if (a != b) throw new Error(msg || a + ' != ' + b); };
-            assert.strictEqual = function(a, b, msg) { if (a !== b) throw new Error(msg || a + ' !== ' + b); };
-            assert.deepEqual = function(a, b, msg) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(msg || 'deep equal failed'); };
             assert.notEqual = function(a, b, msg) { if (a == b) throw new Error(msg || a + ' == ' + b); };
-            assert.throws = function(fn, expected, msg) { try { fn(); } catch(e) { return; } throw new Error(msg || 'Expected throw'); };
+            assert.strictEqual = function(a, b, msg) { if (a !== b) throw new Error(msg || JSON.stringify(a) + ' !== ' + JSON.stringify(b)); };
+            assert.notStrictEqual = function(a, b, msg) { if (a === b) throw new Error(msg || 'Expected values to not be strictly equal'); };
+            assert.deepEqual = function(a, b, msg) { if (!_deepEq(a,b,false,[])) throw new Error(msg || 'deepEqual failed'); };
+            assert.notDeepEqual = function(a, b, msg) { if (_deepEq(a,b,false,[])) throw new Error(msg || 'notDeepEqual failed'); };
+            assert.deepStrictEqual = function(a, b, msg) { if (!_deepEq(a,b,true,[])) throw new Error(msg || 'deepStrictEqual failed'); };
+            assert.notDeepStrictEqual = function(a, b, msg) { if (_deepEq(a,b,true,[])) throw new Error(msg || 'notDeepStrictEqual failed'); };
+            assert.throws = function(fn, expected, msg) {
+                try { fn(); } catch(e) {
+                    if (!expected) return;
+                    if (typeof expected === 'function' && e instanceof expected) return;
+                    if (expected instanceof RegExp && expected.test(e.message)) return;
+                    if (typeof expected === 'object' && expected.message && e.message === expected.message) return;
+                    return;
+                }
+                throw new Error(msg || 'Expected function to throw');
+            };
             assert.doesNotThrow = function(fn, msg) { try { fn(); } catch(e) { throw new Error(msg || 'Unexpected throw: ' + e.message); } };
+            assert.ifError = function(v) { if (v) throw v; };
+            assert.fail = function(msg) { throw new Error(msg || 'assert.fail'); };
             globalThis.__requireCache['assert'] = assert;
             globalThis.__requireCache['node:assert'] = assert;
 
@@ -3427,6 +3581,66 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
 
     // process.config — used by node-gyp checks
     if (!p.config) p.config = { variables: { node_root_dir: '', node_prefix: '' } };
+}());
+
+// ── reflect-metadata ─────────────────────────────────────────────────────────
+// Minimal polyfill for NestJS, TypeORM, tsyringe, routing-controllers.
+// Implements: Reflect.metadata, defineMetadata, getMetadata, getOwnMetadata,
+//             hasMetadata, hasOwnMetadata, deleteMetadata, getMetadataKeys,
+//             getOwnMetadataKeys, decorate.
+(function() {
+    if (typeof Reflect === 'undefined') globalThis.Reflect = {};
+    var _store = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+    var _fallback = [];
+    function _getEntry(target) {
+        if (_store) {
+            if (!_store.has(target)) _store.set(target, Object.create(null));
+            return _store.get(target);
+        }
+        for (var i = 0; i < _fallback.length; i++) { if (_fallback[i][0] === target) return _fallback[i][1]; }
+        var e = Object.create(null); _fallback.push([target, e]); return e;
+    }
+    function _slotKey(prop) { return prop === undefined ? '__$own$__' : '__$' + String(prop) + '$__'; }
+    function _getMap(target, prop) { var e = _getEntry(target); var k = _slotKey(prop); return e[k] || null; }
+    function _getOrCreate(target, prop) { var e = _getEntry(target); var k = _slotKey(prop); if (!e[k]) e[k] = Object.create(null); return e[k]; }
+    function _chain(target, prop, metaKey) {
+        var t = target;
+        while (t && typeof t === 'object' || typeof t === 'function') {
+            var m = _getMap(t, prop);
+            if (m && Object.prototype.hasOwnProperty.call(m, metaKey)) return m;
+            t = Object.getPrototypeOf ? Object.getPrototypeOf(t) : null;
+        }
+        return null;
+    }
+    Reflect.metadata = function(metaKey, metaValue) {
+        return function(target, propertyKey) { Reflect.defineMetadata(metaKey, metaValue, target, propertyKey); };
+    };
+    Reflect.defineMetadata = function(metaKey, metaValue, target, propertyKey) { _getOrCreate(target, propertyKey)[metaKey] = metaValue; };
+    Reflect.getOwnMetadata = function(metaKey, target, propertyKey) { var m = _getMap(target, propertyKey); return m ? m[metaKey] : undefined; };
+    Reflect.getMetadata = function(metaKey, target, propertyKey) { var m = _chain(target, propertyKey, metaKey); return m ? m[metaKey] : undefined; };
+    Reflect.hasOwnMetadata = function(metaKey, target, propertyKey) { var m = _getMap(target, propertyKey); return !!(m && Object.prototype.hasOwnProperty.call(m, metaKey)); };
+    Reflect.hasMetadata = function(metaKey, target, propertyKey) { return !!_chain(target, propertyKey, metaKey); };
+    Reflect.deleteMetadata = function(metaKey, target, propertyKey) { var m = _getMap(target, propertyKey); if (m) delete m[metaKey]; };
+    Reflect.getOwnMetadataKeys = function(target, propertyKey) { var m = _getMap(target, propertyKey); return m ? Object.keys(m) : []; };
+    Reflect.getMetadataKeys = function(target, propertyKey) {
+        var seen = Object.create(null); var result = []; var t = target;
+        while (t && typeof t === 'object' || typeof t === 'function') {
+            var m = _getMap(t, propertyKey);
+            if (m) Object.keys(m).forEach(function(k) { if (!seen[k]) { seen[k] = true; result.push(k); } });
+            t = Object.getPrototypeOf ? Object.getPrototypeOf(t) : null;
+        }
+        return result;
+    };
+    Reflect.decorate = function(decorators, target, propertyKey, descriptor) {
+        if (propertyKey === undefined) return decorators.reduceRight(function(c, d) { return d(c) || c; }, target);
+        return decorators.reduceRight(function(d2, dec) {
+            return dec(target, propertyKey, d2) || d2;
+        }, descriptor !== undefined ? descriptor : (Object.getOwnPropertyDescriptor ? Object.getOwnPropertyDescriptor(target, propertyKey) : undefined));
+    };
+    if (globalThis.__requireCache) {
+        globalThis.__requireCache['reflect-metadata'] = Reflect;
+        globalThis.__requireCache['node:reflect-metadata'] = Reflect;
+    }
 }());
 
 // ── Additional module aliases ─────────────────────────────────────────────────

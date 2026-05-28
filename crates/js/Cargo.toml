@@ -10,6 +10,14 @@ tungstenite = { workspace = true }
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 
 [[test]]
+name = "compat_sprint1"
+path = "tests/compat_sprint1.rs"
+
+[[test]]
+name = "compat_fixes"
+path = "tests/compat_fixes.rs"
+
+[[test]]
 name = "crypto_module"
 path = "tests/crypto_module.rs"
 
@@ -90,6 +98,11 @@ url.workspace = true
 flate2.workspace = true
 aes-gcm = { workspace = true }
 native-tls = { workspace = true }
+rsa = { workspace = true }
+p256 = { workspace = true }
+p384 = { workspace = true }
+md-5 = { workspace = true }
+
 libloading = "0.8"
 libffi = "3.2"
 oxc_transformer = "0.132"
