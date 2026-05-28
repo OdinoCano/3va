@@ -433,6 +433,76 @@ async fn fs_create_read_stream() {
     assert_eq!(r, "streamed");
 }
 
+#[tokio::test]
+async fn fs_create_write_stream() {
+    let dir = TempDir::new().unwrap();
+    let e = engine_rw(&dir).await;
+    let p = path_str(&dir, "writestream.txt");
+
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+        var Writable = require('stream').Writable;
+        var s = require('fs').createWriteStream('{p}');
+        var ok = s instanceof Writable;
+        s.write('hello ');
+        s.write('world');
+        s.end();
+        var content = require('fs').readFileSync('{p}', 'utf8');
+        String(s.bytesWritten) + '|' + content
+        "#
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "11|hello world");
+}
+
+#[tokio::test]
+async fn fs_create_write_stream_sync() {
+    let dir = TempDir::new().unwrap();
+    let e = engine_rw(&dir).await;
+    let p = path_str(&dir, "writestream2.txt");
+
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+        var Writable = require('stream').Writable;
+        var s = require('fs').createWriteStream('{p}');
+        var ok = s instanceof Writable;
+        s.write('hello ');
+        s.write('world');
+        s.end();
+        var content = require('fs').readFileSync('{p}', 'utf8');
+        String(s.bytesWritten) + '|' + content
+        "#
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "11|hello world");
+}
+
+#[tokio::test]
+async fn fs_create_read_stream_instanceof() {
+    let dir = TempDir::new().unwrap();
+    let e = engine_rw(&dir).await;
+    let p = path_str(&dir, "istest.txt");
+    std::fs::write(&p, "data").unwrap();
+
+    let r = e
+        .eval_to_string(
+            r#"
+            var fs = require('fs');
+            var stream = require('stream');
+            var s = fs.createReadStream('/nonexistent');
+            var w = fs.createWriteStream('/nonexistent');
+            String(s instanceof stream.Readable) + '|' + String(w instanceof stream.Writable)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true|true");
+}
+
 // ── fs.constants ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
