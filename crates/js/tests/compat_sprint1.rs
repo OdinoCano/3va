@@ -577,3 +577,131 @@ async fn assert_if_error_throws_on_error() {
         .unwrap();
     assert_eq!(r, "threw");
 }
+
+// ── http.IncomingMessage / http.ServerResponse as classes ─────────────────────
+
+#[tokio::test]
+async fn http_incoming_message_is_exported() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string("typeof require('http').IncomingMessage")
+        .await
+        .unwrap();
+    assert_eq!(r, "function");
+}
+
+#[tokio::test]
+async fn http_server_response_is_exported() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string("typeof require('http').ServerResponse")
+        .await
+        .unwrap();
+    assert_eq!(r, "function");
+}
+
+#[tokio::test]
+async fn http_incoming_message_instanceof_readable() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var http = require('http');
+            var stream = require('stream');
+            var req = new http.IncomingMessage({});
+            String(req instanceof stream.Readable)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn http_server_response_instanceof_writable() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var http = require('http');
+            var stream = require('stream');
+            var req = new http.IncomingMessage({});
+            var res = new http.ServerResponse(req);
+            String(res instanceof stream.Writable)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn http_prototype_extension_works() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var http = require('http');
+            http.ServerResponse.prototype.send = function(m) { this.end(m); };
+            var req = new http.IncomingMessage({});
+            var res = new http.ServerResponse(req);
+            typeof res.send
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "function");
+}
+
+#[tokio::test]
+async fn http_server_response_writehead_works() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var http = require('http');
+            var req = new http.IncomingMessage({});
+            var res = new http.ServerResponse(req);
+            res.setHeader('X-Test', 'value');
+            res.getHeader('X-Test')
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "value");
+}
+
+#[tokio::test]
+async fn http_incoming_message_properties() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var http = require('http');
+            var req = new http.IncomingMessage({});
+            req.method = 'POST';
+            req.url = '/test';
+            req.method + ' ' + req.url
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "POST /test");
+}
+
+#[tokio::test]
+async fn http_server_response_status_code_default() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var http = require('http');
+            var req = new http.IncomingMessage({});
+            var res = new http.ServerResponse(req);
+            String(res.statusCode)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "200");
+}
