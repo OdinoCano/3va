@@ -330,6 +330,53 @@ async fn path_normalize_collapses_dots() {
     assert_eq!(r, "/a/c|a/b");
 }
 
+#[tokio::test]
+async fn path_normalize_edge_cases() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var path = require('path');
+        [
+            path.normalize(''),
+            path.normalize('/'),
+            path.normalize('/..'),
+            path.normalize('/../..'),
+            path.normalize('a/../../b'),
+            path.normalize('..'),
+            path.normalize('.'),
+            path.normalize('./..'),
+            path.normalize('/foo/bar/'),
+            path.normalize('/.'),
+            path.normalize('a/.'),
+        ].join('|')
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, ".|/|/|/|../b|..|.|..|/foo/bar/|/|a");
+}
+
+#[tokio::test]
+async fn path_resolve_edge_cases() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var path = require('path');
+        [
+            path.resolve('/a', 'b'),
+            path.resolve('/a', '/b'),
+            path.resolve('/a', '..'),
+            path.resolve('/a', '../..'),
+        ].join('|')
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "/a/b|/b|/|/");
+}
+
 // ── os ───────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
