@@ -524,33 +524,36 @@ mod builtin_tests {
     }
 
     #[tokio::test]
-    async fn child_process_execsync_always_throws() {
+    async fn child_process_execsync_throws_without_permission() {
+        // execSync now works but requires --allow-child-process; without it, a
+        // permission error is thrown (not a "not available" message).
         let e = engine_no_perms().await;
         let r = e
             .eval_to_string(
                 r#"(function() {
                        try { require('child_process').execSync('echo'); return 'no_throw'; }
-                       catch(e) { return e.message.includes('not available') ? 'ok' : 'wrong:' + e.message; }
+                       catch(e) { return 'threw'; }
                    })()"#,
             )
             .await
             .unwrap();
-        assert_eq!(r, "ok");
+        assert_eq!(r, "threw");
     }
 
     #[tokio::test]
-    async fn child_process_spawnsync_always_throws() {
+    async fn child_process_spawnsync_throws_without_permission() {
+        // spawnSync now works but requires --allow-child-process.
         let e = engine_no_perms().await;
         let r = e
             .eval_to_string(
                 r#"(function() {
                        try { require('child_process').spawnSync('echo'); return 'no_throw'; }
-                       catch(e) { return e.message.includes('not available') ? 'ok' : 'wrong:' + e.message; }
+                       catch(e) { return 'threw'; }
                    })()"#,
             )
             .await
             .unwrap();
-        assert_eq!(r, "ok");
+        assert_eq!(r, "threw");
     }
 
     #[tokio::test]

@@ -106,7 +106,7 @@ Bundles code for distribution.
 ```
 
 ### 1.3.5 Command: dev
-Development server with hot module replacement.
+Development server with hot module replacement. Automatically detects frameworks (Astro, Next.js, Nuxt, SvelteKit, Remix, Gatsby, SolidStart, Qwik) and delegates to their native dev server.
 
 ```
 3va dev [OPTIONS]
@@ -115,17 +115,65 @@ Development server with hot module replacement.
 **Options:**
 | Option | Description |
 |--------|-------------|
-| --port, -p | Port to listen on (default: 3000) |
-| --host | Host to bind to (default: 127.0.0.1) |
-| --open | Open browser automatically |
-| --public-dir | Public directory for static assets (default: `public`) |
+| `--port, -p` | Port to listen on (default: 3000) |
+| `--host` | Host to bind to (default: 127.0.0.1) |
+| `--open` | Open browser automatically |
+| `--public-dir` | Public directory for static assets (default: `public`) |
 
 **Example:**
 ```bash
 3va dev --port 8080 --open
 ```
 
-### 1.3.6 Command: audit
+### 1.3.6 Command: start
+Starts an entry file as a managed background daemon (production process manager).
+
+```
+3va start [--name <NAME>] <ENTRY> [-- <ARGS>...]
+```
+
+**Example:**
+```bash
+3va start server.js
+3va start --name my-api server.js -- --port 3000
+```
+
+### 1.3.7 Command: stop
+Stops a managed process (SIGTERM → SIGKILL after 1.5 s).
+
+```
+3va stop <NAME>
+```
+
+### 1.3.8 Command: restart
+Restarts a managed process with the same configuration.
+
+```
+3va restart <NAME>
+```
+
+### 1.3.9 Command: status
+Shows the status of one or all managed processes.
+
+```
+3va status [<NAME>]
+```
+
+### 1.3.10 Command: logs
+Displays the last N lines of a managed process's log file.
+
+```
+3va logs <NAME> [--lines <N>]
+```
+
+### 1.3.11 Command: delete
+Stops (if running) and permanently removes a managed process including its logs.
+
+```
+3va delete <NAME>
+```
+
+### 1.3.12 Command: audit
 Runs a 3-phase security audit (malware + CVE + secrets) on installed packages.
 
 ```
@@ -146,7 +194,7 @@ Runs a 3-phase security audit (malware + CVE + secrets) on installed packages.
 3va audit --json --secrets
 ```
 
-### 1.3.7 Command: sandbox
+### 1.3.13 Command: sandbox
 Opens an interactive JavaScript REPL with isolated permissions.
 
 ```
@@ -163,14 +211,14 @@ Opens an interactive JavaScript REPL with isolated permissions.
 | .allow-net | Grant network permission |
 | .permissions | Show current permissions |
 
-### 1.3.8 Command: doctor
+### 1.3.14 Command: doctor
 Checks the environment and reports missing dependencies or misconfigurations.
 
 ```
 3va doctor
 ```
 
-### 1.3.9 Commands: update / reinstall
+### 1.3.15 Commands: update / reinstall
 
 ```
 3va update [PACKAGES...] [--allow-net=HOST]

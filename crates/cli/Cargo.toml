@@ -16,6 +16,8 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 notify = "6.1"
 serde_json.workspace = true
+serde.workspace = true
+libc = "0.2"
 vvva_core = { path = "../core" }
 vvva_pm = { path = "../pm" }
 vvva_js = { path = "../js" }

@@ -64,6 +64,76 @@ pub fn inject_child_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Res
         )?,
     )?;
 
+    // __execSyncShell: synchronous sh -c execution, blocks the calling thread.
+    // Permission is checked before running. Used by execSync / spawnSync.
+    let perms3 = permissions.clone();
+    globals.set(
+        "__execSyncShell",
+        Function::new(
+            ctx.clone(),
+            move |command: String| -> rquickjs::Result<String> {
+                if !perms3.check(&Capability::SpawnProcess) {
+                    return Err(rquickjs::Error::new_from_js_message(
+                        "permission",
+                        "permission",
+                        "Process spawn denied. Run with --allow-child-process".to_string(),
+                    ));
+                }
+                let shell = if cfg!(windows) { "cmd" } else { "sh" };
+                let flag = if cfg!(windows) { "/C" } else { "-c" };
+                let result = std::process::Command::new(shell)
+                    .args([flag, command.as_str()])
+                    .output()
+                    .map_err(|e| {
+                        rquickjs::Error::new_from_js_message(
+                            "child_process",
+                            "execSync",
+                            e.to_string(),
+                        )
+                    })?;
+                let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+                let code = result.status.code().unwrap_or(-1);
+                Ok(
+                    serde_json::json!({ "stdout": stdout, "stderr": stderr, "code": code })
+                        .to_string(),
+                )
+            },
+        )?,
+    )?;
+
+    // __spawnSyncExec: synchronous spawn (cmd + args array), blocks the calling thread.
+    let perms4 = permissions.clone();
+    globals.set(
+        "__spawnSyncExec",
+        Function::new(
+            ctx.clone(),
+            move |cmd: String, args: Vec<String>| -> rquickjs::Result<String> {
+                if !perms4.check(&Capability::SpawnProcess) {
+                    return Err(rquickjs::Error::new_from_js_message(
+                        "permission",
+                        "permission",
+                        "Process spawn denied. Run with --allow-child-process".to_string(),
+                    ));
+                }
+                let result = std::process::Command::new(&cmd)
+                    .args(&args)
+                    .output()
+                    .map_err(|e| {
+                        rquickjs::Error::new_from_js_message(
+                            "child_process",
+                            "spawnSync",
+                            e.to_string(),
+                        )
+                    })?;
+                let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+                let code = result.status.code().unwrap_or(-1);
+                Ok(serde_json::json!({ "stdout": stdout, "stderr": stderr, "status": code, "pid": 0 }).to_string())
+            },
+        )?,
+    )?;
+
     // __execShellAsync(command: string) -> same shape, runs via sh -c
     let perms2 = permissions;
     globals.set(
@@ -193,18 +263,34 @@ pub fn inject_child_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Res
                     return cp;
                 },
 
-                // execSync(command, [options]) -> Buffer/string
+                // execSync(command, [options]) -> Buffer | string
+                // Blocks until the command finishes (same semantics as Node.js).
                 execSync: function(command, opts) {
-                    // Synchronous not available in async context; throws with guidance
-                    throw new Error(
-                        'execSync is not available in 3va (async runtime). ' +
-                        'Use child_process.exec() with a callback or promisify it.'
-                    );
+                    opts = opts || {};
+                    var raw = JSON.parse(__execSyncShell(command));
+                    if (raw.code !== 0) {
+                        var err = new Error('Command failed: ' + command + '\n' + raw.stderr);
+                        err.status = raw.code;
+                        err.stderr = raw.stderr;
+                        err.stdout = raw.stdout;
+                        throw err;
+                    }
+                    var enc = opts.encoding || null;
+                    if (enc === 'utf8' || enc === 'utf-8' || enc === 'buffer') {
+                        return enc === 'buffer' ? (typeof Buffer !== 'undefined' ? Buffer.from(raw.stdout) : raw.stdout) : raw.stdout;
+                    }
+                    return typeof Buffer !== 'undefined' ? Buffer.from(raw.stdout) : raw.stdout;
                 },
 
-                // spawnSync — same issue
-                spawnSync: function() {
-                    throw new Error('spawnSync is not available in 3va. Use spawn() instead.');
+                // spawnSync(command, [args], [options]) -> {status, stdout, stderr, pid, signal, error}
+                spawnSync: function(command, args, opts) {
+                    if (!Array.isArray(args)) { opts = args || {}; args = []; }
+                    opts = opts || {};
+                    var raw = JSON.parse(__spawnSyncExec(command, args || []));
+                    var enc = opts.encoding || null;
+                    var out = (enc === 'utf8' || enc === 'utf-8') ? raw.stdout : (typeof Buffer !== 'undefined' ? Buffer.from(raw.stdout) : raw.stdout);
+                    var err = (enc === 'utf8' || enc === 'utf-8') ? raw.stderr : (typeof Buffer !== 'undefined' ? Buffer.from(raw.stderr) : raw.stderr);
+                    return { status: raw.status, stdout: out, stderr: err, pid: raw.pid, signal: null, error: null };
                 },
 
                 // promisify helper

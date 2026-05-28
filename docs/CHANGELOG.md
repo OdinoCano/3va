@@ -9,6 +9,127 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **`Buffer` como subclase real de `Uint8Array`** (`builtins/buffer.rs`):
+  Reescrito usando el patrón *prototype swap*: el constructor devuelve un `Uint8Array` real con `Buffer.prototype` en su cadena. Esto garantiza:
+  - `buf instanceof Uint8Array` → `true`
+  - `buf[0]` → valor de byte correcto (proxy nativo de TypedArray)
+  - `[...buf]` spread, `buf.set()`, `Array.from(buf)` — todos funcionan como nativos
+  - `DataView`, `Float32Array` y otras vistas sobre `buf.buffer` funcionan sin conversión
+  - Compatibles con `ws`, `msgpackr`, `protobufjs` y cualquier librería que accede a bytes directamente
+  Todos los métodos (`readUInt32BE`, `writeFloatLE`, `BigUInt64`, `slice`, `subarray`, etc.) actualizados para operar sobre `this` directamente.
+
+- **`crypto.createSign`/`createVerify` — RSA PKCS1v15 y ECDSA reales** (`builtins/crypto.rs`):
+  Implementación nativa vía crates Rust. Soporta:
+  - **RSA PKCS#1 v1.5**: algoritmos `RSA-SHA256`, `RSA-SHA384`, `RSA-SHA512`, `SHA256`, `SHA1`
+  - **ECDSA P-256**: `SHA256` con clave P-256
+  - **ECDSA P-384**: `SHA384` con clave P-384
+  - Salida en formato **DER** (compatible con `jsonwebtoken`, `passport-jwt`, `jose`)
+  - Acepta DER y P1363 (raw r‖s) en verificación
+  ```js
+  const sig = crypto.createSign('RSA-SHA256').update(data).sign(privateKey);
+  crypto.createVerify('RSA-SHA256').update(data).verify(publicKey, sig); // → true
+  ```
+
+- **`crypto.createPrivateKey`/`createPublicKey`/`createSecretKey`** (`builtins/crypto.rs`):
+  Importa claves PEM existentes en objetos `KeyObject` compatibles con Node.js.
+  - `.type` → `'private'`, `'public'`, o `'secret'`
+  - `.asymmetricKeyType` → `'rsa'` o `'ec'`
+  - `.export()` → PEM string o Uint8Array (con `format: 'der'`)
+  Desbloquea: `jsonwebtoken` con claves externas, `passport-jwt`, `@panva/jose`.
+
+- **`crypto.sign`/`crypto.verify` (one-shot, Node.js 15+)** (`builtins/crypto.rs`):
+  ```js
+  const sig = crypto.sign('SHA256', data, privateKey);
+  crypto.verify('SHA256', data, publicKey, sig); // → boolean
+  ```
+
+- **`crypto.createHash('md5')`** (`builtins/crypto.rs`):
+  MD5 ahora soportado vía crate `md-5 0.10` (algoritmo RustCrypto). Para fingerprinting de contenido,
+  ETags, compatibilidad legacy. No recomendado para seguridad.
+
+- **`crypto.getCiphers()`/`getHashes()`/`getCurves()`** (`builtins/crypto.rs`):
+  Nuevas funciones de enumeración que devuelven los algoritmos soportados.
+
+- **`crypto.generateKeyPair` / `generateKeyPairSync` — RSA y EC nativos** (`builtins/crypto.rs`):
+  Generación de pares de claves asimétricas vía Rust (`rsa 0.9`, `p256 0.13`, `p384 0.13`).
+  - `crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })` → `{ publicKey, privateKey }` con `.export()` que devuelve PEM PKCS#8/SPKI.
+  - `crypto.generateKeyPair('rsa', opts, callback)` — versión async con spawn_blocking.
+  - Curvas EC soportadas: `P-256` (`prime256v1`), `P-384` (`secp384r1`).
+  - Claves RSA-PSS: misma implementación que RSA estándar.
+  Desbloquea: JWT RS256/ES256/ES384 con `jsonwebtoken`, `passport-jwt`, `node-jose`.
+
+- **`crypto.webcrypto`** (`builtins/crypto.rs`):
+  Añadido `crypto.webcrypto = { subtle }` como alias al `crypto.subtle` existente.
+  Requerido por Hono, edge runtimes, y cualquier código que accede a WebCrypto vía `require('crypto').webcrypto`.
+
+- **`crypto.scryptSync` — implementación real con scrypt** (`builtins/crypto.rs`):
+  Sustituye la aproximación anterior (PBKDF2 como fallback) por `__cryptoScryptSync`, que llama
+  directamente a la implementación nativa `scrypt::scrypt`. Nuevo binding Rust síncrono análogo a `__cryptoPbkdf2Sync`.
+
+- **`child_process.execSync` / `spawnSync`** (`builtins/child_process.rs`):
+  Implementación real que bloquea el hilo llamante vía `std::process::Command::output()`.
+  - `execSync(cmd, opts)` — devuelve stdout como Buffer o string; lanza en exit ≠ 0.
+  - `spawnSync(cmd, args, opts)` — devuelve `{ status, stdout, stderr, pid, signal, error }`.
+  - Ambos respetan el sistema de capabilities: requieren `--allow-child-process`.
+  Desbloquea: Vite/esbuild postinstall, Prisma query engine bootstrap, CLIs con Node.js.
+
+- **`util.parseArgs`** (`builtins/modules.rs`):
+  Implementación completa del API de Node.js 18+ para parseo de argumentos CLI.
+  Soporta: `--flag`, `--key=value`, `--key value`, flags booleanos, valores múltiples, positionals, `--`, defaults, y el campo `tokens` opcional.
+
+- **`reflect-metadata` polyfill** (`builtins/modules.rs`):
+  Polyfill JS completo de la API `Reflect.metadata` para decoradores TypeScript.
+  Implementa: `defineMetadata`, `getMetadata`, `getOwnMetadata`, `hasMetadata`, `hasOwnMetadata`,
+  `deleteMetadata`, `getMetadataKeys`, `getOwnMetadataKeys`, `decorate`.
+  Accesible vía `require('reflect-metadata')`. Desbloquea: NestJS, TypeORM, tsyringe, routing-controllers.
+
+### Fixed
+
+- **`assert.deepStrictEqual` — implementación completa** (`builtins/modules.rs`):
+  La implementación anterior usaba `JSON.stringify` que fallaba con:
+  - Valores `undefined` (eliminados por JSON)
+  - TypedArrays (`Uint8Array`, `Int32Array`, etc.)
+  - Referencias circulares
+  - Objetos `Date`, `RegExp`, `Map`, `Set`
+  La nueva implementación hace comparación estructural recursiva con:
+  - Detección de ciclos vía lista de pares visitados
+  - Soporte para `Date` (comparación por timestamp), `RegExp` (por string), `TypedArray`, `Map`, `Set`
+  - Semántica estricta (`===`) vs no-estricta (`==`) según el método
+  También añadidos: `notDeepStrictEqual`, `notStrictEqual`, `ifError`, `fail`.
+
+- **`Buffer.isBuffer(x)` ahora devuelve `true` para `Uint8Array` nativo** (`builtins/buffer.rs`):
+  Anteriormente devolvía `false` para `Uint8Array` no envuelto en `Buffer`, rompiendo librerías que
+  hacen `if (!Buffer.isBuffer(x)) throw`. Ahora `Buffer.isBuffer(new Uint8Array(4)) === true`.
+
+- **`util.inspect` — manejo de referencias circulares y `Symbol.for('nodejs.util.inspect.custom')`** (`builtins/modules.rs`):
+  La implementación anterior hacía `JSON.stringify` que lanzaba en objetos circulares. Ahora:
+  - Detecta ciclos y muestra `[Circular *]`.
+  - Llama `obj[Symbol.for('nodejs.util.inspect.custom')]` si existe (requerido por pino, winston, etc.).
+  - Formatea funciones como `[Function: name]`, fechas como ISO, y errors como `[ErrorType: message]`.
+  - Limita la profundidad (2 niveles por defecto, configurable con `{ depth: n }`).
+
+- **Framework detection — `3va dev` ahora detecta y delega a 8 frameworks** (`crates/cli/src/main.rs`):
+  `3va dev` detecta automáticamente el framework del proyecto y delega en su dev server nativo.
+  - Astro (`astro.config.*` → `astro dev`)
+  - Next.js (`next.config.*` → `next dev`)
+  - Nuxt (`nuxt.config.*` → `nuxi dev`)
+  - SvelteKit (`svelte.config.*` + `@sveltejs/kit` → `vite dev`)
+  - Remix (`remix.config.*` → `remix dev`)
+  - Gatsby (`gatsby-config.*` → `gatsby develop`)
+  - SolidStart (`app.config.*` → `vinxi dev`)
+  - Qwik (`qwik.config.*` → `qwik dev`)
+  Los flags `--port`, `--host` y `--open` se reenvían automáticamente al CLI del framework.
+
+- **Process manager nativo — comandos `start`, `stop`, `restart`, `status`, `logs`, `delete`** (`crates/cli/src/proc.rs`, `crates/cli/src/main.rs`):
+  Nuevo sistema de gestión de procesos en producción similar a PM2:
+  - `3va start <entry>` — inicia un proceso como daemon (nuevo session group vía `setsid`).
+  - `3va stop <name>` — detiene con SIGTERM → SIGKILL tras 1.5 s.
+  - `3va restart <name>` — reinicia con la misma configuración.
+  - `3va status [name]` — muestra estado de procesos con códigos de color.
+  - `3va logs <name>` — muestra las últimas N líneas del log.
+  - `3va delete <name>` — elimina permanentemente el proceso y sus logs.
+  Los metadatos se almacenan en `~/.3va/processes/<name>.json` y los logs en `~/.3va/processes/<name>.log`.
+
 - **`EventEmitter` — API completa** (`modules.rs`):
   Nuevos métodos que muchos paquetes npm dan por sentados:
   - `prependListener(event, fn)` / `prependOnceListener(event, fn)` — agregan listeners al inicio de la cola (en lugar del final).
