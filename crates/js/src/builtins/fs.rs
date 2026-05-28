@@ -956,93 +956,135 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 };
             },
 
-            // ── createReadStream ────────────────────────────────────────────────
+            // ── createReadStream (proper Readable) ──────────────────────────────
             createReadStream: function(path, opts) {
-                var EventEmitter = require('events');
-                var stream = new EventEmitter();
-                stream.readable = true;
+                var ropts = (typeof opts === 'object' && opts !== null) ? opts : {};
+                var encoding = ropts.encoding;
+                if (encoding === 'buffer' || encoding === null) encoding = undefined;
+                var Readable = require('stream').Readable;
+                var stream = new Readable({
+                    highWaterMark: ropts.highWaterMark || 65536,
+                    encoding: encoding,
+                });
                 stream.path = path;
                 stream.bytesRead = 0;
-                stream._flowing = false;
-                stream._doRead = function() {
+                stream._fd = undefined;
+                stream._done = false;
+                stream._read = function(size) {
                     var self = this;
-                    setTimeout(function() {
+                    if (self._done) return;
+                    if (self._fd === undefined) {
                         try {
-                            var data = __fsReadFileSync(path);
-                            self.bytesRead = data.length;
-                            self.emit('data', data);
-                            self.emit('end');
+                            self._fd = __fsFdOpen(path, 'r', null);
+                            self.emit('open', self._fd);
                         } catch(e) {
                             self.emit('error', e);
+                            self._done = true;
+                            return;
                         }
-                    }, 0);
+                    }
+                    try {
+                        var chunkSize = size || 65536;
+                        var pos = ropts.start !== undefined ? (ropts.start + self.bytesRead) : undefined;
+                        if (ropts.end !== undefined && self.bytesRead > (ropts.end - (ropts.start || 0))) {
+                            if (self._fd !== undefined) { try { __fsFdClose(self._fd); } catch(_) {} }
+                            self._done = true;
+                            self.push(null);
+                            return;
+                        }
+                        var maxRead = ropts.end !== undefined ? Math.min(chunkSize, (ropts.end - (ropts.start || 0) - self.bytesRead + 1)) : chunkSize;
+                        if (maxRead <= 0) {
+                            if (self._fd !== undefined) { try { __fsFdClose(self._fd); } catch(_) {} }
+                            self._done = true;
+                            self.push(null);
+                            return;
+                        }
+                        var bytes = __fsFdRead(self._fd, maxRead, pos != null ? pos : null);
+                        self.bytesRead += bytes.length;
+                        if (bytes.length === 0) {
+                            if (self._fd !== undefined) { try { __fsFdClose(self._fd); } catch(_) {} }
+                            self._done = true;
+                            self.push(null);
+                        } else {
+                            self.push(Buffer.from(bytes));
+                            if (self._readableState && self._readableState.flowing && !self._done) {
+                                setTimeout(function() { self._read(65536); }, 0);
+                            }
+                        }
+                    } catch(e) {
+                        self._done = true;
+                        if (self._fd !== undefined) { try { __fsFdClose(self._fd); } catch(_) {} }
+                        self.emit('error', e);
+                    }
                 };
-                // Override on() to auto-start when a 'data' listener is added (Node.js flowing mode)
-                var _origOn = stream.on.bind(stream);
+                var _onOrig = stream.on.bind(stream);
                 stream.on = function(event, fn) {
-                    _origOn(event, fn);
-                    if (event === 'data' && !this._flowing) {
-                        this._flowing = true;
-                        this._doRead();
+                    _onOrig(event, fn);
+                    if (event === 'data' && !this._readableState.flowing) {
+                        this._readableState.flowing = true;
+                        this._read(65536);
                     }
                     return this;
                 };
-                stream.pipe = function(dest) {
-                    var self = this;
-                    setTimeout(function() {
-                        try {
-                            var data = __fsReadFileSync(path);
-                            self.bytesRead = data.length;
-                            if (dest && dest.write) dest.write(data);
-                            self.emit('data', data);
-                            self.emit('end');
-                            if (dest && dest.end) dest.end();
-                        } catch(e) {
-                            self.emit('error', e);
-                        }
-                    }, 0);
-                    return dest;
-                };
-                stream.resume = function() {
-                    if (!this._flowing) {
-                        this._flowing = true;
-                        this._doRead();
-                    }
+                stream.destroy = function() {
+                    if (this._fd !== undefined) { try { __fsFdClose(this._fd); this._fd = undefined; } catch(_) {} }
+                    this._done = true;
+                    this.emit('close');
                     return this;
                 };
-                stream.destroy = function() { this.emit('close'); };
                 return stream;
             },
 
-            // ── createWriteStream ───────────────────────────────────────────────
+            // ── createWriteStream (proper Writable) ──────────────────────────────
             createWriteStream: function(path, opts) {
-                var EventEmitter = require('events');
-                var stream = new EventEmitter();
-                stream.writable = true;
+                var wopts = (typeof opts === 'object' && opts !== null) ? opts : {};
+                var flags = wopts.flags || 'w';
+                var Writable = require('stream').Writable;
+                var stream = new Writable({
+                    highWaterMark: wopts.highWaterMark || 16384,
+                });
                 stream.path = path;
                 stream.bytesWritten = 0;
-                stream._buf = '';
-                stream.write = function(chunk) {
-                    var s = typeof chunk === 'string' ? chunk : chunk.toString();
-                    this._buf += s;
-                    this.bytesWritten += s.length;
-                    return true;
-                };
-                stream.end = function(chunk) {
-                    if (chunk) this.write(chunk);
+                stream._fd = undefined;
+                stream._write = function(chunk, encoding, callback) {
+                    var self = this;
+                    if (self._fd === undefined) {
+                        try {
+                            self._fd = __fsFdOpen(path, flags, null);
+                            self.emit('open', self._fd);
+                        } catch(e) {
+                            callback(e);
+                            return;
+                        }
+                    }
                     try {
-                        __fsWriteFileSync(path, this._buf);
-                        this.emit('finish');
-                        this.emit('close');
+                        var data;
+                        if (Buffer.isBuffer(chunk)) {
+                            data = Array.from(chunk);
+                        } else if (chunk instanceof Uint8Array) {
+                            data = Array.from(chunk);
+                        } else {
+                            data = Array.from(new TextEncoder().encode(String(chunk)));
+                        }
+                        __fsFdWrite(self._fd, data, null);
+                        self.bytesWritten += data.length;
+                        callback(null);
                     } catch(e) {
-                        this.emit('error', e);
+                        callback(e);
                     }
                 };
-                stream.destroy = function() { this.emit('close'); };
-                // Auto-flush flag for append mode
-                if (opts && opts.flags === 'a') {
-                    stream._append = true;
-                }
+                stream._final = function(callback) {
+                    if (this._fd !== undefined) {
+                        try { __fsFdClose(this._fd); this._fd = undefined; } catch(_) {}
+                    }
+                    callback();
+                };
+                stream.destroy = function(err) {
+                    if (this._fd !== undefined) { try { __fsFdClose(this._fd); this._fd = undefined; } catch(_) {} }
+                    if (err) this.emit('error', err);
+                    this.emit('close');
+                    return this;
+                };
                 return stream;
             },
 
