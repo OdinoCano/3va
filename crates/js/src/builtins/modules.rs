@@ -3589,6 +3589,70 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
         p.stdin = stdin;
     }
 
+    // stdout / stderr as Writable streams
+    if (stream) {
+        if (p.stdout && !(p.stdout instanceof stream.Writable)) {
+            var stdout = new stream.Writable({
+                write: function(chunk, encoding, cb) {
+                    var s = (typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk));
+                    __stdoutWrite(s);
+                    cb();
+                },
+                final: function(cb) { cb(); }
+            });
+            stdout.fd = 1;
+            stdout.isTTY = false;
+            stdout.columns = 80;
+            stdout.rows = 24;
+            p.stdout = stdout;
+        }
+        if (p.stderr && !(p.stderr instanceof stream.Writable)) {
+            var stderr = new stream.Writable({
+                write: function(chunk, encoding, cb) {
+                    var s = (typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk));
+                    __stderrWrite(s);
+                    cb();
+                },
+                final: function(cb) { cb(); }
+            });
+            stderr.fd = 2;
+            stderr.isTTY = false;
+            stderr.columns = 80;
+            stderr.rows = 24;
+            p.stderr = stderr;
+        }
+    }
+
+    // process.env as a dynamic Proxy
+    if (typeof Proxy !== 'undefined' && p.env && !p.env.__isProxy) {
+        var _envStore = {};
+        // Copy existing env vars into the store
+        var _envKeys = Object.keys(p.env);
+        for (var i = 0; i < _envKeys.length; i++) _envStore[_envKeys[i]] = p.env[_envKeys[i]];
+        // Allow write access if --allow-env or individual var permissions
+        var _envProxy = new Proxy(_envStore, {
+            get: function(target, key) {
+                if (key === '__isProxy') return true;
+                if (typeof key === 'symbol') return undefined;
+                return target[key];
+            },
+            set: function(target, key, value) {
+                if (key === '__isProxy') return false;
+                if (typeof key === 'symbol') return false;
+                target[key] = String(value);
+                return true;
+            },
+            has: function(target, key) { return key in target; },
+            deleteProperty: function(target, key) { return delete target[key]; },
+            ownKeys: function(target) { return Object.keys(target); },
+            getOwnPropertyDescriptor: function(target, key) {
+                if (key in target) return { configurable: true, enumerable: true, value: target[key], writable: true };
+                return undefined;
+            }
+        });
+        p.env = _envProxy;
+    }
+
     // execPath / execArgv
     if (!p.execPath) p.execPath = p.argv && p.argv[0] || '3va';
     if (!p.execArgv) p.execArgv = [];

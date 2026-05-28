@@ -167,16 +167,6 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     argv.set(0usize, bin)?;
     process.set("argv", argv)?;
 
-    // env: only expose variables that pass the permission check.
-    // EnvAccess (all) or EnvVar(key) grants are both accepted by caps_match.
-    let env_obj = Object::new(ctx.clone())?;
-    for (key, val) in std::env::vars() {
-        if permissions.check(&Capability::EnvVar(key.clone())) {
-            env_obj.set(key, val)?;
-        }
-    }
-    process.set("env", env_obj)?;
-
     // exit(): delegate to the native __processExit binding
     ctx.eval::<(), _>("globalThis.__processExit = __processExit;")?;
     process.set(
@@ -201,24 +191,43 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     // chdir(): no-op stub — sandboxed runtime doesn't change working dir
     process.set("chdir", Function::new(ctx.clone(), |_: Rest<String>| {})?)?;
 
-    // stdout / stderr: write delegates to console methods installed by inject_console
-    let stdout = Object::new(ctx.clone())?;
-    stdout.set(
+    // Native write helpers for stdout/stderr (used by JS Writable streams)
+    globals.set(
+        "__stdoutWrite",
+        Function::new(ctx.clone(), |msg: String| print!("{msg}"))?,
+    )?;
+    globals.set(
+        "__stderrWrite",
+        Function::new(ctx.clone(), |msg: String| eprint!("{msg}"))?,
+    )?;
+
+    // Temporary stdout/stderr (replaced by Writable instances in modules.rs)
+    let stdout_plain = Object::new(ctx.clone())?;
+    stdout_plain.set(
         "write",
         Function::new(ctx.clone(), |msg: String| print!("{msg}"))?,
     )?;
-    stdout.set("fd", 1i32)?;
-    stdout.set("isTTY", false)?;
-    process.set("stdout", stdout)?;
+    stdout_plain.set("fd", 1i32)?;
+    stdout_plain.set("isTTY", false)?;
+    process.set("stdout", stdout_plain)?;
 
-    let stderr = Object::new(ctx.clone())?;
-    stderr.set(
+    let stderr_plain = Object::new(ctx.clone())?;
+    stderr_plain.set(
         "write",
         Function::new(ctx.clone(), |msg: String| eprint!("{msg}"))?,
     )?;
-    stderr.set("fd", 2i32)?;
-    stderr.set("isTTY", false)?;
-    process.set("stderr", stderr)?;
+    stderr_plain.set("fd", 2i32)?;
+    stderr_plain.set("isTTY", false)?;
+    process.set("stderr", stderr_plain)?;
+
+    // env: expose variables that pass permission check (replaced by Proxy in modules.rs)
+    let env_obj = Object::new(ctx.clone())?;
+    for (key, val) in std::env::vars() {
+        if permissions.check(&Capability::EnvVar(key.clone())) {
+            env_obj.set(key, val)?;
+        }
+    }
+    process.set("env", env_obj)?;
 
     // memoryUsage(): real RSS on Linux
     process.set("memoryUsage", Function::new(ctx.clone(), rss_bytes)?)?;
