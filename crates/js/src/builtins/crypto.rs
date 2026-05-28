@@ -1094,8 +1094,24 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
     // ── Web Crypto (crypto.subtle) ────────────────────────────────────────────
     // Implements the subset of the W3C SubtleCrypto API used by most packages:
     //   digest, importKey, exportKey, generateKey,
-    //   sign/verify (HMAC), encrypt/decrypt (AES-GCM),
+    //   sign/verify (HMAC, RSASSA-PKCS1-v1_5, RSA-PSS, ECDSA),
+    //   encrypt/decrypt (AES-GCM),
     //   deriveBits/deriveKey (HKDF, PBKDF2).
+    // DOMException polyfill (QuickJS doesn't have it natively).
+    if (typeof DOMException === 'undefined') {
+        var DOMException = (function() {
+            function DOMException(message, name) {
+                this.message = message || '';
+                this.name = name || 'Error';
+                this.code = 0;
+            }
+            DOMException.prototype = Object.create(Error.prototype);
+            DOMException.prototype.constructor = DOMException;
+            DOMException.prototype.toString = function() { return this.name + ': ' + this.message; };
+            return DOMException;
+        })();
+    }
+
     var subtle = (function() {
         // Normalise algorithm name to upper-case with hyphens.
         function normAlg(a) {
@@ -1117,22 +1133,102 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
             return u.buffer;
         }
 
+        // DER <-> PEM conversion for asymmetric keys / signatures.
+        var b64Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        var b64Lookup = {};
+        for (var i = 0; i < 64; i++) b64Lookup[b64Chars[i]] = i;
+        function base64Decode(s) {
+            s = s.replace(/[^A-Za-z0-9\+\/=]/g, '');
+            var bytes = [];
+            for (var i = 0; i < s.length; i += 4) {
+                var a = b64Lookup[s[i] || 'A'] || 0;
+                var b = b64Lookup[s[i+1] || 'A'] || 0;
+                var c = b64Lookup[s[i+2] || 'A'] || 0;
+                var d = b64Lookup[s[i+3] || 'A'] || 0;
+                bytes.push((a << 2) | (b >> 4));
+                if (s[i+2] !== '=') bytes.push(((b & 0xf) << 4) | (c >> 2));
+                if (s[i+3] !== '=') bytes.push(((c & 0x3) << 6) | d);
+            }
+            return new Uint8Array(bytes);
+        }
+        function base64Encode(bytes) {
+            var s = '';
+            for (var i = 0; i < bytes.length; i += 3) {
+                var a = bytes[i], b = bytes[i+1] || 0, c = bytes[i+2] || 0;
+                s += b64Chars[a >> 2] + b64Chars[((a & 3) << 4) | (b >> 4)];
+                s += i + 1 < bytes.length ? b64Chars[((b & 0xf) << 2) | (c >> 6)] : '=';
+                s += i + 2 < bytes.length ? b64Chars[c & 0x3f] : '=';
+            }
+            return s;
+        }
+        function derToPem(der, label) {
+            var b64 = base64Encode(new Uint8Array(der));
+            var lines = b64.match(/.{1,64}/g) || [b64];
+            return '-----BEGIN ' + label + '-----\n' + lines.join('\n') + '\n-----END ' + label + '-----\n';
+        }
+        function pemToDer(pem) {
+            var b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\n/g, '');
+            return base64Decode(b64);
+        }
+
+        // Convert DER SEQUENCE { INTEGER r, INTEGER s } to raw r||s (fixed-width).
+        function ecdsaDerToRaw(der, fieldSize) {
+            var view = new Uint8Array(der);
+            var i = 0;
+            if (view[i] !== 0x30) throw new Error('ECDSA: expected SEQUENCE');
+            i++;
+            // SEQUENCE length (skip if long-form)
+            if (view[i] & 0x80) { i += (view[i] & 0x7f) + 1; } else { i++; }
+            function readInt() {
+                if (view[i] !== 0x02) throw new Error('ECDSA: expected INTEGER');
+                i++;
+                var len = view[i]; i++;
+                // Strip leading zero if present
+                while (len > 0 && view[i] === 0) { i++; len--; }
+                var val = view.slice(i, i + len);
+                i += len;
+                return val;
+            }
+            var rArr = readInt();
+            var sArr = readInt();
+            function padTo(v, size) {
+                if (v.length >= size) return v.slice(v.length - size);
+                var p = new Uint8Array(size);
+                p.set(v, size - v.length);
+                return p;
+            }
+            var out = new Uint8Array(fieldSize * 2);
+            out.set(padTo(rArr, fieldSize), 0);
+            out.set(padTo(sArr, fieldSize), fieldSize);
+            return out;
+        }
+
+        // Map Web Crypto hash name to Node.js algorithm string.
+        var hashToNode = { 'SHA-1': 'sha1', 'SHA-224': 'sha224', 'SHA-256': 'sha256', 'SHA-384': 'sha384', 'SHA-512': 'sha512' };
+
+        // Resolve hash from algorithm object or key.algorithm for asymmetric keys.
+        function resolveHash(algorithm, key) {
+            var h = normHash((algorithm && algorithm.hash) || (key && key.algorithm && key.algorithm.hash) || 'SHA-256');
+            return hashToNode[h] || (function() { throw new DOMException('Unsupported hash: ' + h, 'NotSupportedError'); })();
+        }
+
         // Internal CryptoKey representation.
         function CryptoKey(type, extractable, algorithm, usages, raw) {
             this.type = type;          // "secret" | "public" | "private"
             this.extractable = extractable;
             this.algorithm = algorithm; // {name, ...}
             this.usages = usages;
-            this._raw = raw;           // Uint8Array of raw key bytes
+            this._raw = raw;           // Uint8Array of raw key bytes (symmetric) or null
+            this._pem = null;          // PEM string for asymmetric keys
+            this._asymmetricKeyType = null; // "rsa" | "ec"
+            this._curve = null;        // EC curve name for ECDSA
         }
 
         return {
             // ── digest ───────────────────────────────────────────────────────
             digest: function(algorithm, data) {
                 var alg = normAlg(algorithm);
-                // Map Web Crypto names to Node crypto names
-                var map = { 'SHA-1': 'sha1', 'SHA-224': 'sha224', 'SHA-256': 'sha256', 'SHA-384': 'sha384', 'SHA-512': 'sha512' };
-                var nodeAlg = map[alg];
+                var nodeAlg = hashToNode[alg];
                 if (!nodeAlg) return Promise.reject(new DOMException('Unsupported algorithm: ' + alg, 'NotSupportedError'));
                 try {
                     var raw = __cryptoHash(nodeAlg, toByteArray(data));
@@ -1161,6 +1257,48 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
                             keyUsages, raw);
                         return Promise.resolve(key);
                     }
+                    if (alg === 'RSASSA-PKCS1-V1-5' || alg === 'RSA-PSS') {
+                        var hashName = normHash(algorithm.hash || 'SHA-256');
+                        var nodeHash = hashToNode[hashName];
+                        if (!nodeHash) return Promise.reject(new DOMException('Unsupported hash: ' + hashName, 'NotSupportedError'));
+                        var modulusLength = algorithm.modulusLength || 2048;
+                        var opts = JSON.stringify({ modulusLength: modulusLength });
+                        var result = JSON.parse(__cryptoGenerateKeyPairSync('rsa', opts));
+                        var pubUsages = [], privUsages = [];
+                        for (var i = 0; i < keyUsages.length; i++) {
+                            if (keyUsages[i] === 'verify' || keyUsages[i] === 'encrypt' || keyUsages[i] === 'wrapKey') pubUsages.push(keyUsages[i]);
+                            if (keyUsages[i] === 'sign' || keyUsages[i] === 'decrypt' || keyUsages[i] === 'unwrapKey') privUsages.push(keyUsages[i]);
+                        }
+                        var keyAlg = { name: alg, hash: { name: hashName }, modulusLength: modulusLength, publicExponent: new Uint8Array([1,0,1]) };
+                        var publicKey = new CryptoKey('public', true, keyAlg, pubUsages, null);
+                        publicKey._pem = result.publicKeyPem;
+                        publicKey._asymmetricKeyType = 'rsa';
+                        var privateKey = new CryptoKey('private', extractable, keyAlg, privUsages, null);
+                        privateKey._pem = result.privateKeyPem;
+                        privateKey._asymmetricKeyType = 'rsa';
+                        return Promise.resolve({ publicKey: publicKey, privateKey: privateKey });
+                    }
+                    if (alg === 'ECDSA') {
+                        var namedCurve = algorithm.namedCurve || 'P-256';
+                        var opts = JSON.stringify({ namedCurve: namedCurve });
+                        var result = JSON.parse(__cryptoGenerateKeyPairSync('ec', opts));
+                        var pubUsages = [], privUsages = [];
+                        for (var i = 0; i < keyUsages.length; i++) {
+                            if (keyUsages[i] === 'verify') pubUsages.push(keyUsages[i]);
+                            if (keyUsages[i] === 'sign') privUsages.push(keyUsages[i]);
+                        }
+                        var hashName = normHash(algorithm.hash || 'SHA-256');
+                        var keyAlg = { name: 'ECDSA', namedCurve: namedCurve, hash: { name: hashName } };
+                        var publicKey = new CryptoKey('public', true, keyAlg, pubUsages, null);
+                        publicKey._pem = result.publicKeyPem;
+                        publicKey._asymmetricKeyType = 'ec';
+                        publicKey._curve = namedCurve;
+                        var privateKey = new CryptoKey('private', extractable, keyAlg, privUsages, null);
+                        privateKey._pem = result.privateKeyPem;
+                        privateKey._asymmetricKeyType = 'ec';
+                        privateKey._curve = namedCurve;
+                        return Promise.resolve({ publicKey: publicKey, privateKey: privateKey });
+                    }
                     return Promise.reject(new DOMException('generateKey: unsupported algorithm ' + alg, 'NotSupportedError'));
                 } catch(e) { return Promise.reject(e); }
             },
@@ -1169,11 +1307,34 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
             importKey: function(format, keyData, algorithm, extractable, keyUsages) {
                 try {
                     var alg = normAlg(algorithm);
+                    var isAsymmetric = (alg === 'RSASSA-PKCS1-V1-5' || alg === 'RSA-PSS' || alg === 'ECDSA');
+                    if (isAsymmetric) {
+                        var keyType = (format === 'pkcs8' ? 'private' : 'public');
+                        var der = rawBytes(keyData);
+                        var pemLabel = (keyType === 'private' ? 'PRIVATE KEY' : 'PUBLIC KEY');
+                        var pem = derToPem(der, pemLabel);
+                        var keyAlg;
+                        var curve = null;
+                        var asymType = 'rsa';
+                        if (alg === 'ECDSA') {
+                            asymType = 'ec';
+                            curve = algorithm.namedCurve || (format === 'pkcs8' ? 'P-256' : 'P-256');
+                            keyAlg = { name: 'ECDSA', namedCurve: curve, hash: algorithm.hash ? { name: normHash(algorithm.hash) } : { name: 'SHA-256' } };
+                        } else {
+                            var hashName = normHash(algorithm.hash || 'SHA-256');
+                            keyAlg = { name: alg, hash: { name: hashName }, modulusLength: algorithm.modulusLength || 2048 };
+                        }
+                        var key = new CryptoKey(keyType, extractable, keyAlg, keyUsages, null);
+                        key._pem = pem;
+                        key._asymmetricKeyType = asymType;
+                        key._curve = curve;
+                        return Promise.resolve(key);
+                    }
+                    // Symmetric key import
                     var raw;
                     if (format === 'raw') {
                         raw = rawBytes(keyData);
                     } else if (format === 'jwk') {
-                        // JWK: base64url-decode 'k' field for symmetric keys
                         if (!keyData.k) return Promise.reject(new DOMException('importKey JWK: missing k field', 'DataError'));
                         var b64 = keyData.k.replace(/-/g,'+').replace(/_/g,'/');
                         while (b64.length % 4) b64 += '=';
@@ -1204,6 +1365,25 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
             // ── exportKey ────────────────────────────────────────────────────
             exportKey: function(format, key) {
                 if (!key.extractable) return Promise.reject(new DOMException('key is not extractable', 'InvalidAccessError'));
+                if (key._asymmetricKeyType) {
+                    if (format === 'spki' && key.type === 'public') {
+                        var der = pemToDer(key._pem);
+                        return Promise.resolve(der.buffer.slice(der.byteOffset, der.byteOffset + der.byteLength));
+                    }
+                    if (format === 'pkcs8' && key.type === 'private') {
+                        var der = pemToDer(key._pem);
+                        return Promise.resolve(der.buffer.slice(der.byteOffset, der.byteOffset + der.byteLength));
+                    }
+                    if (format === 'jwk') {
+                        // Minimal JWK for RSA/EC public keys
+                        var der = pemToDer(key._pem);
+                        if (key._asymmetricKeyType === 'ec') {
+                            return Promise.resolve({ kty: 'EC', crv: key._curve || 'P-256', key_ops: key.usages, ext: true });
+                        }
+                        return Promise.resolve({ kty: 'RSA', key_ops: key.usages, ext: true });
+                    }
+                    return Promise.reject(new DOMException('exportKey: unsupported format ' + format + ' for key type ' + key.type, 'NotSupportedError'));
+                }
                 if (format === 'raw') return Promise.resolve(key._raw.buffer.slice(key._raw.byteOffset, key._raw.byteOffset + key._raw.byteLength));
                 if (format === 'jwk') {
                     var b64 = btoa(String.fromCharCode.apply(null, key._raw)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
@@ -1218,10 +1398,23 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
                 try {
                     if (alg === 'HMAC') {
                         var hash = normHash(algorithm.hash || key.algorithm.hash || 'SHA-256');
-                        var map = { 'SHA-1': 'sha1', 'SHA-224': 'sha224', 'SHA-256': 'sha256', 'SHA-384': 'sha384', 'SHA-512': 'sha512' };
-                        var nodeAlg = map[hash];
+                        var nodeAlg = hashToNode[hash];
                         if (!nodeAlg) return Promise.reject(new DOMException('Unsupported HMAC hash: ' + hash, 'NotSupportedError'));
                         var raw = __cryptoHmac(nodeAlg, Array.from(key._raw), toByteArray(data));
+                        return Promise.resolve(toArrayBuffer(raw));
+                    }
+                    if (alg === 'RSASSA-PKCS1-V1-5' || alg === 'RSA-PSS') {
+                        if (key.type !== 'private') return Promise.reject(new DOMException('sign requires private key', 'InvalidAccessError'));
+                        var nodeHash = resolveHash(algorithm, key);
+                        var sig = __cryptoRsaSign(nodeHash, key._pem, toByteArray(data));
+                        return Promise.resolve(toArrayBuffer(sig));
+                    }
+                    if (alg === 'ECDSA') {
+                        if (key.type !== 'private') return Promise.reject(new DOMException('sign requires private key', 'InvalidAccessError'));
+                        var curve = key._curve || algorithm.namedCurve || 'P-256';
+                        var der = __cryptoEcSign(curve, key._pem, toByteArray(data));
+                        var fieldSize = (curve.indexOf('384') !== -1 || curve.indexOf('521') !== -1) ? (curve.indexOf('521') !== -1 ? 66 : 48) : 32;
+                        var raw = ecdsaDerToRaw(der, fieldSize);
                         return Promise.resolve(toArrayBuffer(raw));
                     }
                     return Promise.reject(new DOMException('sign: unsupported algorithm ' + alg, 'NotSupportedError'));
@@ -1230,15 +1423,59 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
 
             // ── verify ───────────────────────────────────────────────────────
             verify: function(algorithm, key, signature, data) {
-                var self = this;
-                return self.sign(algorithm, key, data).then(function(expected) {
-                    var e = new Uint8Array(expected);
-                    var s = rawBytes(signature);
-                    if (e.length !== s.length) return false;
-                    var diff = 0;
-                    for (var i = 0; i < e.length; i++) diff |= e[i] ^ s[i];
-                    return diff === 0;
-                });
+                var alg = normAlg(algorithm);
+                try {
+                    if (alg === 'HMAC') {
+                        var self = this;
+                        return self.sign(algorithm, key, data).then(function(expected) {
+                            var e = new Uint8Array(expected);
+                            var s = rawBytes(signature);
+                            if (e.length !== s.length) return false;
+                            var diff = 0;
+                            for (var i = 0; i < e.length; i++) diff |= e[i] ^ s[i];
+                            return diff === 0;
+                        });
+                    }
+                    if (alg === 'RSASSA-PKCS1-V1-5' || alg === 'RSA-PSS') {
+                        if (key.type !== 'public') return Promise.reject(new DOMException('verify requires public key', 'InvalidAccessError'));
+                        var nodeHash = resolveHash(algorithm, key);
+                        var ok = __cryptoRsaVerify(nodeHash, key._pem, toByteArray(data), toByteArray(signature));
+                        return Promise.resolve(ok);
+                    }
+                    if (alg === 'ECDSA') {
+                        if (key.type !== 'public') return Promise.reject(new DOMException('verify requires public key', 'InvalidAccessError'));
+                        var curve = key._curve || algorithm.namedCurve || 'P-256';
+                        // Accept both raw r||s and DER signatures
+                        var sigBytes = toByteArray(signature);
+                        var ok = __cryptoEcVerify(curve, key._pem, toByteArray(data), sigBytes);
+                        if (ok) return Promise.resolve(true);
+                        // If raw, try wrapping in DER
+                        var fieldSize = (curve.indexOf('384') !== -1 || curve.indexOf('521') !== -1) ? (curve.indexOf('521') !== -1 ? 66 : 48) : 32;
+                        if (sigBytes.length === fieldSize * 2) {
+                            // Build DER: SEQUENCE { INTEGER r, INTEGER s }
+                            function intToDer(v) {
+                                while (v[0] === 0) v = v.slice(1);
+                                if (v[0] & 0x80) { var p = new Uint8Array(v.length + 1); p.set(v, 1); v = p; }
+                                var tag = new Uint8Array([0x02, v.length]);
+                                var out = new Uint8Array(tag.length + v.length);
+                                out.set(tag); out.set(v, tag.length);
+                                return out;
+                            }
+                            var rDer = intToDer(sigBytes.slice(0, fieldSize));
+                            var sDer = intToDer(sigBytes.slice(fieldSize));
+                            var seqContent = new Uint8Array(rDer.length + sDer.length);
+                            seqContent.set(rDer); seqContent.set(sDer, rDer.length);
+                            var seq = new Uint8Array(2 + seqContent.length);
+                            seq[0] = 0x30;
+                            if (seqContent.length > 127) { seq[1] = 0x81; seq[2] = seqContent.length; /* skip */ }
+                            else { seq[1] = seqContent.length; }
+                            seq.set(seqContent, 2);
+                            ok = __cryptoEcVerify(curve, key._pem, toByteArray(data), Array.from(seq));
+                        }
+                        return Promise.resolve(ok);
+                    }
+                    return Promise.reject(new DOMException('verify: unsupported algorithm ' + alg, 'NotSupportedError'));
+                } catch(e) { return Promise.reject(e); }
             },
 
             // ── encrypt ──────────────────────────────────────────────────────
