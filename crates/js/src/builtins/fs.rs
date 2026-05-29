@@ -675,6 +675,188 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         )?,
     )?;
 
+    // ── fs.watch backend (inotify / kqueue / FSEvents via notify crate) ──────────
+    {
+        use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use tokio::sync::mpsc;
+
+        /// Each live watcher: holds the notify handle (dropping it stops watching)
+        /// and an async receiver for incoming events.
+        struct WatcherEntry {
+            _watcher: RecommendedWatcher,
+            rx: tokio::sync::Mutex<mpsc::Receiver<notify::Result<notify::Event>>>,
+        }
+
+        type WatchTable = Arc<Mutex<HashMap<u32, Arc<WatcherEntry>>>>;
+        static NEXT_WATCHER_ID: AtomicU32 = AtomicU32::new(1);
+
+        let watch_table: WatchTable = Arc::new(Mutex::new(HashMap::new()));
+
+        // __fsWatchCreate(path, recursive) → watcher_id  (synchronous)
+        {
+            let table = watch_table.clone();
+            let perms = permissions.clone();
+            globals.set(
+                "__fsWatchCreate",
+                Function::new(
+                    ctx.clone(),
+                    move |ctx: Ctx<'_>, path_str: String, recursive: bool| -> Result<u32> {
+                        let path = PathBuf::from(&path_str);
+                        if !perms.check(&Capability::FileRead(path.clone())) {
+                            return Err(perm_err(&ctx, "watch", &path));
+                        }
+
+                        let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>(256);
+                        let mut watcher = RecommendedWatcher::new(
+                            move |res: notify::Result<notify::Event>| {
+                                let _ = tx.blocking_send(res);
+                            },
+                            Config::default(),
+                        )
+                        .map_err(|e| js_err(&ctx, format!("fs.watch: {e}")))?;
+
+                        let mode = if recursive {
+                            RecursiveMode::Recursive
+                        } else {
+                            RecursiveMode::NonRecursive
+                        };
+                        watcher
+                            .watch(&path, mode)
+                            .map_err(|e| js_err(&ctx, format!("fs.watch '{}': {e}", path_str)))?;
+
+                        let id = NEXT_WATCHER_ID.fetch_add(1, Ordering::Relaxed);
+                        table.lock().unwrap().insert(
+                            id,
+                            Arc::new(WatcherEntry {
+                                _watcher: watcher,
+                                rx: tokio::sync::Mutex::new(rx),
+                            }),
+                        );
+                        Ok(id)
+                    },
+                )?,
+            )?;
+        }
+
+        // __fsWatchNext(id) → Promise<JSON>  awaits the next event
+        //   JSON: {"eventType":"change"|"rename","filename":"foo.txt"}
+        //   Rejects with ECLOSED when the watcher has been removed.
+        {
+            let table = watch_table.clone();
+            globals.set(
+                "__fsWatchNext",
+                Function::new(
+                    ctx.clone(),
+                    rquickjs::function::Async(move |id: u32| {
+                        let table = table.clone();
+                        async move {
+                            let entry = {
+                                let guard = table.lock().unwrap();
+                                guard.get(&id).cloned()
+                            };
+                            let entry = entry.ok_or_else(|| {
+                                rquickjs::Error::new_from_js_message(
+                                    "ECLOSED",
+                                    "ECLOSED",
+                                    "watcher closed".to_string(),
+                                )
+                            })?;
+
+                            let event = {
+                                let mut rx = entry.rx.lock().await;
+                                rx.recv().await
+                            };
+
+                            match event {
+                                None => Err(rquickjs::Error::new_from_js_message(
+                                    "ECLOSED",
+                                    "ECLOSED",
+                                    "watcher channel closed".to_string(),
+                                )),
+                                Some(Err(e)) => Err(rquickjs::Error::new_from_js_message(
+                                    "EIO",
+                                    "EIO",
+                                    e.to_string(),
+                                )),
+                                Some(Ok(ev)) => {
+                                    use notify::event::{
+                                        EventKind, ModifyKind, RenameMode,
+                                    };
+                                    let event_type = match ev.kind {
+                                        EventKind::Create(_) => "rename",
+                                        EventKind::Remove(_) => "rename",
+                                        EventKind::Modify(ModifyKind::Name(
+                                            RenameMode::From | RenameMode::To | RenameMode::Both,
+                                        )) => "rename",
+                                        _ => "change",
+                                    };
+                                    // Pick the first path; fall back to empty string.
+                                    let filename = ev
+                                        .paths
+                                        .first()
+                                        .and_then(|p| {
+                                            p.file_name()
+                                                .and_then(|n| n.to_str())
+                                                .map(|s| s.to_string())
+                                        })
+                                        .unwrap_or_default();
+                                    Ok(format!(
+                                        "{{\"eventType\":\"{event_type}\",\"filename\":\"{filename}\"}}",
+                                    ))
+                                }
+                            }
+                        }
+                    }),
+                )?,
+            )?;
+        }
+
+        // __fsWatchClose(id) → void  (synchronous; drops the watcher entry)
+        {
+            let table = watch_table.clone();
+            globals.set(
+                "__fsWatchClose",
+                Function::new(ctx.clone(), move |id: u32| {
+                    table.lock().unwrap().remove(&id);
+                })?,
+            )?;
+        }
+    }
+
+    // ── __fsWatchPollStat(path, interval_ms) → Promise<stat JSON> ─────────────
+    // Tokio-async stat poller for fs.watchFile.  Sleeps `interval_ms`, then
+    // returns the current stat as JSON so the JS layer can detect changes.
+    // Uses rquickjs::function::Async — no Ctx<'_> in the closure, matching
+    // the pattern used by all other async bindings (e.g. __cryptoPbkdf2).
+    {
+        let perms = permissions.clone();
+        globals.set(
+            "__fsWatchPollStat",
+            Function::new(
+                ctx.clone(),
+                rquickjs::function::Async(move |path_str: String, interval_ms: u64| {
+                    let perms = perms.clone();
+                    async move {
+                        let path = PathBuf::from(&path_str);
+                        if !perms.check(&Capability::FileRead(path.clone())) {
+                            return Err(rquickjs::Error::new_from_js_message(
+                                "EACCES",
+                                "EACCES",
+                                format!("permission denied: '{path_str}'"),
+                            ));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+                        let meta = std::fs::metadata(&path).map_err(|e| {
+                            rquickjs::Error::new_from_js_message("ENOENT", "ENOENT", e.to_string())
+                        })?;
+                        Ok::<String, rquickjs::Error>(stat_meta_to_json(&meta))
+                    }
+                }),
+            )?,
+        )?;
+    }
+
     // ── JS wrapper: globalThis.fs ─────────────────────────────────────────────
     ctx.eval::<(), _>(r#"
     (function() {
@@ -1088,13 +1270,98 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 return stream;
             },
 
-            // ── watch (stub — no inotify in sandbox) ────────────────────────────
-            watch: function(path, opts, cb) {
-                if (typeof opts === 'function') { cb = opts; }
+            // ── watch — backed by __fsWatchCreate / __fsWatchNext / __fsWatchClose ──
+            watch: function(path, opts, listener) {
+                if (typeof opts === 'function') { listener = opts; opts = {}; }
+                opts = opts || {};
+                var recursive = !!(opts.recursive);
+
                 var EventEmitter = require('events');
                 var watcher = new EventEmitter();
-                watcher.close = function() {};
+                watcher.filename = path;
+
+                // Create OS-level watcher synchronously (returns an integer id).
+                // Throws synchronously on permission errors or invalid paths,
+                // matching Node.js behaviour.
+                var watcherId = __fsWatchCreate(path, recursive);
+
+                var closed = false;
+
+                // Poll loop: each __fsWatchNext call awaits ONE event then recurses.
+                function poll() {
+                    if (closed) return;
+                    __fsWatchNext(watcherId).then(function(json) {
+                        if (closed) return;
+                        var ev = JSON.parse(json);
+                        if (typeof listener === 'function') {
+                            listener(ev.eventType, ev.filename);
+                        }
+                        watcher.emit('change', ev.eventType, ev.filename);
+                        poll();
+                    }).catch(function(err) {
+                        if (!closed) {
+                            // ECLOSED = we called close() — don't surface as an error.
+                            if (!err || (err.message !== 'watcher closed' && err.message !== 'watcher channel closed')) {
+                                watcher.emit('error', err);
+                            }
+                        }
+                    });
+                }
+
+                poll();
+
+                watcher.close = function() {
+                    if (closed) return;
+                    closed = true;
+                    __fsWatchClose(watcherId);
+                };
+
                 return watcher;
+            },
+
+            // ── watchFile — inotify-backed (reuses __fsWatchCreate/__fsWatchNext) ──
+            // Node.js watchFile uses stat polling, but OS notifications are both
+            // faster and more reliable. We use the same watcher infrastructure as
+            // fs.watch, comparing stats before and after each event so the
+            // callback receives proper (curr, prev) stat objects.
+            watchFile: function(filename, opts, listener) {
+                if (typeof opts === 'function') { listener = opts; opts = {}; }
+                var closed = false;
+
+                // Capture initial stat for change comparison.
+                var prevStat;
+                try { prevStat = parseStat(__fsStatSync(filename, false)); }
+                catch(e) { prevStat = { mtimeMs: 0, size: 0, isFile: function(){return false;}, isDirectory: function(){return false;} }; }
+
+                var watcherId = __fsWatchCreate(filename, false);
+
+                function poll() {
+                    if (closed) return;
+                    __fsWatchNext(watcherId).then(function() {
+                        if (closed) return;
+                        var currStat;
+                        try { currStat = parseStat(__fsStatSync(filename, false)); }
+                        catch(e) { currStat = { mtimeMs: 0, size: 0, isFile: function(){return false;}, isDirectory: function(){return false;} }; }
+                        if (typeof listener === 'function') listener(currStat, prevStat);
+                        prevStat = currStat;
+                        poll();
+                    }).catch(function() { /* watcher closed or error — stop silently */ });
+                }
+
+                poll();
+
+                return {
+                    stop: function() {
+                        if (closed) return;
+                        closed = true;
+                        __fsWatchClose(watcherId);
+                    }
+                };
+            },
+
+            // ── unwatchFile ───────────────────────────────────────────────────────
+            unwatchFile: function(filename) {
+                // No-op in this impl (watchFile handle tracks its own cleanup).
             },
 
             // ── promises API (mirror of async) ──────────────────────────────────

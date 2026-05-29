@@ -4537,6 +4537,7 @@ dependencies = [
  "libloading",
  "md-5",
  "native-tls",
+ "notify 6.1.1",
  "oxc_allocator",
  "oxc_ast",
  "oxc_codegen",

@@ -10,6 +10,10 @@ tungstenite = { workspace = true }
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 
 [[test]]
+name = "fs_watch"
+path = "tests/fs_watch.rs"
+
+[[test]]
 name = "compat_sprint1"
 path = "tests/compat_sprint1.rs"
 
@@ -77,6 +81,10 @@ path = "tests/web_globals.rs"
 name = "wintercg_globals"
 path = "tests/wintercg_globals.rs"
 
+[[test]]
+name = "express_jwt"
+path = "tests/express_jwt.rs"
+
 [dependencies]
 rquickjs.workspace = true
 rquickjs-sys = { path = "../../vendor/rquickjs-sys" }
@@ -102,6 +110,7 @@ rsa = { workspace = true }
 p256 = { workspace = true }
 p384 = { workspace = true }
 md-5 = { workspace = true }
+notify = { workspace = true }
 
 libloading = "0.8"
 libffi = "3.2"
