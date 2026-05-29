@@ -59,7 +59,31 @@ jobs:
         with:
           command: check advisories licenses bans sources
 
-  # ── Gate 5: secret scanning ──────────────────────────────────────────────────
+  # ── Gate 5: fuzz build + short smoke run ─────────────────────────────────────
+  fuzz:
+    name: Fuzz (build + 30s smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - run: cargo install cargo-fuzz --locked
+      - name: Build fuzz targets
+        run: cargo fuzz build
+        working-directory: fuzz
+      - name: Smoke-run fuzz_target_1 (30 s)
+        run: cargo fuzz run fuzz_target_1 -- -max_total_time=30
+        working-directory: fuzz
+      - name: Smoke-run fuzz_permission_sandbox (30 s)
+        run: cargo fuzz run fuzz_permission_sandbox -- -max_total_time=30
+        working-directory: fuzz
+      - name: Smoke-run fuzz_pm_resolver (30 s)
+        run: cargo fuzz run fuzz_pm_resolver -- -max_total_time=30
+        working-directory: fuzz
+
+  # ── Gate 6: secret scanning ──────────────────────────────────────────────────
   secrets:
     name: Secret Scanning (gitleaks)
     runs-on: ubuntu-latest

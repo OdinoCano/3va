@@ -48,6 +48,11 @@ impl MlKemKeypair {
 
     // ── Serialisation ─────────────────────────────────────────────────────────
 
+    /// Return the raw encapsulation key bytes (1 184 B for ML-KEM-768).
+    pub fn encapsulation_key_bytes(&self) -> Vec<u8> {
+        self.ek.to_bytes().as_slice().to_vec()
+    }
+
     /// Hex-encode the encapsulation (public) key.
     pub fn encapsulation_key_hex(&self) -> String {
         hex::encode(self.ek.to_bytes().as_slice())

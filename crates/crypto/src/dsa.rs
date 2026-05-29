@@ -17,8 +17,8 @@
 //! All byte arrays are hex-encoded for easy transport.
 
 use ml_dsa::{
-    EncodedVerifyingKey, Generate, KeyExport, MlDsa65, Signature, SignatureEncoding, Signer,
-    SigningKey, Verifier, VerifyingKey, common::Key,
+    EncodedVerifyingKey, Generate, KeyExport, Keypair, MlDsa65, Signature, SignatureEncoding,
+    Signer, SigningKey, Verifier, VerifyingKey, common::Key,
 };
 
 use crate::CryptoError;
@@ -28,6 +28,13 @@ use crate::CryptoError;
 /// Generate a new ML-DSA-65 signing key using the system CSPRNG.
 pub fn generate_signing_key() -> SigningKey<MlDsa65> {
     SigningKey::<MlDsa65>::generate()
+}
+
+/// Generate an ML-DSA-65 keypair and return `(signing_key_hex, verifying_key_hex)`.
+pub fn generate_keypair_hex() -> (String, String) {
+    let sk = generate_signing_key();
+    let vk = sk.verifying_key().clone();
+    (signing_key_to_hex(&sk), verifying_key_to_hex(&vk))
 }
 
 // ── Signing ───────────────────────────────────────────────────────────────────

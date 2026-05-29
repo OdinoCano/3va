@@ -18,6 +18,7 @@ use std::time::Duration;
 use native_tls::TlsStream;
 use rquickjs::function::Async;
 use rquickjs::{Ctx, Function, Result, function::Rest};
+use vvva_crypto;
 use vvva_permissions::{Capability, PermissionState};
 
 // ── Connection type ───────────────────────────────────────────────────────────
@@ -386,6 +387,83 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 move |_ctx: Ctx<'_>, server_id: u32| -> Result<()> {
                     listeners.lock().unwrap().remove(&server_id);
                     Ok(())
+                },
+            ),
+        )?;
+    }
+
+    // ── Hybrid PQ-TLS connect ─────────────────────────────────────────────────
+    //
+    // __pqTlsConnect(host, port) → { connId: number, pqSharedSecret: hex }
+    //
+    // Establishes a classical TLS connection then performs an ML-KEM-768
+    // ephemeral key encapsulation exchange over the secured channel:
+    //   client → server: [4-byte length][ML-KEM encapsulation key]
+    //   client ← server: [4-byte length][ML-KEM ciphertext]
+    //   Both sides derive a 32-byte PQ shared secret.
+    //
+    // The resulting `pqSharedSecret` can be combined with the TLS session key
+    // (e.g. via HKDF) to achieve hybrid classical+PQ forward secrecy.
+    {
+        let pool = pool.clone();
+        let nid = next_id.clone();
+        let perms = permissions.clone();
+        ctx.globals().set(
+            "__pqTlsConnect",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>, host: String, port: u16| -> Result<String> {
+                    if !perms.check(&Capability::Network(host.clone())) {
+                        return Err(js_code_err(
+                            &ctx,
+                            "EACCES",
+                            format!("Network access denied. Run with --allow-net={}", host),
+                        ));
+                    }
+
+                    // Classical TLS handshake
+                    let connector = native_tls::TlsConnector::new()
+                        .map_err(|e| js_err(&ctx, format!("TLS init: {e}")))?;
+                    let tcp = TcpStream::connect(format!("{}:{}", host, port))
+                        .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
+                    let mut tls = connector.connect(&host, tcp).map_err(|e| {
+                        js_code_err(&ctx, "ECONNRESET", format!("TLS handshake failed: {e}"))
+                    })?;
+
+                    // ML-KEM-768 ephemeral key exchange (client initiates)
+                    let kp = vvva_crypto::kem::MlKemKeypair::generate();
+                    let ek_bytes: Vec<u8> = kp.encapsulation_key_bytes();
+
+                    // Send encapsulation key
+                    let ek_len = (ek_bytes.len() as u32).to_be_bytes();
+                    tls.write_all(&ek_len)
+                        .and_then(|_| tls.write_all(&ek_bytes))
+                        .map_err(|e| js_err(&ctx, format!("PQ TLS send ek: {e}")))?;
+
+                    // Receive ciphertext from server
+                    let mut ct_len_buf = [0u8; 4];
+                    tls.read_exact(&mut ct_len_buf)
+                        .map_err(|e| js_err(&ctx, format!("PQ TLS recv ct len: {e}")))?;
+                    let ct_len = u32::from_be_bytes(ct_len_buf) as usize;
+                    let mut ct_bytes = vec![0u8; ct_len];
+                    tls.read_exact(&mut ct_bytes)
+                        .map_err(|e| js_err(&ctx, format!("PQ TLS recv ct: {e}")))?;
+
+                    let ct = vvva_crypto::MlKemCiphertext::from_hex(&hex::encode(&ct_bytes))
+                        .map_err(|e| js_err(&ctx, format!("PQ TLS ct decode: {e}")))?;
+                    let ss = vvva_crypto::decapsulate(&kp.dk, &ct);
+                    let ss_hex = hex::encode(ss.0);
+
+                    // Switch to non-blocking for subsequent reads
+                    tls.get_ref()
+                        .set_nonblocking(true)
+                        .map_err(|e| js_err(&ctx, e.to_string()))?;
+
+                    let conn_id = alloc_id(&pool, &nid, TcpConn::Tls(tls));
+                    Ok(
+                        serde_json::json!({ "connId": conn_id, "pqSharedSecret": ss_hex })
+                            .to_string(),
+                    )
                 },
             ),
         )?;

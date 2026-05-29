@@ -1,3 +1,5 @@
+//! Module bundler — resolves imports, tree-shakes, and code-generates single-file JS/TS bundles.
+
 pub mod generator;
 pub mod resolver;
 pub mod tree_shaker;
@@ -8,6 +10,13 @@ pub use tree_shaker::{DeadCodeEliminator, TreeShaker};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+use oxc_allocator::Allocator;
+use oxc_codegen::Codegen;
+use oxc_parser::Parser;
+use oxc_semantic::SemanticBuilder;
+use oxc_span::SourceType;
+use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
 
 #[derive(Debug, Clone)]
 pub struct BundlerOutput {
@@ -23,8 +32,7 @@ pub struct ChunkOutput {
 }
 
 pub struct Bundler {
-    #[allow(dead_code)]
-    resolver: ModuleResolver,
+    _resolver: ModuleResolver,
     tree_shaker: TreeShaker,
     code_gen: CodeGenerator,
     modules: HashMap<String, PathBuf>,
@@ -37,7 +45,7 @@ pub struct Bundler {
 impl Bundler {
     pub fn new(root: PathBuf) -> Self {
         Self {
-            resolver: ModuleResolver::new(root),
+            _resolver: ModuleResolver::new(root),
             tree_shaker: TreeShaker::new(vec![]),
             code_gen: CodeGenerator::new(BundlerOptions::default()),
             modules: HashMap::new(),
@@ -210,35 +218,46 @@ impl Bundler {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         match ext {
-            "ts" | "tsx" => Ok(self.strip_types(&content)),
+            "ts" => Ok(self.strip_types(&content, false)),
+            "tsx" => Ok(self.strip_types(&content, true)),
             "js" | "jsx" => Ok(content),
             "json" => Ok(format!("module.exports = {};", content)),
             _ => Ok(content),
         }
     }
 
-    fn strip_types(&self, code: &str) -> String {
-        let mut result = String::new();
-
-        for line in code.lines() {
-            let trimmed = line.trim();
-
-            if trimmed.starts_with("interface ")
-                || trimmed.starts_with("type ")
-                || trimmed.contains(": string")
-                || trimmed.contains(": number")
-                || trimmed.contains(": boolean")
-                || trimmed.contains(": void")
-                || trimmed.starts_with("// @ts-")
-            {
-                continue;
-            }
-
-            result.push_str(line);
-            result.push('\n');
+    fn strip_types(&self, code: &str, jsx: bool) -> String {
+        let allocator = Allocator::default();
+        let source_type = if jsx {
+            SourceType::tsx()
+        } else {
+            SourceType::mjs().with_typescript(true)
+        };
+        let parsed = Parser::new(&allocator, code, source_type).parse();
+        if !parsed.errors.is_empty() && parsed.program.body.is_empty() {
+            return code.to_string();
         }
-
-        result
+        let mut program = parsed.program;
+        let scoping = SemanticBuilder::new()
+            .build(&program)
+            .semantic
+            .into_scoping();
+        let mut options = TransformOptions::default();
+        if jsx {
+            options.jsx = JsxOptions {
+                jsx_plugin: true,
+                runtime: JsxRuntime::Classic,
+                pragma: Some("React.createElement".to_string()),
+                pragma_frag: Some("React.Fragment".to_string()),
+                ..JsxOptions::default()
+            };
+        }
+        let ret = Transformer::new(&allocator, Path::new("input.tsx"), &options)
+            .build_with_scoping(scoping, &mut program);
+        if !ret.errors.is_empty() && program.body.is_empty() {
+            return code.to_string();
+        }
+        Codegen::new().build(&program).code
     }
 }
 

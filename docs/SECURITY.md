@@ -332,6 +332,76 @@ Never publish if any of these fail:
 
 ---
 
+---
+
+## Accepted Risk Register
+
+Advisories ignorados en `deny.toml` con justificación documentada.
+**Deben revisarse antes de cualquier release 1.0.**
+
+### RUSTSEC-2023-0071 — Marvin Attack (RSA timing side-channel)
+
+| Campo        | Valor                                          |
+|--------------|------------------------------------------------|
+| Advisory     | RUSTSEC-2023-0071                              |
+| Crate        | `rsa`                                          |
+| CVE          | CVE-2023-49092                                 |
+| CVSS         | 5.9 (Medium)                                   |
+| Estado       | **Aceptado — no hay fix upstream disponible**  |
+
+**Qué es:** El path de decryption PKCS#1 v1.5 del crate `rsa` es vulnerable al
+Marvin Attack: un oracle de timing que permite a un atacante que puede medir
+la latencia de muchas operaciones de decryption recuperar texto plano sin la
+clave privada.
+
+**Por qué el riesgo es aceptable en 3va:** 3va es una **herramienta de línea
+de comandos**. Las operaciones RSA (keygen, signing, verification) corren
+localmente con las claves propias del usuario. No hay servidor exponiendo un
+oracle de decryption a callers remotos. El ataque requiere:
+1. Acceso de red a un servicio vivo que realice decryption RSA-PKCS1.
+2. Capacidad de enviar muchos ciphertexts especialmente fabricados y medir
+   tiempos de respuesta con precisión sub-milisegundo.
+
+Ninguna condición se cumple en el modelo de amenaza de 3va.
+
+**Invalidadores — si alguno ocurre, esta aceptación debe revocarse:**
+- 3va añade un modo servidor que expone TLS/RSA decryption por red.
+- `rsa` publica un parche; en ese caso actualizar de inmediato.
+
+**Referencias:**
+- https://rustsec.org/advisories/RUSTSEC-2023-0071.html
+- https://people.redhat.com/~hkario/marvin/
+
+---
+
+### RUSTSEC-2023-0051 & RUSTSEC-2024-0370 (wasmtime deps transitivas)
+
+Aceptados como dependencias transitivas de `wasmtime` sin path de explotación
+activo para el uso de 3va. Se revisan en cada upgrade mayor de `wasmtime`.
+
+### RUSTSEC-2025-0057 — fxhash sin mantenimiento
+
+`fxhash` es un crate sin mantenimiento importado transitivamente por `wasmtime`.
+Sin CVE activo. Se elimina si `wasmtime` lo descarta.
+
+---
+
+## Post-Quantum Cryptography
+
+3va implementa ML-KEM-768 (NIST FIPS 203) y ML-DSA-65 (NIST FIPS 204) en
+el crate `vvva_crypto`. Accesibles desde JS via `require('crypto').pq`.
+
+Las conexiones via `__pqTlsConnect` realizan un intercambio **híbrido**
+TLS-clásico + ML-KEM-768, proporcionando confidencialidad post-cuántica
+contra adversarios cuánticos futuros.
+
+> **Nota:** El path TLS por defecto (`native-tls`) **no** incluye PQ key
+> exchange. Las aplicaciones que requieran PQ forward secrecy deben usar
+> `__pqTlsConnect` explícitamente.
+
+---
+
 ## Security Contact
 
-To report vulnerabilities: [edgarcano.166@gmail.com]
+To report vulnerabilities: edgar@sophava.com
+Do NOT open a public GitHub issue for security bugs.

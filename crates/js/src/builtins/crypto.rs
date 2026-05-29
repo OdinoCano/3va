@@ -9,6 +9,7 @@ use rquickjs::function::Async;
 use rquickjs::{Ctx, Function, Result};
 use sha1::Sha1;
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
+use vvva_crypto as pq;
 
 /// Encode DER bytes as a PEM block (64-char line wrapping).
 fn to_pem(label: &str, der: &[u8]) -> String {
@@ -1572,6 +1573,149 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
     }
 })();
         "#,
+    )?;
+
+    // ── Post-quantum crypto (ML-KEM-768, ML-DSA-65) ───────────────────────────
+
+    // __pqKemGenerateKeypair() → { encapsulationKey: hex, decapsulationKey: hex }
+    ctx.globals().set(
+        "__pqKemGenerateKeypair",
+        Function::new(ctx.clone(), || -> rquickjs::Result<String> {
+            let kp = pq::kem::MlKemKeypair::generate();
+            let ek = kp.encapsulation_key_hex();
+            let dk = kp.decapsulation_key_hex();
+            Ok(serde_json::json!({ "encapsulationKey": ek, "decapsulationKey": dk }).to_string())
+        })?,
+    )?;
+
+    // __pqKemEncapsulate(encapsulationKeyHex) → { ciphertext: hex, sharedSecret: hex }
+    ctx.globals().set(
+        "__pqKemEncapsulate",
+        Function::new(ctx.clone(), |ek_hex: String| -> rquickjs::Result<String> {
+            let ek = pq::encapsulation_key_from_hex(&ek_hex).map_err(|e| {
+                rquickjs::Error::new_from_js_message("crypto", "pqKemEncapsulate", &e.to_string())
+            })?;
+            let (ct, ss) = pq::encapsulate(&ek);
+            let ct_hex = ct.to_hex();
+            let ss_hex = hex::encode(ss.0);
+            Ok(serde_json::json!({ "ciphertext": ct_hex, "sharedSecret": ss_hex }).to_string())
+        })?,
+    )?;
+
+    // __pqKemDecapsulate(decapsulationKeyHex, ciphertextHex) → sharedSecretHex
+    ctx.globals().set(
+        "__pqKemDecapsulate",
+        Function::new(
+            ctx.clone(),
+            |dk_hex: String, ct_hex: String| -> rquickjs::Result<String> {
+                let dk = pq::decapsulation_key_from_hex(&dk_hex).map_err(|e| {
+                    rquickjs::Error::new_from_js_message(
+                        "crypto",
+                        "pqKemDecapsulate",
+                        &e.to_string(),
+                    )
+                })?;
+                let ct = pq::MlKemCiphertext::from_hex(&ct_hex).map_err(|e| {
+                    rquickjs::Error::new_from_js_message(
+                        "crypto",
+                        "pqKemDecapsulate",
+                        &e.to_string(),
+                    )
+                })?;
+                let ss = pq::decapsulate(&dk, &ct);
+                Ok(hex::encode(ss.0))
+            },
+        )?,
+    )?;
+
+    // __pqDsaGenerateKeypair() → { signingKey: hex, verifyingKey: hex }
+    ctx.globals().set(
+        "__pqDsaGenerateKeypair",
+        Function::new(ctx.clone(), || -> rquickjs::Result<String> {
+            let (sk_hex, vk_hex) = pq::generate_keypair_hex();
+            Ok(serde_json::json!({ "signingKey": sk_hex, "verifyingKey": vk_hex }).to_string())
+        })?,
+    )?;
+
+    // __pqDsaSign(signingKeyHex, messageHex) → signatureHex
+    ctx.globals().set(
+        "__pqDsaSign",
+        Function::new(
+            ctx.clone(),
+            |sk_hex: String, msg_hex: String| -> rquickjs::Result<String> {
+                let sk = pq::signing_key_from_hex(&sk_hex).map_err(|e| {
+                    rquickjs::Error::new_from_js_message("crypto", "pqDsaSign", &e.to_string())
+                })?;
+                let msg = hex::decode(&msg_hex).map_err(|e| {
+                    rquickjs::Error::new_from_js_message("crypto", "pqDsaSign", &e.to_string())
+                })?;
+                let sig_bytes = pq::sign(&sk, &msg);
+                Ok(hex::encode(&sig_bytes))
+            },
+        )?,
+    )?;
+
+    // __pqDsaVerify(verifyingKeyHex, messageHex, signatureHex) → bool
+    ctx.globals().set(
+        "__pqDsaVerify",
+        Function::new(
+            ctx.clone(),
+            |vk_hex: String, msg_hex: String, sig_hex: String| -> rquickjs::Result<bool> {
+                let vk = pq::verifying_key_from_hex(&vk_hex).map_err(|e| {
+                    rquickjs::Error::new_from_js_message("crypto", "pqDsaVerify", &e.to_string())
+                })?;
+                let msg = hex::decode(&msg_hex).map_err(|e| {
+                    rquickjs::Error::new_from_js_message("crypto", "pqDsaVerify", &e.to_string())
+                })?;
+                let sig_bytes = hex::decode(&sig_hex).map_err(|e| {
+                    rquickjs::Error::new_from_js_message("crypto", "pqDsaVerify", &e.to_string())
+                })?;
+                Ok(pq::verify(&vk, &msg, &sig_bytes).is_ok())
+            },
+        )?,
+    )?;
+
+    // Inject PQ crypto JS wrapper into the crypto module
+    ctx.eval::<(), _>(
+        r#"
+(function() {
+    var _pq = globalThis.__pqCrypto || {};
+
+    _pq.kem = {
+        generateKeypair: function() {
+            return JSON.parse(__pqKemGenerateKeypair());
+        },
+        encapsulate: function(encapsulationKeyHex) {
+            return JSON.parse(__pqKemEncapsulate(encapsulationKeyHex));
+        },
+        decapsulate: function(decapsulationKeyHex, ciphertextHex) {
+            return __pqKemDecapsulate(decapsulationKeyHex, ciphertextHex);
+        },
+    };
+
+    _pq.dsa = {
+        generateKeypair: function() {
+            return JSON.parse(__pqDsaGenerateKeypair());
+        },
+        sign: function(signingKeyHex, messageHex) {
+            return __pqDsaSign(signingKeyHex, messageHex);
+        },
+        verify: function(verifyingKeyHex, messageHex, signatureHex) {
+            return __pqDsaVerify(verifyingKeyHex, messageHex, signatureHex);
+        },
+    };
+
+    globalThis.__pqCrypto = _pq;
+
+    // Also expose under require('crypto').pq and require('node:crypto').pq
+    if (globalThis.__requireCache) {
+        var c = globalThis.__requireCache['crypto'];
+        if (c) c.pq = _pq;
+        var nc = globalThis.__requireCache['node:crypto'];
+        if (nc) nc.pq = _pq;
+    }
+})();
+    "#,
     )?;
 
     Ok(())

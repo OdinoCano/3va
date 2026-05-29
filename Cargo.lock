@@ -3329,8 +3329,6 @@ dependencies = [
 [[package]]
 name = "rquickjs-core"
 version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e9129d69b7b8f7ee8ad1da5b12c7f4a8a8acd45f2e6dd9cb2ee1bc5a1f2fa3d"
 dependencies = [
  "async-lock",
  "chrono",
@@ -4462,7 +4460,9 @@ dependencies = [
  "oxc_ast",
  "oxc_codegen",
  "oxc_parser",
+ "oxc_semantic",
  "oxc_span",
+ "oxc_transformer",
  "regex-lite",
  "serde",
  "serde_json",
@@ -4532,6 +4532,7 @@ dependencies = [
  "base64",
  "cargo-husky",
  "flate2",
+ "hex",
  "hmac",
  "libffi",
  "libloading",
@@ -4562,6 +4563,7 @@ dependencies = [
  "ureq",
  "url",
  "vvva_core",
+ "vvva_crypto",
  "vvva_permissions",
 ]
 

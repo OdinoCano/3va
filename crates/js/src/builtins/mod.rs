@@ -7,6 +7,7 @@ pub mod ffi;
 pub mod fs;
 pub mod http_server;
 pub mod modules;
+pub mod napi;
 pub mod process;
 pub mod tcp;
 pub mod timers;
@@ -40,6 +41,7 @@ pub fn inject_all(
     zlib::inject_zlib(ctx)?;
     child_process::inject_child_process(ctx, permissions.clone())?;
     crypto::inject_crypto(ctx)?;
-    ffi::inject_ffi(ctx, permissions)?;
+    ffi::inject_ffi(ctx, permissions.clone())?;
+    napi::inject_napi(ctx, permissions)?;
     Ok(())
 }

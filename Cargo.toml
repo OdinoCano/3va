@@ -51,3 +51,4 @@ lto = "thin"
 
 [patch.crates-io]
 rquickjs-sys = { path = "vendor/rquickjs-sys" }
+rquickjs-core = { path = "vendor/rquickjs-core" }

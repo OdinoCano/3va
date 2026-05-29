@@ -1,3 +1,5 @@
+//! Test framework for 3va — runner, matchers, coverage, and security test utilities.
+
 pub mod coverage;
 pub mod framework;
 pub mod matchers;
