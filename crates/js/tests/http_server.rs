@@ -4,15 +4,15 @@
 // eval_to_string returns.  The accept loop uses an async Promise (__httpAcceptAsync),
 // so the engine event loop must run concurrently while the HTTP client runs.
 //
-// Pattern: start client via spawn_blocking (separate OS thread), drive the JS engine
-// event loop via `loop { e.idle().await }` in a tokio::select! branch.
+// Pattern: use an async tokio TcpStream as the client and drive the JS engine
+// event loop via `loop { e.idle().await }` in a tokio::select! alongside the client.
 //
 // Run: cargo test -p vvva_js --test http_server
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use vvva_js::JsEngine;
 use vvva_permissions::{Capability, PermissionState};
 
@@ -29,12 +29,10 @@ fn free_port() -> u16 {
     port
 }
 
-fn raw_http(port: u16, method: &str, path: &str, body: &str) -> String {
-    let mut stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
-        Ok(s) => s,
-        Err(_) => return String::new(),
-    };
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+async fn raw_http(port: u16, method: &str, path: &str, body: &str) -> String {
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap_or_else(|e| panic!("connect to port {}: {}", port, e));
 
     let req = if body.is_empty() {
         format!(
@@ -51,11 +49,36 @@ fn raw_http(port: u16, method: &str, path: &str, body: &str) -> String {
             body = body,
         )
     };
-    stream.write_all(req.as_bytes()).ok();
 
-    let mut resp = String::new();
-    stream.read_to_string(&mut resp).ok();
-    resp
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut resp = String::new();
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            resp.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        Ok::<_, String>(resp)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            eprintln!("raw_http error: {}", e);
+            String::new()
+        }
+        Err(_) => {
+            eprintln!("raw_http timeout on port {}", port);
+            String::new()
+        }
+    }
 }
 
 fn response_status(resp: &str) -> u16 {
@@ -78,6 +101,15 @@ async fn drive_forever(e: &JsEngine) -> ! {
     }
 }
 
+/// Drive the JS event loop until the client future completes.
+async fn drive_until<T>(e: &JsEngine, client: impl std::future::Future<Output = T>) -> T {
+    tokio::pin!(client);
+    tokio::select! {
+        _ = drive_forever(e) => unreachable!(),
+        result = &mut client => result,
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -85,7 +117,6 @@ async fn server_responds_200() {
     let port = free_port();
     let e = engine_with_net().await;
 
-    // __httpListen is synchronous, so the port is bound before this returns.
     e.eval_to_string(&format!(
         r#"
         var http = require('http');
@@ -101,13 +132,10 @@ async fn server_responds_200() {
     .await
     .unwrap();
 
-    // Port is already bound — connect immediately.
-    let http_task = tokio::task::spawn_blocking(move || raw_http(port, "GET", "/", ""));
+    // Give engine a moment to start the accept loop.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let resp = tokio::select! {
-        _ = drive_forever(&e) => unreachable!(),
-        r = http_task => r.unwrap(),
-    };
+    let resp = drive_until(&e, raw_http(port, "GET", "/", "")).await;
 
     assert_eq!(response_status(&resp), 200, "full response:\n{}", resp);
     assert_eq!(response_body(&resp), "hello");
@@ -134,12 +162,9 @@ async fn server_reads_method_and_url() {
     .await
     .unwrap();
 
-    let http_task = tokio::task::spawn_blocking(move || raw_http(port, "POST", "/test-path", ""));
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    tokio::select! {
-        _ = drive_forever(&e) => unreachable!(),
-        _ = http_task => {},
-    }
+    drive_until(&e, raw_http(port, "POST", "/test-path", "")).await;
 
     let result = e.eval_to_string("globalThis.__lastReq").await.unwrap();
     assert_eq!(result, "POST /test-path");
@@ -166,12 +191,9 @@ async fn server_reads_request_body() {
     .await
     .unwrap();
 
-    let http_task = tokio::task::spawn_blocking(move || raw_http(port, "POST", "/", "hello body"));
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    tokio::select! {
-        _ = drive_forever(&e) => unreachable!(),
-        _ = http_task => {},
-    }
+    drive_until(&e, raw_http(port, "POST", "/", "hello body")).await;
 
     let result = e.eval_to_string("globalThis.__lastBody").await.unwrap();
     assert_eq!(result, "hello body");
@@ -197,12 +219,9 @@ async fn server_responds_with_custom_status() {
     .await
     .unwrap();
 
-    let http_task = tokio::task::spawn_blocking(move || raw_http(port, "GET", "/missing", ""));
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let resp = tokio::select! {
-        _ = drive_forever(&e) => unreachable!(),
-        r = http_task => r.unwrap(),
-    };
+    let resp = drive_until(&e, raw_http(port, "GET", "/missing", "")).await;
 
     assert_eq!(response_status(&resp), 404);
     assert_eq!(response_body(&resp), "not found");
@@ -229,14 +248,10 @@ async fn server_handles_multiple_requests() {
     .await
     .unwrap();
 
-    // Send three requests sequentially.  Each request is wrapped in a select! so
-    // the engine drives while the blocking client runs.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     for _ in 0..3u32 {
-        let http_task = tokio::task::spawn_blocking(move || raw_http(port, "GET", "/", ""));
-        tokio::select! {
-            _ = drive_forever(&e) => unreachable!(),
-            _ = http_task => {},
-        }
+        drive_until(&e, raw_http(port, "GET", "/", "")).await;
     }
 
     let count = e

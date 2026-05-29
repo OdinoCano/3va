@@ -940,7 +940,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     callback();
                 };
                 ServerResponse.prototype._sendResponse = function() {
-                    if (this._responded || !this._connId) return;
+                    if (this._responded || this._connId == null) return;
                     this._responded = true;
                     this.headersSent = true;
                     var body = this._chunks.join('');

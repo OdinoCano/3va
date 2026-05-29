@@ -119,7 +119,7 @@ pub fn inject_http_server(ctx: &Ctx, permissions: Arc<PermissionState>) -> Resul
     let servers: Arc<Mutex<HashMap<u32, Arc<TcpListener>>>> = Arc::new(Mutex::new(HashMap::new()));
     let conns: Arc<Mutex<HashMap<u32, ConnEntry>>> = Arc::new(Mutex::new(HashMap::new()));
     let next_server_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
-    let next_conn_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+    let next_conn_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(1));
 
     // ── __httpListen(port, host) → server_id  (synchronous) ──────────────────
     // Binds immediately using std, then registers with Tokio I/O driver.
