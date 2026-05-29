@@ -3,11 +3,11 @@
 //! # Examples
 //!
 //! ```rust,no_run
-//! # tokio_test::block_on(async {
 //! use std::sync::Arc;
 //! use vvva_permissions::PermissionState;
 //! use vvva_js::JsEngine;
 //!
+//! # tokio::runtime::Runtime::new().unwrap().block_on(async {
 //! let perms = Arc::new(PermissionState::new());
 //! let engine = JsEngine::new(perms).await.unwrap();
 //! engine.eval("const x = 1 + 1; console.log(x);").await.unwrap();
