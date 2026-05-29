@@ -2626,6 +2626,16 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 return result;
             }
 
+            // Native NAPI addons (.node files): delegate to Rust __napiRequire
+            if (resolvedPath.endsWith('.node')) {
+                if (typeof globalThis.__napiRequire !== 'function') {
+                    throw new Error('NAPI not available: --allow-ffi is required to load .node addons');
+                }
+                result = globalThis.__napiRequire(resolvedPath);
+                globalThis.__requireCache[resolvedPath] = result;
+                return result;
+            }
+
             // Save and restore outer module state
             var savedModule = globalThis.module;
             var savedExports = globalThis.exports;

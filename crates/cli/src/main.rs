@@ -1234,6 +1234,19 @@ enum Commands {
         #[arg(long = "allow-ffi", num_args = 0.., require_equals = true, value_delimiter = ',')]
         allow_ffi: Option<Vec<String>>,
 
+        /// Activate the Chrome DevTools Protocol (CDP) inspector.
+        /// Optional value: host:port (default 127.0.0.1:9229).
+        /// Connect with Chrome → chrome://inspect or any DAP-compatible IDE.
+        /// The `debugger;` statement will pause execution.
+        #[arg(
+            long = "inspect",
+            num_args = 0..=1,
+            require_equals = false,
+            default_missing_value = "127.0.0.1:9229",
+            value_name = "HOST:PORT"
+        )]
+        inspect: Option<String>,
+
         /// Write a JSON audit log to this file after execution
         #[arg(long = "audit-log")]
         audit_log: Option<PathBuf>,
@@ -1631,6 +1644,7 @@ async fn main() -> anyhow::Result<()> {
             allow_env,
             allow_child_process,
             allow_ffi,
+            inspect,
             audit_log,
             audit_level,
             script_args,
@@ -1659,13 +1673,22 @@ async fn main() -> anyhow::Result<()> {
             let permissions = Arc::new(permissions);
             info!("3va Runtime initialized securely.");
 
+            let inspect_addr = inspect.as_deref().map(|s| {
+                s.parse::<std::net::SocketAddr>().unwrap_or_else(|_| {
+                    eprintln!("[inspector] Invalid address '{s}', defaulting to 127.0.0.1:9229");
+                    "127.0.0.1:9229".parse().unwrap()
+                })
+            });
+
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext == "wasm" || ext == "wat" {
                 info!("Executing WebAssembly module...");
                 let engine = vvva_wasm::WasmEngine::new(permissions.clone())?;
                 engine.eval_file_with_args(file, script_args).await?;
             } else {
-                let engine = vvva_js::JsEngine::new(permissions.clone()).await?;
+                let engine =
+                    vvva_js::JsEngine::new_with_inspector(permissions.clone(), inspect_addr)
+                        .await?;
                 // Execute file (transpiles TypeScript automatically); event loop runs inside eval_file
                 engine.eval_file_with_args(file, script_args).await?;
             }

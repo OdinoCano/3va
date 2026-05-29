@@ -1,3 +1,5 @@
+//! Package manager — install, update, audit, and lockfile management for 3va projects.
+
 pub mod auditor;
 pub mod fetcher;
 pub mod lockfile;
@@ -99,13 +101,13 @@ impl PackageManager {
         }
     }
 
-    pub fn install(
+    pub async fn install(
         &mut self,
         deps: &HashMap<String, String>,
         project_name: &str,
         project_version: &str,
     ) -> anyhow::Result<Lockfile> {
-        let graph = self.resolver.resolve(deps);
+        let graph = self.resolver.resolve(deps).await;
         let lockfile = Lockfile::generate(&graph, project_name, project_version);
         tracing::info!("Resolved {} dependencies", graph.nodes().len());
         Ok(lockfile)
@@ -562,8 +564,46 @@ async fn install_with_transitive(
     Ok(())
 }
 
-pub fn audit_packages() -> anyhow::Result<bool> {
+fn collect_installed(node_modules: &Path) -> anyhow::Result<Vec<(String, String, Option<String>)>> {
     let lockfile_path = PathBuf::from("3va-lock.json");
+    if lockfile_path.exists() {
+        let lock = Lockfile::load(&lockfile_path)?;
+        return Ok(lock
+            .dependencies
+            .iter()
+            .map(|(name, dep)| (name.clone(), dep.version.clone(), dep.registry.clone()))
+            .collect());
+    }
+    let mut pkgs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(node_modules) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                if name.starts_with('@') {
+                    if let Ok(sub) = std::fs::read_dir(&path) {
+                        for sub_entry in sub.flatten() {
+                            pkgs.push((
+                                format!("{}/{}", name, sub_entry.file_name().to_string_lossy()),
+                                "unknown".to_string(),
+                                None,
+                            ));
+                        }
+                    }
+                } else {
+                    pkgs.push((name, "unknown".to_string(), None));
+                }
+            }
+        }
+    }
+    Ok(pkgs)
+}
+
+pub fn audit_packages() -> anyhow::Result<bool> {
     let node_modules = PathBuf::from("node_modules");
 
     if !node_modules.exists() {
@@ -573,41 +613,7 @@ pub fn audit_packages() -> anyhow::Result<bool> {
         anyhow::bail!("node_modules not found");
     }
 
-    let installed: Vec<(String, String, Option<String>)> = if lockfile_path.exists() {
-        let lock = Lockfile::load(&lockfile_path)?;
-        lock.dependencies
-            .iter()
-            .map(|(name, dep)| (name.clone(), dep.version.clone(), dep.registry.clone()))
-            .collect()
-    } else {
-        // Fall back to scanning all directories in node_modules/
-        let mut pkgs = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&node_modules) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    // Handle scoped packages (@scope/name)
-                    if name.starts_with('@') {
-                        if let Ok(sub) = std::fs::read_dir(&path) {
-                            for sub_entry in sub.flatten() {
-                                let sub_name =
-                                    format!("{}/{}", name, sub_entry.file_name().to_string_lossy());
-                                pkgs.push((sub_name, "unknown".to_string(), None));
-                            }
-                        }
-                    } else {
-                        pkgs.push((name, "unknown".to_string(), None));
-                    }
-                }
-            }
-        }
-        pkgs
-    };
+    let installed = collect_installed(&node_modules)?;
 
     if installed.is_empty() {
         println!("No packages to audit.");
@@ -735,45 +741,11 @@ pub fn audit_packages_silent() -> anyhow::Result<bool> {
         return Ok(true); // no packages → nothing malicious
     }
 
-    let lockfile_path = PathBuf::from("3va-lock.json");
-    let installed: Vec<(String, String)> = if lockfile_path.exists() {
-        let lock = Lockfile::load(&lockfile_path)?;
-        lock.dependencies
-            .iter()
-            .map(|(name, dep)| (name.clone(), dep.version.clone()))
-            .collect()
-    } else {
-        let mut pkgs = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&node_modules) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    if name.starts_with('@') {
-                        if let Ok(sub) = std::fs::read_dir(&path) {
-                            for sub_entry in sub.flatten() {
-                                pkgs.push((
-                                    format!("{}/{}", name, sub_entry.file_name().to_string_lossy()),
-                                    "unknown".to_string(),
-                                ));
-                            }
-                        }
-                    } else {
-                        pkgs.push((name, "unknown".to_string()));
-                    }
-                }
-            }
-        }
-        pkgs
-    };
+    let installed = collect_installed(&node_modules)?;
 
     let scanner = MalwareScanner::new();
     let mut any_critical = false;
-    for (pkg_name, _version) in &installed {
+    for (pkg_name, _version, _registry) in &installed {
         let pkg_dir = node_modules.join(pkg_name);
         if !pkg_dir.exists() {
             continue;
@@ -1269,7 +1241,7 @@ async fn install_package_impl(
 
     // Generate lockfile
     let mut pm = PackageManager::new(project_root.join(".3va-cache"));
-    let mut lockfile = pm.install(&deps, &project_name, &project_version)?;
+    let mut lockfile = pm.install(&deps, &project_name, &project_version).await?;
 
     let lockfile_path = project_root.join("3va-lock.json");
 

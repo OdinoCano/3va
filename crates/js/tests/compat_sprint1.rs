@@ -18,7 +18,6 @@ async fn engine() -> JsEngine {
         .unwrap()
 }
 
-#[allow(dead_code)]
 async fn eval_async_result(e: &JsEngine, setup: &str, var: &str) -> String {
     e.eval(setup).await.unwrap();
     for _ in 0..200 {

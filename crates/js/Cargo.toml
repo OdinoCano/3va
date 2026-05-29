@@ -96,7 +96,9 @@ rand = { workspace = true }
 pbkdf2 = { workspace = true }
 scrypt = { workspace = true }
 vvva_core = { path = "../core" }
+vvva_crypto = { path = "../crypto" }
 vvva_permissions = { path = "../permissions" }
+hex = "0.4"
 base64.workspace = true
 serde_json.workspace = true
 ureq.workspace = true

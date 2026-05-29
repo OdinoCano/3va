@@ -77,7 +77,7 @@ async fn net_server_accepts_connection() {
     });
 
     let response = tokio::select! {
-        _ = drive_forever(&e) => unreachable!(),
+        _ = drive_forever(&e) => unreachable!("engine event loop terminated unexpectedly"),
         r = task => r.unwrap(),
     };
 
@@ -121,7 +121,7 @@ async fn net_server_receives_data() {
     // The task completes only after the server reads data, fires 'data' callback,
     // and calls socket.end() — which means __received is already set.
     tokio::select! {
-        _ = drive_forever(&e) => unreachable!(),
+        _ = drive_forever(&e) => unreachable!("engine event loop terminated unexpectedly"),
         _ = task => {},
     }
 
@@ -161,7 +161,7 @@ async fn net_server_handles_multiple_connections() {
             buf
         });
         let resp = tokio::select! {
-            _ = drive_forever(&e) => unreachable!(),
+            _ = drive_forever(&e) => unreachable!("engine event loop terminated unexpectedly"),
             r = task => r.unwrap(),
         };
         responses.push(resp);

@@ -1,3 +1,18 @@
+//! Core runtime primitives — async task queue and timer management shared across crates.
+//!
+//! # Examples
+//!
+//! ```
+//! use vvva_core::Runtime;
+//! use vvva_permissions::PermissionState;
+//!
+//! let perms = PermissionState::new();
+//! let mut rt = Runtime::new(perms);
+//! let id = rt.set_timeout(std::time::Duration::from_millis(0), || {});
+//! assert!(rt.clear_timeout(id));
+//! assert_eq!(rt.pending_task_count(), 0);
+//! ```
+
 pub mod task_queue;
 pub mod timer;
 

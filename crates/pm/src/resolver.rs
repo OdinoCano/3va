@@ -84,89 +84,139 @@ impl DependencyGraph {
 }
 
 pub struct Resolver {
-    _registry_url: String,
+    registry_url: String,
     cache: HashMap<String, Vec<DependencyNode>>,
+    client: reqwest::Client,
 }
 
 impl Resolver {
     pub fn new(registry_url: &str) -> Self {
         Self {
-            _registry_url: registry_url.to_string(),
+            registry_url: registry_url.to_string(),
             cache: HashMap::new(),
+            client: reqwest::Client::new(),
         }
     }
 
-    pub fn resolve(&mut self, deps: &HashMap<String, String>) -> DependencyGraph {
+    pub async fn resolve(&mut self, deps: &HashMap<String, String>) -> DependencyGraph {
         let mut graph = DependencyGraph::new();
 
-        for (name, version) in deps {
-            self.resolve_dep(&mut graph, name, version);
+        let mut stack: Vec<(String, String)> =
+            deps.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+        while let Some((name, version)) = stack.pop() {
+            if graph.resolved_versions.contains_key(&name) {
+                continue;
+            }
+
+            if let Some(node) = self.fetch_metadata(&name, &version).await {
+                graph.add_node(node.clone());
+                graph
+                    .resolved_versions
+                    .insert(name.clone(), node.version.clone());
+
+                for (dep_name, dep_version) in &node.dependencies {
+                    stack.push((dep_name.clone(), dep_version.clone()));
+                }
+            }
         }
 
         self.resolve_conflicts(&mut graph);
         graph
     }
 
-    fn resolve_dep(&mut self, graph: &mut DependencyGraph, name: &str, version: &str) {
-        let _key = name.to_string();
-
-        if graph.resolved_versions.contains_key(name) {
-            return;
-        }
-
-        let node = self.fetch_metadata(name, version);
-
-        if let Some(n) = node {
-            graph.add_node(n.clone());
-            graph
-                .resolved_versions
-                .insert(name.to_string(), n.version.clone());
-
-            for (dep_name, dep_version) in &n.dependencies {
-                self.resolve_dep(graph, dep_name, dep_version);
-            }
-        }
-    }
-
-    fn fetch_metadata(&mut self, name: &str, version: &str) -> Option<DependencyNode> {
+    async fn fetch_metadata(&mut self, name: &str, version: &str) -> Option<DependencyNode> {
         let key = name.to_string();
 
-        if let Some(cached) = self.cache.get(&key) {
-            for node in cached {
-                if let Some(v) = Semver::parse(&node.version)
-                    && let Some(r) = SemverRange::parse(version)
-                    && r.matches(&v)
-                {
-                    return Some(node.clone());
+        if let Some(cached) = self.cache.get(&key)
+            && let Some(best) = Self::find_best_match(cached, version)
+        {
+            return Some(best.clone());
+        }
+
+        let url = format!("{}/{}", self.registry_url, name);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Accept", "application/json")
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+            .ok()?;
+
+        if !resp.status().is_success() {
+            return None;
+        }
+
+        let data: serde_json::Value = resp.json().await.ok()?;
+
+        let mut nodes: Vec<DependencyNode> = Vec::new();
+        if let Some(versions) = data["versions"].as_object() {
+            for (ver, meta) in versions {
+                let mut node = DependencyNode::new(name.to_string(), ver.clone());
+
+                node.resolved = meta["dist"]["tarball"].as_str().map(|s| s.to_string());
+                node.integrity = meta["dist"]["integrity"].as_str().map(|s| s.to_string());
+
+                if let Some(deps) = meta["dependencies"].as_object() {
+                    for (dep_name, dep_ver) in deps {
+                        if let Some(dv) = dep_ver.as_str() {
+                            node.dependencies.insert(dep_name.clone(), dv.to_string());
+                        }
+                    }
                 }
+
+                if let Some(dev_deps) = meta["devDependencies"].as_object() {
+                    for (dep_name, dep_ver) in dev_deps {
+                        if let Some(dv) = dep_ver.as_str() {
+                            node.dev_dependencies
+                                .insert(dep_name.clone(), dv.to_string());
+                        }
+                    }
+                }
+
+                if let Some(peer_deps) = meta["peerDependencies"].as_object() {
+                    for (dep_name, dep_ver) in peer_deps {
+                        if let Some(dv) = dep_ver.as_str() {
+                            node.peer_dependencies
+                                .insert(dep_name.clone(), dv.to_string());
+                        }
+                    }
+                }
+
+                nodes.push(node);
             }
         }
 
-        let mut node = DependencyNode::new(name.to_string(), version.to_string());
+        if nodes.is_empty() {
+            return None;
+        }
 
-        node.dependencies = match name {
-            "lodash" => [("lodash".to_string(), "^4.17.21".to_string())]
-                .into_iter()
-                .collect(),
-            "express" => [
-                ("accepts".to_string(), "^1.3.7".to_string()),
-                ("body-parser".to_string(), "^1.20.2".to_string()),
-                ("express".to_string(), "4.18.2".to_string()),
-            ]
+        self.cache.entry(key).or_default().extend(nodes);
+
+        let cached = self.cache.get(name)?;
+        Self::find_best_match(cached, version).cloned()
+    }
+
+    fn find_best_match<'a>(
+        nodes: &'a [DependencyNode],
+        version: &str,
+    ) -> Option<&'a DependencyNode> {
+        let range = SemverRange::parse(version)?;
+
+        let candidates: Vec<&DependencyNode> = nodes
+            .iter()
+            .filter(|n| {
+                if let Some(v) = Semver::parse(&n.version) {
+                    return range.matches(&v);
+                }
+                false
+            })
+            .collect();
+
+        candidates
             .into_iter()
-            .collect(),
-            "axios" => [
-                ("follow-redirects".to_string(), "^1.15.0".to_string()),
-                ("proxy-from-env".to_string(), "^1.1.0".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            _ => HashMap::new(),
-        };
-
-        self.cache.entry(key).or_default().push(node.clone());
-
-        Some(node)
+            .max_by(|a, b| Semver::parse(&a.version).cmp(&Semver::parse(&b.version)))
     }
 
     fn resolve_conflicts(&self, _graph: &mut DependencyGraph) {}
@@ -187,19 +237,30 @@ mod tests {
     }
 
     #[test]
-    fn test_resolver() {
-        let mut resolver = Resolver::new("https://registry.npmjs.org");
+    fn test_resolve_version() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node(DependencyNode::new(
+            "lodash".to_string(),
+            "4.17.21".to_string(),
+        ));
+        graph.add_node(DependencyNode::new(
+            "lodash".to_string(),
+            "4.17.20".to_string(),
+        ));
 
-        let deps: std::collections::HashMap<String, String> = [
-            ("lodash".to_string(), "^4.17.21".to_string()),
-            ("axios".to_string(), "^1.0.0".to_string()),
-        ]
-        .into_iter()
-        .collect();
+        let v = graph.resolve_version("lodash", "^4.17.0");
+        assert_eq!(v, Some("4.17.21".to_string()));
+    }
 
-        let graph = resolver.resolve(&deps);
+    #[test]
+    fn test_resolve_version_no_match() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node(DependencyNode::new(
+            "lodash".to_string(),
+            "3.10.1".to_string(),
+        ));
 
-        assert!(graph.resolved_versions.contains_key("lodash"));
-        assert!(graph.resolved_versions.contains_key("axios"));
+        let v = graph.resolve_version("lodash", "^4.0.0");
+        assert_eq!(v, None);
     }
 }

@@ -105,7 +105,7 @@ async fn drive_forever(e: &JsEngine) -> ! {
 async fn drive_until<T>(e: &JsEngine, client: impl std::future::Future<Output = T>) -> T {
     tokio::pin!(client);
     tokio::select! {
-        _ = drive_forever(e) => unreachable!(),
+        _ = drive_forever(e) => unreachable!("engine event loop terminated unexpectedly"),
         result = &mut client => result,
     }
 }

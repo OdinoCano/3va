@@ -1,9 +1,27 @@
+//! JavaScript engine crate — wraps QuickJS via rquickjs, exposes `JsEngine` and all built-in modules.
+//!
+//! # Examples
+//!
+//! ```rust,no_run
+//! # tokio_test::block_on(async {
+//! use std::sync::Arc;
+//! use vvva_permissions::PermissionState;
+//! use vvva_js::JsEngine;
+//!
+//! let perms = Arc::new(PermissionState::new());
+//! let engine = JsEngine::new(perms).await.unwrap();
+//! engine.eval("const x = 1 + 1; console.log(x);").await.unwrap();
+//! # });
+//! ```
+
 pub mod async_context;
 pub mod builtins;
 pub mod esm;
+pub mod inspector;
 pub mod transpiler;
 
-use rquickjs::{AsyncContext, AsyncRuntime, Module};
+use rquickjs::{AsyncContext, AsyncRuntime, Function, Module};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use vvva_core::Runtime;
@@ -44,16 +62,24 @@ fn is_esm_source(code: &str) -> bool {
 }
 
 pub struct JsEngine {
-    #[allow(dead_code)]
     runtime: AsyncRuntime,
     context: AsyncContext,
     _permissions: Arc<PermissionState>,
     timer_manager: Arc<TimerManager>,
     runtime_core: Mutex<Runtime>,
+    inspector: Option<Arc<inspector::InspectorState>>,
 }
 
 impl JsEngine {
     pub async fn new(permissions: Arc<PermissionState>) -> anyhow::Result<Self> {
+        Self::new_with_inspector(permissions, None).await
+    }
+
+    /// Create a `JsEngine` with an optional CDP inspector bound to `inspect_addr`.
+    pub async fn new_with_inspector(
+        permissions: Arc<PermissionState>,
+        inspect_addr: Option<SocketAddr>,
+    ) -> anyhow::Result<Self> {
         let runtime = AsyncRuntime::new()?;
         let timer_manager = TimerManager::new();
         let runtime_core = Mutex::new(Runtime::new((*permissions).clone()));
@@ -74,11 +100,15 @@ impl JsEngine {
 
         let context = AsyncContext::full(&runtime).await?;
 
+        // Start the CDP inspector server if requested.
+        let inspector = inspect_addr.map(inspector::start);
+
         {
             let perms = permissions.clone();
             let tm = timer_manager.clone();
+            let insp = inspector.clone();
             context
-                .with(|ctx: rquickjs::Ctx| {
+                .with(move |ctx: rquickjs::Ctx| {
                     // Install async context hook FIRST — must be wired before any
                     // Promises are created so continuations capture context IDs.
                     let rt_ptr = ctx.as_raw().as_ptr();
@@ -87,6 +117,16 @@ impl JsEngine {
                     unsafe { async_context::install(&ctx, rt_ptr) }?;
 
                     builtins::inject_all(&ctx, perms, tm)?;
+
+                    // Inject __3va_debugger__ if inspector is active.
+                    if let Some(state) = insp {
+                        let f = Function::new(ctx.clone(), move || {
+                            let s = state.clone();
+                            tokio::task::block_in_place(move || s.pause());
+                        })?;
+                        ctx.globals().set("__3va_debugger__", f)?;
+                    }
+
                     Ok::<(), rquickjs::Error>(())
                 })
                 .await?;
@@ -98,6 +138,7 @@ impl JsEngine {
             _permissions: permissions,
             timer_manager,
             runtime_core,
+            inspector,
         })
     }
 
@@ -162,7 +203,7 @@ impl JsEngine {
         let source = std::fs::read_to_string(path)?;
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let code = match ext {
+        let transpiled = match ext {
             "tsx" | "jsx" => transpiler::transpile_jsx(&source),
             "ts" | "mts" | "cts" => transpiler::transpile(&source),
             _ => {
@@ -173,6 +214,13 @@ impl JsEngine {
                     source
                 }
             }
+        };
+
+        // Rewrite `debugger;` → `__3va_debugger__();` when inspector is active.
+        let code = if self.inspector.is_some() {
+            inspector::rewrite_debugger_statements(&transpiled).into_owned()
+        } else {
+            transpiled
         };
 
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());

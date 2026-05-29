@@ -86,7 +86,6 @@ pub enum SemverRange {
     Exact(Semver),
     Caret(Semver),
     Tilde(Semver),
-    Range(String),
     Gt(Semver),
     Gte(Semver),
     Lt(Semver),
@@ -145,19 +144,21 @@ impl SemverRange {
             SemverRange::Any => true,
             SemverRange::Exact(v) => version == v,
             SemverRange::Caret(base) => {
-                version.major == base.major && version >= base && version.major < base.major + 1
+                if base.major != 0 {
+                    version.major == base.major && version >= base
+                } else if base.minor != 0 {
+                    version.major == 0 && version.minor == base.minor && version >= base
+                } else {
+                    version.major == 0 && version.minor == 0 && version.patch == base.patch
+                }
             }
             SemverRange::Tilde(base) => {
-                version.major == base.major
-                    && version.minor == base.minor
-                    && version >= base
-                    && version.minor < base.minor + 1
+                version.major == base.major && version.minor == base.minor && version >= base
             }
             SemverRange::Gt(v) => version > v,
             SemverRange::Gte(v) => version >= v,
             SemverRange::Lt(v) => version < v,
             SemverRange::Lte(v) => version <= v,
-            SemverRange::Range(_) => true,
         }
     }
 }
@@ -190,10 +191,71 @@ mod tests {
     }
 
     #[test]
+    fn test_caret_range_zero_major() {
+        // ^0.2.3 → >=0.2.3 <0.3.0 (pin minor when major is 0)
+        let range = SemverRange::parse("^0.2.3").unwrap();
+        assert!(range.matches(&Semver::parse("0.2.3").unwrap()));
+        assert!(range.matches(&Semver::parse("0.2.9").unwrap()));
+        assert!(!range.matches(&Semver::parse("0.3.0").unwrap()));
+        assert!(!range.matches(&Semver::parse("1.0.0").unwrap()));
+    }
+
+    #[test]
+    fn test_caret_range_zero_minor() {
+        // ^0.0.3 → =0.0.3 (exact when both major and minor are 0)
+        let range = SemverRange::parse("^0.0.3").unwrap();
+        assert!(range.matches(&Semver::parse("0.0.3").unwrap()));
+        assert!(!range.matches(&Semver::parse("0.0.4").unwrap()));
+        assert!(!range.matches(&Semver::parse("0.1.0").unwrap()));
+    }
+
+    #[test]
     fn test_tilde_range() {
         let range = SemverRange::parse("~1.2.0").unwrap();
         assert!(range.matches(&Semver::parse("1.2.3").unwrap()));
         assert!(range.matches(&Semver::parse("1.2.0").unwrap()));
         assert!(!range.matches(&Semver::parse("1.3.0").unwrap()));
+        assert!(!range.matches(&Semver::parse("2.2.0").unwrap()));
+    }
+
+    #[test]
+    fn test_comparison_ranges() {
+        assert!(
+            SemverRange::parse(">1.0.0")
+                .unwrap()
+                .matches(&Semver::parse("1.0.1").unwrap())
+        );
+        assert!(
+            !SemverRange::parse(">1.0.0")
+                .unwrap()
+                .matches(&Semver::parse("1.0.0").unwrap())
+        );
+        assert!(
+            SemverRange::parse(">=1.0.0")
+                .unwrap()
+                .matches(&Semver::parse("1.0.0").unwrap())
+        );
+        assert!(
+            SemverRange::parse("<2.0.0")
+                .unwrap()
+                .matches(&Semver::parse("1.9.9").unwrap())
+        );
+        assert!(
+            !SemverRange::parse("<2.0.0")
+                .unwrap()
+                .matches(&Semver::parse("2.0.0").unwrap())
+        );
+        assert!(
+            SemverRange::parse("<=2.0.0")
+                .unwrap()
+                .matches(&Semver::parse("2.0.0").unwrap())
+        );
+    }
+
+    #[test]
+    fn test_wildcard_any() {
+        let range = SemverRange::parse("*").unwrap();
+        assert!(range.matches(&Semver::parse("0.0.1").unwrap()));
+        assert!(range.matches(&Semver::parse("99.99.99").unwrap()));
     }
 }

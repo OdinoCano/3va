@@ -192,7 +192,7 @@ async fn audit_no_lockfile_no_node_modules_returns_error() {
     assert!(result.is_err(), "debe fallar sin lockfile ni node_modules");
     let msg = match result {
         Err(e) => format!("{e}"),
-        Ok(_) => unreachable!(),
+        Ok(_) => unreachable!("expected Err from audit without lockfile or node_modules"),
     };
     assert!(
         msg.contains("3va-lock.json") || msg.contains("node_modules"),
