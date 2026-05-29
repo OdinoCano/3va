@@ -203,7 +203,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                         file.seek(SeekFrom::Start(pos as u64))
                             .map_err(|e| js_err(&ctx, e.to_string()))?;
                     }
-                    let mut buf = vec![0u8; length];
+                    let mut buf = vec![0u8; length.min(65536)];
                     let n = file
                         .read(&mut buf)
                         .map_err(|e| js_err(&ctx, e.to_string()))?;

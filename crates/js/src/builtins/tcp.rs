@@ -445,6 +445,13 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                     tls.read_exact(&mut ct_len_buf)
                         .map_err(|e| js_err(&ctx, format!("PQ TLS recv ct len: {e}")))?;
                     let ct_len = u32::from_be_bytes(ct_len_buf) as usize;
+                    // ML-KEM-768 ciphertext is always exactly 1088 bytes.
+                    if ct_len != 1088 {
+                        return Err(js_err(
+                            &ctx,
+                            format!("PQ TLS: invalid ciphertext length {ct_len}"),
+                        ));
+                    }
                     let mut ct_bytes = vec![0u8; ct_len];
                     tls.read_exact(&mut ct_bytes)
                         .map_err(|e| js_err(&ctx, format!("PQ TLS recv ct: {e}")))?;

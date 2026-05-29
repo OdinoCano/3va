@@ -285,6 +285,7 @@ async fn do_pbkdf2(
     keylen: usize,
     digest: String,
 ) -> anyhow::Result<Vec<u8>> {
+    let keylen = keylen.min(64 * 1024);
     tokio::task::spawn_blocking(move || {
         let mut out = vec![0u8; keylen];
         match norm_alg(&digest).as_str() {
@@ -308,6 +309,7 @@ async fn do_scrypt(
     p: u32,
     keylen: usize,
 ) -> anyhow::Result<Vec<u8>> {
+    let keylen = keylen.min(64 * 1024);
     tokio::task::spawn_blocking(move || {
         if n == 0 || (n & (n - 1)) != 0 {
             return Err(anyhow::anyhow!(
