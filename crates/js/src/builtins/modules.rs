@@ -83,6 +83,27 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     // These are looked up before any file resolution, so require('util') etc. always work.
     ctx.eval::<(), _>(r#"
         (function() {
+            // ── Error.captureStackTrace polyfill (V8 API, used by depd, express, etc.) ─
+            if (typeof Error.captureStackTrace === 'undefined') {
+                function mockCallsite() {
+                    return {
+                        getFileName: function() { return ''; },
+                        getLineNumber: function() { return 0; },
+                        getColumnNumber: function() { return 0; },
+                        isEval: function() { return false; },
+                        getThis: function() { return null; },
+                        getTypeName: function() { return 'Object'; },
+                        getFunctionName: function() { return ''; },
+                        getMethodName: function() { return ''; },
+                        toString: function() { return ''; }
+                    };
+                }
+                Error.captureStackTrace = function(obj) {
+                    obj.stack = [mockCallsite(), mockCallsite(), mockCallsite()];
+                };
+                Error.stackTraceLimit = 10;
+            }
+
             // ── util ──────────────────────────────────────────────────────────────
             var util = {
                 inherits: function(ctor, superCtor) {
@@ -4049,6 +4070,14 @@ fn resolve_node_module_entry(pkg_dir: &Path) -> PathBuf {
             }
         }
     }
-    // Fallback: index.js / index.ts
-    resolve_file_path(pkg_dir)
+    // Fallback: index.js / index.ts (direct check to avoid recursion with resolve_file_path)
+    let idx = pkg_dir.join("index.js");
+    if idx.is_file() {
+        return idx;
+    }
+    let idx_ts = pkg_dir.join("index.ts");
+    if idx_ts.is_file() {
+        return idx_ts;
+    }
+    pkg_dir.to_path_buf()
 }
