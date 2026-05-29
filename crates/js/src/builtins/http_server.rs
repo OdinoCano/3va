@@ -94,7 +94,7 @@ async fn parse_request(
             let name = trimmed[..colon].trim().to_lowercase();
             let value = trimmed[colon + 1..].trim().to_string();
             if name == "content-length" {
-                content_length = value.parse().unwrap_or(0);
+                content_length = value.parse::<usize>().unwrap_or(0).min(100 * 1024 * 1024);
             }
             headers.push((name, value));
         }

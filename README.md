@@ -90,9 +90,51 @@ Run a JavaScript or TypeScript file inside a sandboxed environment.
 | `--allow-net[=<host>]` | Grant network access (optionally scoped to a host) |
 | `--allow-env[=<var>]` | Grant environment variable access (optionally scoped) |
 | `--allow-child-process` | Allow spawning child processes |
+| `--allow-ffi[=<path>]` | Allow loading native `.node` addons (NAPI); optionally scoped to a path |
+| `--inspect[=<host:port>]` | Enable Chrome DevTools Protocol debugger (default: `127.0.0.1:9229`) |
 | `--interactive` | Start an interactive session after running the file |
 
 All permissions are deny-by-default. Omitting a flag means the capability is blocked.
+
+#### Debugging with `--inspect`
+
+Start the script with the inspector enabled and connect from Chrome or any DAP-compatible IDE:
+
+```bash
+3va run app.ts --inspect
+# or on a custom address:
+3va run app.ts --inspect=0.0.0.0:9230
+```
+
+1. Open **`chrome://inspect`** in Chrome and click *Open dedicated DevTools for Node*.
+2. The `debugger;` statement pauses execution and sends a `Debugger.paused` CDP event.
+
+#### Native addons (NAPI)
+
+3va can load `.node` native addons compiled against the NAPI v8 ABI. Requires `--allow-ffi`:
+
+```bash
+3va run app.ts --allow-ffi=./build/Release/addon.node
+```
+
+Inside the script, use the standard `require` path:
+
+```js
+const addon = require('./build/Release/addon.node');
+```
+
+#### Post-quantum TLS (`require('net').pqTlsConnect`)
+
+Establish a classical TLS connection with an additional ML-KEM-768 key exchange on top, producing a hybrid shared secret:
+
+```js
+import net from 'net';
+
+const { connId, pqSharedSecret } = await net.pqTlsConnect('example.com', 443);
+// pqSharedSecret is a hex-encoded 32-byte shared secret derived via ML-KEM-768
+```
+
+The function requires `--allow-net=<host>`. The shared secret can be used as key material for symmetric encryption.
 
 ---
 
