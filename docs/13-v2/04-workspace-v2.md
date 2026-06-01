@@ -116,6 +116,17 @@ Each package can declare the permissions it requires in `package.json`. The work
 
 When running `3va workspace run build`, each package's script runs with only the permissions declared in its `package.json#3va.permissions`. This prevents a compromised package script from accessing resources outside its declared scope, even if the workspace root was started with broader permissions.
 
+### 4.6.1 Path Resolution Rules
+
+Relative paths declared inside `3va.permissions` (such as `"./config"` or `"../shared"`) are resolved **relative to the package's individual directory** (e.g. `/projects/monorepo/packages/api/config`), rather than the workspace root. This maintains absolute local containment.
+
+### 4.6.2 Hoisted Module Resolution
+
+The module loader (both `EsmResolver` and CommonJS) is updated in Workspace v2 to walk up the directory tree to search for dependencies:
+1. Search local `node_modules` under the current package subdirectory (resolves local dependency conflicts).
+2. Walk up to search the parent `/node_modules` (resolves hoisted/shared dependencies).
+3. If not found, continue walking up to the filesystem root.
+
 ---
 
 ## 4.7 `3va workspace info` (enhanced)

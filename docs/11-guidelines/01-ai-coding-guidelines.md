@@ -53,35 +53,38 @@ The AI MUST verify that any API it references, documents, or generates actually 
 |--------|--------|--------|
 | `console` | **Real** — full implementation | `builtins/console.rs` |
 | `fs` | **Real** — permission-gated; full sync+async+promises+streams API | `builtins/fs.rs` |
-| `Buffer` | **Real** | `builtins/buffer.rs` |
-| `process` | **Real** | `builtins/process.rs` |
+| `Buffer` | **Real** — prototype-swapped subclass of `Uint8Array` | `builtins/buffer.rs` |
+| `process` | **Real** — full API including memoryUsage, cpuUsage, and signals | `builtins/process.rs` |
 | `fetch` | **Real** — accepts `Request` or URL string, returns `Response` | `builtins/fetch.rs` |
 | `Request` / `Response` / `Headers` | **Real** — full WinterCG-compatible classes | `builtins/modules.rs` |
 | `WebSocket` | **Real** — requires `--allow-net` | `builtins/websocket.rs` |
 | `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` | **Real** | `builtins/timers.rs` |
-| `zlib` | **Real** — async only (gzip, gunzip, deflate, inflate, deflateRaw, inflateRaw) | `builtins/zlib.rs` + `flate2` |
-| `child_process` | **Real** — `exec`, `spawn`, `execFile`; requires `--allow-child-process` | `builtins/child_process.rs` |
+| `zlib` | **Real** — sync + async + Transform streams (gzip, gunzip, deflate, inflate, deflateRaw, inflateRaw, etc.) | `builtins/zlib.rs` + `flate2` |
+| `child_process` | **Real** — sync + async (exec, spawn, execFile, execSync, spawnSync); requires `--allow-child-process` | `builtins/child_process.rs` |
 | `http` / `https` — client | **Real** — `request()`, `get()` backed by `__fetchAsync` | `builtins/modules.rs` |
 | `http.createServer()` | **Real** — real Tokio TCP listener, HTTP/1.1 parser; requires `--allow-net` | `builtins/http_server.rs` |
 | `net.createServer()` | **Real** — raw TCP server via `__netListen`/`__netAcceptAsync`; requires `--allow-net` | `builtins/tcp.rs` |
 | `net.connect()` / `Socket` | **Real** — `TcpStream`-backed; requires `--allow-net` | `builtins/tcp.rs` |
 | `tls.connect()` / `TlsSocket` | **Real** — `TlsStream` via `native-tls`; requires `--allow-net` | `builtins/tcp.rs` |
-| `crypto.subtle` | **Real** — digest, generateKey, importKey, exportKey, sign/verify, encrypt/decrypt, deriveBits/deriveKey | `builtins/crypto.rs` |
+| `crypto.subtle` / `crypto.webcrypto` | **Real** — digest, generateKey, importKey, exportKey, sign/verify, encrypt/decrypt, deriveBits/deriveKey | `builtins/crypto.rs` |
 | `crypto.getRandomValues` | **Real** — CSPRNG backed by Rust `rand::RngCore` | `builtins/crypto.rs` |
 | `crypto.randomBytes(n)` | **Real** — CSPRNG, returns `Buffer`; **not** `Math.random()` | `builtins/crypto.rs` |
 | `crypto.randomUUID()` | **Real** — CSPRNG UUID v4 | `builtins/crypto.rs` |
 | `crypto.createHash(alg)` | **Real** — SHA-1/256/384/512; `.update(data)` / `.digest(enc)` returns a `Promise` | `builtins/crypto.rs` |
 | `crypto.createHmac(alg, key)` | **Real** — HMAC-SHA variants; `.update(data)` / `.digest(enc)` returns a `Promise` | `builtins/crypto.rs` |
 | `crypto.timingSafeEqual(a, b)` | **Real** — constant-time comparison | `builtins/crypto.rs` |
-| `crypto.pbkdf2(...)` | **Real** — async PBKDF2 via `crypto.subtle` | `builtins/crypto.rs` |
-| `crypto.scrypt(password, salt, keylen, opts, cb)` | **Real** — async via `scrypt` crate | `builtins/crypto.rs` |
+| `crypto.pbkdf2(...)` / `pbkdf2Sync()` | **Real** — PBKDF2 KDF derivation (async and sync forms) | `builtins/crypto.rs` |
+| `crypto.scrypt(...)` / `scryptSync()` | **Real** — scrypt KDF derivation (async and sync forms) | `builtins/crypto.rs` |
+| `crypto.createCipheriv()` / `createDecipheriv()` | **Real** — AES-128-GCM and AES-256-GCM streaming encryption/decryption | `builtins/crypto.rs` |
+| `crypto.generateKeyPair()` / `generateKeyPairSync()` | **Real** — asymmetric RSA and EC key pair generation | `builtins/crypto.rs` |
+| `crypto.createPrivateKey()` / `createPublicKey()` / `createSecretKey()` | **Real** — imports PEM keys into compatible KeyObject wrappers | `builtins/crypto.rs` |
 | `http2` | **Partial stub** — client API backed by `__fetchAsync`; no real HTTP/2 framing | `builtins/modules.rs` |
-| `events` | **Real** — `EventEmitter` class | `builtins/modules.rs` |
+| `events` | **Real** — full `EventEmitter` class (prependListener, rawListeners, etc.) | `builtins/modules.rs` |
 | `stream` | **JS implementation** — `Readable`/`Writable`/`Transform` | `builtins/modules.rs` |
-| `path` | **Real** — full Node.js-compatible path utilities | `builtins/modules.rs` |
+| `path` | **Real** — full Node.js-compatible path utilities (relative, normalize, resolve, etc.) | `builtins/modules.rs` |
 | `url` | **Real** — `URL`, `URLSearchParams`; full parsing + iteration | `builtins/modules.rs` |
-| `util` | **Real** — `inherits`, `promisify`, `format`, etc. | `builtins/modules.rs` |
-| `os` | **Stub** — static hardcoded values for `platform`, `hostname` | `builtins/modules.rs` |
+| `util` | **Real** — `inherits`, `promisify`, `format`, `inspect` (circular refs), `parseArgs` (Node 18+) | `builtins/modules.rs` |
+| `os` | **Real** — system metrics (Linux: hostname, cpus, totalmem, freemem, uptime, platform/arch, constants) | `builtins/modules.rs` |
 | `structuredClone` | **Real** — JSON-based deep clone; throws `DataCloneError` for non-serializable | `builtins/modules.rs` |
 | `navigator` | **Real** — `userAgent`, `language`, `languages`, `onLine`, `hardwareConcurrency` | `builtins/modules.rs` |
 | `AbortController` / `AbortSignal` | **Real** — integrates with `fetch` via `Promise.race` | `builtins/modules.rs` |
@@ -89,6 +92,8 @@ The AI MUST verify that any API it references, documents, or generates actually 
 | `FormData` | **Real** — `append`, `set`, `get`, `getAll`, `delete`, `forEach`, iteration | `builtins/modules.rs` |
 | `ReadableStream` / `WritableStream` / `TransformStream` | **Real** — WinterCG pull model | `builtins/modules.rs` |
 | `FileReader` | **Real** — `readAsText`, `readAsDataURL`, `readAsArrayBuffer`, `abort` | `builtins/modules.rs` |
+| `ffi` (native libs) | **Real** — loads shared libraries via `dlopen`; requires `--allow-ffi=<path>` | `builtins/ffi.rs` |
+| `napi` (`.node` addons) | **Real** — ~30 NAPI v8 functions; `require('./addon.node')` delegates to `__napiRequire`; requires `--allow-ffi` | `builtins/napi.rs` |
 
 ### 2.2 APIs That THROW — Never Suggest These as Working
 
@@ -96,29 +101,15 @@ The following methods exist in the require cache but **throw at call time**. The
 
 | Call | Error thrown | Use instead |
 |------|-------------|-------------|
-| `child_process.execSync(cmd)` | `execSync is not available in 3va` | `exec()` with callback or `promisify` |
-| `child_process.spawnSync(cmd)` | `spawnSync is not available in 3va` | `spawn()` |
-| `zlib.gzipSync(buf)` | `gzipSync not available` | `zlib.gzip(buf, cb)` |
-| `zlib.gunzipSync(buf)` | `gunzipSync not available` | `zlib.gunzip(buf, cb)` |
-| `zlib.deflateSync(buf)` | `deflateSync not available` | `zlib.deflate(buf, cb)` |
-| `zlib.inflateSync(buf)` | `inflateSync not available` | `zlib.inflate(buf, cb)` |
 | `crypto.subtle.wrapKey()` | `wrapKey not implemented` (`NotSupportedError`) | use `exportKey` + encrypt manually |
 | `crypto.subtle.unwrapKey()` | `unwrapKey not implemented` (`NotSupportedError`) | use `importKey` + decrypt manually |
-| `crypto.pbkdf2Sync()` | `pbkdf2Sync: use async crypto.pbkdf2()` | `crypto.pbkdf2(...)` with callback |
-| `crypto.createCipheriv()` | `use crypto.subtle.encrypt() instead` | `crypto.subtle.encrypt` |
-| `crypto.createDecipheriv()` | `use crypto.subtle.decrypt() instead` | `crypto.subtle.decrypt` |
 | `fs.watch()` | returns stub EventEmitter that never fires | no alternative in sandbox |
 
 ### 2.3 APIs That Are Partial Stubs — Document Limitations
 
 | Call | Actual behavior |
 |------|----------------|
-| `zlib.createGzip()` | Returns `{}` — not a real Transform stream |
-| `zlib.createGunzip()` | Returns `{}` |
-| `zlib.createDeflate()` | Returns `{}` |
-| `zlib.createInflate()` | Returns `{}` |
 | `http2.connect()` | Client API only; backed by `__fetchAsync`, no real HTTP/2 framing |
-| `os.platform()` | Returns hardcoded `'linux'` |
 | `process.chdir()` | No-op stub; sandboxed runtime does not change working directory |
 | `fs.watch()` | Returns a stub EventEmitter; no inotify in sandbox |
 | `AbortController.abort()` | Races against `__fetchAsync` via `Promise.race`; cannot cancel in-flight I/O at socket level |
@@ -147,6 +138,7 @@ The following globals are implementation details injected by Rust builtins. The 
 - `__netListen`, `__netAcceptAsync`, `__netWrite`, `__netClose` — used by `net.createServer()`
 - `__tcpConnect`, `__tcpConnectTls`, `__tcpRead`, `__tcpWrite`, `__tcpClose` — used by `net.connect()` / `tls.connect()`
 - `__fsReadFileSync`, `__fsWriteFileSync`, `__fsStatSync`, `__fsMkdirSync`, etc. — used by `fs`
+- `__napiRequire(path)` — used by `require('./addon.node')` (NAPI loader); do not call directly
 
 ---
 
@@ -163,10 +155,11 @@ The AI must only reference flags that are defined in `crates/cli/src/main.rs` an
 | `--allow-net[=<host>]` | Network access (`Capability::Network(String)`) — fetch, WebSocket, http server, net |
 | `--allow-env[=VAR,...]` | `process.env` access; no value = all vars, with value = scoped vars only |
 | `--allow-child-process` | `child_process` exec/spawn (`Capability::SpawnProcess`) |
+| `--allow-ffi[=<path>]` | FFI / NAPI native library loading (`Capability::FFI(PathBuf)`); no value = all paths; required by `require('./addon.node')` |
 | `--allow-all` / `-A` | All permissions (dangerous) |
 | `--accessible` | Enable accessible output mode (EN 301 549) |
 
-**Flags that do NOT exist** (do not invent them): `--allow-ffi`, `--allow-hrtime`, `--allow-sys`, `--allow-plugin`, `--allow-run` (correct flag is `--allow-child-process`).
+**Flags that do NOT exist** (do not invent them): `--allow-hrtime`, `--allow-sys`, `--allow-plugin`, `--allow-run` (correct flag is `--allow-child-process`).
 
 ### 3.2 Permission Checks in Rust
 
@@ -230,7 +223,8 @@ The injection order in `crates/js/src/builtins/mod.rs` matters. The current orde
 
 ```
 console → timers → buffer → process → global alias → fetch → fs → tcp
-  → http_server → modules::inject_require → zlib → child_process → crypto
+  → http_server → modules::inject_require → websocket → zlib → child_process
+  → crypto → ffi → napi
 ```
 
 **Rule**: any builtin that overwrites a `modules.rs` stub must be called **after** `inject_require`. Builtins that provide primitives needed by the JS stubs (e.g. `http_server`, `tcp`) must be called **before** `inject_require`.

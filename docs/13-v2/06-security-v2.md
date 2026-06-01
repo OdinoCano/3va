@@ -8,13 +8,11 @@
 
 ### v2.0.0 resolution
 
-v2.0.0 will migrate RSA to one of the following (decision pending upstream fixes):
+v2.0.0 resolves the Marvin Attack advisory by migrating the RSA backend:
+- **Primary Path (Option A):** Upgrade to `rsa 0.10+` when the upstream fix for RUSTSEC-2023-0071 lands and the advisory is officially withdrawn. This is the preferred way as it preserves pure Rust dependencies.
+- **Fallback Path (Option B):** If no upstream fix is available before the release candidate, RSA operations will be delegated to `openssl` via `openssl-sys` (using a build-time feature flag `--features=openssl-crypto`).
 
-- **Option A:** Upgrade to `rsa 0.10+` once the upstream fix for RUSTSEC-2023-0071 lands and the advisory is withdrawn.
-- **Option B:** Delegate RSA operations to `openssl` via `openssl-sys` (constant-time guarantees by the OpenSSL maintainers) using a feature flag `--features=openssl-crypto`.
-- **Option C:** Restrict `createSign`/`createVerify`/`privateDecrypt` to ECDSA-only and remove RSA support entirely, offering ML-DSA-65 (post-quantum) as the long-term replacement.
-
-The chosen option will be documented in `SECURITY.md` before v2.0.0-rc.1.
+This decision and the chosen implementation path will be reflected in `SECURITY.md` before v2.0.0-rc.1.
 
 ---
 
@@ -111,3 +109,43 @@ pq.dsa.verify({ key: publicKey, data, signature })  // was: verify(key, data, si
 ```
 
 The old names (`generateKeypair`, positional `sign(key, data)`) are kept as deprecated aliases through v2.x and removed in v3.0.0.
+
+---
+
+## 6.6 Post-Quantum Web Crypto (`crypto.subtle`) Integration
+
+To align with emerging Web Crypto standards and facilitate PQ adoption in modern runtimes, v2.0.0 introduces experimental support for standard `crypto.subtle` operations utilizing post-quantum algorithms:
+
+### 6.6.1 Algorithm Identifiers
+
+We register two experimental algorithm names in the SubtleCrypto pipeline:
+- `ML-KEM-768`: Support for key generation and key encapsulation/decapsulation via `subtle.generateKey`, `subtle.importKey`/`subtle.exportKey` (raw/JWK), and `subtle.deriveBits` / `subtle.deriveKey`.
+- `ML-DSA-65`: Support for key generation, signing, and verification via `subtle.generateKey`, `subtle.sign`, and `subtle.verify`.
+
+### 6.6.2 Example Usage
+
+```js
+// Generate ML-DSA-65 signing keys
+const keyPair = await crypto.subtle.generateKey(
+  { name: 'ML-DSA-65' },
+  true,
+  ['sign', 'verify']
+);
+
+// Sign a message
+const signature = await crypto.subtle.sign(
+  { name: 'ML-DSA-65' },
+  keyPair.privateKey,
+  new TextEncoder().encode('message')
+);
+
+// Verify signature
+const isValid = await crypto.subtle.verify(
+  { name: 'ML-DSA-65' },
+  keyPair.publicKey,
+  signature,
+  new TextEncoder().encode('message')
+);
+```
+
+This experimental integration runs in parallel to the `crypto.pq` Node-style module and helps prepare 3va for upstream Web Crypto PQ standards.
