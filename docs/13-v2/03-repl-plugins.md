@@ -79,7 +79,9 @@ Saves REPL input history to `~/.3va/repl_history` (one entry per line, newest at
 
 ## 3.5 Permissions
 
-Plugins are loaded under the same sandbox as the REPL itself. A plugin cannot grant itself permissions beyond what was passed to `3va sandbox` on the command line. The `ctx.permissions.grantRead` / `ctx.permissions.grantNet` methods mirror the existing `.allow-read` / `.allow-net` dot-commands.
+Plugins are loaded under the same sandbox as the REPL itself. A plugin cannot grant itself permissions beyond what was passed to `3va sandbox` on the command line. The `ctx.permissions.grantRead` / `ctx.permissions.grantNet` methods mirror the existing `.allow-read` / `.allow-net` dot-commands. 
+
+To prevent silent sandbox escapes, any programmatic call to `ctx.permissions.grant*` that is not already covered by the CLI startup flags **must trigger the standard interactive TTY confirmation prompt** to the user. A plugin cannot silently acquire privileges.
 
 ---
 

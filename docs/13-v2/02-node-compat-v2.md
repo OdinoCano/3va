@@ -23,7 +23,9 @@ if (isMainThread) {
 
 **Implementation:** Each `Worker` spawns a new OS thread with its own `JsEngine` instance (QuickJS is not thread-safe; isolation is enforced). `MessageChannel` passes data via `serde_json` serialization over a `tokio::sync::mpsc` channel bridged across the thread boundary with `std::sync::mpsc`.
 
-**Permission model:** Workers inherit a read-only copy of the parent's `PermissionState`. The parent cannot grant new permissions to a worker after creation.
+**Shared Memory Limitation:** Since QuickJS runs in isolated OS threads with independent heaps, `SharedArrayBuffer` and `Atomics` (sharing raw memory directly between workers) are **not supported** and are declared a *Non-Goal* for v2.0.0. All data sharing must go through message passing.
+
+**Permission model:** Workers inherit a read-only copy of the parent's `PermissionState`. The parent cannot grant new permissions to a worker after creation. Optionally, a parent can restrict a worker further during instantiation by passing a restricted permission map in the `Worker` constructor option keys.
 
 ---
 
@@ -58,14 +60,20 @@ const addrs = await dnsPromises.resolve4('example.com');
 const { address } = await dnsPromises.lookup('example.com');
 ```
 
-Backed by `tokio::net::lookup_host`. Requires `--allow-net=<host>`.
+Requires `--allow-net=<host>`.
+
+**Implementation note:** `tokio::net::lookup_host` only performs forward A/AAAA resolution and is **not sufficient** to implement the full `dns` API. Methods that perform arbitrary DNS record queries (`resolve4`, `resolve6`, `resolveMx`, `resolveTxt`, `resolveSrv`, `reverse`, etc.) require a dedicated DNS resolver crate such as `hickory-dns` (formerly `trust-dns-resolver`). This must be added to `Cargo.toml` as a dependency before implementing those methods.
 
 ---
 
-### `globalThis.crypto` (Web Crypto / SubtleCrypto)
+### `globalThis.crypto` (Web Crypto / SubtleCrypto) — **already in v1.0.0**
+
+`globalThis.crypto` (with `.subtle`, `.getRandomValues`, and `.randomUUID`) is **already set in v1.0.0** by `builtins/crypto.rs`. It does not need to be re-implemented.
+
+v2.0.0 extends this global with post-quantum algorithm support via `crypto.subtle` (see [06-security-v2.md §6.6](06-security-v2.md)). The existing usage continues unchanged:
 
 ```js
-// Available as global — no require() needed
+// Available as global — no require() needed (v1.0.0+)
 const key = await crypto.subtle.generateKey(
   { name: 'AES-GCM', length: 256 },
   true,
@@ -78,7 +86,7 @@ const encrypted = await crypto.subtle.encrypt(
 );
 ```
 
-`globalThis.crypto.subtle` is backed by the existing `vvva_crypto` crate (AES-GCM, SHA-*, HMAC, ECDSA, ECDH). `crypto.getRandomValues` is already implemented in v1.0.0.
+`globalThis.crypto.subtle` is backed by the `vvva_crypto` crate (AES-GCM, SHA-*, HMAC, ECDSA, ECDH).
 
 ---
 
@@ -86,7 +94,7 @@ const encrypted = await crypto.subtle.encrypt(
 
 ```js
 const { ReadableStream, WritableStream, TransformStream } = require('stream/web');
-// Also available as globals (no require needed)
+// Also available as globals (no require needed — already true in v1.0.0)
 
 const readable = new ReadableStream({
   start(controller) {
@@ -96,7 +104,7 @@ const readable = new ReadableStream({
 });
 ```
 
-Pure-JS implementation injected via `modules.rs`, compatible with the Fetch API body streaming already implemented in v1.0.0.
+**Note:** `ReadableStream`, `WritableStream`, and `TransformStream` are **already available as globals in v1.0.0** (injected by `modules.rs`). What v2.0.0 adds is the `require('stream/web')` subpath, allowing destructured imports consistent with Node.js 16+ conventions. No new implementation is needed — only registering `'stream/web'` as an alias in the require cache pointing to the existing globals.
 
 ---
 
@@ -133,10 +141,9 @@ v1.0.0 has a partial readline. v2.0.0 completes:
 |--------|-----------|-----------|
 | `events` | Missing `EventEmitter.once` / `EventEmitter.on` static helpers (Node 16+) | Added |
 | `path` | Missing `path.toNamespacedPath` (Windows no-op on POSIX) | Added no-op |
-| `os` | `os.cpus()` returns empty array | Returns real CPU info via `sysinfo` crate |
+| `os` | `os.cpus()` returns placeholder objects (`model: 'Unknown', speed: 0`) | Returns real CPU info via `sysinfo` crate |
 | `fs` | `fs.cp` (recursive copy, Node 16+) missing | Implemented |
 | `http` | `http.globalAgent` not exposed | Exposed as `{ maxSockets: Infinity }` stub |
-| `crypto` | `crypto.generateKeyPair` (async callback form) missing | Implemented |
 
 ---
 

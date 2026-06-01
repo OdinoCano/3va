@@ -89,6 +89,14 @@ For each invocation:
 4. Merge config values as defaults into the CLI flag parser.
 5. CLI flags override all config values.
 
+### 5.4.1 Security Sandbox
+
+To prevent arbitrary code execution attacks (e.g. from malicious repositories or dependencies), the config file is loaded and evaluated inside a zero-privilege sandboxed JavaScript context:
+- No network access (`--allow-net` is ignored/denied during evaluation).
+- No filesystem write access.
+- Filesystem read access is restricted strictly to the config file path itself (no directory traversal or secret reading allowed).
+- No child process spawning (`child_process` and FFI are disabled).
+
 ---
 
 ## 5.5 Environment Variable Overrides

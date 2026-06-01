@@ -98,6 +98,8 @@
 - [04-workspace-v2.md](13-v2/04-workspace-v2.md) - Topological execution, affected mode, graph, hoisting
 - [05-config-file.md](13-v2/05-config-file.md) - `3va.config.ts` schema and loading order
 - [06-security-v2.md](13-v2/06-security-v2.md) - RUSTSEC-2023-0071 resolution, SLSA level 2, CSP, `pq` API alignment
+- [07-migration.md](13-v2/07-migration.md) - Migration tool CLI, codemods, and breaking changes transition
+- [08-testing-v2.md](13-v2/08-testing-v2.md) - Parallel test execution, mocking APIs, and CI reporting
 
 ## Changelog
 
