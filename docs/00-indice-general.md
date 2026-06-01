@@ -83,10 +83,21 @@
 
 ## Volume 12: Roadmap and LTS
 
-- [01-roadmap.md](12-roadmap/01-roadmap.md) - Development roadmap
+- [01-roadmap.md](12-roadmap/01-roadmap.md) - Development roadmap (updated for v1.0.0)
 - [02-lts-criteria.md](12-roadmap/02-lts-criteria.md) - LTS criteria
 - [03-release-process.md](12-roadmap/03-release-process.md) - Release process
 - [04-compatibility.md](12-roadmap/04-compatibility.md) - Backward compatibility
+- [05-v2-roadmap.md](12-roadmap/05-v2-roadmap.md) - v2.0.0 roadmap and feature goals
+
+## Volume 13: v2.0.0 Technical Specification
+
+- [00-overview.md](13-v2/00-overview.md) - v2.0.0 overview and compatibility promise
+- [01-profiler.md](13-v2/01-profiler.md) - CPU profiler, flamegraph, heap snapshot (`--prof`)
+- [02-node-compat-v2.md](13-v2/02-node-compat-v2.md) - New Node.js modules: `worker_threads`, `dgram`, `dns`, `webcrypto`, `stream/web`, `timers/promises`
+- [03-repl-plugins.md](13-v2/03-repl-plugins.md) - REPL plugin API and built-in plugins
+- [04-workspace-v2.md](13-v2/04-workspace-v2.md) - Topological execution, affected mode, graph, hoisting
+- [05-config-file.md](13-v2/05-config-file.md) - `3va.config.ts` schema and loading order
+- [06-security-v2.md](13-v2/06-security-v2.md) - RUSTSEC-2023-0071 resolution, SLSA level 2, CSP, `pq` API alignment
 
 ## Changelog
 
@@ -95,10 +106,10 @@
 ---
 
 **Document Identifier:** 3VA-SPEC-2026-001
-**Version:** 1.1.0
-**Date:** 2026-05-27
+**Version:** 2.0.0
+**Date:** 2026-06-01
 **Classification:** Public
-**Status:** Draft
+**Status:** v1.0.0 Released · v2.0.0 Draft
 
 ---
 

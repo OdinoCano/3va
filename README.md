@@ -123,18 +123,68 @@ Inside the script, use the standard `require` path:
 const addon = require('./build/Release/addon.node');
 ```
 
-#### Post-quantum TLS (`require('net').pqTlsConnect`)
+#### CPU Profiling (`--prof`)
+
+Collect a sampling CPU profile and optionally generate a flamegraph:
+
+```bash
+# Write a V8-compatible .cpuprofile (loadable in Chrome DevTools / speedscope.app)
+3va run app.ts --prof
+
+# Custom output path and sampling interval (default: 10 ms)
+3va run app.ts --prof --prof-out=my.cpuprofile --prof-interval=5
+
+# Also emit a flamegraph SVG
+3va run app.ts --prof --flamegraph=flame.svg
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--prof` | off | Enable CPU sampling profiler |
+| `--prof-out=<path>` | `profile.cpuprofile` | Output path for the CPU profile JSON |
+| `--prof-interval=<ms>` | `10` | Sampling interval in milliseconds |
+| `--flamegraph=<path>` | — | Also emit an Inferno-style SVG flamegraph |
+
+Inside a profiled script, use `console.profile` / `console.profileEnd` to annotate regions:
+
+```js
+console.profile('my-loop');
+for (let i = 0; i < 1_000_000; i++) { /* ... */ }
+console.profileEnd('my-loop');
+```
+
+**Note:** Sampling is performed via `setInterval` + `new Error().stack`. Tight CPU loops with no async yield points will appear as a single deep frame rather than individual function calls — this is a QuickJS constraint. I/O-bound and async programs profile accurately.
+
+---
+
+### `3va prof <file>`
+
+Analyze a `.cpuprofile` file and print a top-N function breakdown:
+
+```bash
+3va prof profile.cpuprofile
+3va prof profile.cpuprofile --top 10
+3va prof profile.cpuprofile --format=flamegraph --out=flame.svg
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--top <N>` | `20` | Number of hot functions to show |
+| `--format <fmt>` | `text` | Output format: `text` or `flamegraph` |
+| `--out <path>` | `flamegraph.svg` | SVG output path (only with `--format=flamegraph`) |
+
+---
+
+#### Post-quantum TLS (`__pqTlsConnect`)
 
 Establish a classical TLS connection with an additional ML-KEM-768 key exchange on top, producing a hybrid shared secret:
 
 ```js
-import net from 'net';
-
-const { connId, pqSharedSecret } = await net.pqTlsConnect('example.com', 443);
+const { connId, pqSharedSecret } = await __pqTlsConnect('example.com', 443);
 // pqSharedSecret is a hex-encoded 32-byte shared secret derived via ML-KEM-768
 ```
 
-The function requires `--allow-net=<host>`. The shared secret can be used as key material for symmetric encryption.
+`__pqTlsConnect` is a global function injected by the runtime — it is **not** a method on the `net` module. The function requires `--allow-net=<host>`. The shared secret can be used as key material for symmetric encryption.
 
 ---
 

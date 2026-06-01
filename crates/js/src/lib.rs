@@ -18,6 +18,7 @@ pub mod async_context;
 pub mod builtins;
 pub mod esm;
 pub mod inspector;
+pub mod profiler;
 pub mod transpiler;
 
 use rquickjs::{AsyncContext, AsyncRuntime, Function, Module};
@@ -28,6 +29,7 @@ use vvva_core::Runtime;
 use vvva_permissions::PermissionState;
 
 use builtins::TimerManager;
+use profiler::Profiler;
 
 /// Heuristic: detect ESM by scanning all lines for top-level import/export.
 /// Skips blank lines and single-line comments. Handles files where exports
@@ -68,6 +70,7 @@ pub struct JsEngine {
     timer_manager: Arc<TimerManager>,
     runtime_core: Mutex<Runtime>,
     inspector: Option<Arc<inspector::InspectorState>>,
+    profiler: Option<Profiler>,
 }
 
 impl JsEngine {
@@ -79,6 +82,24 @@ impl JsEngine {
     pub async fn new_with_inspector(
         permissions: Arc<PermissionState>,
         inspect_addr: Option<SocketAddr>,
+    ) -> anyhow::Result<Self> {
+        Self::new_full(permissions, inspect_addr, None).await
+    }
+
+    /// Create a `JsEngine` with CPU profiling enabled.
+    ///
+    /// `interval_ms` controls the sampling interval (default: 10 ms).
+    pub async fn new_with_profiler(
+        permissions: Arc<PermissionState>,
+        interval_ms: u32,
+    ) -> anyhow::Result<Self> {
+        Self::new_full(permissions, None, Some(interval_ms)).await
+    }
+
+    async fn new_full(
+        permissions: Arc<PermissionState>,
+        inspect_addr: Option<SocketAddr>,
+        prof_interval_ms: Option<u32>,
     ) -> anyhow::Result<Self> {
         let runtime = AsyncRuntime::new()?;
         let timer_manager = TimerManager::new();
@@ -103,10 +124,15 @@ impl JsEngine {
         // Start the CDP inspector server if requested.
         let inspector = inspect_addr.map(inspector::start);
 
+        // Allocate the profiler state so we can share it with the JS push callback.
+        let profiler = prof_interval_ms.map(|_| Profiler::new());
+
         {
             let perms = permissions.clone();
             let tm = timer_manager.clone();
             let insp = inspector.clone();
+            let prof_js = prof_interval_ms.map(profiler::profiler_js);
+            let prof_handle = profiler.clone();
             context
                 .with(move |ctx: rquickjs::Ctx| {
                     // Install async context hook FIRST — must be wired before any
@@ -127,6 +153,27 @@ impl JsEngine {
                         ctx.globals().set("__3va_debugger__", f)?;
                     }
 
+                    // Inject profiler JS bootstrap and the Rust-side push callback.
+                    if let (Some(js_src), Some(handle)) = (prof_js, prof_handle) {
+                        // __profilerPush(ts_ms, stack_str, label_or_null) → called by JS
+                        let push_handle = handle.clone();
+                        ctx.globals().set(
+                            "__profilerPush",
+                            Function::new(
+                                ctx.clone(),
+                                move |ts: u64, stack: String, label: rquickjs::Value| {
+                                    let lbl = if label.is_null() || label.is_undefined() {
+                                        None
+                                    } else {
+                                        label.as_string().and_then(|s| s.to_string().ok())
+                                    };
+                                    push_handle.push_raw(ts, &stack, lbl);
+                                },
+                            )?,
+                        )?;
+                        ctx.eval::<(), _>(js_src.as_str())?;
+                    }
+
                     Ok::<(), rquickjs::Error>(())
                 })
                 .await?;
@@ -139,6 +186,7 @@ impl JsEngine {
             timer_manager,
             runtime_core,
             inspector,
+            profiler,
         })
     }
 
@@ -332,6 +380,30 @@ impl JsEngine {
         }
 
         Ok(())
+    }
+
+    /// If profiling is active, stop the JS sampling interval and return the
+    /// accumulated `Profiler`. Returns `None` if `--prof` was not enabled.
+    pub async fn take_profiler(&self) -> Option<Profiler> {
+        if let Some(ref profiler) = self.profiler {
+            // Call __profilerStop() in JS to clear the setInterval.
+            let _ = self
+                .context
+                .with(|ctx| {
+                    let _: rquickjs::Value =
+                        ctx.eval("if (typeof __profilerStop === 'function') __profilerStop();")?;
+                    Ok::<(), rquickjs::Error>(())
+                })
+                .await;
+            Some(profiler.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Returns `true` if profiling is active on this engine.
+    pub fn is_profiling(&self) -> bool {
+        self.profiler.is_some()
     }
 }
 

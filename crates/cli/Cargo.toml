@@ -1,6 +1,6 @@
 [package]
 name = "vvva_cli"
-version = "0.1.0"
+version = "1.0.0"
 license = "MIT OR Apache-2.0"
 edition = "2021"
 
@@ -22,8 +22,8 @@ vvva_core = { path = "../core" }
 vvva_pm = { path = "../pm" }
 vvva_js = { path = "../js" }
 vvva_permissions = { path = "../permissions" }
-vvva_bundler = { version = "0.1.0", path = "../bundler" }
-vvva_test = { version = "0.1.0", path = "../test" }
+vvva_bundler = { version = "1.0.0", path = "../bundler" }
+vvva_test = { version = "1.0.0", path = "../test" }
 vvva_wasm = { path = "../wasm" }
 
 [dev-dependencies]

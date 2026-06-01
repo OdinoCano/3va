@@ -5,9 +5,48 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [1.0.0] — 2026-06-01
+
+### Added
+
+- **CDP Inspector (`--inspect`)** — WebSocket Chrome DevTools Protocol server. `debugger;` statements are rewritten to `__3va_debugger__()` at source-load time. Pause is implemented via `tokio::task::block_in_place` + `Condvar` so the Tokio runtime remains responsive. Connect with `chrome://inspect` or any DAP-compatible IDE.
+- **NAPI native module loading (`--allow-ffi`)** — ~30 NAPI v8 functions exposed as `unsafe extern "C"`. `.node` addons loaded via the standard `require('./addon.node')` path. Requires `--allow-ffi` permission.
+- **WebAssembly (WASM)** — WASI-preview1-compatible runtime via `wasmtime`. Supports `.wasm` and `.wat` files. Full permission integration (filesystem preopens, env vars scoped to granted capabilities).
+- **Post-quantum TLS (`__pqTlsConnect`)** — hybrid classical TLS + ML-KEM-768 key exchange. Returns `{ connId, pqSharedSecret }`. Non-blocking: runs inside `spawn_blocking`. Requires `--allow-net`.
+- **Post-quantum crypto JS API** — `require('crypto').pq.kem.{generateKeypair,encapsulate,decapsulate}` (ML-KEM-768) and `require('crypto').pq.dsa.{generateKeypair,sign,verify}` (ML-DSA-65).
+- **Fuzz targets in CI** — 3 fuzz targets built on nightly; 30 s smoke run in GitHub Actions.
+- **Doc-tests** — public API surfaces of `vvva_core`, `vvva_permissions`, `vvva_crypto`, and `vvva_js` now have doc-tests.
+- **`SECURITY.md`** — explicit acceptance rationale for RUSTSEC-2023-0071 (Marvin Attack); documents "before 1.0" review requirement.
+- **Process manager subcommands** — `start`, `stop`, `restart`, `status`, `logs`, `delete` for running scripts as managed background daemons.
+
+### Fixed
+
+- `__pqTlsConnect` was synchronous on the JS event loop (blocked all timers and I/O during TLS handshake). Now runs inside `spawn_blocking` and is registered as `Async`.
+- `SemverRange` silently rejected `"latest"`, `"1.x"`, `">=1.0.0 <2.0.0"` forms — added dist-tag, x-range, and compound-range support.
+- Dependency resolver produced non-deterministic lockfiles (HashMap iteration order). Resolution stack is now sorted alphabetically.
+- Version conflict in the resolver was silent — now emits a structured `tracing::warn!`.
+- `Content-Length` header forwarded to JS did not reflect the 100 MiB internal cap.
+
+### Changed
+
+- `rquickjs-core 0.6.2` vendored at `vendor/rquickjs-core/` with a one-line fix for the `never type fallback` future-incompatibility lint (Rust Edition 2024).
+- All crate versions bumped to `1.0.0`.
+
+---
+
 ## [Unreleased]
 
 ### Added
+
+- **CPU sampling profiler (`--prof`)** (`crates/js/src/profiler.rs`):
+  - `3va run app.ts --prof` — collects samples every `--prof-interval` ms (default 10) via `setInterval` + `new Error().stack`; writes V8-compatible `.cpuprofile` JSON.
+  - `--flamegraph=<path>` — also emits an Inferno-style SVG flamegraph using the `inferno` crate.
+  - `3va prof <file>` subcommand — post-hoc analysis: prints top-N hot functions by self% or re-generates a flamegraph from an existing `.cpuprofile`.
+  - `console.profile(label)` / `console.profileEnd(label)` — JS-side region markers, active when `--prof` is passed.
+  - `JsEngine::new_with_profiler(perms, interval_ms)` / `JsEngine::take_profiler()` — public Rust API.
+  - 7 unit tests: stack parser, location parser, folded-stacks aggregation, `.cpuprofile` JSON validity, `analyze_cpuprofile`, JS bootstrap interval embedding.
+
+
 
 - **`Buffer` como subclase real de `Uint8Array`** (`builtins/buffer.rs`):
   Reescrito usando el patrón *prototype swap*: el constructor devuelve un `Uint8Array` real con `Buffer.prototype` en su cadena. Esto garantiza:
