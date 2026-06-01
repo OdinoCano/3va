@@ -2,7 +2,9 @@
 
 ## 2.1 Resolution Algorithm
 
-3va's dependency resolver implements an npm-compatible algorithm to resolve the dependency tree.
+3va's dependency resolver implements an npm-compatible iterative algorithm that
+fetches package metadata from the npm registry and walks the full transitive
+dependency tree.  It is designed for correctness, determinism, and performance.
 
 ## 2.2 Resolution Process
 
@@ -10,240 +12,166 @@
 
 ```
 1. Parse project package.json
-2. Get package metadata from registry
-3. Resolve version conflicts
-4. Build dependency tree
-5. Verify lockfile
-6. Generate new lockfile if necessary
+2. Sort root dependencies alphabetically (determinism guarantee)
+3. For each package on the stack:
+   a. Skip if already resolved (with conflict warning on mismatch)
+   b. Hit in-memory metadata cache → queue transitive deps
+   c. Batch remaining uncached packages → fetch concurrently from registry
+4. Populate DependencyGraph with resolved nodes
+5. Generate lockfile from the resolved graph
 ```
 
 ### 2.2.2 Flow Diagram
 
 ```
 ┌──────────────┐
-│ package.json│
+│ package.json │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│   Parse    │
-│ dependencies│
+│ Sort & push  │  ← alphabetical order for determinism
+│ onto stack   │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────┐     cache hit
+│ Pop (name,   │────────────────► queue transitive deps (sorted)
+│  version)    │
+└──────┬───────┘
+       │ cache miss
+       ▼
+┌──────────────┐
+│ Batch fetch  │  ← parallel tokio::spawn per uncached package
+│ (concurrent) │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│   Query    │ ───► Fetch package metadata
-│   Registry  │       from npm registry
+│  Populate    │  ← find_best_match selects highest satisfying version
+│  graph cache │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│   Resolve  │ ───► Version matching algorithm
-│  Versions  │       (semver)
+│  Conflict    │  ← tracing::warn! when resolved version ≠ required range
+│  detection   │
 └──────┬───────┘
        │
        ▼
 ┌──────────────┐
-│   Detect   │ ───► peerDependencies conflicts
-│  Conflicts │       duplicates, mismatches
-└──────┬───────┘
-       │
-       ▼
-┌──────────────┐
-│  Build    │
-│   Tree     │
-└──────┬───────┘
-       │
-       ▼
-┌──────────────┐
-│  Compare   │ ───► If diff, regenerate lockfile
-│  lockfile   │
+│  Lockfile    │
+│  generation  │
 └──────────────┘
 ```
 
 ## 2.3 Version Matching
 
-### 2.3.1 Semver
+### 2.3.1 Supported Range Formats
+
+The `SemverRange` parser handles all common npm range forms:
+
+| Format | Example | Meaning |
+|--------|---------|---------|
+| Exact | `1.2.3`, `=1.2.3` | Exact version |
+| Caret | `^1.2.3` | Compatible: `>=1.2.3 <2.0.0` |
+| Caret (0.x) | `^0.2.3` | Pins minor: `>=0.2.3 <0.3.0` |
+| Caret (0.0.x) | `^0.0.3` | Exact patch: `=0.0.3` |
+| Tilde | `~1.2.3` | Patch-compatible: `>=1.2.3 <1.3.0` |
+| Comparators | `>1.0.0`, `>=1.0.0`, `<2.0.0`, `<=2.0.0` | Single bound |
+| Compound | `>=1.0.0 <2.0.0` | AND of two ranges |
+| Wildcard | `*`, `` (empty) | Any version |
+| X-range (major) | `1`, `1.x` | Same as `^1.0.0` |
+| X-range (minor) | `1.2`, `1.2.x` | Same as `~1.2.0` |
+| Dist-tags | `latest`, `next`, `beta` | Treated as `*` (any version) |
+
+### 2.3.2 Resolution Strategy
+
+`Resolver::find_best_match` selects the highest version that satisfies a range:
 
 ```rust
-// Soporte para versiones semver
-pub enum SemverMatch {
-    Exact(String),        // 1.0.0
-    Caret(String),        // ^1.0.0 -> >=1.0.0 <2.0.0
-    Tilde(String),       // ~1.0.0 -> >=1.0.0 <1.1.0
-    Range(String),       // >=1.0.0 <2.0.0
-    Gt(String),          // >1.0.0
-    Gte(String),         // >=1.0.0
-    Lt(String),          // <1.0.0
-    Lte(String),         // <=1.0.0
-}
+pub(crate) fn find_best_match<'a>(
+    nodes: &'a [DependencyNode],
+    version: &str,
+) -> Option<&'a DependencyNode>
 ```
 
-### 2.3.2 Resolution Algorithm
+- Parses `version` into a `SemverRange`; returns `None` for truly invalid strings
+  and logs a `tracing::warn!` for any node whose stored version string cannot be parsed
+- Picks the candidate with the highest parsed `Semver` (major → minor → patch →
+  pre-release ordering)
 
-```rust
-pub struct Resolver {
-    registry: RegistryClient,
-    cache: ResolutionCache,
-}
+### 2.3.3 Determinism
 
-impl Resolver {
-    pub fn resolve(&self, deps: &HashMap<String, String>) -> DependencyGraph {
-        let mut graph = DependencyGraph::new();
+Resolution order is deterministic across runs:
 
-        for (name, version) in deps {
-            // 1. Fetch package metadata
-            let metadata = self.registry.fetch(name, version);
+- The initial dependency stack is sorted **descending by name** before the first
+  pop, so `pop()` processes packages in ascending alphabetical order
+- Transitive dependencies are sorted the same way before being pushed onto the stack
+- `HashMap` iteration order is never relied upon for resolution outcome
 
-            // 2. Resolve version
-            let resolved = self.resolve_version(&metadata, version);
+This guarantees that the same `package.json` always produces the same
+`3va-lock.json` regardless of the runtime hash-map seed.
 
-            // 3. Add to graph
-            graph.add(name, resolved);
+### 2.3.4 Conflict Detection
 
-            // 4. Recursively resolve dependencies
-            if let Some(sub_deps) = resolved.dependencies {
-                for (sub_name, sub_version) in sub_deps {
-                    self.resolve_dep(&mut graph, &sub_name, &sub_version);
-                }
-            }
-        }
+When a package is already resolved and a new transitive constraint arrives that
+the resolved version does not satisfy, a structured warning is emitted:
 
-        // 5. Resolve conflicts
-        self.resolve_conflicts(&mut graph);
-
-        graph
-    }
-
-    fn resolve_conflicts(&self, graph: &mut DependencyGraph) {
-        // Detect and resolve version conflicts
-        // - Same package with different versions
-        // - peerDependencies conflicts
-    }
-}
+```
+WARN version conflict: resolved version does not satisfy this constraint
+  package=foo resolved=1.5.0 required=^2.0.0
 ```
 
-### 2.3.3 Conflict Handling
+Full backtracking is not performed; the first satisfying version wins.  The
+warning surfaces conflicts that would otherwise be silent.
 
-| Scenario | Strategy |
-|----------|----------|
-| A → B@1, C → B@2 | Use B@2 (dupes allowed) |
-| A → B@1, peer: B@2 | Resolve to compatible version |
-| A → C@1, B → C@1 | Optimize (dedupe) |
-| Circular | Resolve up to maximum depth |
+## 2.4 Parallel Package Fetching
 
-## 2.4 Package Fetch
+Uncached packages are fetched concurrently in batches:
 
-### 2.4.1 Download
-
-```rust
-pub struct PackageFetcher {
-    client: HttpClient,
-    cache: FileCache,
-    registry: String,
-}
-
-impl PackageFetcher {
-    pub async fn fetch(&self, package: &str, version: &str) -> anyhow::Result<Package> {
-        // 1. Check cache
-        if let Some(cached) = self.cache.get(package, version) {
-            return Ok(cached);
-        }
-
-        // 2. Download from registry
-        let tarball = self.client.download(&format!(
-            "{}/{}/-/{}-{}.tgz",
-            self.registry, package, package, version
-        )).await?;
-
-        // 3. Verify hash
-        let expected_hash = self.get_hash_from_metadata(package, version)?;
-        let actual_hash = sha256(&tarball);
-
-        if expected_hash != actual_hash {
-            anyhow::bail!("Hash mismatch for {}@{}", package, version);
-        }
-
-        // 4. Extract
-        let extracted = self.extract(tarball)?;
-
-        // 5. Cache
-        self.cache.put(package, version, &extracted);
-
-        Ok(extracted)
-    }
-}
 ```
+while stack is not empty:
+  if next package is in cache → use it
+  else:
+    collect all uncached packages from top of stack → batch
+    tokio::spawn one HTTP GET per batch item        → concurrent
+    await all handles
+    push batch back onto stack (now cached)
+```
+
+Each fetch uses a 20-second timeout.  Packages that return a non-2xx response
+or cannot be parsed are skipped with a `tracing::warn!`.
 
 ## 2.5 Lockfile
 
-### 2.5.1 Format
+### 2.5.1 Format (`3va-lock.json`)
 
 ```json
 {
-    "lockfileVersion": 3,
-    "name": "my-project",
-    "version": "1.0.0",
-    "packages": {
-        "": {
-            "dependencies": {
-                "lodash": "^4.17.21"
-            }
-        },
-        "node_modules/lodash": {
-            "version": "4.17.21",
-            "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
-            "integrity": "sha512-..."
-        },
-        "node_modules/lodash/package.json": {
-            "name": "lodash",
-            "version": "4.17.21"
-        }
-    },
-    "dependencies": {
-        "lodash": {
-            "version": "4.17.21",
-            "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
-            "integrity": "sha512-..."
-        }
+  "lockfileVersion": 1,
+  "name": "my-project",
+  "version": "1.0.0",
+  "dependencies": {
+    "lodash": {
+      "version": "4.17.21",
+      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
+      "integrity": "sha512-...",
+      "registry": "https://registry.npmjs.org"
     }
+  }
 }
 ```
 
-### 2.5.2 Generation
+### 2.5.2 `collect_installed` — Installed Package Discovery
 
-```rust
-pub fn generate_lockfile(graph: &DependencyGraph) -> Lockfile {
-    let mut packages = HashMap::new();
-    let mut dependencies = HashMap::new();
+`audit_packages` and `audit_packages_silent` both call `collect_installed(node_modules)` to enumerate installed packages:
 
-    for (name, node) in graph.nodes() {
-        packages.insert(
-            format!("node_modules/{}", name),
-            LockfilePackage {
-                version: node.version.clone(),
-                resolved: node.resolved.clone(),
-                integrity: node.integrity.clone(),
-            }
-        );
-
-        dependencies.insert(name, LockfileDep {
-            version: node.version.clone(),
-            resolved: node.resolved.clone(),
-            integrity: node.integrity.clone(),
-            dependencies: node.deps.clone(),
-        });
-    }
-
-    Lockfile {
-        lockfileVersion: 3,
-        name: graph.root_name.clone(),
-        version: graph.root_version.clone(),
-        packages,
-        dependencies,
-    }
-}
-```
+1. **Lockfile path**: derived from `node_modules.parent()` — workspace-safe; not
+   hardcoded to the process CWD
+2. **Lockfile present**: reads exact versions from `3va-lock.json`
+3. **Lockfile absent**: walks `node_modules/` and reads each package's
+   `package.json` for the `"version"` field via `read_package_version`
 
 ## 2.6 Cache
 
@@ -252,33 +180,20 @@ pub fn generate_lockfile(graph: &DependencyGraph) -> Lockfile {
 ```
 ~/.3va/cache/
 ├── metadata/
-│   └── package/
+│   └── <package>/
 │       └── versions.json
 ├── tarballs/
-│   └── package-version.tgz
+│   └── <package>-<version>.tgz
 └── extracted/
-    └── package-version/
-        └── package/
+    └── <package>-<version>/
 ```
 
-### 2.6.2 Cache Policy
+### 2.6.2 In-memory Metadata Cache
 
-```rust
-pub struct CacheConfig {
-    pub max_size: u64,           // 1GB default
-    pub ttl: Duration,          // 7 days
-    pub prune_on_install: bool, // Clean on install
-}
-
-impl Cache {
-    pub fn get_or_fetch(&mut self, package: &str) -> anyhow::Result<Package> {
-        // 1. Check in-memory cache
-        // 2. Check disk cache
-        // 3. Fetch if not found
-    }
-}
-```
+The `Resolver` holds an in-memory `HashMap<String, Vec<DependencyNode>>` keyed
+by package name.  On a cache hit, no HTTP request is made and `find_best_match`
+selects the best version from the already-fetched version list.
 
 ---
 
-*Resolution compliant with npm algorithm and semver specification.*
+*Implemented in `crates/pm/src/resolver.rs` and `crates/pm/src/semver.rs`.*

@@ -95,8 +95,12 @@ async fn parse_request(
             let value = trimmed[colon + 1..].trim().to_string();
             if name == "content-length" {
                 content_length = value.parse::<usize>().unwrap_or(0).min(100 * 1024 * 1024);
+                // Forward the effective (capped) length so JS sees the same
+                // value that was actually read from the socket.
+                headers.push((name, content_length.to_string()));
+            } else {
+                headers.push((name, value));
             }
-            headers.push((name, value));
         }
     }
 
