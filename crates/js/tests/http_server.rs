@@ -110,6 +110,26 @@ async fn drive_until<T>(e: &JsEngine, client: impl std::future::Future<Output = 
     }
 }
 
+/// Send a raw HTTP/1.1 request with an explicit `Content-Length` that may differ
+/// from the actual body bytes sent.  Used to test server-side cap behaviour
+/// without actually transmitting hundreds of megabytes.
+///
+/// The connection is closed after the body bytes are written, so if the server
+/// tries to read more than `body.len()` bytes it will see an EOF error rather
+/// than blocking indefinitely.
+async fn raw_http_with_claimed_length(port: u16, claimed_content_length: usize, body: &str) {
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+
+    let req = format!(
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {claimed_content_length}\r\nConnection: close\r\n\r\n{body}"
+    );
+    let _ = stream.write_all(req.as_bytes()).await;
+    // Intentionally drop — server sees EOF before claimed_content_length bytes arrive.
+    drop(stream);
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -259,4 +279,87 @@ async fn server_handles_multiple_requests() {
         .await
         .unwrap();
     assert_eq!(count, "3");
+}
+
+/// Verify that `req.headers['content-length']` in JS reflects the bytes that
+/// were actually allocated and read — not the raw value from the request header.
+///
+/// Before the fix, the header string forwarded to JS was taken verbatim from the
+/// incoming request even when the allocation was capped at 100 MiB.  After the
+/// fix the forwarded value equals the effective (capped) `content_length`.
+#[tokio::test]
+async fn content_length_header_matches_allocated_body_bytes() {
+    let port = free_port();
+    let e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__clHeader = null;
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__clHeader = req.headers['content-length'];
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let body = "hello world";
+    drive_until(&e, raw_http(port, "POST", "/", body)).await;
+
+    // JS must see the exact Content-Length that was sent (no capping occurs here
+    // since the body is well below the 100 MiB limit).
+    let cl = e
+        .eval_to_string("String(globalThis.__clHeader)")
+        .await
+        .unwrap();
+    assert_eq!(cl, body.len().to_string());
+}
+
+/// Verify the server remains responsive after a client sends a wildly over-sized
+/// Content-Length and then closes the connection without sending the body.
+///
+/// The 100 MiB allocation cap means the server tries to `read_exact` at most
+/// 100 MiB; when the client closes early it gets an I/O error on that request
+/// but must NOT crash or hang — subsequent requests must succeed.
+#[tokio::test]
+async fn server_survives_oversized_content_length_with_early_close() {
+    let port = free_port();
+    let e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__okCount = 0;
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__okCount++;
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send a request claiming 200 MiB but providing 0 bytes then closing —
+    // the server should handle the EOF gracefully without panicking.
+    let oversized = 200 * 1024 * 1024usize; // 200 MiB — beyond the 100 MiB cap.
+    drive_until(&e, raw_http_with_claimed_length(port, oversized, "")).await;
+
+    // Allow the server to process the (failed) request and reset.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A legitimate follow-up request must still succeed.
+    let resp = drive_until(&e, raw_http(port, "GET", "/health", "")).await;
+    assert_eq!(response_status(&resp), 200);
 }
