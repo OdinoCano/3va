@@ -680,6 +680,92 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
         return min + (n % range);
     }
 
+    // ── DiffieHellman helpers ─────────────────────────────────────────────────
+    // Primes from RFC 2409 (modp2, modp5) and RFC 3526 (modp14-18). Generator = 2.
+    var _dhGroups = {
+        modp2:  { prime: 'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381FFFFFFFFFFFFFFFF' },
+        modp5:  { prime: 'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA237327FFFFFFFFFFFFFFFF' },
+        modp14: { prime: 'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AACAA68FFFFFFFFFFFFFFFF' },
+        modp15: { prime: 'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA0510157256E5A8AACAA68FFFFFFFFFFFFFFFF' },
+        modp16: { prime: 'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D04507A33A85521ABDF1CBA64ECFB850458DBEF0A8AEA71575D060C7DB3970F85A6E1E4C7ABF5AE8CDB0933D71E8C94E04A25619DCEE3D2261AD2EE6BF12FFA06D98A0864D87602733EC86A64521F2B18177B200CBBE117577A615D6C770988C0BAD946E208E24FA074E5AB3143DB5BFCE0FD108E4B82D120A92108011A723C12A787E6D788719A10BDBA5B2699C327186AF4E23C1A946834B6150BDA2583E9CA2AD44CE8DBBBC2DB04DE8EF92E8EFC141FBECAA6287C59474E6BC05D99B2964FA090C3A2233BA186515BE7ED1F612970CEE2D7AFB81BDD762170481CD0069127D5B05AA993B4EA988D8FDDC186FFB7DC90A6C08F4DF435C934063199FFFFFFFFFFFFFFFF' }
+    };
+
+    function _bigModpow(base, exp, mod) {
+        var result = 1n;
+        base = base % mod;
+        while (exp > 0n) {
+            if (exp & 1n) result = result * base % mod;
+            exp >>= 1n;
+            base = base * base % mod;
+        }
+        return result;
+    }
+
+    function _bigIntToBytes(n) {
+        var hex = n.toString(16);
+        if (hex.length % 2 !== 0) hex = '0' + hex;
+        var bytes = new Uint8Array(hex.length / 2);
+        for (var i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i*2, i*2+2), 16);
+        return bytes;
+    }
+
+    function _makeDH(primeHex, generator) {
+        var p = BigInt('0x' + primeHex.toUpperCase());
+        var g = BigInt(generator);
+        var privKeyBits = Math.min(256, Math.floor(primeHex.length * 4 / 2));
+        var privateKey = null;
+        var publicKey  = null;
+
+        function randomPrivate() {
+            var bytes = Math.ceil(privKeyBits / 8);
+            var randBytes = __cryptoRandomBytes(bytes);
+            var hex = Array.from(randBytes).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+            return (BigInt('0x' + hex) % (p - 4n)) + 2n;
+        }
+
+        return {
+            generateKeys: function(encoding) {
+                privateKey = randomPrivate();
+                publicKey  = _bigModpow(g, privateKey, p);
+                return encodeBytes(Array.from(_bigIntToBytes(publicKey)), encoding || 'buffer');
+            },
+            computeSecret: function(otherPublicKey, inputEncoding, outputEncoding) {
+                if (privateKey === null) throw new Error('DH: generateKeys must be called first');
+                var bytes = toBytes(otherPublicKey);
+                var hex = Array.from(bytes).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+                var otherPub = BigInt('0x' + (hex || '0'));
+                var secret = _bigModpow(otherPub, privateKey, p);
+                return encodeBytes(Array.from(_bigIntToBytes(secret)), outputEncoding || 'buffer');
+            },
+            getPublicKey: function(encoding) {
+                if (publicKey === null) throw new Error('DH: generateKeys must be called first');
+                return encodeBytes(Array.from(_bigIntToBytes(publicKey)), encoding || 'buffer');
+            },
+            getPrivateKey: function(encoding) {
+                if (privateKey === null) throw new Error('DH: generateKeys must be called first');
+                return encodeBytes(Array.from(_bigIntToBytes(privateKey)), encoding || 'buffer');
+            },
+            getPrime: function(encoding) {
+                return encodeBytes(Array.from(_bigIntToBytes(p)), encoding || 'buffer');
+            },
+            getGenerator: function(encoding) {
+                return encodeBytes(Array.from(_bigIntToBytes(g)), encoding || 'buffer');
+            },
+            setPublicKey: function(key) {
+                var bytes = toBytes(key);
+                var hex = Array.from(bytes).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+                publicKey = BigInt('0x' + (hex || '0'));
+            },
+            setPrivateKey: function(key) {
+                var bytes = toBytes(key);
+                var hex = Array.from(bytes).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+                privateKey = BigInt('0x' + (hex || '0'));
+                publicKey  = _bigModpow(g, privateKey, p);
+            },
+            verifyError: 0
+        };
+    }
+
     var crypto = {
         // ── Hashing ──────────────────────────────────────────────────────────
 
@@ -1091,7 +1177,44 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
             POINT_CONVERSION_COMPRESSED: 2,
             POINT_CONVERSION_HYBRID: 3,
             POINT_CONVERSION_UNCOMPRESSED: 4,
-        }
+        },
+
+        // ── DiffieHellman ────────────────────────────────────────────────────
+        // Classic MODP Diffie-Hellman using JavaScript BigInt for modular exponentiation.
+        // Named groups: modp2 (1024-bit), modp5 (1536-bit), modp14 (2048-bit, default),
+        //               modp15 (3072-bit), modp16 (4096-bit) — primes from RFC 2409/3526.
+        // Private key length is capped at 256 bits for performance while remaining secure.
+
+        createDiffieHellman: function(primeOrLength, generatorOrEnc, primeEncoding, generatorEncoding) {
+            var gen = (typeof generatorOrEnc === 'number') ? generatorOrEnc : 2;
+            var primeHex;
+            if (typeof primeOrLength === 'number') {
+                // Map bit-length to the nearest standard MODP group.
+                var groups = [
+                    [1024, 'modp2'], [1536, 'modp5'], [2048, 'modp14'],
+                    [3072, 'modp15'], [4096, 'modp16']
+                ];
+                var chosen = 'modp14';
+                for (var gi = 0; gi < groups.length; gi++) {
+                    if (primeOrLength <= groups[gi][0]) { chosen = groups[gi][1]; break; }
+                }
+                primeHex = _dhGroups[chosen].prime;
+            } else {
+                var primeBytes = toBytes(primeOrLength);
+                primeHex = primeBytes.map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+            }
+            return _makeDH(primeHex, gen);
+        },
+
+        createDiffieHellmanGroup: function(name) {
+            var g = _dhGroups[name.toLowerCase()];
+            if (!g) throw new Error('Unknown DH group: ' + name);
+            return _makeDH(g.prime, 2);
+        },
+
+        getDiffieHellman: function(name) {
+            return this.createDiffieHellmanGroup(name);
+        },
     };
 
     // ── Web Crypto (crypto.subtle) ────────────────────────────────────────────

@@ -51,6 +51,251 @@ fn parse_meminfo_kb(key: &str) -> u64 {
     0
 }
 
+/// Returns a JSON array of per-CPU info: [{model, speed, times: {user,nice,sys,idle,irq}}].
+/// Reads /proc/cpuinfo (model name + MHz) and /proc/stat (per-CPU jiffies → ms, HZ=100).
+fn cpus_info_json() -> String {
+    let mut cpus: Vec<serde_json::Value> = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+        let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+
+        // Parse per-CPU model name + MHz. Blocks are separated by blank lines.
+        let mut cpu_meta: Vec<(String, u64)> = Vec::new();
+        let mut model = String::from("Unknown");
+        let mut speed_mhz = 0u64;
+        let mut in_block = false;
+        for line in cpuinfo.lines() {
+            if line.trim().is_empty() {
+                if in_block {
+                    cpu_meta.push((model.clone(), speed_mhz));
+                    model = String::from("Unknown");
+                    speed_mhz = 0;
+                    in_block = false;
+                }
+            } else {
+                in_block = true;
+                if let Some((k, v)) = line.split_once(':') {
+                    match k.trim() {
+                        "model name" => model = v.trim().to_string(),
+                        "cpu MHz" => speed_mhz = v.trim().parse::<f64>().unwrap_or(0.0) as u64,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if in_block {
+            cpu_meta.push((model, speed_mhz));
+        }
+
+        // Parse per-CPU times from /proc/stat.
+        // Line format: "cpu0 user nice sys idle iowait irq softirq ..."
+        // Multiply jiffies by 10 to convert to ms (assuming HZ=100, standard Linux).
+        let mut cpu_times: Vec<serde_json::Value> = Vec::new();
+        for line in stat.lines() {
+            if !line.starts_with("cpu") {
+                break;
+            }
+            let rest = &line[3..];
+            // Skip the aggregate "cpu " line (starts with a space after "cpu").
+            if rest.is_empty() || rest.starts_with(' ') {
+                continue;
+            }
+            let nums: Vec<u64> = rest
+                .split_whitespace()
+                .skip(1) // skip the cpu-N index
+                .filter_map(|v| v.parse().ok())
+                .collect();
+            cpu_times.push(serde_json::json!({
+                "user": nums.first().copied().unwrap_or(0) * 10,
+                "nice": nums.get(1).copied().unwrap_or(0) * 10,
+                "sys":  nums.get(2).copied().unwrap_or(0) * 10,
+                "idle": nums.get(3).copied().unwrap_or(0) * 10,
+                "irq":  nums.get(5).copied().unwrap_or(0) * 10,
+            }));
+        }
+
+        let n = cpu_meta.len().max(cpu_times.len());
+        let dummy_times = serde_json::json!({"user":0,"nice":0,"sys":0,"idle":0,"irq":0});
+        for i in 0..n {
+            let (m, s) = cpu_meta
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| ("Unknown".to_string(), 0));
+            let t = cpu_times
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| dummy_times.clone());
+            cpus.push(serde_json::json!({ "model": m, "speed": s, "times": t }));
+        }
+    }
+
+    if cpus.is_empty() {
+        let dummy = serde_json::json!({"user":0,"nice":0,"sys":0,"idle":0,"irq":0});
+        for _ in 0..cpu_count() {
+            cpus.push(serde_json::json!({"model":"Unknown","speed":0,"times":dummy}));
+        }
+    }
+
+    serde_json::to_string(&cpus).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn prefix_to_ipv4_netmask(prefix: u8) -> String {
+    let mask: u32 = if prefix == 0 {
+        0
+    } else if prefix >= 32 {
+        u32::MAX
+    } else {
+        !((1u32 << (32 - prefix)) - 1)
+    };
+    let b = mask.to_be_bytes();
+    format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
+}
+
+fn prefix_to_ipv6_netmask(prefix: u8) -> String {
+    let mut groups = Vec::with_capacity(8);
+    let mut remaining = prefix as i32;
+    for _ in 0..8 {
+        let bits = remaining.clamp(0, 16) as u32;
+        let mask: u16 = if bits == 0 {
+            0
+        } else if bits >= 16 {
+            0xffff
+        } else {
+            (0xffffu32 << (16 - bits)) as u16
+        };
+        groups.push(format!("{:x}", mask));
+        remaining -= 16;
+    }
+    groups.join(":")
+}
+
+fn format_ipv6_hex(hex: &str) -> String {
+    if hex.len() != 32 {
+        return "::".to_string();
+    }
+    let groups: Vec<String> = hex
+        .as_bytes()
+        .chunks(4)
+        .map(|c| {
+            let s = std::str::from_utf8(c).unwrap_or("0000");
+            let trimmed = s.trim_start_matches('0');
+            if trimmed.is_empty() { "0" } else { trimmed }.to_string()
+        })
+        .collect();
+    groups.join(":")
+}
+
+/// Returns a JSON object mapping interface name → [{address, netmask, family, mac, internal, cidr}].
+/// Primary: runs `ip -j addr` (iproute2, available on all modern Linux).
+/// Fallback: parses /proc/net/if_inet6 for IPv6-only data.
+fn network_interfaces_json() -> String {
+    let mut result = serde_json::Map::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(out) = std::process::Command::new("ip")
+            .args(["-j", "addr"])
+            .output()
+            && out.status.success()
+            && let Ok(ifaces) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
+        {
+            for iface in &ifaces {
+                let name = match iface.get("ifname").and_then(|v| v.as_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                let internal = iface
+                    .get("flags")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().any(|v| v.as_str() == Some("LOOPBACK")))
+                    .unwrap_or(false);
+                let mac = std::fs::read_to_string(format!("/sys/class/net/{name}/address"))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|_| "00:00:00:00:00:00".to_string());
+
+                let mut addrs: Vec<serde_json::Value> = Vec::new();
+                if let Some(infos) = iface.get("addr_info").and_then(|v| v.as_array()) {
+                    for addr in infos {
+                        let family = addr.get("family").and_then(|v| v.as_str()).unwrap_or("");
+                        let local = match addr.get("local").and_then(|v| v.as_str()) {
+                            Some(l) => l.to_string(),
+                            None => continue,
+                        };
+                        let prefix =
+                            addr.get("prefixlen").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+                        match family {
+                            "inet" => addrs.push(serde_json::json!({
+                                "address":  local,
+                                "netmask":  prefix_to_ipv4_netmask(prefix),
+                                "family":   "IPv4",
+                                "mac":      mac,
+                                "internal": internal,
+                                "cidr":     format!("{local}/{prefix}"),
+                            })),
+                            "inet6" => {
+                                let scope_id =
+                                    addr.get("scope_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                                addrs.push(serde_json::json!({
+                                    "address":  local,
+                                    "netmask":  prefix_to_ipv6_netmask(prefix),
+                                    "family":   "IPv6",
+                                    "mac":      mac,
+                                    "internal": internal,
+                                    "cidr":     format!("{local}/{prefix}"),
+                                    "scopeid":  scope_id,
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if !addrs.is_empty() {
+                    result.insert(name, serde_json::Value::Array(addrs));
+                }
+            }
+            return serde_json::to_string(&serde_json::Value::Object(result))
+                .unwrap_or_else(|_| "{}".to_string());
+        }
+
+        // Fallback: parse /proc/net/if_inet6 for IPv6 addresses.
+        // Line format: "addr32hex ifindex prefixlen(hex) scope(hex) flags(hex) ifname"
+        if let Ok(content) = std::fs::read_to_string("/proc/net/if_inet6") {
+            for line in content.lines() {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() < 6 {
+                    continue;
+                }
+                let prefix = u8::from_str_radix(fields[2], 16).unwrap_or(0);
+                let scope = u8::from_str_radix(fields[3], 16).unwrap_or(0);
+                let iface_name = fields[5];
+                let addr = format_ipv6_hex(fields[0]);
+                let mac = std::fs::read_to_string(format!("/sys/class/net/{iface_name}/address"))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|_| "00:00:00:00:00:00".to_string());
+                let entry = serde_json::json!({
+                    "address":  addr,
+                    "netmask":  prefix_to_ipv6_netmask(prefix),
+                    "family":   "IPv6",
+                    "mac":      mac,
+                    "internal": scope == 0x10,
+                    "cidr":     format!("{addr}/{prefix}"),
+                    "scopeid":  scope as u64,
+                });
+                result
+                    .entry(iface_name.to_string())
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+                    .as_array_mut()
+                    .unwrap()
+                    .push(entry);
+            }
+        }
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(result)).unwrap_or_else(|_| "{}".to_string())
+}
+
 fn cpu_count() -> u32 {
     #[cfg(target_os = "linux")]
     if let Ok(s) = std::fs::read_to_string("/proc/cpuinfo") {
@@ -284,6 +529,11 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         })?,
     )?;
     globals.set("__osCpuCount", Function::new(ctx.clone(), cpu_count)?)?;
+    globals.set("__osCpusInfo", Function::new(ctx.clone(), cpus_info_json)?)?;
+    globals.set(
+        "__osNetworkInterfaces",
+        Function::new(ctx.clone(), network_interfaces_json)?,
+    )?;
     globals.set("__osMemTotal", Function::new(ctx.clone(), mem_total_bytes)?)?;
     globals.set("__osMemFree", Function::new(ctx.clone(), mem_free_bytes)?)?;
     globals.set("__osUptime", Function::new(ctx.clone(), uptime_secs)?)?;

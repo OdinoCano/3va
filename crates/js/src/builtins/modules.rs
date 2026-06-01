@@ -638,14 +638,22 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 },
                 EOL: _osPlatform === 'win32' ? '\r\n' : '\n',
                 cpus: function() {
+                    if (typeof __osCpusInfo === 'function') {
+                        try { return JSON.parse(__osCpusInfo()); } catch(e) {}
+                    }
                     var n = __osCpuCount();
                     var arr = [];
-                    for (var i = 0; i < n; i++) arr.push({ model: 'Generic', speed: 0, times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 } });
+                    for (var i = 0; i < n; i++) arr.push({ model: 'Unknown', speed: 0, times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 } });
                     return arr;
                 },
                 totalmem: function() { return typeof __osMemTotal === 'function' ? __osMemTotal() : 1073741824; },
                 freemem:  function() { return typeof __osMemFree  === 'function' ? __osMemFree()  :  536870912; },
-                networkInterfaces: function() { return {}; },
+                networkInterfaces: function() {
+                    if (typeof __osNetworkInterfaces === 'function') {
+                        try { return JSON.parse(__osNetworkInterfaces()); } catch(e) {}
+                    }
+                    return {};
+                },
                 userInfo: function(opts) {
                     var u = (process && process.env && process.env.USER) || 'user';
                     var h = (process && process.env && process.env.HOME) || '/home/' + u;

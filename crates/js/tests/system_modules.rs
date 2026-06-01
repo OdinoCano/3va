@@ -541,3 +541,140 @@ async fn crypto_hash_shorthand() {
         .unwrap();
     assert_eq!(r, "2cf24dba");
 }
+
+// ── os.cpus() real data ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn os_cpus_has_model_and_times() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var os = require('os');
+        var cpus = os.cpus();
+        var first = cpus[0];
+        String(cpus.length > 0 &&
+               typeof first.model === 'string' && first.model.length > 0 &&
+               typeof first.speed === 'number' &&
+               typeof first.times === 'object' &&
+               typeof first.times.user === 'number' &&
+               typeof first.times.sys  === 'number' &&
+               typeof first.times.idle === 'number')
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true", "os.cpus() must return real model/speed/times");
+}
+
+// ── os.networkInterfaces() ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn os_network_interfaces_returns_object() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var os = require('os');
+        var ifaces = os.networkInterfaces();
+        String(typeof ifaces === 'object' && ifaces !== null)
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true", "os.networkInterfaces() must return an object");
+}
+
+// ── child_process stdin piping ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn child_process_spawnsync_with_input() {
+    let e = engine_with_spawn().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var cp = require('child_process');
+        var result = cp.spawnSync('cat', [], { input: 'hello stdin', encoding: 'utf8' });
+        result.stdout.trim()
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        r, "hello stdin",
+        "spawnSync with input option must pipe stdin"
+    );
+}
+
+#[tokio::test]
+async fn child_process_spawn_stdin_write_end() {
+    let e = engine_with_spawn().await;
+    // eval_to_string doesn't await Promises, so we store the result in a global
+    // and drive the event loop with idle() before reading it.
+    e.eval_to_string(
+        r#"
+        globalThis.__spawnStdinResult = '';
+        var cp = require('child_process');
+        var child = cp.spawn('cat', []);
+        child.stdout.on('data', function(d) { globalThis.__spawnStdinResult += d; });
+        child.stdin.write('piped ');
+        child.stdin.end('data');
+        'started'
+    "#,
+    )
+    .await
+    .unwrap();
+    e.idle().await;
+    let r = e
+        .eval_to_string("globalThis.__spawnStdinResult.trim()")
+        .await
+        .unwrap();
+    assert_eq!(
+        r, "piped data",
+        "spawn stdin.write()/end() must pipe to child"
+    );
+}
+
+// ── crypto.createDiffieHellman ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn crypto_diffie_hellman_key_exchange() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var crypto = require('crypto');
+        var alice = crypto.createDiffieHellman(1024);
+        var bob   = crypto.createDiffieHellmanGroup('modp2');
+        var alicePub = alice.generateKeys();
+        var bobPub   = bob.generateKeys();
+        var aliceSecret = alice.computeSecret(bobPub, null, 'hex');
+        var bobSecret   = bob.computeSecret(alicePub, null, 'hex');
+        String(aliceSecret === bobSecret && aliceSecret.length > 0)
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        r, "true",
+        "DiffieHellman key exchange must produce the same shared secret"
+    );
+}
+
+#[tokio::test]
+async fn crypto_dh_get_public_key_encoding() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+        var crypto = require('crypto');
+        var dh = crypto.createDiffieHellmanGroup('modp2');
+        dh.generateKeys();
+        var hex = dh.getPublicKey('hex');
+        String(typeof hex === 'string' && hex.length > 0 && /^[0-9a-f]+$/.test(hex))
+    "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true", "getPublicKey('hex') must return hex string");
+}
