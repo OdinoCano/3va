@@ -69,7 +69,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz -> target
-      - run: cargo install cargo-fuzz --locked
+      # Install cargo-fuzz via binstall (prebuilt binary) to avoid compiling
+      # rustix 0.36.x, which is incompatible with recent nightly rustc.
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall cargo-fuzz --no-confirm
       - name: Build fuzz targets
         run: cargo fuzz build
         working-directory: fuzz

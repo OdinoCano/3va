@@ -27,6 +27,9 @@ allow = [
     "Unlicense",
     "OpenSSL",
     "CDLA-Permissive-2.0",
+    # inferno (flamegraph generator) uses CDDL-1.0 — copyleft scoped to
+    # file-level modifications, comparable to MPL-2.0 already allowed above.
+    "CDDL-1.0",
 ]
 confidence-threshold = 0.8
 
