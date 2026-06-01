@@ -72,16 +72,21 @@ impl MlKemCiphertext {
         hex::encode(self.0.as_slice())
     }
 
-    /// Decode a ciphertext from hex.
-    pub fn from_hex(s: &str) -> Result<Self, CryptoError> {
-        let bytes = hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
-        let arr: Ciphertext<MlKem768> = Array::try_from(bytes.as_slice()).map_err(|_| {
+    /// Decode a ciphertext from raw bytes (1 088 B for ML-KEM-768).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        let arr: Ciphertext<MlKem768> = Array::try_from(bytes).map_err(|_| {
             CryptoError::InvalidKey(format!(
                 "ciphertext: expected 1088 bytes, got {}",
                 bytes.len()
             ))
         })?;
         Ok(MlKemCiphertext(arr))
+    }
+
+    /// Decode a ciphertext from hex.
+    pub fn from_hex(s: &str) -> Result<Self, CryptoError> {
+        let bytes = hex::decode(s).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        Self::from_bytes(&bytes)
     }
 }
 
@@ -213,5 +218,39 @@ mod tests {
     fn invalid_hex_ciphertext_returns_error() {
         assert!(MlKemCiphertext::from_hex("notvalidhex").is_err());
         assert!(MlKemCiphertext::from_hex("deadbeef").is_err()); // too short
+    }
+
+    #[test]
+    fn from_bytes_round_trip() {
+        let kp = MlKemKeypair::generate();
+        let (ct, ss_send) = encapsulate(&kp.ek);
+        // from_bytes must produce the same shared secret as decapsulating the
+        // original ciphertext — no hex round-trip needed.
+        let raw = ct.0.as_slice().to_vec();
+        let ct2 = MlKemCiphertext::from_bytes(&raw).expect("from_bytes must succeed on 1088 B");
+        let ss_recv = decapsulate(&kp.dk, &ct2);
+        assert_eq!(
+            ss_send.0, ss_recv.0,
+            "shared secret must match via from_bytes"
+        );
+    }
+
+    #[test]
+    fn from_bytes_wrong_length_returns_error() {
+        assert!(MlKemCiphertext::from_bytes(&[0u8; 42]).is_err());
+        assert!(MlKemCiphertext::from_bytes(&[]).is_err());
+    }
+
+    #[test]
+    fn from_bytes_and_from_hex_are_equivalent() {
+        let kp = MlKemKeypair::generate();
+        let (ct, _) = encapsulate(&kp.ek);
+        let raw = ct.0.as_slice().to_vec();
+        let via_bytes = MlKemCiphertext::from_bytes(&raw).unwrap();
+        let via_hex = MlKemCiphertext::from_hex(&hex::encode(&raw)).unwrap();
+        // Both paths must produce the same shared secret.
+        let ss1 = decapsulate(&kp.dk, &via_bytes);
+        let ss2 = decapsulate(&kp.dk, &via_hex);
+        assert_eq!(ss1.0, ss2.0);
     }
 }

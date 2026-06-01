@@ -565,7 +565,10 @@ async fn install_with_transitive(
 }
 
 fn collect_installed(node_modules: &Path) -> anyhow::Result<Vec<(String, String, Option<String>)>> {
-    let lockfile_path = PathBuf::from("3va-lock.json");
+    let lockfile_path = node_modules
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("3va-lock.json");
     if lockfile_path.exists() {
         let lock = Lockfile::load(&lockfile_path)?;
         return Ok(lock
@@ -587,20 +590,32 @@ fn collect_installed(node_modules: &Path) -> anyhow::Result<Vec<(String, String,
                 if name.starts_with('@') {
                     if let Ok(sub) = std::fs::read_dir(&path) {
                         for sub_entry in sub.flatten() {
-                            pkgs.push((
-                                format!("{}/{}", name, sub_entry.file_name().to_string_lossy()),
-                                "unknown".to_string(),
-                                None,
-                            ));
+                            let pkg_name =
+                                format!("{}/{}", name, sub_entry.file_name().to_string_lossy());
+                            let version = read_package_version(&sub_entry.path());
+                            pkgs.push((pkg_name, version, None));
                         }
                     }
                 } else {
-                    pkgs.push((name, "unknown".to_string(), None));
+                    let version = read_package_version(&path);
+                    pkgs.push((name, version, None));
                 }
             }
         }
     }
     Ok(pkgs)
+}
+
+fn read_package_version(pkg_dir: &Path) -> String {
+    let pkg_json = pkg_dir.join("package.json");
+    if let Ok(content) = std::fs::read_to_string(&pkg_json)
+        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+        && let Some(v) = val["version"].as_str()
+    {
+        v.to_string()
+    } else {
+        "unknown".to_string()
+    }
 }
 
 pub fn audit_packages() -> anyhow::Result<bool> {
