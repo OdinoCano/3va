@@ -76,6 +76,62 @@ fn js_code_err(ctx: &Ctx<'_>, code: &str, msg: String) -> rquickjs::Error {
     }
 }
 
+// ── PQ-TLS blocking helper ────────────────────────────────────────────────────
+
+/// Perform the full TCP connect → TLS handshake → ML-KEM-768 key exchange on
+/// the calling (blocking) thread.  Returns the ready-to-use TLS stream and the
+/// hex-encoded 32-byte shared secret, or an error message string.
+///
+/// Callers **must** run this inside `tokio::task::spawn_blocking` so the JS
+/// event loop is not stalled during network I/O.
+fn pq_tls_connect_blocking(
+    host: &str,
+    port: u16,
+) -> std::result::Result<(TlsStream<TcpStream>, String), String> {
+    // Classical TLS handshake (blocking).
+    let connector = native_tls::TlsConnector::new().map_err(|e| format!("TLS init: {e}"))?;
+    let tcp =
+        TcpStream::connect(format!("{host}:{port}")).map_err(|e| format!("ECONNREFUSED: {e}"))?;
+    let mut tls = connector
+        .connect(host, tcp)
+        .map_err(|e| format!("TLS handshake failed: {e}"))?;
+
+    // ML-KEM-768 ephemeral key exchange: client initiates.
+    let kp = vvva_crypto::kem::MlKemKeypair::generate();
+    let ek_bytes = kp.encapsulation_key_bytes();
+
+    // Send [4-byte big-endian length][encapsulation key].
+    let ek_len = (ek_bytes.len() as u32).to_be_bytes();
+    tls.write_all(&ek_len)
+        .and_then(|_| tls.write_all(&ek_bytes))
+        .map_err(|e| format!("PQ TLS send ek: {e}"))?;
+
+    // Receive [4-byte big-endian length][ML-KEM-768 ciphertext = 1088 B].
+    let mut ct_len_buf = [0u8; 4];
+    tls.read_exact(&mut ct_len_buf)
+        .map_err(|e| format!("PQ TLS recv ct len: {e}"))?;
+    let ct_len = u32::from_be_bytes(ct_len_buf) as usize;
+    if ct_len != 1088 {
+        return Err(format!("PQ TLS: invalid ciphertext length {ct_len}"));
+    }
+    let mut ct_bytes = vec![0u8; ct_len];
+    tls.read_exact(&mut ct_bytes)
+        .map_err(|e| format!("PQ TLS recv ct: {e}"))?;
+
+    // Decode raw bytes directly — no hex round-trip needed.
+    let ct = vvva_crypto::MlKemCiphertext::from_bytes(&ct_bytes)
+        .map_err(|e| format!("PQ TLS ct decode: {e}"))?;
+    let ss = vvva_crypto::decapsulate(&kp.dk, &ct);
+    let ss_hex = hex::encode(ss.0);
+
+    // Switch to non-blocking for subsequent reads through the connection pool.
+    tls.get_ref()
+        .set_nonblocking(true)
+        .map_err(|e| format!("set_nonblocking: {e}"))?;
+
+    Ok((tls, ss_hex))
+}
+
 // ── Injection ─────────────────────────────────────────────────────────────────
 
 pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
@@ -404,6 +460,9 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
     //
     // The resulting `pqSharedSecret` can be combined with the TLS session key
     // (e.g. via HKDF) to achieve hybrid classical+PQ forward secrecy.
+    //
+    // All blocking I/O (TCP connect, TLS handshake, ML-KEM round-trip) runs in
+    // a `spawn_blocking` thread so the JS event loop is never stalled.
     {
         let pool = pool.clone();
         let nid = next_id.clone();
@@ -412,66 +471,42 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             "__pqTlsConnect",
             Function::new(
                 ctx.clone(),
-                move |ctx: Ctx<'_>, host: String, port: u16| -> Result<String> {
-                    if !perms.check(&Capability::Network(host.clone())) {
-                        return Err(js_code_err(
-                            &ctx,
-                            "EACCES",
-                            format!("Network access denied. Run with --allow-net={}", host),
-                        ));
+                Async(move |host: String, port: u16| {
+                    let perms = perms.clone();
+                    let pool = pool.clone();
+                    let nid = nid.clone();
+                    async move {
+                        if !perms.check(&Capability::Network(host.clone())) {
+                            return Err(rquickjs::Error::new_from_js_message(
+                                "EACCES",
+                                "EACCES",
+                                format!("Network access denied. Run with --allow-net={}", host),
+                            ));
+                        }
+
+                        // All blocking I/O runs off the JS thread.
+                        let (tls, ss_hex) = tokio::task::spawn_blocking(move || {
+                            pq_tls_connect_blocking(&host, port)
+                        })
+                        .await
+                        .map_err(|e| {
+                            rquickjs::Error::new_from_js_message(
+                                "EIO",
+                                "EIO",
+                                format!("PQ TLS task panicked: {e}"),
+                            )
+                        })?
+                        .map_err(|e| {
+                            rquickjs::Error::new_from_js_message("ECONNRESET", "ECONNRESET", e)
+                        })?;
+
+                        let conn_id = alloc_id(&pool, &nid, TcpConn::Tls(tls));
+                        Ok::<String, rquickjs::Error>(
+                            serde_json::json!({ "connId": conn_id, "pqSharedSecret": ss_hex })
+                                .to_string(),
+                        )
                     }
-
-                    // Classical TLS handshake
-                    let connector = native_tls::TlsConnector::new()
-                        .map_err(|e| js_err(&ctx, format!("TLS init: {e}")))?;
-                    let tcp = TcpStream::connect(format!("{}:{}", host, port))
-                        .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
-                    let mut tls = connector.connect(&host, tcp).map_err(|e| {
-                        js_code_err(&ctx, "ECONNRESET", format!("TLS handshake failed: {e}"))
-                    })?;
-
-                    // ML-KEM-768 ephemeral key exchange (client initiates)
-                    let kp = vvva_crypto::kem::MlKemKeypair::generate();
-                    let ek_bytes: Vec<u8> = kp.encapsulation_key_bytes();
-
-                    // Send encapsulation key
-                    let ek_len = (ek_bytes.len() as u32).to_be_bytes();
-                    tls.write_all(&ek_len)
-                        .and_then(|_| tls.write_all(&ek_bytes))
-                        .map_err(|e| js_err(&ctx, format!("PQ TLS send ek: {e}")))?;
-
-                    // Receive ciphertext from server
-                    let mut ct_len_buf = [0u8; 4];
-                    tls.read_exact(&mut ct_len_buf)
-                        .map_err(|e| js_err(&ctx, format!("PQ TLS recv ct len: {e}")))?;
-                    let ct_len = u32::from_be_bytes(ct_len_buf) as usize;
-                    // ML-KEM-768 ciphertext is always exactly 1088 bytes.
-                    if ct_len != 1088 {
-                        return Err(js_err(
-                            &ctx,
-                            format!("PQ TLS: invalid ciphertext length {ct_len}"),
-                        ));
-                    }
-                    let mut ct_bytes = vec![0u8; ct_len];
-                    tls.read_exact(&mut ct_bytes)
-                        .map_err(|e| js_err(&ctx, format!("PQ TLS recv ct: {e}")))?;
-
-                    let ct = vvva_crypto::MlKemCiphertext::from_hex(&hex::encode(&ct_bytes))
-                        .map_err(|e| js_err(&ctx, format!("PQ TLS ct decode: {e}")))?;
-                    let ss = vvva_crypto::decapsulate(&kp.dk, &ct);
-                    let ss_hex = hex::encode(ss.0);
-
-                    // Switch to non-blocking for subsequent reads
-                    tls.get_ref()
-                        .set_nonblocking(true)
-                        .map_err(|e| js_err(&ctx, e.to_string()))?;
-
-                    let conn_id = alloc_id(&pool, &nid, TcpConn::Tls(tls));
-                    Ok(
-                        serde_json::json!({ "connId": conn_id, "pqSharedSecret": ss_hex })
-                            .to_string(),
-                    )
-                },
+                }),
             ),
         )?;
     }
