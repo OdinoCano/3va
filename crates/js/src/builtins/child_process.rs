@@ -135,7 +135,7 @@ pub fn inject_child_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Res
     )?;
 
     // __execShellAsync(command: string) -> same shape, runs via sh -c
-    let perms2 = permissions;
+    let perms2 = permissions.clone();
     globals.set(
         "__execShellAsync",
         Function::new(
@@ -184,6 +184,123 @@ pub fn inject_child_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Res
                     .to_string())
                 }
             }),
+        )?,
+    )?;
+
+    // __spawnWithInput(cmd, args, stdinData) -> Promise<{stdout, stderr, code}>
+    // Spawns the process with stdin piped, writes stdinData then closes stdin,
+    // and resolves with the collected output. Used by spawn() stdin.end().
+    let perms_si = permissions.clone();
+    globals.set(
+        "__spawnWithInput",
+        Function::new(
+            ctx.clone(),
+            Async(move |cmd: String, args: Vec<String>, stdin_data: String| {
+                let perms = perms_si.clone();
+                async move {
+                    if !perms.check(&Capability::SpawnProcess) {
+                        return Err(rquickjs::Error::new_from_js_message(
+                            "permission",
+                            "permission",
+                            "Process spawn denied. Run with --allow-child-process".to_string(),
+                        ));
+                    }
+                    let result = tokio::task::spawn_blocking(move || {
+                        use std::io::Write;
+                        let mut child = std::process::Command::new(&cmd)
+                            .args(&args)
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .spawn()?;
+                        if !stdin_data.is_empty() {
+                            if let Some(mut stdin) = child.stdin.take() {
+                                let _ = stdin.write_all(stdin_data.as_bytes());
+                                // Drop stdin to signal EOF to the child process.
+                            }
+                        } else {
+                            drop(child.stdin.take());
+                        }
+                        child.wait_with_output()
+                    })
+                    .await
+                    .map_err(|e| {
+                        rquickjs::Error::new_from_js_message(
+                            "child_process",
+                            "spawnWithInput",
+                            e.to_string(),
+                        )
+                    })?
+                    .map_err(|e| {
+                        rquickjs::Error::new_from_js_message(
+                            "child_process",
+                            "spawnWithInput",
+                            format!("spawn error: {}", e),
+                        )
+                    })?;
+                    let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
+                    let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+                    let code = result.status.code().unwrap_or(-1);
+                    Ok(
+                        serde_json::json!({"stdout": stdout, "stderr": stderr, "code": code})
+                            .to_string(),
+                    )
+                }
+            }),
+        )?,
+    )?;
+
+    // __spawnSyncWithStdin(cmd, args, stdinData) -> {stdout, stderr, status, pid}
+    // Synchronous version of the above, used by spawnSync({ input }) option.
+    let perms_ss = permissions.clone();
+    globals.set(
+        "__spawnSyncWithStdin",
+        Function::new(
+            ctx.clone(),
+            move |cmd: String, args: Vec<String>, stdin_data: String| -> rquickjs::Result<String> {
+                if !perms_ss.check(&Capability::SpawnProcess) {
+                    return Err(rquickjs::Error::new_from_js_message(
+                        "permission",
+                        "permission",
+                        "Process spawn denied. Run with --allow-child-process".to_string(),
+                    ));
+                }
+                use std::io::Write;
+                let mut child = std::process::Command::new(&cmd)
+                    .args(&args)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| {
+                        rquickjs::Error::new_from_js_message(
+                            "child_process",
+                            "spawnSyncWithStdin",
+                            e.to_string(),
+                        )
+                    })?;
+                if !stdin_data.is_empty() {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(stdin_data.as_bytes());
+                    }
+                } else {
+                    drop(child.stdin.take());
+                }
+                let output = child.wait_with_output().map_err(|e| {
+                    rquickjs::Error::new_from_js_message(
+                        "child_process",
+                        "spawnSyncWithStdin",
+                        e.to_string(),
+                    )
+                })?;
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let status = output.status.code().unwrap_or(-1);
+                Ok(
+                    serde_json::json!({"stdout": stdout, "stderr": stderr, "status": status, "pid": 0})
+                        .to_string(),
+                )
+            },
         )?,
     )?;
 
@@ -241,24 +358,62 @@ pub fn inject_child_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Res
                 },
 
                 // spawn(command, [args], [options]) -> ChildProcess-like
+                // Supports stdin.write() / stdin.end() via __spawnWithInput.
+                // Execution is deferred to the next microtask tick so that callers can
+                // attach stdin writes synchronously before the process starts.
                 spawn: function(command, args, opts) {
                     args = args || [];
+                    opts = opts || {};
+                    var stdinChunks = [];
+                    var started = false;
+
+                    function runWith(stdinData) {
+                        if (stdinData) {
+                            __spawnWithInput(command, args, stdinData).then(function(raw) {
+                                var r = JSON.parse(raw);
+                                if (r.stdout) cp.stdout._listeners.forEach(function(fn) { fn(r.stdout); });
+                                if (r.stderr) cp.stderr._listeners.forEach(function(fn) { fn(r.stderr); });
+                                cp._exitListeners.forEach(function(fn) { fn(r.code, null); });
+                            }).catch(function(e) {
+                                cp._exitListeners.forEach(function(fn) { fn(1, null); });
+                            });
+                        } else {
+                            __execAsync(command, args, 0).then(function(raw) {
+                                var r = JSON.parse(raw);
+                                if (r.stdout) cp.stdout._listeners.forEach(function(fn) { fn(r.stdout); });
+                                if (r.stderr) cp.stderr._listeners.forEach(function(fn) { fn(r.stderr); });
+                                cp._exitListeners.forEach(function(fn) { fn(r.code, null); });
+                            }).catch(function(e) {
+                                cp._exitListeners.forEach(function(fn) { fn(1, null); });
+                            });
+                        }
+                    }
+
                     var cp = {
                         _stdout: '', _stderr: '', _code: null,
                         stdout: { _listeners: [], on: function(ev, fn) { if (ev==='data') this._listeners.push(fn); return this; }, pipe: function() {} },
                         stderr: { _listeners: [], on: function(ev, fn) { if (ev==='data') this._listeners.push(fn); return this; }, pipe: function() {} },
-                        stdin:  { write: function() {}, end: function() {} },
+                        stdin: {
+                            write: function(chunk) {
+                                stdinChunks.push(typeof chunk === 'string' ? chunk : String(chunk));
+                                return true;
+                            },
+                            end: function(chunk) {
+                                if (chunk !== undefined) stdinChunks.push(typeof chunk === 'string' ? chunk : String(chunk));
+                                if (started) return;
+                                started = true;
+                                runWith(stdinChunks.join(''));
+                            }
+                        },
                         _exitListeners: [],
                         on: function(ev, fn) { if (ev==='exit'||ev==='close') this._exitListeners.push(fn); return this; },
                         kill: function() {}
                     };
-                    __execAsync(command, args, 0).then(function(raw) {
-                        var r = JSON.parse(raw);
-                        if (r.stdout) cp.stdout._listeners.forEach(function(fn) { fn(r.stdout); });
-                        if (r.stderr) cp.stderr._listeners.forEach(function(fn) { fn(r.stderr); });
-                        cp._exitListeners.forEach(function(fn) { fn(r.code, null); });
-                    }).catch(function(e) {
-                        cp._exitListeners.forEach(function(fn) { fn(1, null); });
+
+                    // Defer the no-stdin case to the next microtask so the caller can
+                    // call stdin.write()/end() in the same synchronous turn first.
+                    Promise.resolve().then(function() {
+                        if (!started) { started = true; runWith(''); }
                     });
                     return cp;
                 },
@@ -283,14 +438,21 @@ pub fn inject_child_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Res
                 },
 
                 // spawnSync(command, [args], [options]) -> {status, stdout, stderr, pid, signal, error}
+                // Supports opts.input to pipe data to the child's stdin.
                 spawnSync: function(command, args, opts) {
                     if (!Array.isArray(args)) { opts = args || {}; args = []; }
                     opts = opts || {};
-                    var raw = JSON.parse(__spawnSyncExec(command, args || []));
                     var enc = opts.encoding || null;
+                    var raw;
+                    if (opts.input !== undefined) {
+                        var inputStr = typeof opts.input === 'string' ? opts.input : String(opts.input);
+                        raw = JSON.parse(__spawnSyncWithStdin(command, args || [], inputStr));
+                    } else {
+                        raw = JSON.parse(__spawnSyncExec(command, args || []));
+                    }
                     var out = (enc === 'utf8' || enc === 'utf-8') ? raw.stdout : (typeof Buffer !== 'undefined' ? Buffer.from(raw.stdout) : raw.stdout);
                     var err = (enc === 'utf8' || enc === 'utf-8') ? raw.stderr : (typeof Buffer !== 'undefined' ? Buffer.from(raw.stderr) : raw.stderr);
-                    return { status: raw.status, stdout: out, stderr: err, pid: raw.pid, signal: null, error: null };
+                    return { status: raw.status, stdout: out, stderr: err, pid: raw.pid || 0, signal: null, error: null };
                 },
 
                 // promisify helper
