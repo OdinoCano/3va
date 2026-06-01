@@ -1,6 +1,6 @@
 [package]
 name = "vvva_js"
-version = "0.1.0"
+version = "1.0.0"
 license = "MIT OR Apache-2.0"
 edition = "2024"
 
@@ -113,6 +113,7 @@ p256 = { workspace = true }
 p384 = { workspace = true }
 md-5 = { workspace = true }
 notify = { workspace = true }
+inferno = { workspace = true }
 
 libloading = "0.8"
 libffi = "3.2"

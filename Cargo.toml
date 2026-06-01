@@ -43,6 +43,7 @@ p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
 p384 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
 md-5 = "0.10"
 notify = { version = "6", features = ["macos_fsevent"] }
+inferno = { version = "0.11", default-features = false, features = ["nameattr"] }
 
 
 [profile.release]

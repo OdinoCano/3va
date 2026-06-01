@@ -71,6 +71,84 @@ async fn run_tests_and_report(paths: &[PathBuf]) -> anyhow::Result<(usize, usize
     Ok((passed, failed))
 }
 
+/// Reconstruct a `Profiler` from a `.cpuprofile` JSON so we can re-generate flamegraphs.
+/// We rebuild the flat sample list from the `samples` array + `nodes` map.
+fn rebuild_profiler_from_cpuprofile(json: &str) -> anyhow::Result<vvva_js::profiler::Profiler> {
+    use std::collections::HashMap;
+    let v: serde_json::Value = serde_json::from_str(json)?;
+    let nodes = v["nodes"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("missing nodes"))?;
+    let samples = v["samples"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("missing samples"))?;
+    let time_deltas = v["timeDeltas"].as_array();
+
+    // Build id → (function_name, url, line) map
+    let mut node_map: HashMap<u64, (String, String, i32, i32)> = HashMap::new();
+    // Also build child → parent map so we can reconstruct full stacks
+    let mut parent_map: HashMap<u64, u64> = HashMap::new();
+    for node in nodes {
+        let id = node["id"].as_u64().unwrap_or(0);
+        let name = node["callFrame"]["functionName"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let url = node["callFrame"]["url"].as_str().unwrap_or("").to_string();
+        let line = node["callFrame"]["lineNumber"].as_i64().unwrap_or(-1) as i32;
+        let col = node["callFrame"]["columnNumber"].as_i64().unwrap_or(-1) as i32;
+        node_map.insert(id, (name, url, line, col));
+        for child in node["children"].as_array().into_iter().flatten() {
+            if let Some(cid) = child.as_u64() {
+                parent_map.insert(cid, id);
+            }
+        }
+    }
+
+    let profiler = vvva_js::profiler::Profiler::new();
+    let mut ts: u64 = 0;
+    for (i, sample_id) in samples.iter().enumerate() {
+        let sid = sample_id.as_u64().unwrap_or(0);
+        let delta_us = time_deltas
+            .and_then(|d| d.get(i))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10_000);
+        ts += delta_us / 1_000; // convert µs → ms
+
+        // Walk up the parent chain to reconstruct the stack (leaf → root).
+        let mut stack = Vec::new();
+        let mut cur = sid;
+        let mut depth = 0;
+        while let Some((name, url, line, col)) = node_map.get(&cur) {
+            stack.push(vvva_js::profiler::ProfileFrame {
+                function_name: name.clone(),
+                url: url.clone(),
+                line_number: *line,
+                column_number: *col,
+            });
+            depth += 1;
+            if depth > 64 {
+                break;
+            }
+            match parent_map.get(&cur) {
+                Some(&p) if p != 0 && p != cur => cur = p,
+                _ => break,
+            }
+        }
+        let mut state = profiler.0.lock().unwrap();
+        if state.start_time_ms == 0 {
+            state.start_time_ms = ts;
+        }
+        state.end_time_ms = ts;
+        state.samples.push(vvva_js::profiler::ProfileSample {
+            timestamp_ms: ts,
+            frames: stack,
+            label: None,
+        });
+    }
+    Ok(profiler)
+}
+
 fn check_system_info() -> anyhow::Result<()> {
     println!("\n=== 3VA Doctor Report ===\n");
 
@@ -1199,6 +1277,7 @@ enum StoreAction {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Run a JavaScript or TypeScript file
     Run {
@@ -1254,6 +1333,28 @@ enum Commands {
         /// Audit level: "deny" logs only denied checks (default), "all" logs every check
         #[arg(long = "audit-level", default_value = "deny")]
         audit_level: String,
+
+        /// Enable CPU sampling profiler.
+        /// Samples are collected every `--prof-interval` ms and written to `--prof-out`.
+        #[arg(long = "prof")]
+        prof: bool,
+
+        /// Output path for the CPU profile (V8 .cpuprofile JSON).
+        /// Only used when --prof is passed (default: profile.cpuprofile).
+        #[arg(
+            long = "prof-out",
+            value_name = "PATH",
+            default_value = "profile.cpuprofile"
+        )]
+        prof_out: PathBuf,
+
+        /// Sampling interval in milliseconds (default: 10).
+        #[arg(long = "prof-interval", value_name = "MS", default_value_t = 10)]
+        prof_interval: u32,
+
+        /// Also emit a flamegraph SVG at this path (requires --prof).
+        #[arg(long = "flamegraph", value_name = "PATH")]
+        flamegraph: Option<PathBuf>,
 
         /// Arguments to pass to the script (after --)
         #[arg(last = true)]
@@ -1406,6 +1507,23 @@ enum Commands {
         /// Output results as JSON (for CI/CD pipelines).
         #[arg(long = "json")]
         json: bool,
+    },
+    /// Analyze a .cpuprofile file produced by `3va run --prof`
+    Prof {
+        /// Path to the .cpuprofile JSON file
+        file: PathBuf,
+
+        /// Print top N hot functions (default: 20)
+        #[arg(long = "top", default_value_t = 20)]
+        top: usize,
+
+        /// Output format: "text" (default) or "flamegraph"
+        #[arg(long = "format", default_value = "text")]
+        format: String,
+
+        /// Output path for flamegraph SVG (only used with --format=flamegraph)
+        #[arg(long = "out", value_name = "PATH")]
+        out: Option<PathBuf>,
     },
     /// Check runtime health
     Doctor,
@@ -1647,6 +1765,10 @@ async fn main() -> anyhow::Result<()> {
             inspect,
             audit_log,
             audit_level,
+            prof,
+            prof_out,
+            prof_interval,
+            flamegraph,
             script_args,
         } => {
             info!("Running {:?} (Sandboxed)", file);
@@ -1685,6 +1807,35 @@ async fn main() -> anyhow::Result<()> {
                 info!("Executing WebAssembly module...");
                 let engine = vvva_wasm::WasmEngine::new(permissions.clone())?;
                 engine.eval_file_with_args(file, script_args).await?;
+            } else if *prof {
+                if inspect_addr.is_some() {
+                    anyhow::bail!("--prof and --inspect cannot be used together");
+                }
+                let engine =
+                    vvva_js::JsEngine::new_with_profiler(permissions.clone(), *prof_interval)
+                        .await?;
+                engine.eval_file_with_args(file, script_args).await?;
+                // Stop sampling and collect results
+                if let Some(profiler) = engine.take_profiler().await {
+                    let cpu_json = profiler.to_cpuprofile();
+                    std::fs::write(prof_out, &cpu_json)?;
+                    let samples = profiler.sample_count();
+                    println!(
+                        "[prof] {} samples written to {}",
+                        samples,
+                        prof_out.display()
+                    );
+                    if let Some(svg_path) = flamegraph {
+                        match profiler.to_flamegraph_svg() {
+                            Ok(svg) if !svg.is_empty() => {
+                                std::fs::write(svg_path, &svg)?;
+                                println!("[prof] flamegraph written to {}", svg_path.display());
+                            }
+                            Ok(_) => println!("[prof] no samples — flamegraph skipped"),
+                            Err(e) => eprintln!("[prof] flamegraph error: {e}"),
+                        }
+                    }
+                }
             } else {
                 let engine =
                     vvva_js::JsEngine::new_with_inspector(permissions.clone(), inspect_addr)
@@ -1976,6 +2127,42 @@ async fn main() -> anyhow::Result<()> {
                 run_audit_json(*deny, *update_cache, *secrets).await?;
             } else {
                 run_audit_human(*deny, *update_cache, *secrets).await?;
+            }
+        }
+        Commands::Prof {
+            file,
+            top,
+            format,
+            out,
+        } => {
+            let json = std::fs::read_to_string(file)
+                .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", file.display(), e))?;
+            match format.as_str() {
+                "flamegraph" => {
+                    let profiler = rebuild_profiler_from_cpuprofile(&json)?;
+                    let svg = profiler.to_flamegraph_svg()?;
+                    if svg.is_empty() {
+                        println!("No samples found in profile.");
+                    } else {
+                        let out_path = out
+                            .as_deref()
+                            .unwrap_or(std::path::Path::new("flamegraph.svg"));
+                        std::fs::write(out_path, &svg)?;
+                        println!("Flamegraph written to {}", out_path.display());
+                    }
+                }
+                _ => {
+                    let ranked = vvva_js::profiler::analyze_cpuprofile(&json, *top)?;
+                    if ranked.is_empty() {
+                        println!("No samples found in profile.");
+                    } else {
+                        println!("{:<6}  Function", "Self%");
+                        println!("{}", "-".repeat(50));
+                        for (name, pct) in &ranked {
+                            println!("{:>5}%  {}", pct, name);
+                        }
+                    }
+                }
             }
         }
         Commands::Doctor => {
