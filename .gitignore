@@ -12,6 +12,7 @@ yarn.lock
 
 # Editor / tooling
 .claude/
+.kiro
 .DS_Store
 *.swp
 *.swo

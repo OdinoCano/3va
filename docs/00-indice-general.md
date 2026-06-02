@@ -41,6 +41,7 @@
 - [02-enforcement.md](06-permissions/02-enforcement.md) - Policy enforcement
 - [03-sandboxing.md](06-permissions/03-sandboxing.md) - Sandboxing and isolation
 - [04-audit.md](06-permissions/04-audit.md) - Audit and logging
+- [05-interactive-prompts.md](06-permissions/05-interactive-prompts.md) - Interactive permission prompts (TTY, session scope)
 
 ## Volume 7: Package Manager
 
@@ -48,6 +49,7 @@
 - [02-resolucion.md](07-pm/02-resolucion.md) - Dependency resolution
 - [03-sandboxing.md](07-pm/03-sandboxing.md) - Package sandboxing
 - [04-lockfile.md](07-pm/04-lockfile.md) - Lockfile format
+- [05-global-dedup.md](07-pm/05-global-dedup.md) - Global content-addressable store and deduplication
 
 ## Volume 8: Bundler
 
@@ -74,6 +76,7 @@
 - [04-fuzzing.md](10-security/04-fuzzing.md) - Integrated fuzzing
 - [05-post-quantum.md](10-security/05-post-quantum.md) - Post-quantum cryptography
 - [06-osv-audit.md](10-security/06-osv-audit.md) - Vulnerability audit (OSV)
+- [07-http-performance.md](10-security/07-http-performance.md) - HTTP benchmarks, connection rate limiting, Slowloris protection
 
 ## Volume 11: APIs and Reference
 
