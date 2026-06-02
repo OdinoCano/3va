@@ -31,6 +31,12 @@ use vvva_permissions::PermissionState;
 use builtins::TimerManager;
 use profiler::Profiler;
 
+/// Convert a `rquickjs::Error` into `anyhow::Error`, extracting the real JS exception
+/// message/stack when the variant is `Error::Exception`.
+fn catch_js(ctx: &rquickjs::Ctx, e: rquickjs::Error) -> anyhow::Error {
+    anyhow::anyhow!("{}", rquickjs::CaughtError::from_error(ctx, e))
+}
+
 /// Heuristic: detect ESM by scanning all lines for top-level import/export.
 /// Skips blank lines and single-line comments. Handles files where exports
 /// appear after other code (e.g. `export default fn` at end of file).
@@ -193,9 +199,10 @@ impl JsEngine {
     pub async fn eval(&self, code: &str) -> anyhow::Result<()> {
         let code = code.to_string();
         self.context
-            .with(|ctx| {
-                let _res: rquickjs::Value = ctx.eval(code.as_str())?;
-                Ok::<(), rquickjs::Error>(())
+            .with(|ctx| -> anyhow::Result<()> {
+                ctx.eval::<rquickjs::Value, _>(code.as_str())
+                    .map(|_| ())
+                    .map_err(|e| catch_js(&ctx, e))
             })
             .await?;
         Ok(())
@@ -206,10 +213,11 @@ impl JsEngine {
         let code = code.to_string();
         let result = self
             .context
-            .with(|ctx| -> rquickjs::Result<String> {
-                let val: rquickjs::Value = ctx.eval(code.as_str())?;
+            .with(|ctx| -> anyhow::Result<String> {
+                let val = ctx.eval::<rquickjs::Value, _>(code.as_str())
+                    .map_err(|e| catch_js(&ctx, e))?;
                 if let Some(s) = val.as_string() {
-                    Ok(s.to_string()?)
+                    s.to_string().map_err(|e| catch_js(&ctx, e))
                 } else {
                     Ok(String::new())
                 }
@@ -227,19 +235,18 @@ impl JsEngine {
     pub async fn eval_file_with_args(&self, path: &Path, args: &[String]) -> anyhow::Result<()> {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let filename = canonical.to_string_lossy().to_string();
-        let script_arg = filename.replace('"', "\\\"");
+        let script_arg = filename.replace('\\', "\\\\").replace('"', "\\\"");
         let extra: String = args
             .iter()
-            .map(|a| format!(", \"{}\"", a.replace('"', "\\\"")))
+            .map(|a| format!(", \"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"")))
             .collect();
         let inject = format!(
             "if (globalThis.process && Array.isArray(globalThis.process.argv)) \
              {{ globalThis.process.argv = [globalThis.process.argv[0], \"{script_arg}\"{extra}]; }}"
         );
         self.context
-            .with(|ctx| {
-                ctx.eval::<(), _>(inject.as_str())?;
-                Ok::<(), rquickjs::Error>(())
+            .with(|ctx| -> anyhow::Result<()> {
+                ctx.eval::<(), _>(inject.as_str()).map_err(|e| catch_js(&ctx, e))
             })
             .await?;
         self.eval_file(path).await
@@ -281,54 +288,64 @@ impl JsEngine {
         let is_esm = is_esm_source(&code);
 
         self.context
-            .with(|ctx| {
+            .with(|ctx| -> anyhow::Result<()> {
+                // Escape backslashes first (Windows paths), then quotes.
+                let f = filename.replace('\\', "\\\\").replace('\'', "\\'");
+                let d = dirname.replace('\\', "\\\\").replace('\'', "\\'");
+
                 if is_esm {
-                    // Set argv[1] to the script path for ESM files too
                     let argv_setup = format!(
                         "if (globalThis.process && Array.isArray(globalThis.process.argv) \
                          && globalThis.process.argv.length < 2) \
                          {{ globalThis.process.argv.push('{}'); }}",
-                        filename.replace('\'', "\\'")
+                        f
                     );
-                    ctx.eval::<(), _>(argv_setup.as_str())?;
-                    let module = Module::declare(ctx.clone(), filename.as_str(), code.as_str())?;
-                    let (_module_eval, _promise) = module.eval()?;
-                    Ok::<(), rquickjs::Error>(())
+                    ctx.eval::<(), _>(argv_setup.as_str()).map_err(|e| catch_js(&ctx, e))?;
+                    let module = Module::declare(ctx.clone(), filename.as_str(), code.as_str())
+                        .map_err(|e| catch_js(&ctx, e))?;
+                    let (_module_eval, _promise) = module.eval().map_err(|e| catch_js(&ctx, e))?;
+                    Ok(())
                 } else {
                     let setup = format!(
                         "globalThis.__filename = '{f}'; globalThis.__dirname = '{d}';\
                          if (globalThis.process && Array.isArray(globalThis.process.argv) \
                          && globalThis.process.argv.length < 2) \
                          {{ globalThis.process.argv.push('{f}'); }}",
-                        f = filename.replace('\'', "\\'"),
-                        d = dirname.replace('\'', "\\'"),
+                        f = f,
+                        d = d,
                     );
-                    ctx.eval::<(), _>(setup.as_str())?;
-                    let _: rquickjs::Value = ctx.eval(code.as_str())?;
-                    Ok::<(), rquickjs::Error>(())
+                    ctx.eval::<(), _>(setup.as_str()).map_err(|e| catch_js(&ctx, e))?;
+                    ctx.eval::<rquickjs::Value, _>(code.as_str())
+                        .map(|_| ())
+                        .map_err(|e| catch_js(&ctx, e))
                 }
             })
             .await?;
 
-        // Drain pending JS microtasks / promise callbacks.
-        self.runtime.idle().await;
-
         // Drive the event loop: timers + promise microtasks.
+        // Note: do NOT call runtime.idle() here — it blocks on pending server-side
+        // async tasks (e.g. __httpAcceptAsync) before timers have a chance to fire,
+        // causing a deadlock. run_event_loop handles idle() internally.
         self.run_event_loop().await
     }
 
     /// Run the integrated event loop:
     /// - Fire expired JS timers (setTimeout/setInterval managed by TimerManager)
     /// - Fire expired Rust-level TimerWheel timers
-    /// - Process JS promise microtasks (runtime.idle)
+    /// - Process JS promise microtasks (runtime.idle with short timeout)
     /// - Yield to Tokio so concurrent async tasks can make progress
     /// - Sleep until the next timer expiry (max 50ms per iteration)
     pub async fn run_event_loop(&self) -> anyhow::Result<()> {
-        let max_iterations = 10_000;
+        let max_iterations = 100_000;
         let mut iterations = 0;
+        // Track whether idle() had pending async work (e.g. HTTP server accept loop).
+        // When true the loop keeps running even if no JS timers are pending, so that
+        // server-side async tasks can complete (and schedule new timers via callbacks).
+        let mut has_pending_async = false;
 
         while (self.timer_manager.has_pending()
-            || self.runtime_core.lock().unwrap().pending_task_count() > 0)
+            || self.runtime_core.lock().unwrap().pending_task_count() > 0
+            || has_pending_async)
             && iterations < max_iterations
         {
             iterations += 1;
@@ -353,8 +370,18 @@ impl JsEngine {
                 }
             }
 
-            // 3. Process JS promise microtasks
-            self.runtime.idle().await;
+            // 3. Process JS promise microtasks with a short timeout.
+            //    idle() blocks until ALL spawner tasks complete, which includes
+            //    persistent server-side accept loops (_acceptNext / __httpAcceptAsync).
+            //    We use a 5ms timeout so the loop can keep iterating to fire pending
+            //    setTimeout callbacks (needed to resolve httpGet Promises between requests).
+            let idle_timed_out = tokio::time::timeout(
+                std::time::Duration::from_millis(5),
+                self.runtime.idle(),
+            )
+            .await
+            .is_err();
+            has_pending_async = idle_timed_out;
 
             // 4. Yield to Tokio so concurrent async ops make progress
             tokio::task::yield_now().await;
@@ -373,10 +400,12 @@ impl JsEngine {
                 && wait > std::time::Duration::ZERO
             {
                 tokio::time::sleep(wait.min(std::time::Duration::from_millis(50))).await;
-            } else if wait.is_none() {
-                // No pending timers at all, but still have tasks — brief yield
+            } else if wait.is_none() && !has_pending_async {
+                // No pending timers and no pending async — truly idle, brief yield
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
+            // If has_pending_async: no sleep, keep looping immediately to
+            // process timers that callbacks may have scheduled.
         }
 
         Ok(())

@@ -5,12 +5,16 @@ pub mod fetcher;
 pub mod lockfile;
 pub mod malware_scanner;
 pub mod manifest;
+pub mod npmrc;
+pub mod package_lock;
+pub mod pnpm_lock;
 pub mod resolver;
 pub mod secrets;
 pub mod semver;
 pub mod signature_verifier;
 pub mod store;
 pub mod workspace;
+pub mod yarn_lock;
 
 pub use secrets::{SecretFinding, SecretsScanner, Severity as SecretSeverity};
 pub use store::{ContentStore, PruneResult, StoreStats, virtual_entry_name};
@@ -22,9 +26,15 @@ pub use auditor::{
 pub use lockfile::Lockfile;
 pub use malware_scanner::{MalwareScanner, ScanResult, Threat, ThreatLevel};
 pub use manifest::{PackageInfo, PackageManifest, PackagePermissions};
+pub use npmrc::{
+    NpmrcConfig, discover_npmrc, parse_npmrc, resolve_registry,
+};
+pub use package_lock::load_from_package_lock;
+pub use pnpm_lock::load_from_pnpm_lock;
 pub use resolver::{DependencyGraph, DependencyNode, Resolver};
 pub use semver::{Semver, SemverRange};
 pub use signature_verifier::{HashAlgorithm, SignatureInfo, SignatureVerifier, VerificationStatus};
+pub use yarn_lock::load_from_yarn_lock;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -86,6 +96,56 @@ impl Registry {
     }
 }
 
+// ── Lockfile auto-detection ────────────────────────────────────────────────────
+
+/// Try to detect and load any supported lockfile format from the given project
+/// directory.  Checks in order: `3va-lock.json`, `package-lock.json`,
+/// `yarn.lock`, `pnpm-lock.yaml`.
+pub fn detect_lockfile(project_root: &std::path::Path) -> anyhow::Result<Option<Lockfile>> {
+    // 1. Native format
+    let native = project_root.join("3va-lock.json");
+    if native.exists() {
+        return Lockfile::load(&native).map(Some);
+    }
+    // 2. npm package-lock.json
+    let npm = project_root.join("package-lock.json");
+    if npm.exists() {
+        return package_lock::load_from_package_lock(&npm);
+    }
+    // 3. yarn.lock
+    let yarn = project_root.join("yarn.lock");
+    if yarn.exists() {
+        return yarn_lock::load_from_yarn_lock(&yarn);
+    }
+    // 4. pnpm-lock.yaml
+    let pnpm = project_root.join("pnpm-lock.yaml");
+    if pnpm.exists() {
+        return pnpm_lock::load_from_pnpm_lock(&pnpm);
+    }
+    Ok(None)
+}
+
+/// Migrate an external lockfile to the native `3va-lock.json` format.
+///
+/// Reads any supported lockfile and writes it as `3va-lock.json` in the same
+/// directory.  Returns `true` if a migration happened.
+pub fn migrate_lockfile(project_root: &std::path::Path) -> anyhow::Result<bool> {
+    if project_root.join("3va-lock.json").exists() {
+        return Ok(false); // Already migrated
+    }
+    let lockfile = match detect_lockfile(project_root)? {
+        Some(l) => l,
+        None => return Ok(false),
+    };
+    let out = project_root.join("3va-lock.json");
+    lockfile.save(&out)?;
+    println!(
+        "✓ Migrated lockfile → {}",
+        out.display()
+    );
+    Ok(true)
+}
+
 // ── PackageManager ────────────────────────────────────────────────────────────
 
 pub struct PackageManager {
@@ -143,7 +203,7 @@ async fn lookup_npm_compat(
     let url = format!("{}/{}", base_url, pkg_name);
     let resp = client
         .get(&url)
-        .header("Accept", "application/json")
+        .header("Accept", "application/vnd.npm.install-v1+json, application/json")
         .timeout(std::time::Duration::from_secs(20))
         .send()
         .await?;
@@ -180,6 +240,73 @@ async fn lookup_npm_compat(
     })
 }
 
+/// Fetch only the metadata for a specific version using the abbreviated endpoint.
+/// Much faster than downloading the full packument (all versions).
+/// Returns RegistryInfo with the deps embedded in version_meta via a side-channel field.
+async fn lookup_npm_version(
+    client: &reqwest::Client,
+    base_url: &str,
+    pkg_name: &str,
+    version: &str,
+) -> anyhow::Result<(RegistryInfo, Vec<String>)> {
+    let url = format!("{}/{}/{}", base_url, pkg_name, version);
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await?;
+
+    if resp.status().as_u16() == 404 || !resp.status().is_success() {
+        // Fall back to full packument to get dist-tags etc.
+        return lookup_npm_compat_with_deps(client, base_url, pkg_name).await;
+    }
+
+    let meta: serde_json::Value = resp.json().await?;
+    let resolved_ver = meta["version"].as_str().unwrap_or(version).to_string();
+    let tarball = meta["dist"]["tarball"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "{}/{}/-/{}-{}.tgz",
+                base_url, pkg_name, pkg_name, resolved_ver
+            )
+        });
+    let integrity = meta["dist"]["integrity"].as_str().map(|s| s.to_string());
+    let mut version_meta = HashMap::new();
+    version_meta.insert(resolved_ver.clone(), VersionMeta { tarball, integrity });
+
+    // Collect transitive deps directly from the registry response — no disk read needed
+    let mut dep_specs: Vec<String> = Vec::new();
+    if let Some(deps) = meta["dependencies"].as_object() {
+        for (dep_name, dep_ver) in deps {
+            if let Some(dv) = dep_ver.as_str() {
+                dep_specs.push(dep_name.clone());
+                let _ = dv; // version range stored separately if needed
+            }
+        }
+    }
+
+    let info = RegistryInfo {
+        versions: vec![resolved_ver],
+        latest: None,
+        version_meta,
+    };
+    Ok((info, dep_specs))
+}
+
+async fn lookup_npm_compat_with_deps(
+    client: &reqwest::Client,
+    base_url: &str,
+    pkg_name: &str,
+) -> anyhow::Result<(RegistryInfo, Vec<String>)> {
+    let info = lookup_npm_compat(client, base_url, pkg_name).await?;
+    // For the full packument we don't know which version was picked yet,
+    // return empty deps — they'll be read after extract.
+    Ok((info, Vec::new()))
+}
+
 async fn lookup_jsr(client: &reqwest::Client, pkg_name: &str) -> anyhow::Result<RegistryInfo> {
     if !pkg_name.starts_with('@') || !pkg_name.contains('/') {
         anyhow::bail!(
@@ -189,15 +316,34 @@ async fn lookup_jsr(client: &reqwest::Client, pkg_name: &str) -> anyhow::Result<
     }
     let trimmed = pkg_name.trim_start_matches('@');
     let (scope, name) = trimmed.split_once('/').unwrap();
-    // JSR exposes npm-compatible packages at npm.jsr.io under @jsr/scope__name
     let npm_name = format!("@jsr/{}__{}", scope, name);
     lookup_npm_compat(client, "https://npm.jsr.io", &npm_name)
         .await
         .map_err(|e| anyhow::anyhow!("Package '{}' not found on jsr.io: {}", pkg_name, e))
 }
 
+/// Lookup JSR and return (RegistryInfo, dep_names) for parallel BFS.
+async fn lookup_jsr_with_deps(
+    client: &reqwest::Client,
+    pkg_name: &str,
+    version: &str,
+) -> anyhow::Result<(RegistryInfo, Vec<String>)> {
+    if !pkg_name.starts_with('@') || !pkg_name.contains('/') {
+        anyhow::bail!(
+            "JSR only supports scoped packages (e.g. @scope/name). '{}' is not a valid JSR package name",
+            pkg_name
+        );
+    }
+    let trimmed = pkg_name.trim_start_matches('@');
+    let (scope, name) = trimmed.split_once('/').unwrap();
+    let npm_name = format!("@jsr/{}__{}", scope, name);
+    lookup_npm_version(client, "https://npm.jsr.io", &npm_name, version)
+        .await
+        .map_err(|e| anyhow::anyhow!("Package '{}' not found on jsr.io: {}", pkg_name, e))
+}
+
 async fn lookup_registry(registry: &Registry, pkg_name: &str) -> anyhow::Result<RegistryInfo> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().gzip(true).build()?;
     match registry {
         Registry::Jsr => lookup_jsr(&client, pkg_name).await,
         Registry::Npm | Registry::Yarn | Registry::Custom(_) => {
@@ -333,6 +479,52 @@ fn parse_package_spec(input: &str) -> anyhow::Result<(String, Option<String>)> {
 
 // ── Download + extract ────────────────────────────────────────────────────────
 
+/// Download a tarball with a pre-built client (for parallel installs).
+async fn download_tarball_with_client(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let mut last_err = anyhow::anyhow!("unreachable");
+
+    for attempt in 0..=MAX_RETRIES {
+        if attempt > 0 {
+            let delay_ms = RETRY_BASE_MS * 2u64.pow(attempt - 1);
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+
+        let result = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Network error: {}", e));
+
+        let resp = match result {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+
+        let status = resp.status();
+        if status.is_client_error() {
+            anyhow::bail!("Failed to download {}: HTTP {} (not retrying)", url, status);
+        }
+        if !status.is_success() {
+            last_err = anyhow::anyhow!("HTTP {} from {}", status, url);
+            continue;
+        }
+
+        return Ok(resp.bytes().await?.to_vec());
+    }
+
+    Err(last_err.context(format!(
+        "All {} download attempts failed for {}",
+        MAX_RETRIES + 1,
+        url
+    )))
+}
+
 /// Download a tarball with up to `MAX_RETRIES` retries and exponential backoff.
 /// Retries on connection/timeout errors and 5xx responses; fails immediately
 /// on 4xx (package not found, auth errors, etc.).
@@ -341,7 +533,8 @@ const RETRY_BASE_MS: u64 = 400;
 
 async fn download_tarball(url: &str) -> anyhow::Result<Vec<u8>> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(90))
+        .timeout(std::time::Duration::from_secs(120))
+        .gzip(false)  // tarballs are already gzipped at file level — don't double-decompress
         .build()?;
 
     let mut last_err = anyhow::anyhow!("unreachable");
@@ -433,6 +626,9 @@ pub async fn reinstall_package(name: &str, allow_net: Option<&[String]>) -> anyh
 
 /// Install all `dependencies` listed in `project_root/package.json`.
 /// This is what `3va install` (no args, no workspace) does.
+///
+/// Automatically detects existing lockfiles (`package-lock.json`, `yarn.lock`,
+/// `pnpm-lock.yaml`) and reads `.npmrc` for private registry configuration.
 pub async fn install_from_manifest(
     project_root: &Path,
     allow_net: Option<&[String]>,
@@ -442,6 +638,31 @@ pub async fn install_from_manifest(
         anyhow::bail!(
             "No package.json found in {}.\nCreate one or pass package names explicitly.",
             project_root.display()
+        );
+    }
+
+    // Auto-migrate existing lockfile
+    if let Ok(true) = migrate_lockfile(project_root) {
+        // Already migrated above
+    }
+
+    // Detect .npmrc for private registry support
+    let npmrc = npmrc::discover_npmrc(Some(project_root));
+    if let Some(reg) = &npmrc.registry {
+        if reg != "https://registry.npmjs.org" {
+            tracing::info!("Using custom registry from .npmrc: {}", reg);
+        }
+    }
+    if !npmrc.auth_tokens.is_empty() {
+        tracing::info!(
+            "Found {} auth token(s) in .npmrc",
+            npmrc.auth_tokens.len()
+        );
+    }
+    if !npmrc.scoped_registries.is_empty() {
+        tracing::info!(
+            "Found {} scoped registry(ies) in .npmrc",
+            npmrc.scoped_registries.len()
         );
     }
 
@@ -507,6 +728,10 @@ pub async fn install_from_manifest(
 /// BFS install: installs `root_spec` and all of its transitive dependencies
 /// into `project_root/node_modules/`.
 ///
+/// Phase 1: resolve the full dependency graph in parallel (concurrent metadata
+///          fetches, BFS wave-by-wave so each wave is fully parallel).
+/// Phase 2: download + extract all tarballs in parallel with JoinSet.
+///
 /// `update_manifest`: when true the package.json and lockfile in
 /// `project_root` are updated.  Pass false for transitive deps.
 async fn install_with_transitive(
@@ -516,50 +741,399 @@ async fn install_with_transitive(
     project_root: &Path,
     update_manifest: bool,
 ) -> anyhow::Result<()> {
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::{HashMap as Map, HashSet};
+    use tokio::task::JoinSet;
 
+    // ── Determine registry ────────────────────────────────────────────────────
+    let allowed_host = match allow_net.and_then(|hosts| hosts.first()) {
+        Some(h) => h.clone(),
+        None => {
+            let (pkg_name, _) = parse_package_spec(root_spec)?;
+            eprintln!();
+            eprintln!("✗ Network access denied.");
+            eprintln!();
+            eprintln!("  The package manager requires explicit network permission.");
+            eprintln!("  Specify the registry host with --allow-net:");
+            eprintln!();
+            eprintln!("    3va install {} --allow-net=registry.npmjs.org", pkg_name);
+            anyhow::bail!("Network access denied: --allow-net not specified");
+        }
+    };
+    let registry = Registry::from_allowed_host(&allowed_host);
+    let base_url = registry.base_url().to_string();
+
+    // Two clients:
+    // - meta_client: for JSON metadata requests (gzip on → server sends compressed JSON)
+    // - dl_client: for tarball downloads (gzip off → tarballs are already .tgz, double-decompression breaks them)
+    let meta_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .pool_max_idle_per_host(16)
+        .gzip(true)
+        .build()?;
+    let dl_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .pool_max_idle_per_host(8)
+        .gzip(false)
+        .build()?;
+    // Alias for metadata phase
+    let client = meta_client.clone();
+
+    // ── Phase 1: parallel BFS metadata resolution ─────────────────────────────
+    // resolved: name → (version, tarball_url, integrity)
+    let mut resolved: Map<String, (String, String, Option<String>)> = Map::new();
     let mut visited: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<String> = VecDeque::new();
-    queue.push_back(root_spec.to_string());
-    let mut is_root = true;
 
-    while let Some(spec) = queue.pop_front() {
-        if visited.contains(&spec) {
+    // Start with the root package
+    let (root_name, root_requested_ver) = parse_package_spec(root_spec)?;
+    let mut current_wave: Vec<(String, Option<String>)> =
+        vec![(root_name.clone(), root_requested_ver)];
+
+    println!();
+    println!("  Resolving dependency graph...");
+
+    while !current_wave.is_empty() {
+        // Deduplicate wave and skip already-resolved packages
+        let wave: Vec<(String, Option<String>)> = current_wave
+            .drain(..)
+            .filter(|(name, _)| !visited.contains(name.as_str()))
+            .collect();
+
+        if wave.is_empty() {
+            break;
+        }
+        for (name, _) in &wave {
+            visited.insert(name.clone());
+        }
+
+        // Check which packages are already installed at the right version
+        let needs_fetch: Vec<(String, Option<String>)> = wave
+            .iter()
+            .filter(|(name, _)| {
+                if force {
+                    return true;
+                }
+                let dest = project_root.join("node_modules").join(name);
+                !dest.join("package.json").exists()
+            })
+            .cloned()
+            .collect();
+
+        if needs_fetch.is_empty() {
+            // All in this wave are already installed; still need to read their deps
+            for (name, _) in &wave {
+                let dest = project_root.join("node_modules").join(name);
+                if let Ok(content) = std::fs::read_to_string(dest.join("package.json"))
+                    && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+                {
+                    if let Some(ver) = val["version"].as_str() {
+                        resolved.entry(name.clone()).or_insert_with(|| {
+                            let tarball = format!(
+                                "{}/{}/-/{}-{}.tgz",
+                                base_url, name, name, ver
+                            );
+                            (ver.to_string(), tarball, None)
+                        });
+                    }
+                    if let Some(deps) = val["dependencies"].as_object() {
+                        for (dep_name, _) in deps {
+                            if !visited.contains(dep_name.as_str()) {
+                                current_wave.push((dep_name.clone(), None));
+                            }
+                        }
+                    }
+                }
+            }
             continue;
         }
-        visited.insert(spec.clone());
 
-        let current_is_root = is_root;
-        is_root = false;
-
-        // Parse just the name to check if already installed.
-        let (pkg_name, _) = parse_package_spec(&spec)?;
-        let node_modules_dest = project_root.join("node_modules").join(&pkg_name);
-        let already_ok = !force && node_modules_dest.join("package.json").exists();
-
-        if !already_ok || (current_is_root && force) {
-            install_package_impl(
-                &spec,
-                force && current_is_root,
-                allow_net,
-                project_root,
-                update_manifest && current_is_root,
-            )
-            .await?;
+        // Fetch metadata for this wave concurrently
+        let mut set: JoinSet<anyhow::Result<(String, RegistryInfo, Vec<String>)>> = JoinSet::new();
+        for (pkg_name, requested_ver) in needs_fetch {
+            let client = client.clone();
+            let base = base_url.clone();
+            let registry = registry.clone();
+            set.spawn(async move {
+                let version_to_fetch = requested_ver.as_deref().unwrap_or("latest");
+                let (info, deps) = match &registry {
+                    Registry::Jsr => {
+                        lookup_jsr_with_deps(&client, &pkg_name, version_to_fetch).await?
+                    }
+                    Registry::Npm | Registry::Yarn | Registry::Custom(_) => {
+                        lookup_npm_version(&client, &base, &pkg_name, version_to_fetch).await?
+                    }
+                };
+                Ok((pkg_name, info, deps))
+            });
         }
 
-        // Enqueue transitive deps from the installed package.json.
-        if let Ok(content) = std::fs::read_to_string(node_modules_dest.join("package.json"))
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
-            && let Some(deps_obj) = val["dependencies"].as_object()
-        {
-            for dep_name in deps_obj.keys() {
-                if !visited.contains(dep_name.as_str()) {
-                    queue.push_back(dep_name.clone());
+        let mut next_wave_set: HashSet<String> = HashSet::new();
+        while let Some(result) = set.join_next().await {
+            match result {
+                Ok(Ok((pkg_name, info, dep_names))) => {
+                    let ver = info
+                        .versions
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "latest".to_string());
+                    if let Some(meta) = info.version_meta.get(&ver) {
+                        resolved.insert(
+                            pkg_name.clone(),
+                            (ver.clone(), meta.tarball.clone(), meta.integrity.clone()),
+                        );
+                    }
+                    // Use deps from registry response (no disk read needed)
+                    for dep_name in dep_names {
+                        if !visited.contains(dep_name.as_str()) {
+                            next_wave_set.insert(dep_name);
+                        }
+                    }
+                    // Also check disk in case the package was already extracted
+                    // (covers the fallback full-packument path)
+                    let dest = project_root.join("node_modules").join(&pkg_name);
+                    if dest.join("package.json").exists() {
+                        if let Ok(content) = std::fs::read_to_string(dest.join("package.json"))
+                            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+                            && let Some(deps) = val["dependencies"].as_object()
+                        {
+                            for dep_name in deps.keys() {
+                                if !visited.contains(dep_name.as_str()) {
+                                    next_wave_set.insert(dep_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Failed to resolve package: {}", e);
+                }
+                Err(e) => {
+                    tracing::warn!("Task panic during resolution: {}", e);
                 }
             }
         }
+        for dep in next_wave_set {
+            current_wave.push((dep, None));
+        }
     }
+
+    // ── Phase 2: parallel download + extract ──────────────────────────────────
+    let to_install: Vec<(String, String, String, Option<String>)> = resolved
+        .iter()
+        .filter(|(name, (ver, _, _))| {
+            if force && name.as_str() == root_name.as_str() {
+                return true;
+            }
+            let dest = project_root.join("node_modules").join(name.as_str());
+            let pkg_json = dest.join("package.json");
+            if !pkg_json.exists() {
+                return true;
+            }
+            // Check if installed version matches
+            let installed_ver = std::fs::read_to_string(&pkg_json)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v["version"].as_str().map(|s| s.to_string()));
+            installed_ver.as_deref() != Some(ver.as_str())
+        })
+        .map(|(name, (ver, tarball, integrity))| {
+            (name.clone(), ver.clone(), tarball.clone(), integrity.clone())
+        })
+        .collect();
+
+    if to_install.is_empty() {
+        println!("  ✓ All dependencies already installed.");
+    } else {
+        println!("  Downloading {} package(s) in parallel...", to_install.len());
+
+        let global_store = store::ContentStore::global();
+        let reg_name = registry.display_name().to_string();
+        let cache_dir = project_root.join(".3va-cache");
+        std::fs::create_dir_all(&cache_dir)?;
+        let node_modules = project_root.join("node_modules");
+        std::fs::create_dir_all(&node_modules)?;
+
+        let mut dl_set: JoinSet<(String, String, anyhow::Result<(Vec<u8>, Option<String>)>)> =
+            JoinSet::new();
+
+        for (pkg_name, ver, tarball_url, integrity) in to_install.iter().cloned() {
+            let client = dl_client.clone();
+            let safe_pkg = pkg_name.replace('/', "-").trim_matches('-').to_string();
+            let cached_path = cache_dir.join(format!("{}-{}.tgz", safe_pkg, ver));
+            let gs = global_store.clone();
+            let rn = reg_name.clone();
+
+            dl_set.spawn(async move {
+                let result = async {
+                    // Check global store first (zero network)
+                    if gs.is_cached(&rn, &pkg_name, &ver) {
+                        return Ok((Vec::new(), integrity));
+                    }
+                    // Check per-project tarball cache
+                    if cached_path.exists() {
+                        let bytes = std::fs::read(&cached_path)?;
+                        return Ok((bytes, integrity));
+                    }
+                    // Download
+                    let bytes = download_tarball_with_client(&client, &tarball_url)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}@{} — {}", pkg_name, ver, e))?;
+                    let _ = std::fs::write(&cached_path, &bytes);
+                    Ok((bytes, integrity))
+                }.await;
+                (pkg_name, ver, result)
+            });
+        }
+
+        let verifier = SignatureVerifier::sha512();
+        let mut errors: Vec<String> = Vec::new();
+
+        while let Some(result) = dl_set.join_next().await {
+            match result {
+                Ok((pkg_name, ver, Ok((bytes, integrity)))) => {
+                    // If bytes is empty → was in global store already
+                    let final_bytes = if bytes.is_empty() {
+                        Vec::new() // store.link_to_virtual_store handles it
+                    } else {
+                        // Verify integrity
+                        if let Some(ref int_hash) = integrity {
+                            match verifier.verify_from_registry(&bytes, Some(int_hash)) {
+                                VerificationStatus::Mismatch | VerificationStatus::Failed(_) => {
+                                    errors.push(format!(
+                                        "Integrity check failed for {}@{}",
+                                        pkg_name, ver
+                                    ));
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                        // Store globally
+                        let _ = global_store.store_tarball(&bytes, &reg_name, &pkg_name, &ver);
+                        bytes
+                    };
+
+                    // Link into per-project virtual store
+                    let virtual_path = match global_store.link_to_virtual_store(
+                        &reg_name,
+                        &pkg_name,
+                        &ver,
+                        &node_modules,
+                    ) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            // If store link fails (bytes not in store), extract directly
+                            let dest = node_modules.join(&pkg_name);
+                            if !final_bytes.is_empty() {
+                                if let Err(e2) = extract_tarball(&final_bytes, &dest) {
+                                    errors.push(format!(
+                                        "Extract failed for {}@{}: {}",
+                                        pkg_name, ver, e2
+                                    ));
+                                }
+                            } else {
+                                errors.push(format!("Store link failed for {}@{}: {}", pkg_name, ver, e));
+                            }
+                            println!("  ✓ {}@{}", pkg_name, ver);
+                            continue;
+                        }
+                    };
+
+                    if let Err(e) = create_virtual_symlink(&pkg_name, &ver, &node_modules, &virtual_path) {
+                        errors.push(format!("Symlink failed for {}@{}: {}", pkg_name, ver, e));
+                        continue;
+                    }
+                    println!("  ✓ {}@{}", pkg_name, ver);
+                }
+                Ok((pkg_name, ver, Err(e))) => {
+                    errors.push(format!("Download failed {}@{}: {}", pkg_name, ver, e));
+                }
+                Err(e) => {
+                    errors.push(format!("Task panic: {}", e));
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("  ✗ {}", e);
+            }
+            anyhow::bail!("{} package(s) failed to install", errors.len());
+        }
+
+        println!();
+        println!("  ✓ {} package(s) installed.", to_install.len());
+    }
+
+    // ── Update package.json + lockfile (root package only) ────────────────────
+    if !update_manifest {
+        return Ok(());
+    }
+
+    // Delegate manifest update to a lightweight helper using the same logic as before
+    install_package_impl(
+        root_spec,
+        force,
+        allow_net,
+        project_root,
+        true,
+    )
+    .await
+    .or_else(|_| {
+        // If impl fails (package already there), update manifest manually
+        update_manifest_only(root_spec, project_root)
+    })
+}
+
+/// Update only the package.json and lockfile without re-downloading anything.
+fn update_manifest_only(root_spec: &str, project_root: &Path) -> anyhow::Result<()> {
+    let (pkg_name, _) = parse_package_spec(root_spec)?;
+    let node_modules = project_root.join("node_modules");
+    let pkg_json_path = project_root.join("package.json");
+
+    // Read installed version
+    let installed_ver = std::fs::read_to_string(node_modules.join(&pkg_name).join("package.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v["version"].as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "*".to_string());
+
+    // Update package.json
+    let (project_name, project_version, mut deps) = if pkg_json_path.exists() {
+        let content = std::fs::read_to_string(&pkg_json_path)?;
+        let val: serde_json::Value =
+            serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
+        let pname = val["name"].as_str().unwrap_or("project").to_string();
+        let pver = val["version"].as_str().unwrap_or("0.0.0").to_string();
+        let mut dep_map: HashMap<String, String> = HashMap::new();
+        if let Some(deps_obj) = val["dependencies"].as_object() {
+            for (k, v) in deps_obj {
+                if let Some(ver) = v.as_str() {
+                    dep_map.insert(k.clone(), ver.to_string());
+                }
+            }
+        }
+        (pname, pver, dep_map)
+    } else {
+        ("project".to_string(), "0.0.0".to_string(), HashMap::new())
+    };
+
+    deps.insert(pkg_name.clone(), installed_ver.clone());
+
+    let deps_json: serde_json::Value = deps
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+
+    let manifest = serde_json::json!({
+        "name": project_name,
+        "version": project_version,
+        "dependencies": deps_json
+    });
+    std::fs::write(
+        &pkg_json_path,
+        serde_json::to_string_pretty(&manifest)? + "\n",
+    )?;
 
     Ok(())
 }
@@ -894,7 +1468,7 @@ pub async fn update_packages(
 /// privileges on Windows.
 fn create_virtual_symlink(
     name: &str,
-    version: &str,
+    _version: &str,
     node_modules: &Path,
     _virtual_pkg_path: &Path,
 ) -> anyhow::Result<()> {

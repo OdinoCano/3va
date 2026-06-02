@@ -1,6 +1,7 @@
 use rquickjs::{Ctx, Function, Result, function::Rest};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -113,7 +114,10 @@ fn stat_meta_to_json(meta: &std::fs::Metadata) -> String {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as f64)
         .unwrap_or(mtime_ms);
+    #[cfg(unix)]
     let mode = meta.permissions().mode();
+    #[cfg(not(unix))]
+    let mode: u32 = if meta.permissions().readonly() { 0o444 } else { 0o644 };
     let is_dir = meta.is_dir();
     let is_file = meta.is_file();
     let is_symlink = meta.file_type().is_symlink();
@@ -645,8 +649,19 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 let mode = u32::from_str_radix(mode_str.trim_start_matches("0o"), 8)
                     .or_else(|_| mode_str.parse::<u32>())
                     .unwrap_or(0o644);
+                #[cfg(unix)]
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
+                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
+                #[cfg(not(unix))]
+                {
+                    let mut perms_obj = std::fs::metadata(&path)
+                        .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?
+                        .permissions();
+                    perms_obj.set_readonly(mode & 0o200 == 0);
+                    std::fs::set_permissions(&path, perms_obj)
+                        .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
+                }
+                Ok(())
             },
         )?,
     )?;
@@ -669,8 +684,14 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 if !perms.check(&Capability::FileWrite(path.clone())) {
                     return Err(perm_err(&ctx, "write", &path));
                 }
-                std::os::unix::fs::symlink(&target_str, &path)
-                    .map_err(|e| js_err(&ctx, format!("EEXIST: {}: '{}'", e, path_str)))
+                #[cfg(unix)]
+                return std::os::unix::fs::symlink(&target_str, &path)
+                    .map_err(|e| js_err(&ctx, format!("EEXIST: {}: '{}'", e, path_str)));
+                #[cfg(windows)]
+                return std::os::windows::fs::symlink_file(&target_str, &path)
+                    .map_err(|e| js_err(&ctx, format!("EEXIST: {}: '{}'", e, path_str)));
+                #[cfg(not(any(unix, windows)))]
+                return Err(js_err(&ctx, "symlink not supported on this platform".into()));
             },
         )?,
     )?;

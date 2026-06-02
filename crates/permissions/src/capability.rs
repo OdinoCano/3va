@@ -289,13 +289,29 @@ impl Clone for PermissionState {
 /// - `FileRead`/`FileWrite`: el path requerido debe comenzar con el path concedido.
 /// - `Network`: el host requerido debe coincidir exactamente o por wildcard `*.host`.
 /// - El resto: igualdad exacta.
+/// Strip Windows \\?\ extended-length path prefix so comparisons work
+/// regardless of whether the path was produced by canonicalize() or not.
+#[cfg(windows)]
+fn normalize_path(p: &std::path::Path) -> std::borrow::Cow<std::path::Path> {
+    let s = p.to_string_lossy();
+    if s.starts_with(r"\\?\") {
+        std::borrow::Cow::Owned(std::path::PathBuf::from(&s[4..]))
+    } else {
+        std::borrow::Cow::Borrowed(p)
+    }
+}
+#[cfg(not(windows))]
+fn normalize_path(p: &std::path::Path) -> std::borrow::Cow<std::path::Path> {
+    std::borrow::Cow::Borrowed(p)
+}
+
 fn caps_match(granted: &Capability, required: &Capability) -> bool {
     match (granted, required) {
         (Capability::FileRead(allowed), Capability::FileRead(target)) => {
-            target.starts_with(allowed)
+            normalize_path(target).starts_with(normalize_path(allowed).as_ref())
         }
         (Capability::FileWrite(allowed), Capability::FileWrite(target)) => {
-            target.starts_with(allowed)
+            normalize_path(target).starts_with(normalize_path(allowed).as_ref())
         }
         (Capability::Network(allowed), Capability::Network(target)) => {
             host_matches(allowed, target)
