@@ -405,7 +405,7 @@ There is no way to bypass CI. Branch protection on `main` requires all checks gr
 
 **Security-sensitive changes** (permissions engine, JS builtins, WASM sandbox, CI config, `Cargo.toml`) require maintainer review regardless of author — enforced via `CODEOWNERS`.
 
-To report a vulnerability: email `security@sophava.com`. Do not open a public issue.
+To report a vulnerability: email `edgarcano.166@gmail.com`. Do not open a public issue.
 
 ---
 
