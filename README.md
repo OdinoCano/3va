@@ -1,256 +1,230 @@
 # 3va
 
+[![CI](https://github.com/OdinoCano/3va/actions/workflows/ci.yml/badge.svg)](https://github.com/OdinoCano/3va/actions/workflows/ci.yml)
+[![Security](https://github.com/OdinoCano/3va/actions/workflows/security.yml/badge.svg)](https://github.com/OdinoCano/3va/actions/workflows/security.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust Edition 2021](https://img.shields.io/badge/Rust-2021-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
+
 > *Veni, Vidi, Vici, Abiit — He came, he saw, he conquered, he left.*
 
-**3va** is a secure-by-default JavaScript and TypeScript runtime written in Rust. The name is a tribute to the philosophy of Satoshi Nakamoto: build something that matters, ship it to the world, and step away.
+**3va** is a JavaScript and TypeScript runtime written in Rust with deny-by-default security. It bundles a package manager, process manager, test runner, bundler, and dev server — no pm2, no separate build tool, no extra config.
 
 ---
 
 ## Philosophy
 
-The JavaScript ecosystem is broken from a supply chain security perspective. `3va` reimagines the runtime from the ground up, taking inspiration from QubesOS, WASI, and the Chrome sandbox rather than from Node.js.
+The JavaScript ecosystem has a supply chain security problem. Post-install scripts run arbitrary code at install time. Packages silently access the filesystem and network. There is no enforced boundary between trusted application code and untrusted dependencies.
 
-- **Deny by default.** No access to the filesystem, network, environment variables, or child processes unless you explicitly grant it.
-- **Capability-based permissions.** Every sensitive operation requires a flag. Scopes can be narrowed to specific hosts, paths, or variables.
-- **Untrusted dependencies.** The package manager refuses to execute post-install scripts. Packages are treated as untrusted code, not trusted collaborators.
-- **Post-quantum ready.** The `vvva_crypto` crate is built with post-quantum cryptography primitives in mind.
+3va starts from a different premise: deny everything, grant explicitly. The design draws from QubesOS, WASI, and the Chrome sandbox — not from Node.js. Every capability (filesystem, network, env vars, child processes, native addons) is blocked by default and must be declared at the command line. This applies uniformly to application code and to every dependency it pulls in.
+
+---
+
+## Comparison
+
+| Feature | Node.js 25 | Bun 1.3 | **3va 1.0** |
+|---|---|---|---|
+| JavaScript runtime | ✓ | ✓ | ✓ |
+| TypeScript (no config) | ✗ | ✓ | ✓ |
+| Package manager | via npm | ✓ | ✓ |
+| Process manager | via pm2 | ✗ | ✓ built-in |
+| Test runner | via Jest | ✓ | ✓ Jest-compatible |
+| Bundler | via webpack/esbuild | ✓ | ✓ |
+| Dev server + HMR | ✗ | ✓ | ✓ |
+| Deny-by-default permissions | ✗ | ✗ | ✓ |
+| Post-install scripts blocked | ✗ | ✗ | ✓ always |
+| Malware + secrets audit | ✗ | ✗ | ✓ |
+| OSV CVE scan (24h cache) | ✗ | ✗ | ✓ |
+| CDP Debugger (`--inspect`) | ✓ | ✗ | ✓ |
+| NAPI native addons | ✓ | ✓ | ✓ |
+| WebAssembly (WASI) | partial | ✓ | ✓ |
+| Post-quantum TLS (ML-KEM-768) | ✗ | ✗ | ✓ |
+| Startup time (hello world) | 175 ms | **16 ms** | 94 ms¹ |
+| HTTP throughput (100k req) | — ² | **20,758 req/s** | 1,572 req/s¹ |
+| Memory (minimal HTTP server) | 44 MB | 32 MB | **29 MB** |
+| Install time (warm cache) | 984 ms | **7.8 ms** | 16.8 ms |
+
+¹ Measured with a debug build (`cargo build`, not `--release`). Release performance is higher.  
+² Node.js was not running an HTTP server during the throughput measurement; connection refused on all requests.
+
+**Where Bun wins:** startup latency and raw HTTP throughput. Bun's JSC engine and native HTTP stack are faster in both metrics. 3va trades throughput for security guarantees that Bun does not provide.
+
+**Where 3va wins:** memory footprint, integrated security tooling, and permission isolation that applies at runtime — not just at install time.
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-
-- [Rust toolchain](https://rustup.rs/) (edition 2021 or later)
-
-### Build
-
 ```bash
 git clone https://github.com/OdinoCano/3va.git
 cd 3va
 cargo build --release
-```
-
-### Install the binary
-
-```bash
-# Temporary (current session only)
-export PATH="$PWD/target/release:$PATH"
-
-# Permanent
 sudo cp target/release/3va /usr/local/bin/
 ```
 
-### Run a script
-
 ```bash
+# Run a script (no permissions granted by default)
 3va run app.ts
-3va run app.ts --allow-read=/app/config --allow-net=api.example.com
+
+# Grant specific capabilities
+3va run app.ts --allow-net=api.example.com --allow-read=./data
+
+# Install packages
+3va install express --allow-net=registry.npmjs.org
+
+# Audit the dependency tree
+3va audit --secrets
+
+# Start as a background daemon
+3va start app.js --name my-api
 ```
 
 ---
 
-## CLI Reference
+## Permissions
 
-### Global flags
-
-#### `--accessible` — Accessible / Screen Reader / Braille Mode
-
-Pass `--accessible` before any subcommand to enable accessible output. This flag:
-
-- Disables all ANSI colors and escape sequences
-- Removes animations, spinners, and progress bars
-- Produces plain line-by-line text suitable for screen readers and Braille terminals
-- Complies with EN 301 549 (European accessibility standard for ICT products)
+Every capability is blocked by default. Permissions are granted per-invocation via flags and apply equally to application code and all loaded dependencies.
 
 ```bash
-3va --accessible run app.ts
-3va --accessible sandbox
-3va --accessible audit --json
-3va --accessible test
+3va run app.ts \
+  --allow-read=/app/config \        # filesystem read, scoped to a path
+  --allow-write=/tmp \              # filesystem write, scoped to a path
+  --allow-net=api.stripe.com \      # outbound network, scoped to a host
+  --allow-env=DATABASE_URL \        # env var access, scoped to a variable
+  --allow-child-process \           # spawn child processes
+  --allow-ffi=./build/addon.node    # load native addon (NAPI)
 ```
 
-The flag is **positional** — it must come immediately after `3va`, before the subcommand.
+Omitting a flag means the capability is hard-blocked — not prompted at runtime, not configurable inside the script.
+
+Permission scopes can be widened to cover all values:
+
+```bash
+3va run app.ts --allow-read --allow-net  # unrestricted read + network
+```
+
+Interactive permission prompts are enabled by default in `run`. The runtime asks at the point of first access if a needed permission is not granted.
+
+### Package-level permission declarations (v1.5 roadmap)
+
+Currently, permissions are CLI flags. The planned v1.5 model moves them into `package.json` under a `"3va"` key — a pattern already established by `"jest"`, `"eslint"`, and `"prettier"`. Node.js, Bun, pnpm, and Yarn ignore unknown keys, so there is no conflict.
+
+The target schema:
+
+```json
+{
+  "name": "my-app",
+  "dependencies": {
+    "express": "^4.18.0",
+    "axios": "^1.6.0"
+  },
+  "3va": {
+    "permissions": {
+      ".": {
+        "allow-net": ["api.example.com"],
+        "allow-read": ["./config"]
+      },
+      "axios": {
+        "allow-net": ["api.example.com"]
+      },
+      "express": {
+        "allow-net": ["*"]
+      }
+    }
+  }
+}
+```
+
+The `3va permissions suggest` command (v1.5) will statically analyze the project and generate this section. `3va permissions learn` will run the app under syscall interception and produce the minimum set of permissions actually needed.
 
 ---
 
-### `3va run <file>`
-
-Run a JavaScript or TypeScript file inside a sandboxed environment.
+## Package Manager
 
 ```bash
-3va run app.ts
-3va run app.ts --allow-net=api.example.com --allow-read=/data --allow-env=HOME
+3va install axios                          # from npm
+3va install react@18                       # specific version
+3va install @std/path --allow-net=jsr.io   # from JSR
+3va reinstall                              # reinstall from lockfile
+3va update                                 # update to latest compatible versions
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--allow-read[=<path>]` | Grant read access (optionally scoped to a path) |
-| `--allow-write[=<path>]` | Grant write access (optionally scoped to a path) |
-| `--allow-net[=<host>]` | Grant network access (optionally scoped to a host) |
-| `--allow-env[=<var>]` | Grant environment variable access (optionally scoped) |
-| `--allow-child-process` | Allow spawning child processes |
-| `--allow-ffi[=<path>]` | Allow loading native `.node` addons (NAPI); optionally scoped to a path |
-| `--inspect[=<host:port>]` | Enable Chrome DevTools Protocol debugger (default: `127.0.0.1:9229`) |
-| `--interactive` | Start an interactive session after running the file |
+**Post-install scripts are never executed.** There are no exceptions. This is enforced at the package manager level, not as a flag.
 
-All permissions are deny-by-default. Omitting a flag means the capability is blocked.
+Package storage uses global deduplication (same model as pnpm): a package at version X is stored once on disk; multiple projects reference it and declare their own permissions independently.
 
-#### Debugging with `--inspect`
+### Install benchmarks (warm cache, 10 runs each)
 
-Start the script with the inspector enabled and connect from Chrome or any DAP-compatible IDE:
+| Tool | Mean | Range |
+|------|------|-------|
+| bun install | 7.8 ms | 4.9–23.0 ms |
+| **3va install** | **16.8 ms** | 12.5–31.1 ms |
+| npm install | 984 ms | 911–1,307 ms |
+| pnpm install | 1,368 ms | 1,204–1,603 ms |
+
+### Audit
 
 ```bash
-3va run app.ts --inspect
-# or on a custom address:
-3va run app.ts --inspect=0.0.0.0:9230
+3va audit                  # malware scan + OSV CVE scan (24h cache)
+3va audit --secrets        # also scan for leaked credentials
+3va audit --deny           # exit non-zero on CRITICAL/HIGH findings
+3va audit --json           # machine-readable output
 ```
 
-1. Open **`chrome://inspect`** in Chrome and click *Open dedicated DevTools for Node*.
-2. The `debugger;` statement pauses execution and sends a `Debugger.paused` CDP event.
+Audit runs in three phases:
 
-#### Native addons (NAPI)
-
-3va can load `.node` native addons compiled against the NAPI v8 ABI. Requires `--allow-ffi`:
-
-```bash
-3va run app.ts --allow-ffi=./build/Release/addon.node
-```
-
-Inside the script, use the standard `require` path:
-
-```js
-const addon = require('./build/Release/addon.node');
-```
-
-#### CPU Profiling (`--prof`)
-
-Collect a sampling CPU profile and optionally generate a flamegraph:
-
-```bash
-# Write a V8-compatible .cpuprofile (loadable in Chrome DevTools / speedscope.app)
-3va run app.ts --prof
-
-# Custom output path and sampling interval (default: 10 ms)
-3va run app.ts --prof --prof-out=my.cpuprofile --prof-interval=5
-
-# Also emit a flamegraph SVG
-3va run app.ts --prof --flamegraph=flame.svg
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--prof` | off | Enable CPU sampling profiler |
-| `--prof-out=<path>` | `profile.cpuprofile` | Output path for the CPU profile JSON |
-| `--prof-interval=<ms>` | `10` | Sampling interval in milliseconds |
-| `--flamegraph=<path>` | — | Also emit an Inferno-style SVG flamegraph |
-
-Inside a profiled script, use `console.profile` / `console.profileEnd` to annotate regions:
-
-```js
-console.profile('my-loop');
-for (let i = 0; i < 1_000_000; i++) { /* ... */ }
-console.profileEnd('my-loop');
-```
-
-**Note:** Sampling is performed via `setInterval` + `new Error().stack`. Tight CPU loops with no async yield points will appear as a single deep frame rather than individual function calls — this is a QuickJS constraint. I/O-bound and async programs profile accurately.
+1. **Malware scan** — static analysis of `node_modules` for known malicious patterns
+2. **OSV CVE scan** — queries `api.osv.dev` for known vulnerabilities; results cached 24 hours
+3. **Secrets detection** (opt-in via `--secrets`) — 20 patterns covering AWS keys, GitHub tokens, Stripe keys, private certificates, JWT secrets, database connection strings, and more
 
 ---
 
-### `3va prof <file>`
+## Process Manager
 
-Analyze a `.cpuprofile` file and print a top-N function breakdown:
-
-```bash
-3va prof profile.cpuprofile
-3va prof profile.cpuprofile --top 10
-3va prof profile.cpuprofile --format=flamegraph --out=flame.svg
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--top <N>` | `20` | Number of hot functions to show |
-| `--format <fmt>` | `text` | Output format: `text` or `flamegraph` |
-| `--out <path>` | `flamegraph.svg` | SVG output path (only with `--format=flamegraph`) |
-
----
-
-#### Post-quantum TLS (`__pqTlsConnect`)
-
-Establish a classical TLS connection with an additional ML-KEM-768 key exchange on top, producing a hybrid shared secret:
-
-```js
-const { connId, pqSharedSecret } = await __pqTlsConnect('example.com', 443);
-// pqSharedSecret is a hex-encoded 32-byte shared secret derived via ML-KEM-768
-```
-
-`__pqTlsConnect` is a global function injected by the runtime — it is **not** a method on the `net` module. The function requires `--allow-net=<host>`. The shared secret can be used as key material for symmetric encryption.
-
----
-
-### `3va install <package>[@version]`
-
-Install a package from npm, Yarn, or JSR. The registry is determined by the `--allow-net` host — no separate `--registry` flag is needed.
+Built into the runtime. No pm2, no separate daemon process.
 
 ```bash
-3va install axios --allow-net=registry.npmjs.org
-3va install react@18 --allow-net=registry.yarnpkg.com
-3va install @std/path --allow-net=jsr.io
+3va start server.js --name api
+3va start server.js --name worker -- --port 4000   # pass args after --
+3va status                                          # all processes
+3va status api                                      # one process
+3va logs api --lines 200
+3va restart api
+3va stop api                                        # SIGTERM → SIGKILL after 1.5s
+3va delete api                                      # stop + remove logs
 ```
 
-| Supported registry | Host value |
-|--------------------|------------|
-| npm | `registry.npmjs.org` |
-| Yarn | `registry.yarnpkg.com` |
-| JSR | `jsr.io` |
-
-Post-install scripts are never executed.
+Auto-restart on crash is enabled by default. The process manager state is local to the machine and survives reboots.
 
 ---
 
-### `3va reinstall`
+## HTTP Performance and Load Behavior
 
-Reinstall all packages listed in the lockfile.
+Baseline benchmarks, 100,000 requests at 1,000 concurrent connections:
 
-```bash
-3va reinstall
-```
+| Runtime | Req/s | P50 | P99 | Success |
+|---------|-------|-----|-----|---------|
+| Bun 1.3 | 20,758 | 4.4 ms | 16.0 ms | 100% |
+| **3va 1.0** (debug) | **1,572** | **61 ms** | **143 ms** | **100%** |
 
----
+At 2,000 concurrent connections (stress test, 1,000,000 requests):
 
-### `3va update`
+| Runtime | Success rate | Req/s | Notes |
+|---------|-------------|-------|-------|
+| Bun 1.3 | 100% | 21,650 | No connection limiting |
+| Node.js 25 | 99.97% | 8,869 | 281 connection errors |
+| **3va 1.0** (debug) | **70.4%** | **327** | Rate-limited by design |
 
-Update installed packages to their latest compatible versions.
+3va deliberately limits active connections to protect the process from overload. At 2,000 concurrent connections the rate limiter drops excess connections rather than queuing them indefinitely. This is the intended behavior for production deployments. Slowloris protection is also built into the HTTP layer.
 
-```bash
-3va update
-```
-
----
-
-### `3va bundle <input>`
-
-Bundle a JavaScript or TypeScript application into a single output file.
-
-```bash
-3va bundle src/index.ts
-3va bundle src/index.ts -o dist/bundle.js
-3va bundle src/index.ts --minify --source-map
-3va bundle src/index.ts --split
-```
-
-| Flag | Description |
-|------|-------------|
-| `-o <path>` | Output file path (default: derived from input) |
-| `--split` | Enable code splitting |
-| `--minify` | Minify output |
-| `--source-map` | Emit a source map |
+v2 roadmap targets RUDY (R-U-Dead-Yet) detection and adaptive rate limiting.
 
 ---
 
-### `3va test [paths...]`
+## Dev Tooling
 
-Run tests using the built-in Jest-compatible test runner. Supports `describe`, `test`, `expect`, all common matchers, and snapshots.
+### Test runner
+
+Jest-compatible. No configuration required.
 
 ```bash
 3va test
@@ -260,195 +234,181 @@ Run tests using the built-in Jest-compatible test runner. Supports `describe`, `
 3va test --update-snapshots
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--watch` | Re-run tests on file change |
-| `--coverage` | Collect and report code coverage |
-| `--update-snapshots` | Overwrite existing snapshots with current output |
+Supports `describe`, `test`, `expect`, all standard matchers, `toMatchSnapshot`, watch mode, and coverage reporting. The test runner is implemented in `vvva_test` — no Jest install needed.
 
----
-
-### `3va audit`
-
-Audit installed packages in three phases:
-
-1. **Malware scan** — static analysis of `node_modules` for known malicious patterns
-2. **OSV CVE scan** — queries [api.osv.dev](https://api.osv.dev/v1/querybatch) for known vulnerabilities (24-hour local cache)
-3. **Secrets detection** — scans for leaked credentials and tokens (opt-in)
+### Bundler
 
 ```bash
-3va audit
-3va audit --secrets
-3va audit --deny
-3va audit --update-cache
-3va audit --json
+3va bundle src/index.ts
+3va bundle src/index.ts -o dist/bundle.js --minify --source-map
+3va bundle src/index.ts --split   # code splitting
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--secrets` | Enable phase 3: secrets detection |
-| `--deny` | Exit with non-zero status on CRITICAL or HIGH findings |
-| `--update-cache` | Bypass the 24-hour OSV cache and re-fetch |
-| `--json` | Output results as machine-readable JSON |
+Tree shaking, code splitting, minification, source maps, and watch mode.
 
----
+### Dev server with HMR
 
-### `3va sandbox`
+```bash
+3va dev
+3va dev --port 3000 --host 0.0.0.0 --open
+```
 
-Start an interactive JavaScript REPL with a sandboxed environment. Permissions can be granted dynamically inside the session.
+Automatically detects the project framework (Next.js, Astro, Nuxt, SvelteKit, Remix, Gatsby, SolidStart, Qwik) and delegates to its native dev server. For custom servers, runs a built-in dev server with HMR via Server-Sent Events (`/__hmr`), 300ms debounce, and SPA fallback.
+
+### CPU profiler
+
+```bash
+3va run app.ts --prof                           # writes profile.cpuprofile
+3va run app.ts --prof --flamegraph=flame.svg    # also emit SVG flamegraph
+3va prof profile.cpuprofile --top 20            # post-hoc analysis
+```
+
+Output is V8-compatible `.cpuprofile` JSON, loadable in Chrome DevTools and [speedscope.app](https://speedscope.app). Flamegraphs use the Inferno format.
+
+### Debugger
+
+```bash
+3va run app.ts --inspect         # CDP on 127.0.0.1:9229
+3va run app.ts --inspect=0.0.0.0:9230
+```
+
+Opens a WebSocket CDP server. Connect via `chrome://inspect` or any DAP-compatible IDE. `debugger;` statements pause execution and emit `Debugger.paused` CDP events.
+
+### Interactive sandbox
 
 ```bash
 3va sandbox
 ```
 
-REPL commands available inside the sandbox:
+REPL with permission management. Inside the session: `.allow-read <path>`, `.allow-net <host>`, `.permissions` to list current grants.
 
-| Command | Description |
-|---------|-------------|
-| `.help` | Show available REPL commands |
-| `.exit` | Exit the REPL |
-| `.clear` | Clear the current input buffer |
-| `.allow-read <path>` | Grant read permission for a path |
-| `.allow-net <host>` | Grant network permission for a host |
-| `.permissions` | List currently granted permissions |
-
----
-
-### `3va dev`
-
-Start a development server with hot module replacement (HMR) via Server-Sent Events.
-
-**Framework detection:** 3va automatically detects the project framework (Astro, Next.js, Nuxt, SvelteKit, Remix, Gatsby, SolidStart, Qwik) and delegates to its native dev server.
+### Other commands
 
 ```bash
-3va dev
-3va dev --port 3000 --host 0.0.0.0
-3va dev --public-dir ./static --open
-```
-
-| Flag | Description |
-|------|-------------|
-| `--port <N>` | Port to listen on (default: varies) |
-| `--host <H>` | Host address to bind |
-| `--open` | Open the browser automatically on start |
-| `--public-dir <D>` | Directory to serve static files from (default: `public`) |
-
-**HMR details:**
-- File changes trigger a rebuild with a 300 ms debounce; rebuild time is printed to the console.
-- The `/__hmr` endpoint is an SSE stream that browsers subscribe to.
-- An HMR client script is automatically injected before `</body>` in HTML responses.
-- Unknown routes fall back to `public/index.html` (SPA mode).
-- Static files are served with correct MIME types.
-
----
-
-### `3va start`
-
-Start an entry file as a managed background daemon (production process manager).
-
-```bash
-3va start app.js
-3va start --name my-api server.js -- --port 3000
-```
-
-| Flag | Description |
-|------|-------------|
-| `-n, --name <NAME>` | Custom process name (default: derived from entry filename) |
-| `-- <ARGS>` | Arguments forwarded to the script |
-
----
-
-### `3va stop`
-
-Stop a managed process (SIGTERM → SIGKILL after 1.5 s).
-
-```bash
-3va stop my-api
+3va doctor          # environment health check
+3va --accessible    # EN 301 549 mode: no ANSI, no animations, screen-reader friendly
 ```
 
 ---
 
-### `3va restart`
+## Post-Quantum Cryptography
 
-Restart a managed process with the same configuration.
+The `vvva_crypto` crate implements ML-KEM-768 (key encapsulation) and ML-DSA-65 (signatures), both exposed to JS via `require('crypto').pq`:
 
-```bash
-3va restart my-api
+```js
+const { pq } = require('crypto');
+
+// ML-KEM-768 key exchange
+const { publicKey, secretKey } = pq.kem.generateKeyPair();
+const { ciphertext, sharedSecret } = pq.kem.encapsulate(publicKey);
+const recovered = pq.kem.decapsulate(ciphertext, secretKey);
+
+// ML-DSA-65 signatures
+const kp = pq.dsa.generateKeyPair();
+const sig = pq.dsa.sign(kp.secretKey, message);
+const valid = pq.dsa.verify(kp.publicKey, message, sig);
 ```
+
+**Hybrid TLS** — `__pqTlsConnect` establishes a classical TLS connection with an additional ML-KEM-768 key exchange, producing a 32-byte hybrid shared secret:
+
+```js
+// Requires --allow-net=<host>
+const { connId, pqSharedSecret } = await __pqTlsConnect('example.com', 443);
+// pqSharedSecret: hex-encoded 32-byte shared secret derived via ML-KEM-768
+```
+
+Full post-quantum TLS in production is the v3 roadmap target.
 
 ---
 
-### `3va status`
+## Compatibility
 
-Show status of one or all managed processes.
+### Package registries
 
-```bash
-3va status
-3va status my-api
-```
+| Registry | Access |
+|----------|--------|
+| npmjs.org | `--allow-net=registry.npmjs.org` |
+| registry.yarnpkg.com | `--allow-net=registry.yarnpkg.com` |
+| jsr.io | `--allow-net=jsr.io` |
 
----
+### Module formats
 
-### `3va logs`
+- CommonJS (`require`) and ESM (`import`/`export`) — both supported
+- TypeScript — transpiled before execution, no `tsconfig.json` needed
+- NAPI v8 native addons — `.node` files via `require('./addon.node')` with `--allow-ffi`
+- WebAssembly — `.wasm` and `.wat` files, WASI preview1 compatible
 
-Show logs for a managed process.
+### Frameworks
 
-```bash
-3va logs my-api
-3va logs worker --lines 200
-```
+Framework detection in `3va dev` supports: Next.js, Astro, Nuxt, SvelteKit, Remix, Gatsby, SolidStart, Qwik. For Express, Fastify, Koa and similar server frameworks — they run under `3va run` with appropriate permission flags.
 
-| Flag | Description |
-|------|-------------|
-| `-n, --lines <N>` | Number of tail lines (default: 50) |
-
----
-
-### `3va delete`
-
-Stop (if running) and permanently remove a managed process including its logs.
-
-```bash
-3va delete my-api
-```
-
----
-
-### `3va doctor`
-
-Run a system health check to verify the runtime environment.
-
-```bash
-3va doctor
-```
+**Node.js compatibility note:** v1.0.0 covers the core API surface (fs, net, http, crypto, path, os, events, stream, buffer, timers, url, util, child_process, worker_threads stubs). Some advanced APIs (`cluster`, `dgram`, full `dns` resolver, `stream/web` WHATWG Streams) are targeted for v2.0.0.
 
 ---
 
 ## Architecture
 
-`3va` is organized as a Cargo workspace. Each crate has a single, well-defined responsibility.
+`3va` is a Cargo workspace. Each crate has a single responsibility.
 
 | Crate | Responsibility |
 |-------|----------------|
 | `vvva_core` | Tokio async event loop and scheduler |
-| `vvva_cli` | `clap`-based CLI entrypoint |
+| `vvva_cli` | `clap`-based CLI, subcommand routing, `--accessible` mode |
 | `vvva_permissions` | Capability-based deny-by-default permission engine |
-| `vvva_js` | QuickJS engine via `rquickjs`; ESM loader/resolver, TypeScript transpiler, async/await, Promise microtask loop |
-| `vvva_pm` | Package manager, malware scanner, secrets scanner, OSV auditor |
-| `vvva_bundler` | Bundler with tree shaking, code splitting, and watch mode |
-| `vvva_test` | Test runner, matchers, snapshot engine, and coverage reporting |
-| `vvva_crypto` | Cryptographic utilities (post-quantum preparation) |
+| `vvva_js` | QuickJS via `rquickjs`; ESM loader, TypeScript transpiler, async/await, Promise microtask loop, CDP inspector, profiler |
+| `vvva_pm` | Package manager, malware scanner, secrets scanner, OSV auditor, lockfile |
+| `vvva_bundler` | Bundler with tree shaking, code splitting, watch mode |
+| `vvva_test` | Test runner, matchers, snapshot engine, coverage |
+| `vvva_crypto` | ML-KEM-768, ML-DSA-65, HKDF, AES-GCM, classical crypto wrappers |
+| `vvva_wasm` | WebAssembly/WASI runtime via `wasmtime` |
 
-### JavaScript engine
+The JavaScript engine is QuickJS embedded via `rquickjs`. QuickJS is a small, embeddable engine with full ES2023 support, which makes it straightforward to intercept syscalls at the Rust boundary. This is the primary mechanism for permission enforcement.
 
-`vvva_js` embeds [QuickJS](https://bellard.org/quickjs/) via `rquickjs` and provides:
+**Note on `unsafe`:** The NAPI layer (`crates/js/src/builtins/napi.rs`) uses `unsafe extern "C"` to implement the ~30 NAPI v8 ABI functions. This is unavoidable for binary addon compatibility. All other crates aim to be `unsafe`-free; the CI runs `cargo-geiger` as an informational check on every commit.
 
-- Full ESM support: `import`/`export`, named and default exports, re-export chains
-- TypeScript transpilation before execution
-- `async`/`await` and Promise chains driven by a pending-jobs microtask loop
+---
+
+## Roadmap
+
+| Version | Target | Focus |
+|---------|--------|-------|
+| **1.0.0 LTS** | 2026-06-01 ✅ | Full runtime + PM + toolchain + Inspector + NAPI + WASM + PQ-TLS |
+| **1.5** | 2026 Q3 | `permissions suggest` (static analysis), `permissions learn` (syscall interception), package.json `"3va"` key, permission profiles for common frameworks |
+| **2.0.0** | 2027 | Node.js compat v2 (cluster, dgram, full dns, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting |
+| **3.0** | TBD | Post-quantum TLS in full production mode |
+
+Full roadmap: [`docs/12-roadmap/`](docs/12-roadmap/)
+
+---
+
+## Contributing
+
+```sh
+git clone https://github.com/OdinoCano/3va.git
+cd 3va
+./scripts/dev-setup.sh   # installs pre-commit hooks (fmt + clippy) and pre-push (test)
+```
+
+Every PR must pass all CI gates before merge:
+
+| Gate | Blocks merge |
+|------|-------------|
+| `cargo fmt --check` | Yes |
+| `cargo clippy -D warnings` | Yes |
+| `cargo test` (872 tests) | Yes |
+| `cargo deny check` (CVEs + licenses) | Yes |
+| Gitleaks secret scanning | Yes |
+| Semgrep SAST (ERROR severity) | Yes |
+| Fuzz build + 30s smoke run | Yes |
+
+There is no way to bypass CI. Branch protection on `main` requires all checks green and at least one maintainer approval. Maintainers cannot push directly to `main`.
+
+**Security-sensitive changes** (permissions engine, JS builtins, WASM sandbox, CI config, `Cargo.toml`) require maintainer review regardless of author — enforced via `CODEOWNERS`.
+
+To report a vulnerability: email `security@sophava.com`. Do not open a public issue.
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)
