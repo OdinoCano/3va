@@ -28,25 +28,42 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     // Native __readFile(resolvedAbsPath) -> String
     // Accepts an already-resolved absolute path; does permission check + optional TS transpile.
     let perms = permissions.clone();
-    let read_file_fn = Function::new(ctx.clone(), move |args: Rest<String>| -> Result<String> {
-        let path_str =
-            args.0.into_iter().next().ok_or_else(|| {
-                rquickjs::Error::new_from_js("value", "__readFile() needs a path")
+    let read_file_fn = Function::new(
+        ctx.clone(),
+        move |ctx: rquickjs::Ctx<'_>, args: Rest<String>| -> Result<String> {
+            let path_str =
+                args.0.into_iter().next().ok_or_else(|| {
+                    rquickjs::Error::new_from_js("value", "__readFile() needs a path")
+                })?;
+
+            let full_path = PathBuf::from(&path_str);
+
+            // Permission check
+            if !perms.check(&Capability::FileRead(full_path.clone())) {
+                let msg = format!(
+                    "Permission denied: --allow-read={} is required",
+                    full_path.display()
+                );
+                let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
+                return match ctx
+                    .eval::<rquickjs::Value, _>(format!("new Error(\"{}\")", escaped).as_str())
+                {
+                    Ok(v) => Err(ctx.throw(v)),
+                    Err(e) => Err(e),
+                };
+            }
+
+            // Read the file
+            let source = std::fs::read_to_string(&full_path).map_err(|e| {
+                let msg = format!("ENOENT: {}: '{}'", e, path_str);
+                let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
+                match ctx.eval::<rquickjs::Value, _>(
+                    format!("new Error(\"{}\")", escaped).as_str(),
+                ) {
+                    Ok(v) => ctx.throw(v),
+                    Err(e2) => e2,
+                }
             })?;
-
-        let full_path = PathBuf::from(&path_str);
-
-        // Permission check
-        if !perms.check(&Capability::FileRead(full_path.clone())) {
-            return Err(rquickjs::Error::new_from_js(
-                "permission",
-                "permission denied",
-            ));
-        }
-
-        // Read the file
-        let source = std::fs::read_to_string(&full_path)
-            .map_err(|_| rquickjs::Error::new_from_js("io", "file not found"))?;
 
         // Transpile based on extension and content:
         // - .ts / .tsx: always strip TypeScript types (JSX enabled for .tsx)
@@ -238,8 +255,13 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__requireCache['util'] = util;
 
             // ── events ────────────────────────────────────────────────────────────
-            function EventEmitter() { this._events = {}; this._maxListeners = 10; }
+            function EventEmitter() { this._events = Object.create(null); this._maxListeners = 10; }
+            // All EventEmitter methods lazily initialize _events so that objects
+            // that mix in EventEmitter.prototype (without calling `new EventEmitter()`)
+            // work correctly (e.g. express's app function).
+            function _ensureEvents(self) { if (!self._events) self._events = Object.create(null); }
             EventEmitter.prototype.on = EventEmitter.prototype.addListener = function(ev, fn) {
+                _ensureEvents(this);
                 if (!this._events[ev]) this._events[ev] = [];
                 this._events[ev].push(fn);
                 return this;
@@ -251,28 +273,33 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 return this.on(ev, wrapper);
             };
             EventEmitter.prototype.removeListener = EventEmitter.prototype.off = function(ev, fn) {
+                _ensureEvents(this);
                 if (!this._events[ev]) return this;
                 this._events[ev] = this._events[ev].filter(function(f) { return f !== fn && f._orig !== fn; });
                 return this;
             };
             EventEmitter.prototype.removeAllListeners = function(ev) {
-                if (ev) { delete this._events[ev]; } else { this._events = {}; } return this;
+                _ensureEvents(this);
+                if (ev) { delete this._events[ev]; } else { this._events = Object.create(null); } return this;
             };
             EventEmitter.prototype.emit = function(ev) {
+                _ensureEvents(this);
                 var args = Array.prototype.slice.call(arguments, 1);
                 var listeners = (this._events[ev] || []).slice();
                 listeners.forEach(function(fn) { fn.apply(null, args); });
                 return listeners.length > 0;
             };
             EventEmitter.prototype.listeners = function(ev) {
+                _ensureEvents(this);
                 return (this._events[ev] || []).map(function(f) { return f._orig || f; });
             };
-            EventEmitter.prototype.rawListeners = function(ev) { return (this._events[ev] || []).slice(); };
-            EventEmitter.prototype.listenerCount = function(ev) { return (this._events[ev] || []).length; };
+            EventEmitter.prototype.rawListeners = function(ev) { _ensureEvents(this); return (this._events[ev] || []).slice(); };
+            EventEmitter.prototype.listenerCount = function(ev) { _ensureEvents(this); return (this._events[ev] || []).length; };
             EventEmitter.prototype.setMaxListeners = function(n) { this._maxListeners = n; return this; };
-            EventEmitter.prototype.getMaxListeners = function() { return this._maxListeners; };
-            EventEmitter.prototype.eventNames = function() { return Object.keys(this._events).filter(function(k) { return this._events[k] && this._events[k].length > 0; }, this); };
+            EventEmitter.prototype.getMaxListeners = function() { return this._maxListeners || EventEmitter.defaultMaxListeners; };
+            EventEmitter.prototype.eventNames = function() { _ensureEvents(this); return Object.keys(this._events).filter(function(k) { return this._events[k] && this._events[k].length > 0; }, this); };
             EventEmitter.prototype.prependListener = function(ev, fn) {
+                _ensureEvents(this);
                 if (!this._events[ev]) this._events[ev] = [];
                 this._events[ev].unshift(fn);
                 return this;
@@ -306,6 +333,24 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 value: function(instance) { return !!(instance && instance._readableState); }
             });
             Readable.prototype._read = function(size) {};
+            // Override EventEmitter.on: auto-resume stream when 'data' listener added,
+            // matching Node.js behavior. Deferred via setTimeout so both 'data' and 'end'
+            // listeners are registered before data flows, AND the resume happens in
+            // fire_pending() (BEFORE idle()), avoiding the spawner deadlock.
+            Readable.prototype.on = Readable.prototype.addListener = function(ev, fn) {
+                _ensureEvents(this);
+                if (!this._events[ev]) this._events[ev] = [];
+                this._events[ev].push(fn);
+                if (ev === 'data' && !this._readableState.flowing && !this._readableState._resumeScheduled) {
+                    this._readableState._resumeScheduled = true;
+                    var self = this;
+                    setTimeout(function() {
+                        self._readableState._resumeScheduled = false;
+                        if (!self._readableState.flowing) self.resume();
+                    }, 0);
+                }
+                return this;
+            };
             Readable.prototype.read = function(n) {
                 if (!this._readableState.flowing) this._read(n || 0);
                 var buf = this._readableState.buffer.splice(0);
@@ -325,8 +370,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             Readable.prototype.pipe = function(dest, opts) {
                 var self = this;
                 this.on('data', function(c) { if (dest.write(c) === false && self.pause) self.pause(); });
-                this.on('end', function() { if (!opts || !opts.end === false) dest.end(); });
+                this.on('end', function() { if (!opts || opts.end !== false) dest.end(); });
                 dest.emit('pipe', this);
+                if (!this._readableState.flowing) this.resume();
                 return dest;
             };
             Readable.prototype.unpipe = function(dest) { return this; };
@@ -507,14 +553,20 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             Duplex.prototype.write = Writable.prototype.write;
             Duplex.prototype.end = Writable.prototype.end;
 
-            var stream = {
-                Stream: Stream, Readable: Readable, Writable: Writable,
-                Transform: Transform, PassThrough: PassThrough, Duplex: Duplex,
-                isReadable: function(s) { return !!(s && s.readable); },
-                isWritable: function(s) { return !!(s && s.writable); },
-                isStream: function(s) { return !!(s && (s.readable || s.writable)); },
-            };
+            // In Node.js, require('stream') IS the Stream constructor function,
+            // with Readable/Writable/etc. attached as properties (not a plain object).
+            Stream.Stream = Stream;
+            Stream.Readable = Readable;
+            Stream.Writable = Writable;
+            Stream.Transform = Transform;
+            Stream.PassThrough = PassThrough;
+            Stream.Duplex = Duplex;
+            Stream.isReadable = function(s) { return !!(s && s.readable); };
+            Stream.isWritable = function(s) { return !!(s && s.writable); };
+            Stream.isStream = function(s) { return !!(s && (s.readable || s.writable)); };
+            var stream = Stream;
             globalThis.__requireCache['stream'] = stream;
+            globalThis.__requireCache['node:stream'] = stream;
             globalThis.__requireCache['stream/web'] = stream;
             globalThis.__requireCache['readable-stream'] = stream;
 
@@ -1000,6 +1052,11 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 };
 
                 var modObj = {
+                    METHODS: ['ACL','BIND','CHECKOUT','CONNECT','COPY','DELETE','GET','HEAD',
+                              'LINK','LOCK','M-SEARCH','MERGE','MKACTIVITY','MKCALENDAR','MKCOL',
+                              'MOVE','NOTIFY','OPTIONS','PATCH','POST','PROPFIND','PROPPATCH',
+                              'PURGE','PUT','REBIND','REPORT','SEARCH','SOURCE','SUBSCRIBE',
+                              'TRACE','UNBIND','UNLINK','UNLOCK','UNSUBSCRIBE'],
                     request: request,
                     get: function(url, opts, cb) {
                         if (typeof opts === 'function') { cb = opts; opts = {}; }
@@ -2493,6 +2550,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         globalThis.__esmToCjs = function(src) {
             var lines = src.split('\n');
             var out = [];
+            // Function/class exports must be deferred to end of file so the
+            // assignment runs AFTER the complete function body, not inside it.
+            var deferredExports = [];
             var i = 0;
 
             while (i < lines.length) {
@@ -2621,8 +2681,8 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             // Read and (if needed) transpile the file (path is already absolute)
             var source = __readFile(resolvedPath);
 
-            // Compute dirname
-            var dirname = resolvedPath.replace(/\/[^\/]*$/, '') || '.';
+            // Compute dirname — handle both / (Unix) and \ (Windows) separators
+            var dirname = resolvedPath.replace(/[\/\\][^\/\\]*$/, '') || '.';
             var filename = resolvedPath;
 
             var result;
@@ -2655,16 +2715,33 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__filename = filename;
             globalThis.__dirname = dirname;
 
+            // Create a module-scoped require that captures this module's dirname.
+            // This is critical for lazy getters and callbacks that call require()
+            // after the module has finished loading (and __dirname was restored).
+            var _capturedDirname = dirname;
+            var moduleRequire = (function(capturedDir) {
+                function mr(path) {
+                    var saved = globalThis.__dirname;
+                    globalThis.__dirname = capturedDir;
+                    try { return globalThis.require(path); }
+                    finally { globalThis.__dirname = saved; }
+                }
+                mr.resolve = function(path) { return __resolvePath(path, capturedDir); };
+                mr.cache = globalThis.__requireCache;
+                mr.extensions = globalThis.require && globalThis.require.extensions || {};
+                mr.main = undefined;
+                return mr;
+            })(_capturedDirname);
+
             // If the file uses ESM syntax, inline-convert to CJS before wrapping.
             if (/^\s*(import\s|import\{|export\s|export\{|export\s*default)/m.test(source)) {
                 source = __esmToCjs(source);
             }
 
-            // Execute the module with CJS wrapper
-            // We use eval() with the module wrapper
-            var wrapper = '(function(exports, module, __filename, __dirname) {\n' +
+            // Execute the module with CJS wrapper, passing the module-scoped require.
+            var wrapper = '(function(exports, module, require, __filename, __dirname) {\n' +
                 source +
-                '\n})(globalThis.exports, globalThis.module, globalThis.__filename, globalThis.__dirname);';
+                '\n})(globalThis.exports, globalThis.module, moduleRequire, globalThis.__filename, globalThis.__dirname);';
             eval(wrapper);
 
             result = globalThis.module.exports;
@@ -4057,6 +4134,14 @@ fn resolve_node_module_entry(pkg_dir: &Path) -> PathBuf {
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
     {
         if let Some(exports) = json.get("exports") {
+            // Simple string form: "exports": "./dist/index.js"
+            if let Some(path_str) = exports.as_str() {
+                let p = pkg_dir.join(path_str.trim_start_matches("./"));
+                let resolved = resolve_file_path(&p);
+                if resolved.is_file() {
+                    return resolved;
+                }
+            }
             // Standard form: exports["."] is the entry condition map
             if let Some(exp_dot) = exports.get(".")
                 && let Some(path_str) = exports_cjs_path(exp_dot)

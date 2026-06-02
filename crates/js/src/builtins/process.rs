@@ -34,7 +34,7 @@ fn mem_free_bytes() -> u64 {
     parse_meminfo_kb("MemAvailable").max(parse_meminfo_kb("MemFree")) * 1024
 }
 
-fn parse_meminfo_kb(key: &str) -> u64 {
+fn parse_meminfo_kb(_key: &str) -> u64 {
     #[cfg(target_os = "linux")]
     if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
         let needle = format!("{}:", key);
@@ -141,6 +141,7 @@ fn cpus_info_json() -> String {
     serde_json::to_string(&cpus).unwrap_or_else(|_| "[]".to_string())
 }
 
+#[allow(dead_code)]
 fn prefix_to_ipv4_netmask(prefix: u8) -> String {
     let mask: u32 = if prefix == 0 {
         0
@@ -153,6 +154,7 @@ fn prefix_to_ipv4_netmask(prefix: u8) -> String {
     format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
 }
 
+#[allow(dead_code)]
 fn prefix_to_ipv6_netmask(prefix: u8) -> String {
     let mut groups = Vec::with_capacity(8);
     let mut remaining = prefix as i32;
@@ -171,6 +173,7 @@ fn prefix_to_ipv6_netmask(prefix: u8) -> String {
     groups.join(":")
 }
 
+#[allow(dead_code)]
 fn format_ipv6_hex(hex: &str) -> String {
     if hex.len() != 32 {
         return "::".to_string();
@@ -191,7 +194,7 @@ fn format_ipv6_hex(hex: &str) -> String {
 /// Primary: runs `ip -j addr` (iproute2, available on all modern Linux).
 /// Fallback: parses /proc/net/if_inet6 for IPv6-only data.
 fn network_interfaces_json() -> String {
-    let mut result = serde_json::Map::new();
+    let result = serde_json::Map::new();
 
     #[cfg(target_os = "linux")]
     {

@@ -12,7 +12,7 @@ anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 vvva_permissions = { path = "../permissions" }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "gzip"] }
 sha2.workspace = true
 base64.workspace = true
 hex = "0.4"

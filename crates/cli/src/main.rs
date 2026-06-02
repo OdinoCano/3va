@@ -1167,7 +1167,10 @@ fn build_permissions(
             permissions.grant(vvva_permissions::Capability::FileRead(PathBuf::from("/")));
         } else {
             for path in reads {
-                permissions.grant(vvva_permissions::Capability::FileRead(PathBuf::from(path)));
+                let canon = std::path::Path::new(path)
+                    .canonicalize()
+                    .unwrap_or_else(|_| PathBuf::from(path));
+                permissions.grant(vvva_permissions::Capability::FileRead(canon));
             }
         }
     }
@@ -1176,7 +1179,10 @@ fn build_permissions(
             permissions.grant(vvva_permissions::Capability::FileWrite(PathBuf::from("/")));
         } else {
             for path in writes {
-                permissions.grant(vvva_permissions::Capability::FileWrite(PathBuf::from(path)));
+                let canon = std::path::Path::new(path)
+                    .canonicalize()
+                    .unwrap_or_else(|_| PathBuf::from(path));
+                permissions.grant(vvva_permissions::Capability::FileWrite(canon));
             }
         }
     }

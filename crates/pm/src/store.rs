@@ -15,6 +15,12 @@ pub struct ContentStore {
     root: PathBuf,
 }
 
+impl Clone for ContentStore {
+    fn clone(&self) -> Self {
+        Self { root: self.root.clone() }
+    }
+}
+
 impl ContentStore {
     pub fn global() -> Self {
         let home = std::env::var("HOME")

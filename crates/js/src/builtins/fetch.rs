@@ -1,6 +1,5 @@
 use rquickjs::function::Async;
 use rquickjs::{Ctx, Function, Result};
-use std::collections::HashMap;
 use std::sync::Arc;
 use vvva_permissions::{Capability, PermissionState};
 
@@ -23,11 +22,18 @@ fn do_request(
     hdrs_json: String,
     body: Option<String>,
 ) -> anyhow::Result<String> {
-    let extra: HashMap<String, String> = serde_json::from_str(&hdrs_json).unwrap_or_default();
-
+    // Parse headers as JSON values (not String-only) so numeric values like
+    // Content-Length don't cause deserialization failure.
+    let extra_val: serde_json::Value = serde_json::from_str(&hdrs_json).unwrap_or(serde_json::Value::Object(Default::default()));
     let mut req = ureq::request(&method, &url);
-    for (k, v) in &extra {
-        req = req.set(k, v);
+    if let Some(obj) = extra_val.as_object() {
+        for (k, v) in obj {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            req = req.set(k, &s);
+        }
     }
     req = req.set("User-Agent", "3va/0.1");
 
