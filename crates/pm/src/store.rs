@@ -17,7 +17,9 @@ pub struct ContentStore {
 
 impl Clone for ContentStore {
     fn clone(&self) -> Self {
-        Self { root: self.root.clone() }
+        Self {
+            root: self.root.clone(),
+        }
     }
 }
 

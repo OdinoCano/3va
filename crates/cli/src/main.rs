@@ -1164,7 +1164,23 @@ fn build_permissions(
 
     if let Some(reads) = allow_read {
         if reads.is_empty() || reads.iter().any(|s| s.is_empty()) {
-            permissions.grant(vvva_permissions::Capability::FileRead(PathBuf::from("/")));
+            // On Windows "/" doesn't cover drive paths like C:\; use the actual fs root.
+            #[cfg(windows)]
+            let root = {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                // Get the prefix (e.g. "C:") and append "\"
+                use std::path::Component;
+                let prefix = cwd.components().next();
+                match prefix {
+                    Some(Component::Prefix(p)) => {
+                        PathBuf::from(format!("{}\\", p.as_os_str().to_string_lossy()))
+                    }
+                    _ => PathBuf::from("C:\\"),
+                }
+            };
+            #[cfg(not(windows))]
+            let root = PathBuf::from("/");
+            permissions.grant(vvva_permissions::Capability::FileRead(root));
         } else {
             for path in reads {
                 let canon = std::path::Path::new(path)
@@ -1176,7 +1192,21 @@ fn build_permissions(
     }
     if let Some(writes) = allow_write {
         if writes.is_empty() || writes.iter().any(|s| s.is_empty()) {
-            permissions.grant(vvva_permissions::Capability::FileWrite(PathBuf::from("/")));
+            #[cfg(windows)]
+            let root = {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                use std::path::Component;
+                let prefix = cwd.components().next();
+                match prefix {
+                    Some(Component::Prefix(p)) => {
+                        PathBuf::from(format!("{}\\", p.as_os_str().to_string_lossy()))
+                    }
+                    _ => PathBuf::from("C:\\"),
+                }
+            };
+            #[cfg(not(windows))]
+            let root = PathBuf::from("/");
+            permissions.grant(vvva_permissions::Capability::FileWrite(root));
         } else {
             for path in writes {
                 let canon = std::path::Path::new(path)
