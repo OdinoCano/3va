@@ -94,15 +94,12 @@ fn parse_pnpm_packages(content: &str) -> HashMap<String, PnpmEntry> {
                 entry.integrity = Some(strip_yaml_value(inner));
                 entry.in_resolution = false;
             }
-        } else if entry.in_deps || entry.in_opt_deps {
-            if let Some(eq_pos) = trimmed.find(':') {
-                let dep_name = trimmed[..eq_pos].trim().to_string();
-                let dep_ver = strip_yaml_value(&trimmed[eq_pos + 1..]);
-                entry
-                    .dependencies
-                    .entry(dep_name)
-                    .or_insert(dep_ver);
-            }
+        } else if (entry.in_deps || entry.in_opt_deps)
+            && let Some(eq_pos) = trimmed.find(':')
+        {
+            let dep_name = trimmed[..eq_pos].trim().to_string();
+            let dep_ver = strip_yaml_value(&trimmed[eq_pos + 1..]);
+            entry.dependencies.entry(dep_name).or_insert(dep_ver);
         }
     }
 
@@ -235,25 +232,21 @@ pub fn load_from_pnpm_lock(path: &std::path::Path) -> anyhow::Result<Option<Lock
             },
         );
 
-        if !dependencies.contains_key(&pkg_name) {
+        dependencies.entry(pkg_name).or_insert_with(|| {
             let deps = if entry.dependencies.is_empty() {
                 None
             } else {
                 Some(entry.dependencies.clone())
             };
-
-            dependencies.insert(
-                pkg_name,
-                LockfileDep {
-                    version: entry.version.clone(),
-                    resolved: None,
-                    integrity: entry.integrity.clone(),
-                    dependencies: deps,
-                    dev: entry.dev,
-                    registry: None,
-                },
-            );
-        }
+            LockfileDep {
+                version: entry.version.clone(),
+                resolved: None,
+                integrity: entry.integrity.clone(),
+                dependencies: deps,
+                dev: entry.dev,
+                registry: None,
+            }
+        });
     }
 
     Ok(Some(Lockfile {
@@ -301,7 +294,11 @@ packages:
         assert!(entries.contains_key("/express/4.18.2"));
         assert!(entries.contains_key("/accepts/1.3.8"));
         assert_eq!(entries["/express/4.18.2"].version, "4.18.2");
-        assert!(entries["/express/4.18.2"].dependencies.contains_key("accepts"));
+        assert!(
+            entries["/express/4.18.2"]
+                .dependencies
+                .contains_key("accepts")
+        );
     }
 
     #[test]
@@ -331,16 +328,13 @@ packages:
 
     #[test]
     fn pnpm_path_to_name_scoped() {
-        assert_eq!(
-            pnpm_path_to_name("/@babel+core/7.24.0"),
-            "@babel/core"
-        );
+        assert_eq!(pnpm_path_to_name("/@babel+core/7.24.0"), "@babel/core");
     }
 
     #[test]
     fn load_from_pnpm_lock_nonexistent() {
-        let result = load_from_pnpm_lock(std::path::Path::new("/nonexistent/pnpm-lock.yaml"))
-            .unwrap();
+        let result =
+            load_from_pnpm_lock(std::path::Path::new("/nonexistent/pnpm-lock.yaml")).unwrap();
         assert!(result.is_none());
     }
 
@@ -348,8 +342,16 @@ packages:
     fn load_from_pnpm_lock_file() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("pnpm-lock.yaml");
-        std::fs::write(&path, "packages:\n  /axios/1.7.9:\n    version: 1.7.9\n    dev: false\n").unwrap();
-        std::fs::write(dir.path().join("package.json"), r#"{"name":"my-project","version":"1.0.0"}"#).unwrap();
+        std::fs::write(
+            &path,
+            "packages:\n  /axios/1.7.9:\n    version: 1.7.9\n    dev: false\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"my-project","version":"1.0.0"}"#,
+        )
+        .unwrap();
 
         let result = load_from_pnpm_lock(&path).unwrap();
         assert!(result.is_some());

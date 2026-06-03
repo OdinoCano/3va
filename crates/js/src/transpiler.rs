@@ -3,7 +3,7 @@ use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
-use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
+use oxc_transformer::{DecoratorOptions, JsxOptions, JsxRuntime, TransformOptions, Transformer};
 
 /// TypeScript/TSX/JSX → JavaScript transpiler backed by the Oxc toolchain.
 ///
@@ -273,23 +273,34 @@ fn try_transpile(source: &str, jsx: bool) -> Result<String, ()> {
     let mut program = parsed.program;
 
     let scoping = SemanticBuilder::new()
+        .with_enum_eval(true)
         .build(&program)
         .semantic
         .into_scoping();
 
-    let mut options = TransformOptions::default();
-
-    if jsx {
+    // Enable TypeScript legacy decorators (experimentalDecorators + emitDecoratorMetadata)
+    // Required by TypeORM, MikroORM, tsyringe, routing-controllers, etc.
+    let jsx_opts = if jsx {
         // Use Classic runtime: transforms <Foo /> → React.createElement(Foo, null)
         // This is what React Native and legacy React use.
-        options.jsx = JsxOptions {
+        JsxOptions {
             jsx_plugin: true,
             runtime: JsxRuntime::Classic,
             pragma: Some("React.createElement".to_string()),
             pragma_frag: Some("React.Fragment".to_string()),
             ..JsxOptions::default()
-        };
-    }
+        }
+    } else {
+        JsxOptions::default()
+    };
+    let options = TransformOptions {
+        decorator: DecoratorOptions {
+            legacy: true,
+            emit_decorator_metadata: true,
+        },
+        jsx: jsx_opts,
+        ..TransformOptions::default()
+    };
 
     let ret = Transformer::new(&allocator, std::path::Path::new("input.tsx"), &options)
         .build_with_scoping(scoping, &mut program);

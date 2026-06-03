@@ -130,14 +130,66 @@ await fetch(url, {
 
 | API | Status | Notes |
 |-----|--------|-------|
-| `TextEncoder` / `TextDecoder` | Implemented | UTF-8; global |
-| `fetch` | Implemented | Requires `--allow-net` |
-| `WebSocket` | Implemented | Requires `--allow-net` |
-| `AbortController` / `AbortSignal` | Not implemented | Planned |
-| `ReadableStream` / `WritableStream` | Not implemented | Planned |
-| `FormData` | Not implemented | Planned |
-| `URLSearchParams` | Partial | Via `require('url')` / `require('querystring')` JS stub |
-| `Headers` / `Request` / `Response` | Partial | Accessible on `fetch` response; not standalone constructors |
+| `TextEncoder` / `TextDecoder` | ✅ Implemented | UTF-8; global |
+| `fetch` | ✅ Implemented | Requires `--allow-net` |
+| `WebSocket` | ✅ Implemented | Requires `--allow-net` |
+| `AbortController` / `AbortSignal` | ✅ Implemented | Full signal + timeout + abort |
+| `ReadableStream` / `WritableStream` / `TransformStream` | ✅ Implemented | WHATWG Streams standard |
+| `FormData` | ✅ Implemented | append/set/get/delete/forEach/entries |
+| `Blob` / `File` | ✅ Implemented | `.text()`, `.arrayBuffer()`, `.bytes()`, `.stream()`, `.slice()` |
+| `FileReader` | ✅ Implemented | `readAsText`, `readAsDataURL`, `readAsArrayBuffer` |
+| `URLSearchParams` | ✅ Implemented | Standalone constructor; also via `require('url')` |
+| `URL` | ✅ Implemented | Full WHATWG URL; also via `require('url')` |
+| `Headers` / `Request` / `Response` | ✅ Implemented | Standalone constructors + `fetch` integration |
+| `atob` / `btoa` | ✅ Implemented | Global base64 encode/decode |
+| `crypto.getRandomValues` | ✅ Implemented | CSPRNG via Rust |
+| `crypto.subtle` | ✅ Implemented | SHA-256/384/512, AES-GCM, HMAC, ECDH, RSA-OAEP |
+
+## 3.5 React Native / Expo Globals
+
+3va sets up a React Native environment so Expo packages load without a device or bundler.
+
+### 3.5.1 Environment flags
+
+```javascript
+globalThis.__REACT_NATIVE__ = true   // signals an RN host environment
+globalThis.__DEV__           = false  // production mode
+process.env.EXPO_OS          = 'web'  // Expo web/server platform identifier
+```
+
+### 3.5.2 Platform
+
+```javascript
+Platform.OS      // 'web'
+Platform.Version // '1'
+Platform.select({ web: 'a', native: 'b', default: 'c' })  // 'a'
+Platform.isPad   // false
+Platform.isTV    // false
+```
+
+`Platform` is available both as a global and via `require('react-native').Platform`. Expo's `Platform.select()` uses it to choose branch values.
+
+### 3.5.3 NativeModules proxy
+
+```javascript
+// Pre-registered modules (ExpoConstants, ExpoFileSystem, ExpoFont, etc.):
+typeof NativeModules.ExpoConstants   // 'object'
+NativeModules.ExpoConstants.anyMethod()  // undefined (proxy)
+
+// Unregistered modules:
+NativeModules.EXDevLauncher  // undefined  ← important: NOT a truthy proxy
+```
+
+The proxy returns `undefined` for unknown module names so that truthiness guards like `if (NativeModules.EXDevLauncher)` correctly skip the block.
+
+### 3.5.4 requestAnimationFrame / cancelAnimationFrame
+
+```javascript
+const id = requestAnimationFrame((timestamp) => { /* ... */ });
+cancelAnimationFrame(id);
+```
+
+Backed by `setTimeout(fn, 16)`. Provides a 60fps-compatible callback cycle for animation or frame-based logic.
 
 ---
 

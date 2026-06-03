@@ -60,6 +60,7 @@ fn proc_fs_not_accessible_without_mount() {
 
 // ── Symlinks: VirtualFs no sigue symlinks (frontera de responsabilidad) ───────
 
+#[cfg(unix)]
 #[test]
 fn symlink_inside_mount_resolves_to_real_path_under_source() {
     let temp = TempDir::new().unwrap();
@@ -84,6 +85,7 @@ fn symlink_inside_mount_resolves_to_real_path_under_source() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn traversal_via_dotdot_rejected_even_with_symlink_present() {
     let temp = TempDir::new().unwrap();

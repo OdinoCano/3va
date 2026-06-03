@@ -27,12 +27,15 @@ fn flush_yarn_entry(
 ) {
     let built = entry.build();
     for key in keys {
-        entries.insert(key, YarnEntry {
-            version: built.version.clone(),
-            resolved: built.resolved.clone(),
-            integrity: built.integrity.clone(),
-            dependencies: built.dependencies.clone(),
-        });
+        entries.insert(
+            key,
+            YarnEntry {
+                version: built.version.clone(),
+                resolved: built.resolved.clone(),
+                integrity: built.integrity.clone(),
+                dependencies: built.dependencies.clone(),
+            },
+        );
     }
 }
 
@@ -72,10 +75,7 @@ fn parse_yarn_entries(content: &str) -> HashMap<String, YarnEntry> {
                         if let Some(eq_pos) = content.find(' ') {
                             let dep_name = content[..eq_pos].trim().trim_matches('"').to_string();
                             let dep_ver = content[eq_pos..].trim().trim_matches('"').to_string();
-                            entry
-                                .dependencies
-                                .entry(dep_name)
-                                .or_insert(dep_ver);
+                            entry.dependencies.entry(dep_name).or_insert(dep_ver);
                         }
                     }
                 }
@@ -170,17 +170,16 @@ struct YarnEntry {
 /// `"@scope/pkg@1.0.0"`.  The package name is everything before the last `@`.
 fn extract_name_from_key(key: &str) -> String {
     // Handle scoped packages: @scope/pkg@version
-    if key.starts_with('@') {
-        if let Some(rest) = key.strip_prefix('@') {
-            if let Some(slash_pos) = rest.find('/') {
-                let scope_end = 1 + slash_pos;
-                let after_scope = &key[scope_end + 1..];
-                if let Some(at_pos) = after_scope.rfind('@') {
-                    return format!("@{}", &rest[..=slash_pos + at_pos]);
-                }
-                return key.to_string();
-            }
+    if key.starts_with('@')
+        && let Some(rest) = key.strip_prefix('@')
+        && let Some(slash_pos) = rest.find('/')
+    {
+        let scope_end = 1 + slash_pos;
+        let after_scope = &key[scope_end + 1..];
+        if let Some(at_pos) = after_scope.rfind('@') {
+            return format!("@{}", &rest[..=slash_pos + at_pos]);
         }
+        return key.to_string();
     }
 
     // Regular package: name@version
@@ -236,25 +235,21 @@ pub fn load_from_yarn_lock(path: &std::path::Path) -> anyhow::Result<Option<Lock
             },
         );
 
-        if !dependencies.contains_key(&pkg_name) {
+        dependencies.entry(pkg_name).or_insert_with(|| {
             let deps = if entry.dependencies.is_empty() {
                 None
             } else {
                 Some(entry.dependencies.clone())
             };
-
-            dependencies.insert(
-                pkg_name,
-                LockfileDep {
-                    version: entry.version.clone(),
-                    resolved: entry.resolved.clone(),
-                    integrity: entry.integrity.clone(),
-                    dependencies: deps,
-                    dev: None,
-                    registry: None,
-                },
-            );
-        }
+            LockfileDep {
+                version: entry.version.clone(),
+                resolved: entry.resolved.clone(),
+                integrity: entry.integrity.clone(),
+                dependencies: deps,
+                dev: None,
+                registry: None,
+            }
+        });
     }
 
     Ok(Some(Lockfile {
@@ -303,7 +298,11 @@ express@^4.18.0:
         assert!(entries.contains_key("lodash@^4.17.21"));
         assert!(entries.contains_key("express@^4.18.0"));
         assert_eq!(entries["lodash@^4.17.21"].version, "4.17.21");
-        assert!(entries["express@^4.18.0"].dependencies.contains_key("accepts"));
+        assert!(
+            entries["express@^4.18.0"]
+                .dependencies
+                .contains_key("accepts")
+        );
         assert_eq!(entries["express@^4.18.0"].dependencies["accepts"], "^1.3.8");
     }
 
@@ -346,15 +345,23 @@ express@^4.18.0:
     fn load_from_yarn_lock_file() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("yarn.lock");
-        std::fs::write(&path, r#"# yarn lockfile v1
+        std::fs::write(
+            &path,
+            r#"# yarn lockfile v1
 axios@^1.7.0:
   version "1.7.9"
   resolved "https://registry.yarnpkg.com/axios/-/axios-1.7.9.tgz#hash"
   integrity sha512-test
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         // Create package.json so name gets picked up
-        std::fs::write(dir.path().join("package.json"), r#"{"name":"my-project","version":"1.0.0"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"my-project","version":"1.0.0"}"#,
+        )
+        .unwrap();
 
         let result = load_from_yarn_lock(&path).unwrap();
         assert!(result.is_some());

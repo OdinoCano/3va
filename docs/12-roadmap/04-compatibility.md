@@ -54,7 +54,35 @@ crypto (some algorithms)
 | 1.0 | Removed legacy API | Use new namespace |
 | 0.9 | Changed default security | --legacy-security |
 
-## 4.6 Compatibility Testing
+## 4.6 Expo / React Native Compatibility
+
+3va runs Expo packages in a web/server context without a bundler or device.
+
+### Supported packages (45/45 tests — `test-projects/expo-test/`)
+
+| Package | Version | Status | Notes |
+|---------|---------|--------|-------|
+| `expo-modules-core` | 56.0.14 | ✅ | Polyfill + real npm package loadable |
+| `expo-constants` | 56.0.16 | ✅ | Web variant via `ExponentConstants.web.js` |
+| `expo-asset` | 56.0.15 | ✅ | `@react-native/assets-registry` polyfilled |
+| `expo-font` | 56.0.5 | ✅ | Server path (`isServer = true`); `fontfaceobserver` available |
+| `expo-file-system` | 56.0.7 | ✅ | Web stubs via `ExpoFileSystem.web.ts` |
+| `react-native` | 0.79.0 | ✅ | Pre-cached polyfill (Platform, NativeModules, …) |
+
+### How it works
+
+1. **Platform extension priority** — `.web.ts/.web.js` files are resolved before `.ts/.js` so Expo packages load their server-safe implementations automatically.
+2. **`process.env.EXPO_OS = 'web'`** — Expo packages branch on this to skip `registerWebModule()` calls that require a DOM.
+3. **NativeModules** — only explicitly registered modules are exposed; unknown names return `undefined` (prevents truthy-proxy issues with conditional `JSON.parse` calls).
+4. **ESM→CJS converter** — handles all TypeScript/ESM patterns used by Expo (enums, destructuring exports, `export {}` markers, circular re-exports).
+
+### Known limitations
+
+- Native device APIs (camera, location, etc.) return stubs or throw `UnavailabilityError`.
+- `requireOptionalNativeModule` always returns `null` — intended for server environments.
+- `registerWebModule` returns the factory result directly (no DOM/web worker context).
+
+## 4.7 Compatibility Testing
 
 ```bash
 # Compatibility test suite
@@ -63,8 +91,11 @@ crypto (some algorithms)
 # Run npm test of packages
 3va test-compat express
 3va test-compat lodash
+
+# Expo compatibility test
+3va test test-projects/expo-test/expo.test.js
 ```
 
 ---
 
-*Compatibility targeting 99% Node.js API parity.*
+*Compatibility targeting 99% Node.js API parity + Expo web/server package support.*

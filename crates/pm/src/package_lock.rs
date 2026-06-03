@@ -10,6 +10,7 @@ struct NpmLockV1 {
     name: String,
     version: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     lockfile_version: Option<u32>,
     #[serde(default)]
     dependencies: HashMap<String, NpmDepV1>,
@@ -98,11 +99,7 @@ fn parse_v1(content: String) -> anyhow::Result<Lockfile> {
     let mut dependencies = HashMap::new();
 
     for (name, dep) in &npm.dependencies {
-        let deps = dep
-            .requires
-            .as_ref()
-            .or(dep.dependencies.as_ref())
-            .cloned();
+        let deps = dep.requires.as_ref().or(dep.dependencies.as_ref()).cloned();
 
         dependencies.insert(
             name.clone(),
@@ -159,10 +156,7 @@ fn parse_v2v3(content: String, _version: u32) -> anyhow::Result<Lockfile> {
             packages.insert(
                 key.clone(),
                 LockfilePackage {
-                    version: pkg
-                        .version
-                        .clone()
-                        .unwrap_or_else(|| "0.0.0".to_string()),
+                    version: pkg.version.clone().unwrap_or_else(|| "0.0.0".to_string()),
                     resolved: pkg.resolved.clone(),
                     integrity: pkg.integrity.clone(),
                     dev: pkg.dev,
@@ -171,18 +165,12 @@ fn parse_v2v3(content: String, _version: u32) -> anyhow::Result<Lockfile> {
             );
         } else {
             // Extract package name from key like "node_modules/@scope/pkg" or "node_modules/pkg"
-            let pkg_name = key
-                .strip_prefix("node_modules/")
-                .unwrap_or(key)
-                .to_string();
+            let pkg_name = key.strip_prefix("node_modules/").unwrap_or(key).to_string();
 
             packages.insert(
                 key.clone(),
                 LockfilePackage {
-                    version: pkg
-                        .version
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
+                    version: pkg.version.clone().unwrap_or_else(|| "unknown".to_string()),
                     resolved: pkg.resolved.clone(),
                     integrity: pkg.integrity.clone(),
                     dev: pkg.dev,
@@ -193,20 +181,20 @@ fn parse_v2v3(content: String, _version: u32) -> anyhow::Result<Lockfile> {
             // Only add top-level packages to dependencies
             if !pkg_name.contains('/') || pkg_name.starts_with('@') {
                 let pkg_name_only = pkg_name;
-                if !dependencies.contains_key(&pkg_name_only) {
-                    if let Some(ver) = &pkg.version {
-                        dependencies.insert(
-                            pkg_name_only,
-                            LockfileDep {
-                                version: ver.clone(),
-                                resolved: pkg.resolved.clone(),
-                                integrity: pkg.integrity.clone(),
-                                dependencies: pkg.dependencies.clone(),
-                                dev: pkg.dev,
-                                registry: None,
-                            },
-                        );
-                    }
+                if !dependencies.contains_key(&pkg_name_only)
+                    && let Some(ver) = &pkg.version
+                {
+                    dependencies.insert(
+                        pkg_name_only,
+                        LockfileDep {
+                            version: ver.clone(),
+                            resolved: pkg.resolved.clone(),
+                            integrity: pkg.integrity.clone(),
+                            dependencies: pkg.dependencies.clone(),
+                            dev: pkg.dev,
+                            registry: None,
+                        },
+                    );
                 }
             }
         }
@@ -214,11 +202,7 @@ fn parse_v2v3(content: String, _version: u32) -> anyhow::Result<Lockfile> {
 
     // Also populate from the dependencies block for top-level dep info
     for (name, dep) in &npm.dependencies {
-        let deps = dep
-            .requires
-            .as_ref()
-            .or(dep.dependencies.as_ref())
-            .cloned();
+        let deps = dep.requires.as_ref().or(dep.dependencies.as_ref()).cloned();
 
         dependencies.insert(
             name.clone(),
@@ -277,7 +261,10 @@ mod tests {
         assert!(result.dependencies.contains_key("express"));
         assert_eq!(result.dependencies["lodash"].version, "4.17.21");
         assert_eq!(
-            result.dependencies["express"].dependencies.as_ref().unwrap()["accepts"],
+            result.dependencies["express"]
+                .dependencies
+                .as_ref()
+                .unwrap()["accepts"],
             "1.3.8"
         );
     }
@@ -319,7 +306,8 @@ mod tests {
 
     #[test]
     fn load_from_package_lock_nonexistent() {
-        let result = load_from_package_lock(std::path::Path::new("/nonexistent/package-lock.json")).unwrap();
+        let result =
+            load_from_package_lock(std::path::Path::new("/nonexistent/package-lock.json")).unwrap();
         assert!(result.is_none());
     }
 

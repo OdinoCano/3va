@@ -23,6 +23,7 @@ use vvva_permissions::{Capability, PermissionState};
 
 // ── Connection type ───────────────────────────────────────────────────────────
 
+#[allow(clippy::large_enum_variant)]
 enum TcpConn {
     Plain(TcpStream),
     Tls(TlsStream<TcpStream>),

@@ -493,7 +493,86 @@ Many npm packages reference `global.xxx` instead of `globalThis.xxx`. Both alias
 
 ---
 
-## 3.19 Planned Polyfills (not yet implemented)
+## 3.19 React Native / Expo Globals
+
+3va registers a React Native environment so that Expo packages — and any npm package that checks for a React Native context — load correctly without a device or bundler.
+
+### Environment flags
+
+```javascript
+globalThis.__REACT_NATIVE__ = true;  // signals RN environment
+globalThis.__DEV__           = false; // production mode by default
+process.env.EXPO_OS          = 'web'; // Expo treats this as the web/server platform
+```
+
+`EXPO_OS = 'web'` is critical: Expo packages branch on this value to select code paths that do not call native bridges. Without it, packages like `expo-font` call `registerWebModule()` expecting a DOM, which throws in a server context.
+
+### `react-native` (pre-cached polyfill)
+
+```javascript
+require('react-native')
+// Returns a stub object with the most common RN APIs:
+
+const { Platform, NativeModules, TurboModuleRegistry,
+        PixelRatio, Dimensions, StyleSheet,
+        NativeEventEmitter, DeviceEventEmitter,
+        Animated, Linking, Alert, Keyboard,
+        View, Text, Image, ScrollView, FlatList, ... } = require('react-native');
+
+Platform.OS         // 'web'
+Platform.select({ web: 'a', default: 'b' })  // 'a'
+PixelRatio.get()    // 1
+StyleSheet.create({ box: { flex: 1 } })  // identity pass-through
+```
+
+All component stubs (`View`, `Text`, etc.) are no-op constructors. The polyfill is pre-registered in `__requireCache` so it intercepts `require('react-native')` before the resolver reaches the installed npm package (react-native 0.79 is in `node_modules` but its internal file tree is not fully loadable in a non-native context).
+
+### `@react-native/assets-registry` (pre-cached polyfill)
+
+```javascript
+const { registerAsset, getAssetByID } = require('@react-native/assets-registry/registry');
+```
+
+`registerAsset(meta)` pushes an asset into a local array and returns its 1-based ID. `getAssetByID(id)` retrieves it. Required by `expo-asset`.
+
+### `NativeModules` proxy
+
+```javascript
+// Pre-registered modules return an object proxy (any method call returns undefined):
+typeof NativeModules.ExpoConstants      // 'object'
+NativeModules.ExpoConstants.getAsync()  // undefined
+
+// Unregistered modules return undefined (not a truthy function):
+NativeModules.EXDevLauncher             // undefined
+if (NativeModules.EXDevLauncher) { ... } // block never entered
+```
+
+Returning `undefined` for unregistered modules is intentional — returning a truthy proxy for everything caused incorrect `if (NativeModules.X.someString)` truthiness checks that then passed opaque function objects to `JSON.parse`.
+
+### `expo-modules-core` (pre-cached polyfill)
+
+```javascript
+const emc = require('expo-modules-core');
+
+emc.requireNativeModule('ExpoConstants')         // returns a proxy
+emc.requireOptionalNativeModule('ExpoUpdates')   // always null (absent in web/server)
+emc.CodedError                                   // Error subclass with .code
+emc.UnavailabilityError                          // Error subclass for unavailable APIs
+emc.NativeModule                                 // base class for Expo native modules
+emc.SharedObject                                 // base class for shared Expo objects
+emc.SharedRef                                    // base class for Expo shared refs
+emc.registerWebModule(factory, name)             // calls factory() and returns the result
+emc.Platform                                     // { OS: 'web', select, ... }
+emc.uuid                                         // { v4(), v5() }
+```
+
+`requireOptionalNativeModule` returns `null` for all modules. This is correct for a web/server environment where optional native features are simply absent — callers guard with `if (mod)`.
+
+The real `expo-modules-core` npm package is also loadable directly; the platform extension resolver picks its `.web.ts` files automatically. The polyfill stays in the cache as a stable default so packages that load early in the module graph get consistent results.
+
+---
+
+## 3.20 Planned Polyfills (not yet implemented)
 
 > **Status: PENDING** — these APIs appear in the compatibility roadmap. Using them currently throws `ReferenceError` or silently no-ops.
 

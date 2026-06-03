@@ -56,7 +56,7 @@ fn is_pid_alive(pid: u32) -> bool {
     #[cfg(not(unix))]
     {
         std::process::Command::new("tasklist")
-            .args(&["/FI", &format!("PID eq {}", pid)])
+            .args(["/FI", &format!("PID eq {}", pid)])
             .output()
             .map(|o| {
                 let out = String::from_utf8_lossy(&o.stdout);
@@ -212,7 +212,7 @@ pub fn stop_process(name: &str) -> anyhow::Result<()> {
     #[cfg(not(unix))]
     {
         let _ = std::process::Command::new("taskkill")
-            .args(&["/PID", &pid.to_string(), "/F"])
+            .args(["/PID", &pid.to_string(), "/F"])
             .status();
     }
 

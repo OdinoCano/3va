@@ -1,7 +1,6 @@
 // Integration tests for the pnpm-style virtual store topology.
 // Run: cargo test -p vvva_pm --test virtual_store
 
-use std::path::Path;
 use vvva_pm::store::{ContentStore, virtual_entry_name};
 
 fn seed_store(store: &ContentStore, name: &str, version: &str) {

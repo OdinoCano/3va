@@ -38,6 +38,33 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **Expo / React Native package support** (`crates/js/src/builtins/modules.rs`, `crates/js/src/transpiler.rs`):
+  Real Expo npm packages (`expo-modules-core`, `expo-constants`, `expo-asset`, `expo-font`, `expo-file-system`) load and execute without errors. 45/45 tests pass in `test-projects/expo-test/`.
+
+  *ESM→CJS converter fixes:*
+  - **Circular dependency guard** — `module.exports` pre-cached before eval; circular requires get the partial exports object instead of re-executing the module (matches Node.js behavior, eliminates stack overflows).
+  - **`export default X` chained assignment** — was setting `.default` on the OLD `module.exports` object due to JS LHS-ref evaluation order. Now uses two statements: `module.exports = X` + deferred `module.exports.default = module.exports`.
+  - **Destructuring exports** — `export const { a, b } = X` and `export const [a, b] = X` now correctly emit individual `module.exports.a = a` entries.
+  - **Uninitialised var export** — `export var X;` is now deferred so TypeScript enum IIFEs can fill the value before `module.exports.X` is set.
+  - **Empty export marker** — `export {}` (OXC emits this to tag a file as ESM) is now a no-op; previously surfaced as "unsupported keyword: export".
+  - **Dynamic `import()`** — inline `import(specifier)` expressions are rewritten to `__importAsync(specifier)` which wraps synchronous `require()` in a resolved Promise.
+  - **Deferred exports** — all deferred assignments wrapped in `try{}catch{}` to tolerate read-only properties defined by `Object.defineProperty`.
+
+  *Platform-aware extension resolution:*
+  - `resolve_file_path` probes `.web.js`, `.web.tsx`, `.web.ts`, `.web.mjs` before the generic `.js`, `.tsx`, `.ts` variants. Expo `.web.*` files are the correct choice in a server/CLI context (they avoid native bridge imports).
+  - Index file probing follows the same order (`index.web.ts` before `index.ts`).
+
+  *TypeScript transpiler:*
+  - `SemanticBuilder::with_enum_eval(true)` added — prevents OXC panic when transforming TypeScript `const enum` declarations.
+
+  *New React Native / Expo polyfills:*
+  - `react-native` pre-cached in `__requireCache` with `Platform`, `NativeModules`, `TurboModuleRegistry`, `PixelRatio`, `Dimensions`, `StyleSheet`, `Animated`, and all major component stubs.
+  - `@react-native/assets-registry` pre-cached with `registerAsset` / `getAssetByID`.
+  - `NativeModules` proxy changed to return `undefined` for unregistered module names (previously returned a truthy function-proxy, causing `JSON.parse(function(){})` errors in `expo-constants`).
+  - `expo-modules-core` polyfill extended with `NativeModule`, `SharedObject`, `SharedRef` (extendable base classes), `registerWebModule`, `Platform`, `uuid`.
+  - `requireOptionalNativeModule` returns `null` — correct for a web/server environment where optional native modules are absent.
+  - `process.env.EXPO_OS = 'web'` — Expo packages branch on this to select server-safe code paths.
+
 - **CPU sampling profiler (`--prof`)** (`crates/js/src/profiler.rs`):
   - `3va run app.ts --prof` — collects samples every `--prof-interval` ms (default 10) via `setInterval` + `new Error().stack`; writes V8-compatible `.cpuprofile` JSON.
   - `--flamegraph=<path>` — also emits an Inferno-style SVG flamegraph using the `inferno` crate.

@@ -107,12 +107,14 @@
 ## Changelog
 
 - [CHANGELOG.md](CHANGELOG.md) — Version history (Keep a Changelog 1.0.0)
+- [changelog-2026-06-01.md](changelog-2026-06-01.md) — Security/correctness fixes from code-review (10 findings)
+- [changelog-2026-06-03.md](changelog-2026-06-03.md) — Expo/React Native package support + ESM→CJS engine fixes (45/45 tests)
 
 ---
 
 **Document Identifier:** 3VA-SPEC-2026-001
 **Version:** 2.0.0
-**Date:** 2026-06-01
+**Date:** 2026-06-03
 **Classification:** Public
 **Status:** v1.0.0 Released · v2.0.0 Draft
 
