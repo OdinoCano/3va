@@ -765,15 +765,19 @@ mod builtin_tests {
         let perms = Arc::new(PermissionState::new());
         perms.grant(Capability::SpawnProcess);
         let e = JsEngine::new(perms).await.unwrap();
-        e.eval(
-            r#"globalThis.__cp3 = null;
+        #[cfg(windows)]
+        let js = r#"globalThis.__cp3 = null;
+               const { execFile } = require('child_process');
+               execFile('cmd.exe', ['/c', 'echo', 'execfile_ok'], function(err, stdout) {
+                   globalThis.__cp3 = err ? 'error' : stdout.trim();
+               });"#;
+        #[cfg(not(windows))]
+        let js = r#"globalThis.__cp3 = null;
                const { execFile } = require('child_process');
                execFile('/bin/echo', ['execfile_ok'], function(err, stdout) {
                    globalThis.__cp3 = err ? 'error' : stdout.trim();
-               });"#,
-        )
-        .await
-        .unwrap();
+               });"#;
+        e.eval(js).await.unwrap();
         let result = wait_for_result(&e, "__cp3").await;
         assert_eq!(result, "execfile_ok", "execFile with permission: {result}");
     }
@@ -783,8 +787,18 @@ mod builtin_tests {
         let perms = Arc::new(PermissionState::new());
         perms.grant(Capability::SpawnProcess);
         let e = JsEngine::new(perms).await.unwrap();
-        e.eval(
-            r#"globalThis.__cp4 = null;
+        #[cfg(windows)]
+        let js = r#"globalThis.__cp4 = null;
+               const { spawn } = require('child_process');
+               var child = spawn('cmd.exe', ['/c', 'echo', 'spawn_ok']);
+               child.stdout.on('data', function(data) {
+                   globalThis.__cp4 = typeof data === 'string' ? data.trim() : String(data).trim();
+               });
+               child.on('exit', function(code) {
+                   if (globalThis.__cp4 === null) globalThis.__cp4 = 'no_stdout';
+               });"#;
+        #[cfg(not(windows))]
+        let js = r#"globalThis.__cp4 = null;
                const { spawn } = require('child_process');
                var child = spawn('/bin/echo', ['spawn_ok']);
                child.stdout.on('data', function(data) {
@@ -792,10 +806,8 @@ mod builtin_tests {
                });
                child.on('exit', function(code) {
                    if (globalThis.__cp4 === null) globalThis.__cp4 = 'no_stdout';
-               });"#,
-        )
-        .await
-        .unwrap();
+               });"#;
+        e.eval(js).await.unwrap();
         let result = wait_for_result(&e, "__cp4").await;
         assert_eq!(result, "spawn_ok", "spawn with permission: {result}");
     }
