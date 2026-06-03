@@ -54,15 +54,23 @@ async fn fs_read_blocked_without_allow_read() {
 
 #[tokio::test]
 async fn fs_read_allowed_with_scoped_grant() {
+    #[cfg(windows)]
+    let (grant_dir, file_path) = (
+        PathBuf::from(r"C:\Windows"),
+        r"C:\\Windows\\win.ini".to_string(),
+    );
+    #[cfg(not(windows))]
+    let (grant_dir, file_path) = (PathBuf::from("/etc"), "/etc/hostname".to_string());
+
     let state = PermissionState::new();
-    state.grant(Capability::FileRead(PathBuf::from("/etc")));
+    state.grant(Capability::FileRead(grant_dir));
     let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsReadFileSync('/etc/hostname')").await;
+    let result = eval_catching(&engine, &format!("__fsReadFileSync('{file_path}')")).await;
 
     assert_eq!(
         result, "allowed",
-        "fs.readFile con FileRead('/etc') debe funcionar: {result}"
+        "fs.readFile con FileRead grant debe funcionar: {result}"
     );
 }
 
@@ -157,11 +165,21 @@ async fn fs_readdir_blocked_without_allow_read() {
 
 #[tokio::test]
 async fn fs_readdir_allowed_with_grant() {
+    #[cfg(windows)]
+    let dir_path = r"C:\\Windows".to_string();
+    #[cfg(not(windows))]
+    let dir_path = "/tmp".to_string();
+
+    #[cfg(windows)]
+    let grant_path = PathBuf::from(r"C:\Windows");
+    #[cfg(not(windows))]
+    let grant_path = PathBuf::from("/tmp");
+
     let state = PermissionState::new();
-    state.grant(Capability::FileRead(PathBuf::from("/tmp")));
+    state.grant(Capability::FileRead(grant_path));
     let engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
-    let result = eval_catching(&engine, "__fsReaddirSync('/tmp')").await;
+    let result = eval_catching(&engine, &format!("__fsReaddirSync('{dir_path}')")).await;
 
     assert_eq!(
         result, "allowed",
