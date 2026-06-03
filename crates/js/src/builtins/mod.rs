@@ -27,6 +27,51 @@ pub fn inject_all(
 ) -> rquickjs::Result<()> {
     console::inject_console(ctx)?;
     timers::inject_timers(ctx, timer_manager)?;
+
+    // atob / btoa polyfills — must be injected before buffer.rs, crypto.rs, and
+    // any user code that calls Buffer.from(str, 'base64') or WebCrypto JWK imports.
+    // QuickJS does not expose these as globals by default.
+    ctx.eval::<(), _>(
+        r#"
+    (function() {
+        var _b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        var _b64map = Object.create(null);
+        for (var _i = 0; _i < 64; _i++) _b64map[_b64chars[_i]] = _i;
+        _b64map['='] = -1;
+        if (typeof globalThis.atob !== 'function') {
+            globalThis.atob = function(s) {
+                s = String(s).replace(/[\t\n\f\r ]/g, '');
+                var out = '', i = 0;
+                while (i < s.length) {
+                    var a = _b64map[s[i++]], b = _b64map[s[i++]];
+                    var c = _b64map[s[i++]], d = _b64map[s[i++]];
+                    out += String.fromCharCode((a << 2) | (b >> 4));
+                    if (c !== -1) out += String.fromCharCode(((b & 0xf) << 4) | (c >> 2));
+                    if (d !== -1) out += String.fromCharCode(((c & 0x3) << 6) | d);
+                }
+                return out;
+            };
+        }
+        if (typeof globalThis.btoa !== 'function') {
+            globalThis.btoa = function(s) {
+                s = String(s);
+                var out = '', i = 0, n = s.length;
+                while (i < n) {
+                    var a = s.charCodeAt(i++);
+                    var b = i < n ? s.charCodeAt(i++) : NaN;
+                    var c = i < n ? s.charCodeAt(i++) : NaN;
+                    out += _b64chars[(a >> 2) & 0x3f];
+                    out += _b64chars[((a << 4) | (isNaN(b) ? 0 : b >> 4)) & 0x3f];
+                    out += isNaN(b) ? '=' : _b64chars[((b << 2) | (isNaN(c) ? 0 : c >> 6)) & 0x3f];
+                    out += isNaN(c) ? '=' : _b64chars[c & 0x3f];
+                }
+                return out;
+            };
+        }
+    }());
+    "#,
+    )?;
+
     buffer::inject_buffer(ctx)?;
     process::inject_process(ctx, permissions.clone())?;
     // Node.js packages expect `global` and `globalThis` to be the same object.

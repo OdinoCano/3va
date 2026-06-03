@@ -1,5 +1,7 @@
+use base64::Engine as _;
 use rquickjs::function::Async;
 use rquickjs::{Ctx, Function, Result};
+use std::io::Read as _;
 use std::sync::Arc;
 use vvva_permissions::{Capability, PermissionState};
 
@@ -15,7 +17,38 @@ fn host_from_url(url: &str) -> Option<String> {
     }
 }
 
+fn response_to_json(r: ureq::Response) -> serde_json::Value {
+    let status = r.status();
+    let status_text = r.status_text().to_string();
+    let ok = (200u16..300).contains(&status);
+    let mut resp_hdrs = serde_json::Map::new();
+    for name in r.headers_names() {
+        if let Some(val) = r.header(&name) {
+            resp_hdrs.insert(name, serde_json::Value::String(val.to_string()));
+        }
+    }
+    // Read raw bytes so binary responses (images, archives, etc.) are preserved.
+    // For valid UTF-8 bodies, keep as string. For binary, base64-encode and set
+    // binary:true so the JS layer can deliver a Buffer to data listeners.
+    let mut body_bytes: Vec<u8> = Vec::new();
+    r.into_reader().read_to_end(&mut body_bytes).unwrap_or(0);
+    let (body_val, binary) = match String::from_utf8(body_bytes.clone()) {
+        Ok(s) => (serde_json::Value::String(s), false),
+        Err(_) => (
+            serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD.encode(&body_bytes),
+            ),
+            true,
+        ),
+    };
+    serde_json::json!({
+        "ok": ok, "status": status, "statusText": status_text,
+        "headers": resp_hdrs, "body": body_val, "binary": binary,
+    })
+}
+
 /// Blocking HTTP request executed inside spawn_blocking.
+/// Redirects are NOT followed — mirrors Node.js http.request behaviour.
 fn do_request(
     url: String,
     method: String,
@@ -24,8 +57,13 @@ fn do_request(
 ) -> anyhow::Result<String> {
     // Parse headers as JSON values (not String-only) so numeric values like
     // Content-Length don't cause deserialization failure.
-    let extra_val: serde_json::Value = serde_json::from_str(&hdrs_json).unwrap_or(serde_json::Value::Object(Default::default()));
-    let mut req = ureq::request(&method, &url);
+    let extra_val: serde_json::Value =
+        serde_json::from_str(&hdrs_json).unwrap_or(serde_json::Value::Object(Default::default()));
+
+    // redirects(0): do not follow 3xx — matches Node.js http.request default.
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let mut req = agent.request(&method, &url);
+
     if let Some(obj) = extra_val.as_object() {
         for (k, v) in obj {
             let s = match v {
@@ -44,30 +82,10 @@ fn do_request(
     };
 
     let json = match resp_result {
-        Ok(r) => {
-            let status = r.status();
-            let status_text = r.status_text().to_string();
-            let ok = (200u16..300).contains(&status);
-            let mut resp_hdrs = serde_json::Map::new();
-            for name in r.headers_names() {
-                if let Some(val) = r.header(&name) {
-                    resp_hdrs.insert(name, serde_json::Value::String(val.to_string()));
-                }
-            }
-            let body_text = r.into_string().unwrap_or_default();
-            serde_json::json!({
-                "ok": ok, "status": status, "statusText": status_text,
-                "headers": resp_hdrs, "body": body_text,
-            })
-        }
-        Err(ureq::Error::Status(status, r)) => {
-            let status_text = r.status_text().to_string();
-            let body_text = r.into_string().unwrap_or_default();
-            serde_json::json!({
-                "ok": false, "status": status, "statusText": status_text,
-                "headers": {}, "body": body_text,
-            })
-        }
+        Ok(r) => response_to_json(r),
+        // ureq treats 3xx/4xx/5xx as Err(Status) when redirects=0 for 3xx,
+        // or always for 4xx/5xx. Preserve headers so Location etc. reach JS.
+        Err(ureq::Error::Status(_, r)) => response_to_json(r),
         Err(e) => return Err(anyhow::anyhow!("fetch failed: {}", e)),
     };
 

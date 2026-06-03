@@ -69,7 +69,13 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
       for (var i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
       return b;
     }
-    // utf8 / ascii / latin1
+    // latin1 / binary / ascii — byte-preserving: each char maps to its low byte
+    if (enc === 'latin1' || enc === 'binary' || enc === 'ascii') {
+      var b = new Uint8Array(str.length);
+      for (var i = 0; i < str.length; i++) b[i] = str.charCodeAt(i) & 0xFF;
+      return b;
+    }
+    // utf8 (default)
     if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(str);
     var b = new Uint8Array(str.length);
     for (var i = 0; i < str.length; i++) b[i] = str.charCodeAt(i) & 0xFF;

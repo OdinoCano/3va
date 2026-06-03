@@ -214,7 +214,8 @@ impl JsEngine {
         let result = self
             .context
             .with(|ctx| -> anyhow::Result<String> {
-                let val = ctx.eval::<rquickjs::Value, _>(code.as_str())
+                let val = ctx
+                    .eval::<rquickjs::Value, _>(code.as_str())
                     .map_err(|e| catch_js(&ctx, e))?;
                 if let Some(s) = val.as_string() {
                     s.to_string().map_err(|e| catch_js(&ctx, e))
@@ -246,7 +247,8 @@ impl JsEngine {
         );
         self.context
             .with(|ctx| -> anyhow::Result<()> {
-                ctx.eval::<(), _>(inject.as_str()).map_err(|e| catch_js(&ctx, e))
+                ctx.eval::<(), _>(inject.as_str())
+                    .map_err(|e| catch_js(&ctx, e))
             })
             .await?;
         self.eval_file(path).await
@@ -300,7 +302,8 @@ impl JsEngine {
                          {{ globalThis.process.argv.push('{}'); }}",
                         f
                     );
-                    ctx.eval::<(), _>(argv_setup.as_str()).map_err(|e| catch_js(&ctx, e))?;
+                    ctx.eval::<(), _>(argv_setup.as_str())
+                        .map_err(|e| catch_js(&ctx, e))?;
                     let module = Module::declare(ctx.clone(), filename.as_str(), code.as_str())
                         .map_err(|e| catch_js(&ctx, e))?;
                     let (_module_eval, _promise) = module.eval().map_err(|e| catch_js(&ctx, e))?;
@@ -314,7 +317,8 @@ impl JsEngine {
                         f = f,
                         d = d,
                     );
-                    ctx.eval::<(), _>(setup.as_str()).map_err(|e| catch_js(&ctx, e))?;
+                    ctx.eval::<(), _>(setup.as_str())
+                        .map_err(|e| catch_js(&ctx, e))?;
                     ctx.eval::<rquickjs::Value, _>(code.as_str())
                         .map(|_| ())
                         .map_err(|e| catch_js(&ctx, e))
@@ -370,18 +374,35 @@ impl JsEngine {
                 }
             }
 
+            // 2.5 Drain process.nextTick queue BEFORE Promise microtasks
+            //     (matching Node.js event loop priority).
+            self.context
+                .with(|ctx| -> rquickjs::Result<()> {
+                    let _: rquickjs::Value =
+                        ctx.eval("if (typeof __drainNextTick === 'function') __drainNextTick();")?;
+                    Ok(())
+                })
+                .await?;
+
             // 3. Process JS promise microtasks with a short timeout.
             //    idle() blocks until ALL spawner tasks complete, which includes
             //    persistent server-side accept loops (_acceptNext / __httpAcceptAsync).
             //    We use a 5ms timeout so the loop can keep iterating to fire pending
             //    setTimeout callbacks (needed to resolve httpGet Promises between requests).
-            let idle_timed_out = tokio::time::timeout(
-                std::time::Duration::from_millis(5),
-                self.runtime.idle(),
-            )
-            .await
-            .is_err();
+            let idle_timed_out =
+                tokio::time::timeout(std::time::Duration::from_millis(5), self.runtime.idle())
+                    .await
+                    .is_err();
             has_pending_async = idle_timed_out;
+
+            // 3.5 Drain setImmediate queue (Node.js "check" phase, after I/O and promises)
+            self.context
+                .with(|ctx| -> rquickjs::Result<()> {
+                    let _: rquickjs::Value = ctx
+                        .eval("if (typeof __drainImmediate === 'function') __drainImmediate();")?;
+                    Ok(())
+                })
+                .await?;
 
             // 4. Yield to Tokio so concurrent async ops make progress
             tokio::task::yield_now().await;

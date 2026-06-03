@@ -117,7 +117,11 @@ fn stat_meta_to_json(meta: &std::fs::Metadata) -> String {
     #[cfg(unix)]
     let mode = meta.permissions().mode();
     #[cfg(not(unix))]
-    let mode: u32 = if meta.permissions().readonly() { 0o444 } else { 0o644 };
+    let mode: u32 = if meta.permissions().readonly() {
+        0o444
+    } else {
+        0o644
+    };
     let is_dir = meta.is_dir();
     let is_file = meta.is_file();
     let is_symlink = meta.file_type().is_symlink();
@@ -309,6 +313,28 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             },
         )?,
     )?;
+
+    // ── __fsWriteFileBytesSync(path, bytes: Vec<u8>) ──────────────────────────
+    {
+        let perms = permissions.clone();
+        globals.set(
+            "__fsWriteFileBytesSync",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>, path_str: String, data: Vec<u8>| -> Result<()> {
+                    let path = PathBuf::from(&path_str);
+                    if !perms.check(&Capability::FileWrite(path.clone())) {
+                        return Err(perm_err(&ctx, "write", &path));
+                    }
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    std::fs::write(&path, &data)
+                        .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
+                },
+            )?,
+        )?;
+    }
 
     // ── __fsReadFileBytesSync(path) -> JSON array of byte values ──────────────
     let perms = permissions.clone();
@@ -691,7 +717,10 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 return std::os::windows::fs::symlink_file(&target_str, &path)
                     .map_err(|e| js_err(&ctx, format!("EEXIST: {}: '{}'", e, path_str)));
                 #[cfg(not(any(unix, windows)))]
-                return Err(js_err(&ctx, "symlink not supported on this platform".into()));
+                return Err(js_err(
+                    &ctx,
+                    "symlink not supported on this platform".into(),
+                ));
             },
         )?,
     )?;
@@ -924,15 +953,33 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             existsSync: function(p) { return __fsExistsSync(p); },
             readFileSync: function(p, opts) {
                 var enc = opts && (typeof opts === 'string' ? opts : opts.encoding);
-                if (enc && enc !== 'utf8' && enc !== 'utf-8') {
-                    // Binary: return Buffer
+                if (!enc) {
+                    // No encoding → return Buffer (Node.js default)
                     var bytes = JSON.parse(__fsReadFileBytesSync(p));
                     return Buffer.from(bytes);
                 }
-                return __fsReadFileSync(p);
+                var encLow = enc.toLowerCase();
+                if (encLow === 'utf8' || encLow === 'utf-8') return __fsReadFileSync(p);
+                // Other encoding: read bytes and decode
+                var bytes = JSON.parse(__fsReadFileBytesSync(p));
+                return Buffer.from(bytes).toString(enc);
             },
-            writeFileSync: function(p, data, opts) { return __fsWriteFileSync(p, typeof data === 'string' ? data : data.toString()); },
-            appendFileSync: function(p, data) { return __fsAppendFileSync(p, typeof data === 'string' ? data : data.toString()); },
+            writeFileSync: function(p, data, opts) {
+                if (typeof data === 'string') return __fsWriteFileSync(p, data);
+                // Binary: write raw bytes without UTF-8 conversion
+                var src = data instanceof Uint8Array ? data :
+                    (data && data.type === 'Buffer' ? new Uint8Array(data.data) : new Uint8Array(0));
+                var arr = [];
+                for (var _i = 0; _i < src.length; _i++) arr.push(src[_i]);
+                return __fsWriteFileBytesSync(p, arr);
+            },
+            appendFileSync: function(p, data) {
+                if (typeof data === 'string') return __fsAppendFileSync(p, data);
+                var bytes = data instanceof Uint8Array ? data : new Uint8Array(0);
+                var fd = __fsFdOpen(p, 'a', null);
+                try { __fsFdWrite(fd, bytes, null); }
+                finally { try { __fsFdClose(fd); } catch(_) {} }
+            },
             readdirSync: function(p, opts) {
                 var names = JSON.parse(__fsReaddirSync(p));
                 if (opts && opts.withFileTypes) {
@@ -959,16 +1006,34 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
 
             // ── async (callback + promise) ──────────────────────────────────────
             readFile: function(p, opts, cb) {
-                if (typeof opts === 'function') { cb = opts; opts = {}; }
+                if (typeof opts === 'function') { cb = opts; opts = null; }
                 var self = this;
                 var p2 = new Promise(function(resolve, reject) {
-                    try { resolve(self.readFileSync(p, opts)); } catch(e) { reject(e); }
+                    try { resolve(self.readFileSync(p, opts || null)); } catch(e) { reject(e); }
                 });
                 if (cb) { p2.then(function(v) { cb(null, v); }).catch(function(e) { cb(e); }); return; }
                 return p2;
             },
-            writeFile:   wrapAsync(function(p, data, opts) { return __fsWriteFileSync(p, typeof data === 'string' ? data : data.toString()); }),
-            appendFile:  wrapAsync(function(p, data) { return __fsAppendFileSync(p, typeof data === 'string' ? data : data.toString()); }),
+            writeFile: function(p, data, opts, cb) {
+                if (typeof opts === 'function') { cb = opts; opts = {}; }
+                var self = this;
+                var result = new Promise(function(resolve, reject) {
+                    try { self.writeFileSync(p, data, opts); resolve(); }
+                    catch(e) { reject(e); }
+                });
+                if (cb) { result.then(function() { cb(null); }).catch(function(e) { cb(e); }); return; }
+                return result;
+            },
+            appendFile: function(p, data, opts, cb) {
+                if (typeof opts === 'function') { cb = opts; opts = {}; }
+                var self = this;
+                var result = new Promise(function(resolve, reject) {
+                    try { self.appendFileSync(p, data); resolve(); }
+                    catch(e) { reject(e); }
+                });
+                if (cb) { result.then(function() { cb(null); }).catch(function(e) { cb(e); }); return; }
+                return result;
+            },
             readdir:     wrapAsync(function(p, opts) { return JSON.parse(__fsReaddirSync(p)); }),
             mkdir:       wrapAsync(function(p, opts) { return __fsMkdirSync(p); }),
             rm:          wrapAsync(function(p) { return __fsRmSync(p); }),

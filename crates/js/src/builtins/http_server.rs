@@ -302,6 +302,67 @@ pub fn inject_http_server(ctx: &Ctx, permissions: Arc<PermissionState>) -> Resul
         )?;
     }
 
+    // ── __httpRespondBytes(conn_id, status, status_text, headers_json, body_bytes) ─
+    // Binary-safe version of __httpRespond. Accepts Vec<u8> so file content,
+    // images, and other non-text payloads round-trip without corruption.
+    {
+        let conns = conns.clone();
+        ctx.globals().set(
+            "__httpRespondBytes",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>,
+                      conn_id: u32,
+                      status: u32,
+                      status_text: String,
+                      headers_json: String,
+                      body: Vec<u8>|
+                      -> Result<()> {
+                    let extra_headers: Vec<(String, String)> = serde_json::from_str(&headers_json)
+                        .ok()
+                        .and_then(|v: serde_json::Value| {
+                            v.as_object().map(|obj| {
+                                obj.iter()
+                                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                                    .collect()
+                            })
+                        })
+                        .unwrap_or_default();
+
+                    let mut response = format!("HTTP/1.1 {} {}\r\n", status, status_text);
+                    response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                    response.push_str("Connection: close\r\n");
+
+                    for (k, v) in &extra_headers {
+                        let kl = k.to_lowercase();
+                        if kl != "content-length" && kl != "connection" && kl != "transfer-encoding"
+                        {
+                            response.push_str(&format!("{}: {}\r\n", k, v));
+                        }
+                    }
+                    response.push_str("\r\n");
+
+                    let mut guard = conns.lock().unwrap();
+                    let conn = guard
+                        .get_mut(&conn_id)
+                        .ok_or_else(|| js_code_err(&ctx, "ENOENT", "unknown conn_id"))?;
+
+                    conn.stream
+                        .write_all(response.as_bytes())
+                        .map_err(|e| js_err(&ctx, e.to_string()))?;
+                    conn.stream
+                        .write_all(&body)
+                        .map_err(|e| js_err(&ctx, e.to_string()))?;
+                    conn.stream.flush().ok();
+
+                    drop(guard);
+                    conns.lock().unwrap().remove(&conn_id);
+                    Ok(())
+                },
+            ),
+        )?;
+    }
+
     // ── __httpClose(server_id) ────────────────────────────────────────────────
     {
         let servers = servers.clone();

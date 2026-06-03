@@ -168,12 +168,32 @@ fn resolve_node_module_esm(start_dir: &Path, name: &str) -> PathBuf {
             if let Some(path) = exports_entry {
                 return path;
             }
-            for field in &["module", "main"] {
-                if let Some(entry) = json[field].as_str() {
-                    let path = resolve_relative(&pkg_dir.join(entry));
-                    if path.is_file() {
-                        return path;
-                    }
+            // react-native field: platform-specific entry point override
+            if let Some(rn) = json.get("react-native").and_then(|v| v.as_str()) {
+                let path = resolve_relative(&pkg_dir.join(rn));
+                if path.is_file() {
+                    return path;
+                }
+            }
+            // module field: ESM entry point
+            if let Some(mod_entry) = json.get("module").and_then(|v| v.as_str()) {
+                let path = resolve_relative(&pkg_dir.join(mod_entry));
+                if path.is_file() {
+                    return path;
+                }
+            }
+            // main field: standard Node.js entry
+            if let Some(main) = json.get("main").and_then(|v| v.as_str()) {
+                let path = resolve_relative(&pkg_dir.join(main));
+                if path.is_file() {
+                    return path;
+                }
+            }
+            // browser field: bundler hint fallback
+            if let Some(browser) = json.get("browser").and_then(|v| v.as_str()) {
+                let path = resolve_relative(&pkg_dir.join(browser));
+                if path.is_file() {
+                    return path;
                 }
             }
         }

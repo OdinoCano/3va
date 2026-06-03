@@ -567,32 +567,47 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             };
             process.hrtime.bigint = function() { return BigInt(Date.now()) * BigInt(1000000); };
 
-            // nextTick: schedule callback in a microtask (closest to Node's behaviour in QuickJS)
+            // nextTick: drained by __drainNextTick() called from the Rust event loop
+            // BEFORE Promise microtasks, matching Node.js semantics.
             var _nextTickQueue = [];
-            var _nextTickScheduled = false;
             process.nextTick = function(cb) {
-                var args = Array.prototype.slice.call(arguments, 1);
-                _nextTickQueue.push({ fn: cb, args: args });
-                if (!_nextTickScheduled) {
-                    _nextTickScheduled = true;
-                    Promise.resolve().then(function() {
-                        _nextTickScheduled = false;
-                        var queue = _nextTickQueue.splice(0);
-                        for (var i = 0; i < queue.length; i++) {
-                            try { queue[i].fn.apply(null, queue[i].args); } catch(e) {}
-                        }
-                    });
+                if (typeof cb !== 'function') throw new TypeError('callback is not a function');
+                _nextTickQueue.push({ fn: cb, args: Array.prototype.slice.call(arguments, 1) });
+            };
+            globalThis.__drainNextTick = function() {
+                if (_nextTickQueue.length === 0) return;
+                var queue = _nextTickQueue.splice(0);
+                for (var i = 0; i < queue.length; i++) {
+                    try { queue[i].fn.apply(null, queue[i].args); } catch(e) {}
                 }
+                // Drain any nested nextTick calls made during the drain
+                if (_nextTickQueue.length > 0) globalThis.__drainNextTick();
             };
 
-            // setImmediate / clearImmediate
-            if (typeof setImmediate === 'undefined') {
-                globalThis.setImmediate = function(cb) {
-                    var args = Array.prototype.slice.call(arguments, 1);
-                    return setTimeout(function() { cb.apply(null, args); }, 0);
-                };
-                globalThis.clearImmediate = clearTimeout;
-            }
+            // setImmediate / clearImmediate — real queue drained by __drainImmediate
+            // in the Rust event loop, NOT via setTimeout(0).
+            // Unconditionally override any previous timer-based setImmediate.
+            var _immediateQueue = [];
+            var _immediateId = 0;
+            globalThis.setImmediate = function(cb) {
+                if (typeof cb !== 'function') throw new TypeError('callback is not a function');
+                var args = Array.prototype.slice.call(arguments, 1);
+                var id = ++_immediateId;
+                _immediateQueue.push({ id: id, fn: cb, args: args });
+                return id;
+            };
+            globalThis.clearImmediate = function(id) {
+                _immediateQueue = _immediateQueue.filter(function(item) { return item.id !== id; });
+            };
+            globalThis.__drainImmediate = function() {
+                if (_immediateQueue.length === 0) return;
+                var queue = _immediateQueue.splice(0);
+                for (var i = 0; i < queue.length; i++) {
+                    try { queue[i].fn.apply(null, queue[i].args); } catch(e) {}
+                }
+                // Drain any nested setImmediate calls
+                if (_immediateQueue.length > 0) globalThis.__drainImmediate();
+            };
 
             // EventEmitter-style signal handling on process
             var _sigListeners = {};
