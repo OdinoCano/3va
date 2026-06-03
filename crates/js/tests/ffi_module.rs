@@ -2,7 +2,12 @@ use std::sync::Arc;
 use vvva_js::JsEngine;
 use vvva_permissions::{Capability, PermissionState};
 
+// Used only for permission-denial tests (never actually loaded).
+const TEST_LIB_PATH: &str = "/lib/test/dummy.so";
+
+#[cfg(target_os = "linux")]
 const LIBM: &str = "/lib/x86_64-linux-gnu/libm.so.6";
+#[cfg(target_os = "linux")]
 const LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
 
 async fn engine_no_perms() -> JsEngine {
@@ -77,7 +82,7 @@ async fn dlopen_denied_without_allow_ffi() {
                    return err.message.includes('Permission denied') ? 'denied' : 'wrong:' + err.message;
                  }}
                }})()"#,
-            LIBM
+            TEST_LIB_PATH
         ))
         .await
         .unwrap();
@@ -97,13 +102,14 @@ async fn dlopen_denied_when_path_not_in_grant() {
                    return err.message.includes('Permission denied') ? 'denied' : 'wrong:' + err.message;
                  }}
                }})()"#,
-            LIBM
+            TEST_LIB_PATH
         ))
         .await
         .unwrap();
     assert_eq!(r, "denied", "dlopen outside granted path should be denied");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn dlopen_allowed_with_exact_path_grant() {
     let e = engine_with_ffi(LIBM).await;
@@ -125,6 +131,7 @@ async fn dlopen_allowed_with_exact_path_grant() {
     assert_eq!(r, "ok", "dlopen with exact path grant should succeed");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn dlopen_allowed_with_prefix_grant() {
     // Granting /lib/x86_64-linux-gnu/ should cover LIBM
@@ -151,6 +158,7 @@ async fn dlopen_allowed_with_prefix_grant() {
 
 // ── Calling native functions ──────────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_call_sqrt_f64() {
     let e = engine_with_ffi(LIBM).await;
@@ -172,6 +180,7 @@ async fn ffi_call_sqrt_f64() {
     assert_eq!(r, "2", "sqrt(4.0) should return 2");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_call_abs_i32() {
     let e = engine_with_ffi(LIBC).await;
@@ -194,6 +203,7 @@ async fn ffi_call_abs_i32() {
     assert_eq!(r, "42,7", "abs(-42)=42, abs(7)=7");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_call_strlen_cstring() {
     let e = engine_with_ffi(LIBC).await;
@@ -215,6 +225,7 @@ async fn ffi_call_strlen_cstring() {
     assert_eq!(r, "5", "strlen('hello') should return 5");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_call_pow_two_f64_args() {
     let e = engine_with_ffi(LIBM).await;
@@ -236,6 +247,7 @@ async fn ffi_call_pow_two_f64_args() {
     assert_eq!(r, "1024", "pow(2,10) should return 1024");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_call_void_return() {
     // free(NULL) is a no-op — tests that void return works without crashing
@@ -282,6 +294,7 @@ async fn dlopen_nonexistent_library_throws() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_unknown_symbol_throws() {
     let e = engine_with_ffi(LIBM).await;
@@ -307,6 +320,7 @@ async fn ffi_unknown_symbol_throws() {
     assert_eq!(r, "ok", "calling unknown symbol should throw");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_close_makes_handle_invalid() {
     let e = engine_with_ffi(LIBM).await;
@@ -337,6 +351,7 @@ async fn ffi_close_makes_handle_invalid() {
 
 // ── Multiple libraries open simultaneously ────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_multiple_libs_open_simultaneously() {
     let perms = Arc::new(PermissionState::new());
