@@ -16,7 +16,12 @@ async fn engine_rw(dir: &TempDir) -> JsEngine {
 }
 
 fn path_str(dir: &TempDir, name: &str) -> String {
-    dir.path().join(name).to_string_lossy().into_owned()
+    // Escape backslashes so Windows paths survive JS string interpolation
+    // (e.g. \t in C:\Users\telma would be interpreted as a tab otherwise).
+    dir.path()
+        .join(name)
+        .to_string_lossy()
+        .replace('\\', "\\\\")
 }
 
 /// Drive async Promises to completion.
@@ -108,7 +113,7 @@ async fn fs_stat_sync_file() {
 async fn fs_stat_sync_directory() {
     let dir = TempDir::new().unwrap();
     let e = engine_rw(&dir).await;
-    let p = dir.path().to_string_lossy().into_owned();
+    let p = dir.path().to_string_lossy().replace('\\', "\\\\");
 
     let r = e
         .eval_to_string(&format!(
@@ -327,7 +332,9 @@ async fn fs_access_sync_missing_throws() {
 }
 
 // ── symlinkSync / lstatSync ───────────────────────────────────────────────────
+// Creating symlinks on Windows requires elevated privileges (or Developer Mode).
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn fs_symlink_and_lstat() {
     let dir = TempDir::new().unwrap();
