@@ -39,10 +39,7 @@ pub fn parse_npmrc(content: &str) -> NpmrcConfig {
         let trimmed = line.trim();
 
         // Skip comments and empty lines
-        if trimmed.is_empty()
-            || trimmed.starts_with(';')
-            || trimmed.starts_with('#')
-        {
+        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
             continue;
         }
 
@@ -246,7 +243,8 @@ mod tests {
 
     #[test]
     fn parse_comments_ignored() {
-        let content = "; this is a comment\n# this is also a comment\nregistry=https://registry.npmjs.org";
+        let content =
+            "; this is a comment\n# this is also a comment\nregistry=https://registry.npmjs.org";
         let config = parse_npmrc(content);
         assert!(config.registry.is_some());
     }
@@ -268,17 +266,20 @@ mod tests {
     #[test]
     fn resolve_registry_scoped() {
         let mut config = NpmrcConfig::default();
-        config
-            .scoped_registries
-            .insert("@my-org".to_string(), "https://npm.pkg.github.com".to_string());
+        config.scoped_registries.insert(
+            "@my-org".to_string(),
+            "https://npm.pkg.github.com".to_string(),
+        );
         let url = resolve_registry(&config, "@my-org/pkg");
         assert_eq!(url, "https://npm.pkg.github.com");
     }
 
     #[test]
     fn resolve_registry_custom_default() {
-        let mut config = NpmrcConfig::default();
-        config.registry = Some("https://custom.registry.com".to_string());
+        let config = NpmrcConfig {
+            registry: Some("https://custom.registry.com".to_string()),
+            ..Default::default()
+        };
         let url = resolve_registry(&config, "lodash");
         assert_eq!(url, "https://custom.registry.com");
     }

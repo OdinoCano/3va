@@ -26,9 +26,7 @@ pub use auditor::{
 pub use lockfile::Lockfile;
 pub use malware_scanner::{MalwareScanner, ScanResult, Threat, ThreatLevel};
 pub use manifest::{PackageInfo, PackageManifest, PackagePermissions};
-pub use npmrc::{
-    NpmrcConfig, discover_npmrc, parse_npmrc, resolve_registry,
-};
+pub use npmrc::{NpmrcConfig, discover_npmrc, parse_npmrc, resolve_registry};
 pub use package_lock::load_from_package_lock;
 pub use pnpm_lock::load_from_pnpm_lock;
 pub use resolver::{DependencyGraph, DependencyNode, Resolver};
@@ -139,10 +137,7 @@ pub fn migrate_lockfile(project_root: &std::path::Path) -> anyhow::Result<bool> 
     };
     let out = project_root.join("3va-lock.json");
     lockfile.save(&out)?;
-    println!(
-        "✓ Migrated lockfile → {}",
-        out.display()
-    );
+    println!("✓ Migrated lockfile → {}", out.display());
     Ok(true)
 }
 
@@ -203,7 +198,10 @@ async fn lookup_npm_compat(
     let url = format!("{}/{}", base_url, pkg_name);
     let resp = client
         .get(&url)
-        .header("Accept", "application/vnd.npm.install-v1+json, application/json")
+        .header(
+            "Accept",
+            "application/vnd.npm.install-v1+json, application/json",
+        )
         .timeout(std::time::Duration::from_secs(20))
         .send()
         .await?;
@@ -534,7 +532,7 @@ const RETRY_BASE_MS: u64 = 400;
 async fn download_tarball(url: &str) -> anyhow::Result<Vec<u8>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
-        .gzip(false)  // tarballs are already gzipped at file level — don't double-decompress
+        .gzip(false) // tarballs are already gzipped at file level — don't double-decompress
         .build()?;
 
     let mut last_err = anyhow::anyhow!("unreachable");
@@ -648,16 +646,13 @@ pub async fn install_from_manifest(
 
     // Detect .npmrc for private registry support
     let npmrc = npmrc::discover_npmrc(Some(project_root));
-    if let Some(reg) = &npmrc.registry {
-        if reg != "https://registry.npmjs.org" {
-            tracing::info!("Using custom registry from .npmrc: {}", reg);
-        }
+    if let Some(reg) = &npmrc.registry
+        && reg != "https://registry.npmjs.org"
+    {
+        tracing::info!("Using custom registry from .npmrc: {}", reg);
     }
     if !npmrc.auth_tokens.is_empty() {
-        tracing::info!(
-            "Found {} auth token(s) in .npmrc",
-            npmrc.auth_tokens.len()
-        );
+        tracing::info!("Found {} auth token(s) in .npmrc", npmrc.auth_tokens.len());
     }
     if !npmrc.scoped_registries.is_empty() {
         tracing::info!(
@@ -755,7 +750,10 @@ async fn install_with_transitive(
             eprintln!("  The package manager requires explicit network permission.");
             eprintln!("  Specify the registry host with --allow-net:");
             eprintln!();
-            eprintln!("    3va install {} --allow-net=registry.npmjs.org", pkg_name);
+            eprintln!(
+                "    3va install {} --allow-net=registry.npmjs.org",
+                pkg_name
+            );
             anyhow::bail!("Network access denied: --allow-net not specified");
         }
     };
@@ -827,10 +825,7 @@ async fn install_with_transitive(
                 {
                     if let Some(ver) = val["version"].as_str() {
                         resolved.entry(name.clone()).or_insert_with(|| {
-                            let tarball = format!(
-                                "{}/{}/-/{}-{}.tgz",
-                                base_url, name, name, ver
-                            );
+                            let tarball = format!("{}/{}/-/{}-{}.tgz", base_url, name, name, ver);
                             (ver.to_string(), tarball, None)
                         });
                     }
@@ -890,15 +885,14 @@ async fn install_with_transitive(
                     // Also check disk in case the package was already extracted
                     // (covers the fallback full-packument path)
                     let dest = project_root.join("node_modules").join(&pkg_name);
-                    if dest.join("package.json").exists() {
-                        if let Ok(content) = std::fs::read_to_string(dest.join("package.json"))
-                            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
-                            && let Some(deps) = val["dependencies"].as_object()
-                        {
-                            for dep_name in deps.keys() {
-                                if !visited.contains(dep_name.as_str()) {
-                                    next_wave_set.insert(dep_name.clone());
-                                }
+                    if dest.join("package.json").exists()
+                        && let Ok(content) = std::fs::read_to_string(dest.join("package.json"))
+                        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+                        && let Some(deps) = val["dependencies"].as_object()
+                    {
+                        for dep_name in deps.keys() {
+                            if !visited.contains(dep_name.as_str()) {
+                                next_wave_set.insert(dep_name.clone());
                             }
                         }
                     }
@@ -936,14 +930,22 @@ async fn install_with_transitive(
             installed_ver.as_deref() != Some(ver.as_str())
         })
         .map(|(name, (ver, tarball, integrity))| {
-            (name.clone(), ver.clone(), tarball.clone(), integrity.clone())
+            (
+                name.clone(),
+                ver.clone(),
+                tarball.clone(),
+                integrity.clone(),
+            )
         })
         .collect();
 
     if to_install.is_empty() {
         println!("  ✓ All dependencies already installed.");
     } else {
-        println!("  Downloading {} package(s) in parallel...", to_install.len());
+        println!(
+            "  Downloading {} package(s) in parallel...",
+            to_install.len()
+        );
 
         let global_store = store::ContentStore::global();
         let reg_name = registry.display_name().to_string();
@@ -952,8 +954,12 @@ async fn install_with_transitive(
         let node_modules = project_root.join("node_modules");
         std::fs::create_dir_all(&node_modules)?;
 
-        let mut dl_set: JoinSet<(String, String, anyhow::Result<(Vec<u8>, Option<String>)>)> =
-            JoinSet::new();
+        #[allow(clippy::type_complexity)]
+        let mut dl_set: JoinSet<(
+            String,
+            String,
+            anyhow::Result<(Vec<u8>, Option<String>)>,
+        )> = JoinSet::new();
 
         for (pkg_name, ver, tarball_url, integrity) in to_install.iter().cloned() {
             let client = dl_client.clone();
@@ -979,7 +985,8 @@ async fn install_with_transitive(
                         .map_err(|e| anyhow::anyhow!("{}@{} — {}", pkg_name, ver, e))?;
                     let _ = std::fs::write(&cached_path, &bytes);
                     Ok((bytes, integrity))
-                }.await;
+                }
+                .await;
                 (pkg_name, ver, result)
             });
         }
@@ -1031,16 +1038,83 @@ async fn install_with_transitive(
                                     ));
                                 }
                             } else {
-                                errors.push(format!("Store link failed for {}@{}: {}", pkg_name, ver, e));
+                                errors.push(format!(
+                                    "Store link failed for {}@{}: {}",
+                                    pkg_name, ver, e
+                                ));
                             }
                             println!("  ✓ {}@{}", pkg_name, ver);
                             continue;
                         }
                     };
 
-                    if let Err(e) = create_virtual_symlink(&pkg_name, &ver, &node_modules, &virtual_path) {
+                    if let Err(e) =
+                        create_virtual_symlink(&pkg_name, &ver, &node_modules, &virtual_path)
+                    {
                         errors.push(format!("Symlink failed for {}@{}: {}", pkg_name, ver, e));
                         continue;
+                    }
+
+                    // ── Lifecycle scripts (postinstall / install) ─────────────────
+                    // Security: blocked by default; opt-in via 3VA_ALLOW_SCRIPTS=1
+                    // or --allow-scripts flag (future).
+                    if std::env::var("3VA_ALLOW_SCRIPTS").as_deref() == Ok("1") {
+                        let pkg_dir = node_modules.join(&pkg_name);
+                        let scripts_path = pkg_dir.join("package.json");
+                        if let Ok(scripts_content) = std::fs::read_to_string(&scripts_path)
+                            && let Ok(scripts_val) =
+                                serde_json::from_str::<serde_json::Value>(&scripts_content)
+                        {
+                            let lifecycle_scripts = ["preinstall", "install", "postinstall"];
+                            for lifecycle in &lifecycle_scripts {
+                                if let Some(script) = scripts_val["scripts"]
+                                    .get(*lifecycle)
+                                    .and_then(|v| v.as_str())
+                                {
+                                    println!(
+                                        "  ⚙  Running {lifecycle} script for {pkg_name}@{ver}"
+                                    );
+                                    let shell = if cfg!(windows) { "cmd" } else { "sh" };
+                                    let flag = if cfg!(windows) { "/C" } else { "-c" };
+                                    match std::process::Command::new(shell)
+                                        .args([flag, script])
+                                        .current_dir(&pkg_dir)
+                                        .output()
+                                    {
+                                        Ok(output) => {
+                                            if !output.status.success() {
+                                                let stderr =
+                                                    String::from_utf8_lossy(&output.stderr);
+                                                eprintln!(
+                                                    "  ⚠  {lifecycle} script failed for \
+                                                         {pkg_name}@{ver}: {stderr}"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "  ⚠  Could not run {lifecycle} for \
+                                                     {pkg_name}@{ver}: {e}"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Ok(scripts_content) =
+                        std::fs::read_to_string(node_modules.join(&pkg_name).join("package.json"))
+                        && let Ok(scripts_val) =
+                            serde_json::from_str::<serde_json::Value>(&scripts_content)
+                    {
+                        let has_lifecycle = ["preinstall", "install", "postinstall"]
+                            .iter()
+                            .any(|s| scripts_val["scripts"].get(*s).is_some());
+                        if has_lifecycle {
+                            println!(
+                                "  ⚠  {pkg_name}@{ver} has lifecycle scripts. \
+                                 Set 3VA_ALLOW_SCRIPTS=1 to enable."
+                            );
+                        }
                     }
                     println!("  ✓ {}@{}", pkg_name, ver);
                 }
@@ -1070,18 +1144,12 @@ async fn install_with_transitive(
     }
 
     // Delegate manifest update to a lightweight helper using the same logic as before
-    install_package_impl(
-        root_spec,
-        force,
-        allow_net,
-        project_root,
-        true,
-    )
-    .await
-    .or_else(|_| {
-        // If impl fails (package already there), update manifest manually
-        update_manifest_only(root_spec, project_root)
-    })
+    install_package_impl(root_spec, force, allow_net, project_root, true)
+        .await
+        .or_else(|_| {
+            // If impl fails (package already there), update manifest manually
+            update_manifest_only(root_spec, project_root)
+        })
 }
 
 /// Update only the package.json and lockfile without re-downloading anything.

@@ -31,10 +31,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     let read_file_fn = Function::new(
         ctx.clone(),
         move |ctx: rquickjs::Ctx<'_>, args: Rest<String>| -> Result<String> {
-            let path_str =
-                args.0.into_iter().next().ok_or_else(|| {
-                    rquickjs::Error::new_from_js("value", "__readFile() needs a path")
-                })?;
+            let path_str = args.0.into_iter().next().ok_or_else(|| {
+                rquickjs::Error::new_from_js("value", "__readFile() needs a path")
+            })?;
 
             let full_path = PathBuf::from(&path_str);
 
@@ -57,31 +56,31 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             let source = std::fs::read_to_string(&full_path).map_err(|e| {
                 let msg = format!("ENOENT: {}: '{}'", e, path_str);
                 let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-                match ctx.eval::<rquickjs::Value, _>(
-                    format!("new Error(\"{}\")", escaped).as_str(),
-                ) {
+                match ctx.eval::<rquickjs::Value, _>(format!("new Error(\"{}\")", escaped).as_str())
+                {
                     Ok(v) => ctx.throw(v),
                     Err(e2) => e2,
                 }
             })?;
 
-        // Transpile based on extension and content:
-        // - .ts / .tsx: always strip TypeScript types (JSX enabled for .tsx)
-        // - .jsx: always transform JSX
-        // - .js / .mjs / .cjs: always try OXC transpilation (handles JSX and strips Flow-like annotations)
-        let source = if path_str.ends_with(".tsx") || path_str.ends_with(".jsx") {
-            crate::transpiler::transpile_jsx(&source)
-        } else if path_str.ends_with(".ts")
-            || path_str.ends_with(".mts")
-            || path_str.ends_with(".cts")
-        {
-            crate::transpiler::transpile(&source)
-        } else {
-            crate::transpiler::transpile_js(&source)
-        };
+            // Transpile based on extension and content:
+            // - .ts / .tsx: always strip TypeScript types (JSX enabled for .tsx)
+            // - .jsx: always transform JSX
+            // - .js / .mjs / .cjs: always try OXC transpilation (handles JSX and strips Flow-like annotations)
+            let source = if path_str.ends_with(".tsx") || path_str.ends_with(".jsx") {
+                crate::transpiler::transpile_jsx(&source)
+            } else if path_str.ends_with(".ts")
+                || path_str.ends_with(".mts")
+                || path_str.ends_with(".cts")
+            {
+                crate::transpiler::transpile(&source)
+            } else {
+                crate::transpiler::transpile_js(&source)
+            };
 
-        Ok(source)
-    })?;
+            Ok(source)
+        },
+    )?;
     globals.set("__readFile", read_file_fn)?;
 
     // Native __resolvePath(path, basedir?) -> String
@@ -95,6 +94,44 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             .to_string()
     })?;
     globals.set("__resolvePath", resolve_fn)?;
+
+    // Native __dnsLookup(hostname) -> Promise<string>
+    // Returns a JSON-encoded array of resolved address strings (e.g. '["1.2.3.4"]').
+    let dns_fn = Function::new(
+        ctx.clone(),
+        rquickjs::function::Async(move |hostname: String| async move {
+            let result =
+                tokio::task::spawn_blocking(move || -> std::result::Result<Vec<String>, String> {
+                    use std::net::ToSocketAddrs;
+                    let addr_str = format!("{}:0", hostname);
+                    match addr_str.to_socket_addrs() {
+                        Ok(addrs) => {
+                            let ips: Vec<String> = addrs.map(|a| a.ip().to_string()).collect();
+                            if ips.is_empty() {
+                                Err(format!("ENOTFOUND: {hostname}"))
+                            } else {
+                                Ok(ips)
+                            }
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                })
+                .await
+                .map_err(|e| {
+                    rquickjs::Error::new_from_js_message(
+                        "dns",
+                        "lookup",
+                        format!("join error: {e}"),
+                    )
+                })?;
+
+            match result {
+                Ok(ips) => Ok(serde_json::to_string(&ips).unwrap_or_else(|_| "[]".to_string())),
+                Err(e) => Err(rquickjs::Error::new_from_js_message("dns", "lookup", e)),
+            }
+        }),
+    )?;
+    globals.set("__dnsLookup", dns_fn)?;
 
     // Register Node.js built-in module shims in the require cache by their bare names.
     // These are looked up before any file resolution, so require('util') etc. always work.
@@ -486,24 +523,42 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             // ── Transform ─────────────────────────────────────────────────────────
             function Transform(opts) {
-                Readable.call(this, opts);
-                this.writable = true;
-                this._writableState = {
+                var self = this;
+                Readable.call(self, opts);
+                self.writable = true;
+                self._writableState = {
                     objectMode: !!(opts && opts.objectMode),
                     highWaterMark: (opts && opts.highWaterMark) || 16384,
                     length: 0, corked: 0, ended: false, finished: false,
                     needDrain: false, pendingcb: 0, buffered: [],
+                    destroying: false,
                 };
-                if (opts && typeof opts.transform === 'function') this._transform = opts.transform;
-                if (opts && typeof opts.flush === 'function') this._flush = opts.flush;
+                Object.defineProperties(self, {
+                    writableLength: { get: function() { return self._writableState.length; } },
+                    writableEnded: { get: function() { return self._writableState.ended; } },
+                    writableFinished: { get: function() { return self._writableState.finished; } },
+                });
+                if (opts && typeof opts.transform === 'function') self._transform = opts.transform;
+                if (opts && typeof opts.flush === 'function') self._flush = opts.flush;
+                if (opts && typeof opts.final === 'function') self._final = opts.final;
             }
             util.inherits(Transform, Readable);
             Transform.prototype._transform = function(chunk, encoding, callback) { this.push(chunk); callback(); };
             Transform.prototype._flush = function(callback) { callback(); };
+            Transform.prototype._final = function(callback) { callback(); };
             Transform.prototype.write = function(chunk, encoding, cb) {
                 if (typeof encoding === 'function') { cb = encoding; encoding = 'utf8'; }
                 var self = this;
-                this._transform(chunk, encoding || 'utf8', function(err, data) {
+                var state = self._writableState;
+                if (state.ended) {
+                    var err = new Error('write after end');
+                    self.emit('error', err);
+                    if (cb) cb(err);
+                    return false;
+                }
+                state.pendingcb = (state.pendingcb || 0) + 1;
+                self._transform(chunk, encoding || 'utf8', function(err, data) {
+                    state.pendingcb--;
                     if (err) { self.emit('error', err); if (cb) cb(err); return; }
                     if (data != null) self.push(data);
                     if (cb) cb(null);
@@ -514,22 +569,56 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 if (typeof chunk === 'function') { cb = chunk; chunk = null; }
                 if (typeof encoding === 'function') { cb = encoding; encoding = null; }
                 var self = this;
+                var state = self._writableState;
+                state.ended = true;
                 function doFlush() {
                     self._flush(function(err, data) {
                         if (err) { self.emit('error', err); if (cb) cb(err); return; }
                         if (data != null) self.push(data);
-                        self.push(null);
-                        self._writableState.finished = true;
-                        self.emit('finish');
-                        if (cb) cb(null);
+                        self._final(function(err2) {
+                            if (err2) { self.emit('error', err2); if (cb) cb(err2); return; }
+                            self.push(null);
+                            state.finished = true;
+                            self.emit('finish');
+                            self.emit('close');
+                            if (cb) cb(null);
+                        });
                     });
                 }
-                if (chunk != null) { this.write(chunk, encoding, function(err) { if (!err) doFlush(); else if (cb) cb(err); }); }
+                if (chunk != null) { self.write(chunk, encoding, function(err) { if (!err) doFlush(); else if (cb) cb(err); }); }
                 else { doFlush(); }
             };
-            Transform.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
-            Transform.prototype.cork = function() {};
-            Transform.prototype.uncork = function() {};
+            Transform.prototype._destroy = function(err, callback) {
+                if (err) this.emit('error', err);
+                this.emit('close');
+                if (typeof callback === 'function') callback(err);
+            };
+            Transform.prototype.destroy = function(err) {
+                var state = this._writableState;
+                var rState = this._readableState;
+                if (state && state.destroying) return this;
+                if (state) state.destroying = true;
+                if (err) this.emit('error', err);
+                if (rState) rState.ended = true;
+                this._destroy(err, function() {});
+                return this;
+            };
+            Transform.prototype.cork = function() { this._writableState.corked++; };
+            Transform.prototype.uncork = function() {
+                var state = this._writableState;
+                if (state.corked > 0) state.corked--;
+                if (state.corked === 0 && state.buffered.length > 0) {
+                    var buf = state.buffered.splice(0);
+                    var self = this;
+                    buf.forEach(function(item) {
+                        self._transform(item.chunk, item.encoding || 'utf8', function(err, data) {
+                            if (err) { self.emit('error', err); if (item.cb) item.cb(err); return; }
+                            if (data != null) self.push(data);
+                            if (item.cb) item.cb(null);
+                        });
+                    });
+                }
+            };
 
             // ── PassThrough ───────────────────────────────────────────────────────
             function PassThrough(opts) { Transform.call(this, opts); }
@@ -538,20 +627,55 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             // ── Duplex ────────────────────────────────────────────────────────────
             function Duplex(opts) {
-                Readable.call(this, opts);
-                this.writable = true;
-                this._writableState = {
+                var self = this;
+                Readable.call(self, opts);
+                self.writable = true;
+                self._writableState = {
                     objectMode: !!(opts && opts.objectMode),
                     highWaterMark: (opts && opts.highWaterMark) || 16384,
                     length: 0, corked: 0, ended: false, finished: false,
                     needDrain: false, pendingcb: 0, buffered: [],
+                    destroying: false,
                 };
-                if (opts && typeof opts.write === 'function') this._write = opts.write;
+                Object.defineProperties(self, {
+                    writableLength: { get: function() { return self._writableState.length; } },
+                    writableEnded: { get: function() { return self._writableState.ended; } },
+                    writableFinished: { get: function() { return self._writableState.finished; } },
+                    writableCorked: { get: function() { return self._writableState.corked; } },
+                    writableHighWaterMark: { get: function() { return self._writableState.highWaterMark; } },
+                });
+                if (opts && typeof opts.write === 'function') self._write = opts.write;
+                if (opts && typeof opts.final === 'function') self._final = opts.final;
+                if (opts && typeof opts.destroy === 'function') self._destroy = opts.destroy;
             }
             util.inherits(Duplex, Readable);
+            // Writable side — delegate to Writable.prototype for shared implementation
             Duplex.prototype._write = Writable.prototype._write;
+            Duplex.prototype._final = Writable.prototype._final;
             Duplex.prototype.write = Writable.prototype.write;
             Duplex.prototype.end = Writable.prototype.end;
+            Duplex.prototype.cork = Writable.prototype.cork;
+            Duplex.prototype.uncork = Writable.prototype.uncork;
+            Duplex.prototype.setDefaultEncoding = Writable.prototype.setDefaultEncoding;
+            Duplex.prototype._destroy = function(err, callback) {
+                if (err) this.emit('error', err);
+                this.emit('close');
+                if (typeof callback === 'function') callback(err);
+            };
+            Duplex.prototype.destroy = function(err) {
+                var state = this._writableState;
+                if (state && state.destroying) return this;
+                if (state) state.destroying = true;
+                var self = this;
+                if (err) self.emit('error', err);
+                // End readable side
+                self._readableState.ended = true;
+                // Call _destroy
+                self._destroy(err, function() {
+                    self.emit('close');
+                });
+                return this;
+            };
 
             // In Node.js, require('stream') IS the Stream constructor function,
             // with Readable/Writable/etc. attached as properties (not a plain object).
@@ -914,23 +1038,25 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                             var body = bodyParts.length ? bodyParts.join('') : undefined;
                             __fetchAsync(url, method, JSON.stringify(headers), body).then(function(raw) {
                                 var d = JSON.parse(raw);
+                                // Decode binary responses: server base64-encoded them and set binary:true
+                                var bodyData = d.binary ? Buffer.from(d.body, 'base64') : d.body;
                                 var res = {
                                     statusCode: d.status,
                                     statusMessage: d.statusText,
                                     headers: d.headers,
-                                    _body: d.body,
+                                    _body: bodyData,
                                     _listeners: { data: [], end: [], error: [] },
                                     on: function(ev, fn) { this._listeners[ev] = this._listeners[ev] || []; this._listeners[ev].push(fn); return this; },
-                                    pipe: function(dest) { if (dest && dest.write) dest.write(d.body); if (dest && dest.end) dest.end(); return dest; },
+                                    pipe: function(dest) { if (dest && dest.write) dest.write(bodyData); if (dest && dest.end) dest.end(); return dest; },
                                     resume: function() {}
                                 };
                                 // deliver body
                                 if (cb) cb(res);
                                 listeners.response.forEach(function(fn) { fn(res); });
                                 setTimeout(function() {
-                                    res._listeners.data.forEach(function(fn) { fn(d.body); });
+                                    res._listeners.data.forEach(function(fn) { fn(bodyData); });
                                     res._listeners.end.forEach(function(fn) { fn(); });
-                                    listeners.data.forEach(function(fn) { fn(d.body); });
+                                    listeners.data.forEach(function(fn) { fn(bodyData); });
                                     listeners.end.forEach(function(fn) { fn(); });
                                 }, 0);
                             }).catch(function(e) {
@@ -991,7 +1117,13 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 util.inherits(ServerResponse, Writable);
                 ServerResponse.prototype._write = function(chunk, encoding, callback) {
                     if (chunk !== undefined && chunk !== null) {
-                        this._chunks.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk));
+                        if (typeof chunk === 'string') {
+                            this._chunks.push(Buffer.from(chunk, encoding || 'utf8'));
+                        } else if (chunk instanceof Uint8Array || Buffer.isBuffer(chunk)) {
+                            this._chunks.push(Buffer.from(chunk));
+                        } else {
+                            this._chunks.push(Buffer.from(String(chunk)));
+                        }
                     }
                     callback();
                 };
@@ -1003,13 +1135,15 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     if (this._responded || this._connId == null) return;
                     this._responded = true;
                     this.headersSent = true;
-                    var body = this._chunks.join('');
                     var st = this.statusCode || 200;
                     var stText = this.statusMessage || STATUS_CODES[st] || 'OK';
                     if (!this._headers['Content-Type'] && !this._headers['content-type']) {
                         this._headers['Content-Type'] = 'text/plain';
                     }
-                    try { __httpRespond(this._connId, st, stText, JSON.stringify(this._headers), body); }
+                    try {
+                        var _bodyBuf = Buffer.concat(this._chunks.length ? this._chunks : [Buffer.alloc(0)]);
+                        __httpRespondBytes(this._connId, st, stText, JSON.stringify(this._headers), Array.from(_bodyBuf));
+                    }
                     catch(e) { /* connection may have been closed */ }
                 };
                 ServerResponse.prototype.setHeader = function(k, v) { this._headers[k] = v; return this; };
@@ -1049,6 +1183,147 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     this._responded = true;
                     this.emit('close');
                     return this;
+                };
+
+                // ── Cross-platform absolute-path detection ──────────────────
+                // path.isAbsolute() is POSIX-only and fails for Windows
+                // paths like C:\... when running on Windows.
+                function _isAbsPath(p) {
+                    p = String(p || '');
+                    return p.charAt(0) === '/' || p.charAt(0) === '\\' || /^[A-Za-z]:/.test(p);
+                }
+
+                // ── MIME lookup (used by sendFile / download) ───────────────
+                function _getMime(p) {
+                    var ext = (p || '').split('.').pop().toLowerCase();
+                    return ({
+                        html:'text/html; charset=utf-8', htm:'text/html; charset=utf-8',
+                        css:'text/css', js:'application/javascript; charset=utf-8',
+                        mjs:'application/javascript; charset=utf-8',
+                        cjs:'application/javascript; charset=utf-8',
+                        json:'application/json; charset=utf-8',
+                        jsonld:'application/ld+json', xml:'application/xml',
+                        txt:'text/plain; charset=utf-8', csv:'text/csv',
+                        md:'text/markdown', yaml:'text/yaml', yml:'text/yaml',
+                        png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg',
+                        gif:'image/gif', svg:'image/svg+xml', ico:'image/x-icon',
+                        webp:'image/webp', avif:'image/avif', bmp:'image/bmp',
+                        tiff:'image/tiff', tif:'image/tiff',
+                        mp3:'audio/mpeg', ogg:'audio/ogg', wav:'audio/wav',
+                        flac:'audio/flac', aac:'audio/aac', weba:'audio/webm',
+                        mp4:'video/mp4', webm:'video/webm', avi:'video/x-msvideo',
+                        mov:'video/quicktime', mkv:'video/x-matroska',
+                        woff:'font/woff', woff2:'font/woff2',
+                        ttf:'font/ttf', otf:'font/otf',
+                        eot:'application/vnd.ms-fontobject',
+                        zip:'application/zip', tar:'application/x-tar',
+                        gz:'application/gzip', pdf:'application/pdf',
+                        wasm:'application/wasm', map:'application/json',
+                        webmanifest:'application/manifest+json',
+                    })[ext] || 'application/octet-stream';
+                }
+
+                // ── res.sendFile(path, [opts], [cb]) ────────────────────────
+                ServerResponse.prototype.sendFile = function(filePath, opts, cb) {
+                    if (typeof opts === 'function') { cb = opts; opts = {}; }
+                    opts = opts || {};
+                    var self = this;
+                    var path = require('path');
+                    var fs = require('fs');
+                    var absPath = (opts.root && !_isAbsPath(filePath))
+                        ? path.join(opts.root, filePath)
+                        : (_isAbsPath(filePath) ? filePath : path.resolve(filePath));
+                    fs.stat(absPath, function(err, stat) {
+                        if (err) {
+                            err.status = 404;
+                            if (cb) return cb(err);
+                            self.statusCode = 404;
+                            self.setHeader('Content-Type', 'text/plain');
+                            return self.end('Not Found');
+                        }
+                        if (!stat.isFile()) {
+                            var e = new Error('Not a file: ' + filePath); e.status = 404;
+                            if (cb) return cb(e);
+                            self.statusCode = 404;
+                            self.setHeader('Content-Type', 'text/plain');
+                            return self.end('Not Found');
+                        }
+                        if (!self._headers['Content-Type'] && !self._headers['content-type']) {
+                            self.setHeader('Content-Type', _getMime(absPath));
+                        }
+                        self.setHeader('Content-Length', String(stat.size));
+                        if (self.statusCode === 200 || !self.statusCode) self.statusCode = 200;
+                        var stream = fs.createReadStream(absPath);
+                        stream.on('error', function(e) {
+                            if (cb) { cb(e); return; }
+                            if (!self._responded) {
+                                self.statusCode = 500;
+                                self.setHeader('Content-Type', 'text/plain');
+                                self.end('Error reading file: ' + (e && e.message || String(e)));
+                            }
+                        });
+                        stream.on('end', function() { if (cb) cb(null); });
+                        stream.pipe(self);
+                    });
+                };
+
+                // ── res.download(path, [filename], [opts], [cb]) ────────────
+                ServerResponse.prototype.download = function(filePath, filename, opts, cb) {
+                    if (typeof filename === 'function') { cb = filename; filename = null; opts = {}; }
+                    else if (typeof opts === 'function') { cb = opts; opts = {}; }
+                    var path = require('path');
+                    filename = filename || path.basename(String(filePath));
+                    this.setHeader('Content-Disposition',
+                        'attachment; filename="' + String(filename).replace(/\\/g,'\\\\').replace(/"/g,'\\"') + '"');
+                    this.sendFile(filePath, opts || {}, cb);
+                };
+
+                // ── res.render(view, [locals], [cb]) ────────────────────────
+                // Falls back to simple {{var}} substitution when no engine is registered.
+                ServerResponse.prototype.render = function(view, locals, cb) {
+                    if (typeof locals === 'function') { cb = locals; locals = {}; }
+                    locals = locals || {};
+                    var self = this;
+                    var path = require('path');
+                    var fs = require('fs');
+                    var app = self.req && self.req.app;
+                    var viewsDir = app && typeof app.get === 'function' ? app.get('views') : null;
+                    var viewEngine = app && typeof app.get === 'function' ? app.get('view engine') : null;
+                    var ext = path.extname(view) || (viewEngine ? '.' + viewEngine : '.html');
+                    var viewPath = _isAbsPath(view) ? view
+                        : (viewsDir
+                            ? path.join(viewsDir, view + (path.extname(view) ? '' : ext))
+                            : path.resolve(view + (path.extname(view) ? '' : ext)));
+                    var engineFn = app && app.engines ? app.engines[ext.replace('.', '')] : null;
+                    if (!engineFn && app && app._engines) engineFn = app._engines[ext.replace('.', '')];
+                    if (engineFn) {
+                        try {
+                            engineFn(viewPath, locals, function(err, html) {
+                                if (err) {
+                                    if (cb) return cb(err);
+                                    self.statusCode = 500;
+                                    return self.end('Error: ' + err.message);
+                                }
+                                self.setHeader('Content-Type', 'text/html; charset=utf-8');
+                                if (cb) cb(null, html); else self.end(html);
+                            });
+                        } catch(e) { if (cb) cb(e); else self.end('Error: ' + e.message); }
+                    } else {
+                        fs.readFile(viewPath, 'utf8', function(err, template) {
+                            if (err) {
+                                if (cb) return cb(err);
+                                self.statusCode = 500;
+                                return self.end('Template not found: ' + view);
+                            }
+                            var html = template.replace(/\{\{([\w.]+)\}\}/g, function(_, key) {
+                                var val = locals;
+                                key.split('.').forEach(function(k) { val = val && val[k]; });
+                                return val != null ? String(val) : '';
+                            });
+                            self.setHeader('Content-Type', 'text/html; charset=utf-8');
+                            if (cb) cb(null, html); else self.end(html);
+                        });
+                    }
                 };
 
                 var modObj = {
@@ -2545,6 +2820,34 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         })();
     "#)?;
 
+    // Dynamic import() polyfill: captures the calling module's __dirname so
+    // relative specifiers resolve correctly even when called asynchronously.
+    ctx.eval::<(), _>(
+        r#"
+        globalThis.__importAsync = function(specifier) {
+            var dir = globalThis.__dirname;
+            return new Promise(function(resolve, reject) {
+                try {
+                    var saved = globalThis.__dirname;
+                    globalThis.__dirname = dir;
+                    var mod;
+                    try { mod = globalThis.require(specifier); }
+                    finally { globalThis.__dirname = saved; }
+                    // Wrap as a module namespace object
+                    if (mod && mod.__esModule) {
+                        resolve(mod);
+                    } else {
+                        var ns = Object.assign({ default: mod }, mod);
+                        resolve(ns);
+                    }
+                } catch(e) {
+                    reject(e);
+                }
+            });
+        };
+    "#,
+    )?;
+
     // ESM→CJS inline transformer for loading ESM packages via require()
     ctx.eval::<(), _>(r#"
         globalThis.__esmToCjs = function(src) {
@@ -2595,8 +2898,17 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     i++; continue;
                 }
                 // export default expression;
+                // Use a two-step assignment: first replace module.exports, then set .default on
+                // the new value. The chained form 'module.exports.default = module.exports = X'
+                // sets .default on the OLD module.exports (JS evaluates LHS ref before RHS
+                // assignment), so .default ends up on the stale empty object, not the exported one.
                 if ((m = trimmed.match(/^export\s+default\s+(.*)/))) {
-                    out.push('module.exports.default = module.exports = ' + m[1]);
+                    out.push('module.exports = ' + m[1]);
+                    deferredExports.push('try{var __ed=module.exports;if(__ed!==null&&__ed!==undefined){__ed.default=__ed;module.exports=__ed;}}catch(__e){}');
+                    i++; continue;
+                }
+                // export {}  (empty export, OXC emits this to mark a file as ESM — no-op)
+                if (/^export\s*\{\s*\}\s*(from\s+['"][^'"]+['"]\s*)?;?$/.test(trimmed)) {
                     i++; continue;
                 }
                 // export { a, b as c }
@@ -2626,12 +2938,52 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     out.push('(function(){var __re=require(' + JSON.stringify(m[1]) + ');for(var __k in __re){if(__k!=="default")module.exports[__k]=__re[__k];}})();');
                     i++; continue;
                 }
+                // export const/let/var { a, b } = X  (destructured object export)
+                if ((m = trimmed.match(/^export\s+(?:const|let|var)\s+\{([^}]+)\}\s*=/))) {
+                    var decl = trimmed.replace(/^export\s+/, '');
+                    out.push(decl);
+                    m[1].split(',').forEach(function(s) {
+                        s = s.trim();
+                        if (!s) return;
+                        // Handle aliasing: { orig: local } → export local as orig
+                        var parts = s.split(/\s*:\s*/);
+                        var localName = (parts[1] || parts[0]).trim().split(/\s+/)[0];
+                        var exportName = parts[0].trim();
+                        if (localName && /^\w+$/.test(localName)) {
+                            out.push('module.exports.' + exportName + ' = ' + localName + ';');
+                        }
+                    });
+                    i++; continue;
+                }
+                // export const/let/var [...] = X  (destructured array export)
+                if ((m = trimmed.match(/^export\s+(?:const|let|var)\s+\[([^\]]+)\]\s*=/))) {
+                    var decl = trimmed.replace(/^export\s+/, '');
+                    out.push(decl);
+                    m[1].split(',').forEach(function(s) {
+                        s = s.trim();
+                        if (s && /^\w+$/.test(s)) {
+                            out.push('module.exports.' + s + ' = ' + s + ';');
+                        }
+                    });
+                    i++; continue;
+                }
                 // export const/let/var/function/class X ...
                 if ((m = trimmed.match(/^export\s+(const|let|var|function|class|async\s+function)\s+(\w+)/))) {
                     var decl = trimmed.replace(/^export\s+/, '');
                     var exportName = m[2];
+                    var kind = m[1];
                     out.push(decl);
-                    out.push('module.exports.' + exportName + ' = ' + exportName + ';');
+                    // Defer the export when:
+                    //  - function/class: hoisted but body must complete first
+                    //  - var/let without initializer (export var X;): the value is
+                    //    populated by a later IIFE (TypeScript enum pattern), so
+                    //    exporting immediately would capture 'undefined'.
+                    var hasInitializer = decl.indexOf('=') >= 0;
+                    if (kind === 'function' || kind === 'class' || kind.indexOf('async') >= 0 || !hasInitializer) {
+                        deferredExports.push('module.exports.' + exportName + ' = ' + exportName + ';');
+                    } else {
+                        out.push('module.exports.' + exportName + ' = ' + exportName + ';');
+                    }
                     i++; continue;
                 }
 
@@ -2639,8 +2991,18 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 i++;
             }
 
+            // Flush deferred function/class exports after all declarations are processed.
+            // Wrap in try-catch: some properties may be read-only (e.g. defined via
+            // Object.defineProperty with only a getter) and the assignment would throw.
+            for (var di = 0; di < deferredExports.length; di++) {
+                out.push('try{' + deferredExports[di] + '}catch(__de){}');
+            }
             out.push('if(typeof module.exports.default==="undefined"&&Object.keys(module.exports).length>0){module.exports.__esModule=true;}');
-            return out.join('\n');
+            // Replace dynamic import() with __importAsync() so QuickJS doesn't
+            // try to use the ES module loader (which isn't configured).
+            var result = out.join('\n');
+            result = result.replace(/\bimport\s*\(/g, '__importAsync(');
+            return result;
         };
     "#)?;
 
@@ -2715,6 +3077,11 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__filename = filename;
             globalThis.__dirname = dirname;
 
+            // Pre-cache the (initially empty) exports object so circular requires
+            // get the partial object instead of triggering infinite re-execution.
+            // Node.js does the same thing.
+            globalThis.__requireCache[resolvedPath] = globalThis.module.exports;
+
             // Create a module-scoped require that captures this module's dirname.
             // This is critical for lazy getters and callbacks that call require()
             // after the module has finished loading (and __dirname was restored).
@@ -2734,8 +3101,12 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             })(_capturedDirname);
 
             // If the file uses ESM syntax, inline-convert to CJS before wrapping.
+            // __esmToCjs also handles the import() → __importAsync() replacement.
             if (/^\s*(import\s|import\{|export\s|export\{|export\s*default)/m.test(source)) {
                 source = __esmToCjs(source);
+            } else if (source.indexOf('import(') >= 0) {
+                // Plain CJS that still uses dynamic import() — patch it here.
+                source = source.replace(/\bimport\s*\(/g, '__importAsync(');
             }
 
             // Execute the module with CJS wrapper, passing the module-scoped require.
@@ -2745,6 +3116,21 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             eval(wrapper);
 
             result = globalThis.module.exports;
+
+            // Backward-compat wrap: some packages compiled with TypeScript emit
+            //   Object.defineProperty(exports, "__esModule", { value: true });
+            //   exports.create = create;
+            // but callers (like Express 5) still call the module as a function:
+            //   var cd = require('content-disposition'); cd(filename)
+            // If the loaded module is not callable but has __esModule:true and a
+            // `create` method, wrap it so the default call delegates to `create`.
+            if (result && typeof result === 'object' && result.__esModule === true
+                && typeof result !== 'function' && typeof result.create === 'function') {
+                var _orig = result;
+                result = function() { return _orig.create.apply(_orig, arguments); };
+                var _keys = Object.keys(_orig);
+                for (var _ki = 0; _ki < _keys.length; _ki++) { result[_keys[_ki]] = _orig[_keys[_ki]]; }
+            }
 
             // Restore outer state
             globalThis.module = savedModule;
@@ -3402,45 +3788,204 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
 }());
 
 // ── dns ───────────────────────────────────────────────────────────────────────
-// Many network packages import dns but 3va can't do real DNS; return stubs
-// that signal "not supported" gracefully.
+// Backed by native __dnsLookup(hostname) -> Promise<json-array-of-IPs>
 (function() {
-    function notSupported(name) {
-        return function() {
-            var cb = arguments[arguments.length - 1];
-            var err = Object.assign(new Error('DNS not supported in 3va: ' + name),
-                { code: 'ENOTSUP', syscall: name });
-            if (typeof cb === 'function') { setTimeout(function() { cb(err); }, 0); }
-            else throw err;
-        };
+    var __dnsLookup = globalThis.__dnsLookup;
+
+    function _lookupOne(hostname, family, cb) {
+        if (typeof __dnsLookup !== 'function') {
+            var err = Object.assign(new Error('DNS not available'),
+                { code: 'ENOTSUP', syscall: 'lookup' });
+            if (typeof cb === 'function') return setTimeout(function() { cb(err); }, 0);
+            throw err;
+        }
+        __dnsLookup(hostname).then(function(json) {
+            var all = JSON.parse(json);
+            if (!Array.isArray(all) || all.length === 0) {
+                var nf = Object.assign(new Error('getaddrinfo ENOTFOUND ' + hostname),
+                    { code: 'ENOTFOUND', errno: -3008, syscall: 'getaddrinfo', hostname: hostname });
+                if (typeof cb === 'function') cb(nf);
+                return;
+            }
+            // Filter by family: 4 = IPv4, 6 = IPv6, 0 or undefined = any
+            var filtered = all;
+            if (family === 4) filtered = all.filter(function(a) { return a.indexOf(':') === -1; });
+            else if (family === 6) filtered = all.filter(function(a) { return a.indexOf(':') !== -1; });
+
+            if (filtered.length === 0) {
+                filtered = all;
+            }
+
+            var addr = filtered[0];
+            var fam = addr.indexOf(':') === -1 ? 4 : 6;
+            if (typeof cb === 'function') cb(null, addr, fam);
+        }).catch(function(err) {
+            var dnsErr = err instanceof Error ? err :
+                Object.assign(new Error(String(err)), { code: 'EIO', errno: -5, syscall: 'getaddrinfo', hostname: hostname });
+            if (typeof cb === 'function') cb(dnsErr);
+        });
+    }
+
+    function _lookupAll(hostname, family, cb) {
+        if (typeof __dnsLookup !== 'function') {
+            var err = Object.assign(new Error('DNS not available'),
+                { code: 'ENOTSUP', syscall: 'lookup' });
+            if (typeof cb === 'function') return setTimeout(function() { cb(err); }, 0);
+            throw err;
+        }
+        __dnsLookup(hostname).then(function(json) {
+            var all = JSON.parse(json);
+            if (!Array.isArray(all) || all.length === 0) {
+                var nf = Object.assign(new Error('getaddrinfo ENOTFOUND ' + hostname),
+                    { code: 'ENOTFOUND', errno: -3008, syscall: 'getaddrinfo', hostname: hostname });
+                if (typeof cb === 'function') cb(nf);
+                return;
+            }
+            var filtered = all;
+            if (family === 4) filtered = all.filter(function(a) { return a.indexOf(':') === -1; });
+            else if (family === 6) filtered = all.filter(function(a) { return a.indexOf(':') !== -1; });
+            if (filtered.length === 0) filtered = all;
+            var result = filtered.map(function(a) {
+                return { address: a, family: a.indexOf(':') === -1 ? 4 : 6 };
+            });
+            if (typeof cb === 'function') cb(null, result);
+        }).catch(function(err) {
+            var dnsErr = err instanceof Error ? err :
+                Object.assign(new Error(String(err)), { code: 'EIO', errno: -5, syscall: 'getaddrinfo', hostname: hostname });
+            if (typeof cb === 'function') cb(dnsErr);
+        });
     }
 
     var dns = {
-        lookup: notSupported('lookup'),
-        lookupService: notSupported('lookupService'),
-        resolve: notSupported('resolve'),
-        resolve4: notSupported('resolve4'),
-        resolve6: notSupported('resolve6'),
-        resolveMx: notSupported('resolveMx'),
-        resolveTxt: notSupported('resolveTxt'),
-        resolveSrv: notSupported('resolveSrv'),
-        resolveNs: notSupported('resolveNs'),
-        resolveCname: notSupported('resolveCname'),
-        resolveNaptr: notSupported('resolveNaptr'),
-        resolvePtr: notSupported('resolvePtr'),
-        resolveSoa: notSupported('resolveSoa'),
-        resolveAny: notSupported('resolveAny'),
-        reverse: notSupported('reverse'),
+        lookup: function(hostname, options, callback) {
+            if (typeof options === 'function') { callback = options; options = 0; }
+            if (typeof options === 'number') options = { family: options, all: false };
+            options = options || {};
+            var family = options.family || 0;
+            var all = options.all || false;
+            if (all) return _lookupAll(hostname, family, callback);
+            return _lookupOne(hostname, family, callback);
+        },
+        lookupService: function(addr, port, cb) {
+            var err = Object.assign(new Error('lookupService not supported'),
+                { code: 'ENOTSUP', syscall: 'lookupService' });
+            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+        },
+        resolve: function(hostname, rrtype, cb) {
+            if (typeof rrtype === 'function') { cb = rrtype; rrtype = 'A'; }
+            if (typeof __dnsLookup !== 'function') {
+                var err = Object.assign(new Error('DNS not available'), { code: 'ENOTSUP' });
+                if (typeof cb === 'function') return setTimeout(function() { cb(err); }, 0);
+                throw err;
+            }
+            __dnsLookup(hostname).then(function(json) {
+                var all = JSON.parse(json);
+                if (!Array.isArray(all) || all.length === 0) {
+                    var nf = Object.assign(new Error('getaddrinfo ENOTFOUND ' + hostname),
+                        { code: 'ENOTFOUND', errno: -3008, syscall: 'getaddrinfo' });
+                    if (typeof cb === 'function') cb(nf);
+                    return;
+                }
+                if (rrtype === 'A') {
+                    var v4 = all.filter(function(a) { return a.indexOf(':') === -1; });
+                    if (typeof cb === 'function') cb(null, v4);
+                } else if (rrtype === 'AAAA') {
+                    var v6 = all.filter(function(a) { return a.indexOf(':') !== -1; });
+                    if (typeof cb === 'function') cb(null, v6);
+                } else if (rrtype === 'ANY') {
+                    if (typeof cb === 'function') cb(null, all);
+                } else {
+                    var nf2 = Object.assign(new Error('queryA ENOTFOUND ' + hostname),
+                        { code: 'ENOTFOUND' });
+                    if (typeof cb === 'function') cb(nf2);
+                }
+            }).catch(function(err) {
+                var dnsErr = err instanceof Error ? err :
+                    Object.assign(new Error(String(err)), { code: 'EIO', syscall: 'getaddrinfo' });
+                if (typeof cb === 'function') cb(dnsErr);
+            });
+        },
+        resolve4: function(hostname, options, cb) {
+            if (typeof options === 'function') { cb = options; options = {}; }
+            dns.resolve(hostname, 'A', cb);
+        },
+        resolve6: function(hostname, options, cb) {
+            if (typeof options === 'function') { cb = options; options = {}; }
+            dns.resolve(hostname, 'AAAA', cb);
+        },
+        resolveMx: function(hostname, cb) {
+            var err = Object.assign(new Error('resolveMx not supported'), { code: 'ENOTSUP' });
+            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+        },
+        resolveTxt: function(hostname, cb) {
+            var err = Object.assign(new Error('resolveTxt not supported'), { code: 'ENOTSUP' });
+            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+        },
+        resolveSrv: function(hostname, cb) {
+            var err = Object.assign(new Error('resolveSrv not supported'), { code: 'ENOTSUP' });
+            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+        },
+        resolveNs: function(hostname, cb) {
+            var err = Object.assign(new Error('resolveNs not supported'), { code: 'ENOTSUP' });
+            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+        },
+        resolveCname: function(hostname, cb) {
+            var err = Object.assign(new Error('resolveCname not supported'), { code: 'ENOTSUP' });
+            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+        },
+        resolveNaptr: function(hostname, cb) {
+            var err = Object.assign(new Error('resolveNaptr not supported'), { code: 'ENOTSUP' });
+            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+        },
+        resolvePtr: function(hostname, cb) {
+            var err = Object.assign(new Error('resolvePtr not supported'), { code: 'ENOTSUP' });
+            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+        },
+        resolveSoa: function(hostname, cb) {
+            var err = Object.assign(new Error('resolveSoa not supported'), { code: 'ENOTSUP' });
+            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+        },
+        resolveAny: function(hostname, cb) {
+            dns.resolve(hostname, 'ANY', cb);
+        },
+        reverse: function(ip, cb) {
+            var err = Object.assign(new Error('reverse not supported'), { code: 'ENOTSUP' });
+            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+        },
         setServers: function() {},
         getServers: function() { return []; },
         ADDRCONFIG: 0,
         V4MAPPED: 8,
         ALL: 16,
         promises: {
-            lookup: function(hostname) { return Promise.reject(Object.assign(new Error('DNS not supported'), { code: 'ENOTSUP' })); },
-            resolve: function(hostname) { return Promise.reject(Object.assign(new Error('DNS not supported'), { code: 'ENOTSUP' })); },
-            resolve4: function(hostname) { return Promise.reject(Object.assign(new Error('DNS not supported'), { code: 'ENOTSUP' })); },
-            resolve6: function(hostname) { return Promise.reject(Object.assign(new Error('DNS not supported'), { code: 'ENOTSUP' })); }
+            lookup: function(hostname, options) {
+                return new Promise(function(resolve, reject) {
+                    dns.lookup(hostname, options, function(err, addr, fam) {
+                        if (err) reject(err); else resolve(options && options.all ? addr : { address: addr, family: fam });
+                    });
+                });
+            },
+            resolve: function(hostname, rrtype) {
+                return new Promise(function(resolve, reject) {
+                    dns.resolve(hostname, rrtype || 'A', function(err, result) {
+                        if (err) reject(err); else resolve(result);
+                    });
+                });
+            },
+            resolve4: function(hostname, options) {
+                return new Promise(function(resolve, reject) {
+                    dns.resolve4(hostname, options, function(err, result) {
+                        if (err) reject(err); else resolve(result);
+                    });
+                });
+            },
+            resolve6: function(hostname, options) {
+                return new Promise(function(resolve, reject) {
+                    dns.resolve6(hostname, options, function(err, result) {
+                        if (err) reject(err); else resolve(result);
+                    });
+                });
+            }
         }
     };
     dns.Resolver = function() { return dns; };
@@ -3952,6 +4497,488 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
     }
 }());
 
+// ── Express / HTTP serving utilities ─────────────────────────────────────────
+// Polyfills for packages that express, send, serve-static, and related
+// middleware depend on.  These are registered BEFORE file-system resolution so
+// packages that bundle their own copy still work; they simply override the stub.
+(function() {
+
+// ── depd ─────────────────────────────────────────────────────────────────────
+(function() {
+    function depd(ns) {
+        return function deprecate(fn, msg) {
+            if (typeof fn !== 'function') return fn;
+            return fn;
+        };
+    }
+    depd.function = depd;
+    depd.property = depd;
+    globalThis.__requireCache['depd'] = depd;
+})();
+
+// ── encodeurl ─────────────────────────────────────────────────────────────────
+(function() {
+    // Encode unsafe characters (non-ASCII + special) but leave already-encoded
+    // %XX sequences and the path separator intact.
+    var UNENCODED = /[^\x21\x23-\x3b\x3d\x3f-\x5a\x5f\x61-\x7a\x7e]/g;
+    function encodeUrl(url) {
+        return String(url).replace(UNENCODED, function(c) { return encodeURIComponent(c); });
+    }
+    globalThis.__requireCache['encodeurl'] = encodeUrl;
+})();
+
+// ── escape-html ───────────────────────────────────────────────────────────────
+(function() {
+    function escapeHtml(str) {
+        return String(str)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+    globalThis.__requireCache['escape-html'] = escapeHtml;
+})();
+
+// ── destroy ───────────────────────────────────────────────────────────────────
+(function() {
+    function destroy(stream, err) {
+        if (!stream) return stream;
+        if (typeof stream.destroy === 'function') {
+            if (err) stream.destroy(err); else stream.destroy();
+        } else if (typeof stream.abort === 'function') {
+            stream.abort();
+        } else if (typeof stream.close === 'function') {
+            stream.close();
+        }
+        return stream;
+    }
+    globalThis.__requireCache['destroy'] = destroy;
+})();
+
+// ── on-finished ───────────────────────────────────────────────────────────────
+(function() {
+    function isFinished(res) {
+        return !!(res.writableEnded || res.finished ||
+            (res._writableState && (res._writableState.finished || res._writableState.ended)));
+    }
+    function onFinished(res, cb) {
+        if (isFinished(res)) {
+            setTimeout(function() { cb(null, res); }, 0);
+        } else {
+            function finish() { cb(null, res); }
+            function onerr(err) { cb(err); }
+            res.once('finish', finish);
+            res.once('end', finish);
+            res.once('close', finish);
+            res.once('error', onerr);
+        }
+        return res;
+    }
+    onFinished.isFinished = isFinished;
+    globalThis.__requireCache['on-finished'] = onFinished;
+})();
+
+// ── on-headers ────────────────────────────────────────────────────────────────
+(function() {
+    function onHeaders(res, cb) {
+        var orig = res.writeHead;
+        res.writeHead = function() {
+            if (!res._onHeadersCalled) {
+                res._onHeadersCalled = true;
+                cb.call(res);
+            }
+            return orig.apply(res, arguments);
+        };
+    }
+    globalThis.__requireCache['on-headers'] = onHeaders;
+})();
+
+// ── fresh ─────────────────────────────────────────────────────────────────────
+(function() {
+    function fresh(reqHeaders, resHeaders) {
+        var modifiedSince = reqHeaders['if-modified-since'];
+        var noneMatch = reqHeaders['if-none-match'];
+        if (!modifiedSince && !noneMatch) return false;
+        var cc = reqHeaders['cache-control'] || '';
+        if (cc.indexOf('no-cache') !== -1) return false;
+        if (noneMatch && noneMatch !== '*') {
+            var etag = resHeaders['etag'] || resHeaders['ETag'] || '';
+            if (!etag) return false;
+            var etagStale = noneMatch.split(',').every(function(match) {
+                var m = match.trim();
+                return m !== etag && m !== 'W/' + etag && 'W/' + m !== etag;
+            });
+            if (etagStale) return false;
+        }
+        if (modifiedSince) {
+            var lastModified = resHeaders['last-modified'] || resHeaders['Last-Modified'] || '';
+            if (!lastModified) return false;
+            var lm = Date.parse(lastModified), ms = Date.parse(modifiedSince);
+            if (isNaN(lm) || isNaN(ms) || lm > ms) return false;
+        }
+        return true;
+    }
+    globalThis.__requireCache['fresh'] = fresh;
+})();
+
+// ── etag ──────────────────────────────────────────────────────────────────────
+(function() {
+    function etag(entity, options) {
+        var weak = options && options.weak;
+        var tag;
+        if (entity && typeof entity === 'object' && !Buffer.isBuffer(entity)) {
+            // stat object — weak etag from mtime + size
+            var size = entity.size != null ? entity.size : 0;
+            var mtime = entity.mtime ? +new Date(entity.mtime) : 0;
+            tag = 'W/"' + size.toString(16) + '-' + mtime.toString(16) + '"';
+        } else {
+            var bytes;
+            if (typeof entity === 'string') {
+                bytes = new TextEncoder().encode(entity);
+            } else if (Buffer.isBuffer(entity) || entity instanceof Uint8Array) {
+                bytes = entity instanceof Uint8Array ? entity : new Uint8Array(entity.buffer, entity.byteOffset, entity.byteLength);
+            } else {
+                bytes = new TextEncoder().encode(String(entity));
+            }
+            var len = bytes.length;
+            // Simple djb2-like hash for a fast fingerprint
+            var h = 5381;
+            for (var i = 0; i < len; i++) h = ((h << 5) + h) ^ bytes[i];
+            h = h >>> 0;
+            tag = (weak ? 'W/' : '') + '"' + len.toString(16) + '-' + h.toString(16) + '"';
+        }
+        return tag;
+    }
+    globalThis.__requireCache['etag'] = etag;
+})();
+
+// ── parseurl ──────────────────────────────────────────────────────────────────
+(function() {
+    function parseurl(req) {
+        var url = req.url;
+        if (!url) return null;
+        if (req._parsedUrl && req._parsedUrl.href === url) return req._parsedUrl;
+        var parsed;
+        try {
+            var u = new URL('http://x' + url);
+            parsed = { pathname: u.pathname, search: u.search || null,
+                query: u.search ? u.search.slice(1) : null, href: url, path: url, hash: null };
+        } catch(e) {
+            var q = url.indexOf('?');
+            if (q === -1) {
+                parsed = { pathname: url, search: null, query: null, href: url, path: url, hash: null };
+            } else {
+                parsed = { pathname: url.slice(0, q), search: url.slice(q),
+                    query: url.slice(q + 1), href: url, path: url, hash: null };
+            }
+        }
+        req._parsedUrl = parsed;
+        return parsed;
+    }
+    parseurl.original = parseurl;
+    globalThis.__requireCache['parseurl'] = parseurl;
+    globalThis.__requireCache['node:parseurl'] = parseurl;
+})();
+
+// ── range-parser ──────────────────────────────────────────────────────────────
+(function() {
+    function rangeParser(size, header, options) {
+        if (typeof header !== 'string') return -2;
+        var idx = header.indexOf('=');
+        if (idx === -1) return -2;
+        var type = header.slice(0, idx).trim();
+        if (type !== 'bytes') return -2;
+        var rangeStrs = header.slice(idx + 1).split(',');
+        var ranges = [];
+        for (var i = 0; i < rangeStrs.length; i++) {
+            var r = rangeStrs[i].trim(), dash = r.indexOf('-');
+            if (dash === -1) return -2;
+            var startStr = r.slice(0, dash), endStr = r.slice(dash + 1);
+            var start, end;
+            if (startStr === '') { start = size - parseInt(endStr, 10); end = size - 1; }
+            else if (endStr === '') { start = parseInt(startStr, 10); end = size - 1; }
+            else { start = parseInt(startStr, 10); end = parseInt(endStr, 10); }
+            if (isNaN(start) || isNaN(end) || start > end) continue;
+            if (end > size - 1) end = size - 1;
+            if (start < 0) continue;
+            ranges.push({ start: start, end: end });
+        }
+        if (ranges.length === 0) return -1;
+        ranges.type = type;
+        // Combine overlapping ranges if combine option set
+        if (options && options.combine) {
+            var combined = [ranges[0]];
+            for (var j = 1; j < ranges.length; j++) {
+                var prev = combined[combined.length - 1];
+                if (ranges[j].start <= prev.end + 1) {
+                    if (ranges[j].end > prev.end) prev.end = ranges[j].end;
+                } else { combined.push(ranges[j]); }
+            }
+            combined.type = type;
+            return combined;
+        }
+        return ranges;
+    }
+    globalThis.__requireCache['range-parser'] = rangeParser;
+})();
+
+// ── http-errors ───────────────────────────────────────────────────────────────
+(function() {
+    var HTTP_STATUS = {400:'Bad Request',401:'Unauthorized',402:'Payment Required',
+        403:'Forbidden',404:'Not Found',405:'Method Not Allowed',406:'Not Acceptable',
+        408:'Request Timeout',409:'Conflict',410:'Gone',411:'Length Required',
+        412:'Precondition Failed',413:'Payload Too Large',414:'URI Too Long',
+        415:'Unsupported Media Type',416:'Range Not Satisfiable',418:'I\'m a Teapot',
+        422:'Unprocessable Entity',423:'Locked',425:'Too Early',428:'Precondition Required',
+        429:'Too Many Requests',451:'Unavailable For Legal Reasons',
+        500:'Internal Server Error',501:'Not Implemented',502:'Bad Gateway',
+        503:'Service Unavailable',504:'Gateway Timeout',505:'HTTP Version Not Supported'};
+
+    function HttpError(status, message, props) {
+        this.name = 'HttpError';
+        this.status = this.statusCode = status || 500;
+        this.message = message || HTTP_STATUS[this.status] || 'Error';
+        this.expose = this.status < 500;
+        if (props) for (var k in props) if (props.hasOwnProperty(k)) this[k] = props[k];
+    }
+    HttpError.prototype = Object.create(Error.prototype);
+    HttpError.prototype.constructor = HttpError;
+    HttpError.prototype.toString = function() { return this.name + ': ' + this.message; };
+
+    function createError() {
+        var status = 500, message, props;
+        for (var i = 0; i < arguments.length; i++) {
+            var a = arguments[i];
+            if (typeof a === 'number') { status = a; }
+            else if (typeof a === 'string') { message = a; }
+            else if (a && typeof a === 'object') {
+                if (a instanceof Error) { message = a.message; props = a; }
+                else { props = a; if (a.status) status = a.status; if (a.message) message = a.message; }
+            }
+        }
+        var err = new HttpError(status, message, props);
+        return err;
+    }
+    createError.HttpError = HttpError;
+    createError.isHttpError = function(v) { return v instanceof HttpError; };
+    // Named shorthands
+    Object.keys(HTTP_STATUS).forEach(function(code) {
+        var name = HTTP_STATUS[code].replace(/\s+/g, '');
+        createError[code] = createError[name] = function(msg, p) { return createError(parseInt(code), msg, p); };
+    });
+    globalThis.__requireCache['http-errors'] = createError;
+    globalThis.__requireCache['createerror'] = createError;
+})();
+
+// ── mime-db (minimal JSON table) ──────────────────────────────────────────────
+(function() {
+    var db = {
+        'text/html':{'source':'iana','charset':'UTF-8','extensions':['html','htm']},
+        'text/css':{'source':'iana','extensions':['css']},
+        'application/javascript':{'source':'iana','charset':'UTF-8','extensions':['js','mjs','cjs']},
+        'application/json':{'source':'iana','charset':'UTF-8','extensions':['json']},
+        'application/ld+json':{'extensions':['jsonld']},
+        'application/xml':{'extensions':['xml']},
+        'text/plain':{'source':'iana','charset':'UTF-8','extensions':['txt','text']},
+        'text/csv':{'extensions':['csv']},
+        'text/markdown':{'extensions':['md','markdown']},
+        'text/yaml':{'extensions':['yaml','yml']},
+        'image/png':{'source':'iana','extensions':['png']},
+        'image/jpeg':{'source':'iana','extensions':['jpg','jpeg']},
+        'image/gif':{'source':'iana','extensions':['gif']},
+        'image/svg+xml':{'source':'iana','extensions':['svg','svgz']},
+        'image/x-icon':{'extensions':['ico']},
+        'image/webp':{'source':'iana','extensions':['webp']},
+        'image/avif':{'extensions':['avif']},
+        'image/bmp':{'extensions':['bmp']},
+        'image/tiff':{'extensions':['tiff','tif']},
+        'audio/mpeg':{'source':'iana','extensions':['mp3','mpga']},
+        'audio/ogg':{'extensions':['ogg','oga','opus']},
+        'audio/wav':{'extensions':['wav']},
+        'audio/flac':{'extensions':['flac']},
+        'audio/aac':{'extensions':['aac']},
+        'audio/webm':{'extensions':['weba']},
+        'video/mp4':{'source':'iana','extensions':['mp4']},
+        'video/webm':{'source':'iana','extensions':['webm']},
+        'video/x-msvideo':{'extensions':['avi']},
+        'video/quicktime':{'extensions':['mov','qt']},
+        'video/x-matroska':{'extensions':['mkv']},
+        'font/woff':{'source':'iana','extensions':['woff']},
+        'font/woff2':{'source':'iana','extensions':['woff2']},
+        'font/ttf':{'source':'iana','extensions':['ttf']},
+        'font/otf':{'source':'iana','extensions':['otf']},
+        'application/vnd.ms-fontobject':{'extensions':['eot']},
+        'application/zip':{'source':'iana','extensions':['zip']},
+        'application/x-tar':{'extensions':['tar']},
+        'application/gzip':{'source':'iana','extensions':['gz']},
+        'application/pdf':{'source':'iana','extensions':['pdf']},
+        'application/wasm':{'extensions':['wasm']},
+        'application/manifest+json':{'extensions':['webmanifest']},
+        'application/octet-stream':{'source':'iana','extensions':['bin','dms','lrf','mar','so','dist','distz','pkg','bpk','dump','elc','deploy']},
+    };
+    globalThis.__requireCache['mime-db'] = db;
+})();
+
+// ── mime-types ────────────────────────────────────────────────────────────────
+(function() {
+    var db = globalThis.__requireCache['mime-db'] || {};
+    // Build ext → type and type → ext maps
+    var extToType = Object.create(null);
+    var typeToExt = Object.create(null);
+    Object.keys(db).forEach(function(type) {
+        var entry = db[type];
+        if (entry.extensions) {
+            entry.extensions.forEach(function(ext) {
+                extToType[ext] = type;
+            });
+            if (!typeToExt[type]) typeToExt[type] = entry.extensions[0];
+        }
+    });
+    var mimeTypes = {
+        lookup: function(path) {
+            if (!path || typeof path !== 'string') return false;
+            var ext = path.replace(/^.*[./]/, '').toLowerCase();
+            return extToType[ext] || false;
+        },
+        contentType: function(type) {
+            if (!type || typeof type !== 'string') return false;
+            var mime = type.indexOf('/') === -1 ? mimeTypes.lookup(type) : type;
+            if (!mime) return false;
+            if (mime.indexOf('charset') === -1) {
+                var entry = db[mime];
+                if (entry && entry.charset) mime += '; charset=' + entry.charset.toLowerCase();
+            }
+            return mime;
+        },
+        extension: function(type) {
+            if (!type || typeof type !== 'string') return false;
+            var t = type.split(';')[0].trim().toLowerCase();
+            return typeToExt[t] || false;
+        },
+        charset: function(type) {
+            var t = type.split(';')[0].trim().toLowerCase();
+            var entry = db[t];
+            return (entry && entry.charset) || false;
+        },
+    };
+    globalThis.__requireCache['mime-types'] = mimeTypes;
+})();
+
+// ── mime ──────────────────────────────────────────────────────────────────────
+(function() {
+    var mimeTypes = globalThis.__requireCache['mime-types'];
+    function Mime() {
+        this._types = Object.create(null);
+        this._extensions = Object.create(null);
+    }
+    Mime.prototype.define = function(typeMap, force) {
+        Object.keys(typeMap).forEach(function(type) {
+            var exts = typeMap[type];
+            exts.forEach(function(ext) {
+                if (!force && this._types[ext]) return;
+                this._types[ext] = type;
+                if (!this._extensions[type]) this._extensions[type] = ext;
+            }, this);
+        }, this);
+        return this;
+    };
+    Mime.prototype.getType = function(path) {
+        if (!path) return null;
+        var ext = path.replace(/^.*[./]/, '').toLowerCase();
+        return this._types[ext] || null;
+    };
+    Mime.prototype.getExtension = function(type) {
+        var t = (type || '').split(';')[0].trim().toLowerCase();
+        return this._extensions[t] || null;
+    };
+    var mime = new Mime();
+    // Seed from mime-types
+    if (mimeTypes) {
+        var db = globalThis.__requireCache['mime-db'] || {};
+        Object.keys(db).forEach(function(type) {
+            var entry = db[type];
+            if (entry.extensions && entry.extensions.length) {
+                var map = {};
+                map[type] = entry.extensions;
+                mime.define(map, false);
+            }
+        });
+    }
+    // Make mime work as both a class and a singleton
+    mime.Mime = Mime;
+    mime.default_type = 'application/octet-stream';
+    globalThis.__requireCache['mime'] = mime;
+})();
+
+// ── serve-static (basic fallback) ─────────────────────────────────────────────
+// A minimal implementation that covers the common `express.static(root)` case.
+// If `serve-static` is installed as an npm package it will override this stub.
+(function() {
+    var mime = globalThis.__requireCache['mime-types'];
+    var encodeUrl = globalThis.__requireCache['encodeurl'];
+    var escapeHtml = globalThis.__requireCache['escape-html'];
+    var parseurl = globalThis.__requireCache['parseurl'];
+
+    function serveStatic(root, opts) {
+        opts = opts || {};
+        var index = opts.index !== undefined ? opts.index : 'index.html';
+        var dotfiles = opts.dotfiles || 'ignore';
+        var fs = require('fs');
+        var path = require('path');
+
+        return function staticMiddleware(req, res, next) {
+            if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+            var parsed = parseurl ? parseurl(req) : { pathname: req.url };
+            var urlPath = parsed.pathname || '/';
+            // Decode + security check
+            try { urlPath = decodeURIComponent(urlPath); } catch(e) { return next(); }
+            if (urlPath.indexOf('\0') !== -1) return next();
+            // Check dotfiles
+            if (dotfiles === 'ignore' && /(^|[/\\])\.[^/\\]/.test(urlPath)) return next();
+            var filePath = path.join(root, urlPath);
+            // Prevent path traversal
+            var relative = path.relative(root, filePath);
+            if (relative.startsWith('..') || /^[A-Za-z]:/.test(relative) || relative.charAt(0) === '/') return next();
+            fs.stat(filePath, function(err, stat) {
+                if (err) return next();
+                if (stat.isDirectory()) {
+                    if (index === false) return next();
+                    var idxPath = path.join(filePath, index);
+                    fs.stat(idxPath, function(err2, stat2) {
+                        if (err2 || !stat2.isFile()) return next();
+                        sendFile(idxPath, stat2, req, res, next);
+                    });
+                    return;
+                }
+                if (!stat.isFile()) return next();
+                sendFile(filePath, stat, req, res, next);
+            });
+        };
+    }
+
+    function sendFile(filePath, stat, req, res, next) {
+        var path = require('path');
+        var fs = require('fs');
+        var mimeTypes = globalThis.__requireCache['mime-types'];
+        var contentType = (mimeTypes && mimeTypes.contentType(path.extname(filePath))) || 'application/octet-stream';
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Content-Length', String(stat.size));
+        res.setHeader('Last-Modified', stat.mtime.toUTCString());
+        if (req.method === 'HEAD') {
+            res.statusCode = 200;
+            return res.end();
+        }
+        var stream = fs.createReadStream(filePath);
+        stream.on('error', function(e) { next(e); });
+        stream.pipe(res);
+    }
+
+    // Only register as fallback — don't override if npm package already loaded
+    if (!globalThis.__requireCache['serve-static']) {
+        globalThis.__requireCache['serve-static'] = serveStatic;
+    }
+})();
+
+}()); // end Express utilities block
+
 // ── Additional module aliases ─────────────────────────────────────────────────
 // Some packages do `require('node:X')` even when bare `require('X')` is standard.
 // Make sure all known modules are accessible with both bare and node: prefix.
@@ -3971,6 +4998,289 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
             globalThis.__requireCache[name] = globalThis.__requireCache['node:' + name];
         }
     });
+}());
+
+// ── React Native / Expo globals ──────────────────────────────────────────────
+(function() {
+
+// Detect platform
+var platform = 'web';
+var userAgent = typeof navigator !== 'undefined' && navigator.userAgent || '';
+if (typeof process !== 'undefined' && process.platform === 'win32') platform = 'windows';
+
+// RN platform detection
+globalThis.__REACT_NATIVE__ = true;
+
+// Expo OS identifier: 'web' allows server-side Expo packages to use their web
+// code paths (avoiding native-only code like registerWebModule calls).
+if (typeof process !== 'undefined' && process.env) {
+    if (!process.env.EXPO_OS) process.env.EXPO_OS = 'web';
+}
+
+// requestAnimationFrame / cancelAnimationFrame
+if (typeof globalThis.requestAnimationFrame !== 'function') {
+    globalThis.requestAnimationFrame = function(cb) {
+        return setTimeout(function() { cb(Date.now()); }, 16);
+    };
+}
+if (typeof globalThis.cancelAnimationFrame !== 'function') {
+    globalThis.cancelAnimationFrame = function(id) { clearTimeout(id); };
+}
+
+// NativeModules — stub for the RN native bridge
+// Packages like expo-* call NativeModules.ExpoXXX.method() which becomes no-ops.
+if (typeof globalThis.nativeModuleProxy === 'undefined') {
+    globalThis.nativeModuleProxy = {};
+}
+if (typeof globalThis.NativeModules === 'undefined') {
+    var NativeModules = {};
+    // Proxy for NativeModules: only explicitly registered modules return a value.
+    // Unknown modules return undefined so truthiness checks like
+    //   if (NativeModules.EXDevLauncher) {...}
+    // correctly skip the block. Registered modules are set via registerNativeModule.
+    globalThis.NativeModules = new Proxy(NativeModules, {
+        get: function(target, prop) {
+            if (prop === '__esModule' || prop === 'then') return undefined;
+            if (prop in target) return target[prop];
+            // Unknown module: return undefined so callers treat it as absent.
+            return undefined;
+        },
+        set: function(target, prop, value) { target[prop] = value; return true; }
+    });
+}
+
+// ExpoModules — Expo's native module registry (used by expo-modules-core)
+if (typeof globalThis.ExpoModules === 'undefined') {
+    globalThis.ExpoModules = new Proxy({}, {
+        get: function(target, prop) {
+            if (prop === '__esModule' || prop === 'then') return undefined;
+            if (prop in target) return target[prop];
+            var mod = new Proxy({}, {
+                get: function(t, p) {
+                    if (p === '__esModule' || p === 'then') return undefined;
+                    if (p in t) return t[p];
+                    return function() { return undefined; };
+                },
+                set: function(t, p, v) { t[p] = v; return true; }
+            });
+            target[prop] = mod;
+            return mod;
+        },
+        set: function(target, prop, value) { target[prop] = value; return true; }
+    });
+}
+
+// Platform.OS
+if (typeof globalThis.Platform === 'undefined') {
+    globalThis.Platform = { OS: platform, Version: 1, select: function(obj) { return obj[platform] || obj.default; } };
+}
+
+// Asset require — intercept require() for non-JS files
+(function() {
+    var ASSET_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp',
+                      '.svg', '.woff', '.woff2', '.ttf', '.otf', '.eot',
+                      '.mp4', '.webm', '.ogg', '.mp3', '.wav', '.m4a',
+                      '.aac', '.pdf', '.ico', '.cur'];
+    var assetMap = {};
+    var assetIdCounter = 1;
+
+    // Patch require to handle asset files
+    var origResolve = globalThis.__resolvePath;
+
+    function isAssetExt(p) {
+        for (var i = 0; i < ASSET_EXTS.length; i++) {
+            if (p.endsWith(ASSET_EXTS[i])) return true;
+        }
+        return false;
+    }
+
+    // Override require's path resolution to detect assets
+    var _origRequire = globalThis.require;
+    globalThis.require = function(path) {
+        var dirname = globalThis.__dirname || '.';
+        var resolvedPath = origResolve(path, dirname);
+
+        if (isAssetExt(resolvedPath)) {
+            var id = assetMap[resolvedPath];
+            if (!id) {
+                id = assetIdCounter++;
+                assetMap[resolvedPath] = id;
+            }
+            var asset = {
+                __packager_asset: true,
+                uri: resolvedPath,
+                width: undefined,
+                height: undefined,
+                httpServerLocation: '/assets',
+                scales: [1],
+                hash: id,
+                name: resolvedPath.split(/[\/\\]/).pop().replace(/\.[^.]+$/, ''),
+                type: resolvedPath.split('.').pop(),
+                fileSystemLocation: dirname
+            };
+            return id;
+        }
+
+        return _origRequire(path);
+    };
+    globalThis.require.assetMap = assetMap;
+
+    // Also patch __resolvePath for ESM compatibility
+    globalThis.__resolvePath = function(path, basedir) {
+        var rp = origResolve(path, basedir);
+        if (isAssetExt(rp)) {
+            // For assets, return the path directly (ESM modules can't import assets yet)
+            return rp;
+        }
+        return rp;
+    };
+})();
+
+    // react-native polyfill — exposes the most-used RN APIs as a require()-able module.
+    // Packages like expo-constants, expo-asset, expo-font, etc. import from 'react-native'.
+    (function() {
+        var _rnModule = {
+            Platform: globalThis.Platform || { OS: 'web', Version: '1', select: function(obj) { return obj.web || obj.default; }, isPad: false, isTV: false },
+            NativeModules: globalThis.NativeModules || {},
+            TurboModuleRegistry: {
+                get: function(name) { return null; },
+                getEnforcing: function(name) { return {}; },
+            },
+            PixelRatio: { get: function() { return 1; }, getFontScale: function() { return 1; }, roundToNearestPixel: function(n) { return n; } },
+            Dimensions: { get: function(dim) { return dim === 'window' ? { width: 0, height: 0, scale: 1, fontScale: 1 } : { width: 0, height: 0, scale: 1, fontScale: 1 }; }, addEventListener: function() { return { remove: function() {} }; } },
+            StyleSheet: { create: function(s) { return s; }, flatten: function(s) { return s || {}; }, hairlineWidth: 1, absoluteFill: {} },
+            AppRegistry: { registerComponent: function() {}, runApplication: function() {} },
+            DeviceEventEmitter: { addListener: function() { return { remove: function() {} }; }, emit: function() {}, removeAllListeners: function() {} },
+            NativeEventEmitter: function() { this.addListener = function() { return { remove: function() {} }; }; this.emit = function() {}; this.removeAllListeners = function() {}; },
+            EventEmitter: function() { this.addListener = function() { return { remove: function() {} }; }; this.emit = function() {}; this.removeAllListeners = function() {}; },
+            Alert: { alert: function() {} },
+            Linking: { openURL: function() { return Promise.resolve(); }, canOpenURL: function() { return Promise.resolve(false); }, addEventListener: function() { return { remove: function() {} }; } },
+            Animated: { Value: function(v) { this._value = v; }, timing: function() { return { start: function(cb) { cb && cb({finished:true}); } }; }, spring: function() { return { start: function(cb) { cb && cb({finished:true}); } }; }, View: 'View', Text: 'Text', Image: 'Image', createAnimatedComponent: function(c) { return c; } },
+            View: function() {}, Text: function() {}, Image: function() {}, TextInput: function() {}, ScrollView: function() {}, FlatList: function() {}, SectionList: function() {}, TouchableOpacity: function() {}, TouchableHighlight: function() {}, Pressable: function() {}, Modal: function() {}, ActivityIndicator: function() {}, Switch: function() {}, Slider: function() {},
+            findNodeHandle: function() { return null; },
+            UIManager: { dispatchViewManagerCommand: function() {}, getViewManagerConfig: function() { return null; }, measure: function() {} },
+            I18nManager: { isRTL: false, forceRTL: function() {}, swapLeftAndRightInRTL: function() {} },
+            Keyboard: { dismiss: function() {}, addListener: function() { return { remove: function() {} }; } },
+            BackHandler: { addEventListener: function() { return { remove: function() {} }; }, exitApp: function() {} },
+            AccessibilityInfo: { addEventListener: function() { return { remove: function() {} }; }, isScreenReaderEnabled: function() { return Promise.resolve(false); } },
+            InteractionManager: { runAfterInteractions: function(cb) { return typeof cb === 'function' ? cb() : cb && cb.gen && cb.gen(); }, createInteractionHandle: function() { return 0; }, clearInteractionHandle: function() {} },
+            LayoutAnimation: { configureNext: function() {}, create: function() {}, Presets: {}, Types: {}, Properties: {} },
+            Vibration: { vibrate: function() {}, cancel: function() {} },
+            Share: { share: function() { return Promise.resolve({action:'dismissedAction'}); } },
+            Clipboard: { getString: function() { return Promise.resolve(''); }, setString: function() {} },
+            Settings: { get: function() { return null; }, set: function() {}, watchKeys: function() { return 0; }, clearWatch: function() {} },
+            ToastAndroid: { show: function() {} },
+            ActionSheetIOS: { showActionSheetWithOptions: function(opts, cb) { cb && cb(0); } },
+        };
+        _rnModule.__esModule = true;
+        _rnModule.default = _rnModule;
+        globalThis.__requireCache['react-native'] = _rnModule;
+    })();
+
+    // @react-native/assets-registry polyfill
+    (function() {
+        var _assets = [];
+        var _registry = {
+            registerAsset: function(asset) { return _assets.push(asset); },
+            getAssetByID: function(id) { return _assets[id - 1]; },
+        };
+        globalThis.__requireCache['@react-native/assets-registry'] = _registry;
+        globalThis.__requireCache['@react-native/assets-registry/registry'] = _registry;
+    })();
+
+    // expo-modules-core polyfill — register as CJS module
+    // This provides ExpoModulesProxy, requireNativeModule, etc.
+    (function() {
+        // Track which modules are explicitly registered vs proxy-created
+        var registeredModules = {};
+
+        function getNativeModule(name) {
+            // Only return explicitly registered modules
+            if (registeredModules[name]) return registeredModules[name];
+            return null;
+        }
+
+        function makeModuleProxy(base) {
+            return new Proxy(base || {}, {
+                get: function(t, p) {
+                    if (p === '__esModule' || p === 'then') return undefined;
+                    if (p in t) return t[p];
+                    return function() { return undefined; };
+                },
+                set: function(t, p, v) { t[p] = v; return true; }
+            });
+        }
+
+        function registerNativeModule(name, impl) {
+            var mod = makeModuleProxy(impl);
+            registeredModules[name] = mod;
+            globalThis.ExpoModules[name] = mod;
+            globalThis.NativeModules[name] = mod;
+        }
+
+        var expoModulesCore = {
+            ExpoModulesProxy: globalThis.ExpoModules,
+            NativeModulesProxy: globalThis.NativeModules,
+            requireNativeModule: function(name) {
+                var mod = getNativeModule(name);
+                if (!mod) { mod = {}; registerNativeModule(name, mod); }
+                return mod;
+            },
+            requireOptionalNativeModule: function(name) {
+                // Return null for all optional modules: in web/server environments
+                // native modules are absent. Callers must guard with if (mod) checks.
+                // Returning a truthy proxy would make if(mod.someStringProp) true,
+                // leading to incorrect JSON.parse calls etc.
+                return null;
+            },
+        EventEmitter: function() { this.addListener = function() { return { remove: function() {} }; }; this.emit = function() {}; this.removeAllListeners = function() {}; },
+        // NativeModule / SharedObject / SharedRef are base classes that Expo web modules extend.
+        NativeModule: (function() { function NativeModule() {} return NativeModule; })(),
+        SharedObject: (function() { function SharedObject() {} return SharedObject; })(),
+        SharedRef: (function() { function SharedRef() {} return SharedRef; })(),
+        ModuleNotFoundException: function(name) { this.name = 'ModuleNotFoundException'; this.message = name; },
+        CodedError: function(code, message) { this.name = 'CodedError'; this.code = code; this.message = message; },
+        UnavailabilityError: function(module, property) {
+            this.name = 'UnavailabilityError';
+            this.message = module + '.' + property + ' is not available on this platform.';
+        },
+        // registerWebModule: used by Expo web module implementations.
+        // On the server side (no window), just return the factory result as-is.
+        registerWebModule: function(factory, name) {
+            try { return typeof factory === 'function' ? factory() : factory; } catch(e) { return {}; }
+        },
+        // Platform shim (matches globalThis.Platform)
+        Platform: globalThis.Platform || { OS: 'web', select: function(o){return o.web||o.default;} },
+        // uuid shim
+        uuid: { v4: function() { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(c){var r=Math.random()*16|0;return(c=='x'?r:(r&0x3|0x8)).toString(16);}); }, v5: function(){return '';} },
+    };
+    expoModulesCore.ModuleNotFoundException.prototype = Object.create(Error.prototype);
+    expoModulesCore.CodedError.prototype = Object.create(Error.prototype);
+    expoModulesCore.UnavailabilityError.prototype = Object.create(Error.prototype);
+
+    // Register under names that expo-modules-core might require
+    globalThis.__requireCache['expo-modules-core'] = expoModulesCore;
+    globalThis.__requireCache['@unimodules/core'] = expoModulesCore;
+    globalThis.__requireCache['unimodules-core'] = expoModulesCore;
+    globalThis.__requireCache['expo-core'] = expoModulesCore;
+
+    // Register specific native modules that expo packages commonly require
+    var commonModules = [
+        'ExpoConstants', 'ExpoFileSystem', 'ExpoAsset', 'ExpoFont',
+        'ExpoCrypto', 'ExpoRandom', 'ExpoSecureStore', 'ExpoSQLite',
+        'ExpoWebBrowser', 'ExpoSplashScreen', 'ExpoUpdates',
+        'ExpoApplication', 'ExpoDevice', 'ExpoNotifications',
+        'ExpoCamera', 'ExpoMediaLibrary', 'ExpoImageManipulator',
+        'ExpoBarCodeScanner', 'ExpoLocation', 'ExpoPermissions',
+        'ExpoKeepAwake', 'ExpoHaptics', 'ExpoVideoPlayer',
+        'ExpoStatusBar', 'ExpoLocalization', 'ExpoBrightness',
+        'ExpoNetwork', 'ExpoScreenCapture', 'ExpoStoreReview'
+    ];
+    commonModules.forEach(function(name) {
+        registerNativeModule(name, {});
+    });
+})();
+
 }());
 
 }());
@@ -4042,14 +5352,25 @@ fn resolve_file_path(base: &Path) -> PathBuf {
     }
     // Append extensions as strings to avoid PathBuf::with_extension clobbering
     // filenames that already contain dots (e.g. "Reflect.getPrototypeOf").
+    // Web/platform-specific variants (.web.*) are tried first so Expo/React Native
+    // packages resolve to their web implementations rather than native ones.
     let base_str = base.to_string_lossy();
-    for ext in &["js", "ts", "mjs", "cjs"] {
+    for ext in &[
+        "web.js", "web.tsx", "web.ts", "web.mjs", "js", "tsx", "ts", "mjs", "cjs",
+    ] {
         let p = PathBuf::from(format!("{}.{}", base_str, ext));
         if p.is_file() {
             return p;
         }
     }
-    for index in &["index.js", "index.ts"] {
+    for index in &[
+        "index.web.js",
+        "index.web.tsx",
+        "index.web.ts",
+        "index.js",
+        "index.tsx",
+        "index.ts",
+    ] {
         let p = base.join(index);
         if p.is_file() {
             return p;
@@ -4084,6 +5405,30 @@ fn resolve_node_module_from(
 fn resolve_in_pkg_dir(pkg_dir: &Path, subpath: Option<&str>) -> PathBuf {
     if let Some(sub) = subpath {
         let p = pkg_dir.join(sub);
+        // Check browser field mapping (common in React Native / bundler ecosystem)
+        let pkg_json_path = pkg_dir.join("package.json");
+        if let Ok(content) = std::fs::read_to_string(&pkg_json_path)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(browser) = json.get("browser").and_then(|b| b.as_object())
+        {
+            let sub_normalized = sub.strip_prefix("./").unwrap_or(sub);
+            for (key, val) in browser {
+                let key_normalized = key.strip_prefix("./").unwrap_or(key.as_str());
+                if key_normalized == sub_normalized
+                    || key_normalized == sub
+                    || format!("./{key_normalized}") == sub
+                {
+                    if let Some(replacement) = val.as_str() {
+                        let rp = pkg_dir.join(replacement.trim_start_matches("./"));
+                        let resolved = resolve_file_path(&rp);
+                        if resolved.is_file() {
+                            return resolved;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
         // First try resolving as a file (with extension probing)
         let resolved = resolve_file_path(&p);
         if resolved.is_file() {
@@ -4164,10 +5509,30 @@ fn resolve_node_module_entry(pkg_dir: &Path) -> PathBuf {
                 }
             }
         }
-        // Fallback to "main"
+        // react-native field: platform-specific entry point override
+        if let Some(rn) = json.get("react-native")
+            && let Some(rn_str) = rn.as_str()
+        {
+            let rn_path = pkg_dir.join(rn_str.trim_start_matches("./"));
+            let resolved = resolve_file_path(&rn_path);
+            if resolved.is_file() {
+                return resolved;
+            }
+        }
+        // Fallback to "main" (standard Node.js entry)
         if let Some(main) = json["main"].as_str() {
             let main_path = pkg_dir.join(main);
             let resolved = resolve_file_path(&main_path);
+            if resolved.is_file() {
+                return resolved;
+            }
+        }
+        // browser field: bundler hint — string form replaces the main entry
+        if let Some(browser) = json.get("browser")
+            && let Some(browser_str) = browser.as_str()
+        {
+            let browser_path = pkg_dir.join(browser_str.trim_start_matches("./"));
+            let resolved = resolve_file_path(&browser_path);
             if resolved.is_file() {
                 return resolved;
             }

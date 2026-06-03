@@ -117,6 +117,99 @@ Files that do not contain static `import`/`export` are evaluated as plain script
 
 ---
 
+## 2.6 `require()` — Inline ESM→CJS Conversion
+
+When a file loaded via `require()` contains static `import`/`export` syntax, the runtime automatically converts it to CommonJS inline before evaluation. This allows using ESM npm packages (including TypeScript source packages that ship with `"main": "src/index.ts"`) without a separate build step.
+
+### 2.6.1 Detection
+
+```javascript
+// Triggers conversion if the source matches (multiline):
+/^\s*(import\s|import\{|export\s|export\{|export\s*default)/m
+```
+
+### 2.6.2 Conversion Rules (`__esmToCjs`)
+
+| ESM syntax | CJS equivalent |
+|---|---|
+| `import 'specifier'` | `require('specifier');` |
+| `import def from 'x'` | `var def = (m=>m&&m.__esModule?m.default:m)(require('x'));` |
+| `import * as ns from 'x'` | `var ns = require('x');` |
+| `import { a, b } from 'x'` | `var {a, b} = require('x');` |
+| `export default X` | `module.exports = X;` + deferred `module.exports.default = module.exports` |
+| `export { a, b } from 'x'` | IIFE re-export via `require('x')` |
+| `export * from 'x'` | copies all non-default keys from `require('x')` |
+| `export const/let/var X = …` | declaration + `module.exports.X = X` |
+| `export var X;` (no initializer) | declaration + deferred export (IIFE fills value first) |
+| `export function/class X` | declaration + deferred `module.exports.X = X` |
+| `export const { a, b } = X` | destructuring + `module.exports.a = a; module.exports.b = b;` |
+| `export const [a, b] = X` | array destructuring + individual exports |
+| `export {}` | no-op (OXC ESM marker) |
+| `import(specifier)` | `__importAsync(specifier)` (see §2.6.4) |
+
+**Deferred exports** are emitted after all declarations, ensuring TypeScript enum IIFEs, function hoisting, and class definitions complete before `module.exports.*` is populated.
+
+### 2.6.3 Circular Dependency Handling
+
+Before evaluating any module, the runtime pre-caches an empty `module.exports` object:
+
+```javascript
+globalThis.__requireCache[resolvedPath] = globalThis.module.exports; // empty {}
+// ... eval ...
+globalThis.__requireCache[resolvedPath] = result; // final value
+```
+
+Circular requires (A→B→A) receive the partially-filled exports object, matching Node.js behavior. Without this, mutual imports would trigger infinite recursion and a stack overflow.
+
+### 2.6.4 Dynamic `import()` Polyfill
+
+Dynamic `import(specifier)` expressions are replaced with `__importAsync(specifier)` at source-load time. The polyfill wraps synchronous `require()` in a resolved Promise and normalises the result as a module namespace object:
+
+```javascript
+// Source: const m = await import('./utils');
+// Converted: const m = await __importAsync('./utils');
+
+// Implementation (captures calling module's __dirname):
+globalThis.__importAsync = function(specifier) {
+    var dir = globalThis.__dirname;
+    return new Promise(function(resolve, reject) {
+        try {
+            var mod = globalThis.require(specifier); // synchronous
+            resolve(mod && mod.__esModule ? mod : { default: mod, ...mod });
+        } catch(e) { reject(e); }
+    });
+};
+```
+
+---
+
+## 2.7 Platform-Aware Extension Resolution
+
+When `require()` cannot find a file exactly as specified, the resolver probes extensions in this priority order:
+
+```
+.web.js  →  .web.tsx  →  .web.ts  →  .web.mjs
+.js      →  .tsx      →  .ts      →  .mjs      →  .cjs
+```
+
+For directory-style imports, index files follow the same order:
+```
+index.web.js  →  index.web.tsx  →  index.web.ts
+index.js      →  index.tsx      →  index.ts
+```
+
+**Why `.web.*` first?** Expo and React Native packages ship platform-specific variants (`.native.ts`, `.web.ts`, `.ios.ts`). In the 3va server/CLI environment the web variant is the correct choice — it avoids imports of native modules like `react-native` that have no implementation outside a device. For example:
+
+```
+require('./ExpoFileSystem')
+  → try ExpoFileSystem.web.ts   ← found: safe web stub
+  → (would try ExpoFileSystem.ts, which needs native bridge)
+```
+
+This resolution also applies to multi-extension filenames like `setUpJsLogger.fx` → `setUpJsLogger.fx.web.ts`.
+
+---
+
 ## 2.4 TypeScript Transpilation
 
 The TypeScript transpiler (`crates/js/src/transpiler.rs`) is a pure Rust implementation that removes type annotations without needing `tsc` or Node.js:

@@ -284,24 +284,24 @@ impl Clone for PermissionState {
     }
 }
 
-/// Evalúa si la capability `granted` cubre a `required`.
-///
-/// - `FileRead`/`FileWrite`: el path requerido debe comenzar con el path concedido.
-/// - `Network`: el host requerido debe coincidir exactamente o por wildcard `*.host`.
-/// - El resto: igualdad exacta.
-/// Strip Windows \\?\ extended-length path prefix so comparisons work
-/// regardless of whether the path was produced by canonicalize() or not.
+// Evalúa si la capability `granted` cubre a `required`.
+// - FileRead/FileWrite: el path requerido debe comenzar con el path concedido.
+// - Network: el host requerido debe coincidir exactamente o por wildcard *.host.
+// - El resto: igualdad exacta.
+
+// Strip Windows \\?\ extended-length path prefix so comparisons work
+// regardless of whether the path was produced by canonicalize() or not.
 #[cfg(windows)]
-fn normalize_path(p: &std::path::Path) -> std::borrow::Cow<std::path::Path> {
+fn normalize_path(p: &std::path::Path) -> std::borrow::Cow<'_, std::path::Path> {
     let s = p.to_string_lossy();
-    if s.starts_with(r"\\?\") {
-        std::borrow::Cow::Owned(std::path::PathBuf::from(&s[4..]))
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        std::borrow::Cow::Owned(std::path::PathBuf::from(stripped))
     } else {
         std::borrow::Cow::Borrowed(p)
     }
 }
 #[cfg(not(windows))]
-fn normalize_path(p: &std::path::Path) -> std::borrow::Cow<std::path::Path> {
+fn normalize_path(p: &std::path::Path) -> std::borrow::Cow<'_, std::path::Path> {
     std::borrow::Cow::Borrowed(p)
 }
 
