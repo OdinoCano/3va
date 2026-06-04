@@ -1536,7 +1536,7 @@ pub async fn update_packages(
 /// privileges on Windows.
 fn create_virtual_symlink(
     name: &str,
-    _version: &str,
+    version: &str,
     node_modules: &Path,
     _virtual_pkg_path: &Path,
 ) -> anyhow::Result<()> {
