@@ -102,7 +102,8 @@ mod tests {
     fn test_path_normalization_traversal() {
         let path = Path::new("/app/config/../../etc/passwd");
         let normalized = normalize_path(path);
-        assert_eq!(normalized.to_str().unwrap(), "/etc/passwd");
+        let s = normalized.to_str().unwrap().replace('\\', "/");
+        assert_eq!(s, "/etc/passwd");
     }
 
     #[test]
@@ -112,10 +113,8 @@ mod tests {
 
         // Valid resolution
         let resolved = vfs.resolve(Path::new("/app/config.json")).unwrap();
-        assert_eq!(
-            resolved.to_str().unwrap(),
-            "/var/lib/3va/sandbox1/config.json"
-        );
+        let s = resolved.to_str().unwrap().replace('\\', "/");
+        assert_eq!(s, "/var/lib/3va/sandbox1/config.json");
 
         // Path traversal attempt gets normalized to stay within bounds or errors if out
         // /app/../etc/passwd -> /etc/passwd -> not starts with /app -> error
