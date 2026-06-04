@@ -73,8 +73,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz -> target
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+      - uses: cargo-bins/cargo-binstall@v1
+      - name: Install cargo-fuzz (prebuilt binary — avoids rustix 0.36.x/nightly incompatibility)
+        run: |
+          cargo binstall cargo-fuzz --no-confirm
+          echo "${CARGO_HOME}/bin" >> $GITHUB_PATH
       - name: Build fuzz targets
         run: cargo fuzz build --target x86_64-unknown-linux-gnu
         working-directory: fuzz
