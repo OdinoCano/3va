@@ -1807,6 +1807,11 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
     var _pq = globalThis.__pqCrypto || {};
 
     _pq.kem = {
+        // v2.0.0: camelCase primary name
+        generateKeyPair: function() {
+            return JSON.parse(__pqKemGenerateKeypair());
+        },
+        // Deprecated alias kept for v1 compatibility (use codemod to upgrade)
         generateKeypair: function() {
             return JSON.parse(__pqKemGenerateKeypair());
         },
@@ -1819,14 +1824,43 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
     };
 
     _pq.dsa = {
+        // v2.0.0: camelCase primary name
+        generateKeyPair: function() {
+            return JSON.parse(__pqDsaGenerateKeypair());
+        },
+        // Deprecated alias kept for v1 compatibility
         generateKeypair: function() {
             return JSON.parse(__pqDsaGenerateKeypair());
         },
-        sign: function(signingKeyHex, messageHex) {
-            return __pqDsaSign(signingKeyHex, messageHex);
+        // v2.0.0: named-object form: sign({ key, data })
+        // v1 positional form: sign(signingKeyHex, messageHex) still accepted
+        sign: function(keyOrOptions, messageHex) {
+            var key, data;
+            if (keyOrOptions && typeof keyOrOptions === 'object' &&
+                !Array.isArray(keyOrOptions)) {
+                key = keyOrOptions.key;
+                data = keyOrOptions.data;
+            } else {
+                key = keyOrOptions;
+                data = messageHex;
+            }
+            return __pqDsaSign(key, data);
         },
-        verify: function(verifyingKeyHex, messageHex, signatureHex) {
-            return __pqDsaVerify(verifyingKeyHex, messageHex, signatureHex);
+        // v2.0.0: named-object form: verify({ key, data, signature })
+        // v1 positional form: verify(verifyingKeyHex, messageHex, signatureHex) still accepted
+        verify: function(keyOrOptions, messageHex, signatureHex) {
+            var key, data, sig;
+            if (keyOrOptions && typeof keyOrOptions === 'object' &&
+                !Array.isArray(keyOrOptions)) {
+                key = keyOrOptions.key;
+                data = keyOrOptions.data;
+                sig = keyOrOptions.signature;
+            } else {
+                key = keyOrOptions;
+                data = messageHex;
+                sig = signatureHex;
+            }
+            return __pqDsaVerify(key, data, sig);
         },
     };
 
