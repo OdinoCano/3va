@@ -46,12 +46,13 @@ fuzz_target!(|data: &[u8]| {
 
     // ── Resolver::resolve: arbitrary package name/version never panics ──────
     {
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let mut resolver = Resolver::new("https://registry.npmjs.org");
 
         // Single fuzz-controlled dependency
         let mut deps = HashMap::new();
         deps.insert(s.to_string(), s.to_string());
-        let graph = resolver.resolve(&deps);
+        let graph = rt.block_on(resolver.resolve(&deps));
 
         // Whatever came back, the graph must be inspectable without panic
         let _ = graph.nodes();
@@ -71,22 +72,24 @@ fuzz_target!(|data: &[u8]| {
 
     // Two-package resolve with independent name/version strings
     {
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let mut resolver = Resolver::new("https://registry.npmjs.org");
         let mut deps = HashMap::new();
         deps.insert(left.to_string(), right.to_string());
         deps.insert(right.to_string(), left.to_string());
-        let graph = resolver.resolve(&deps);
+        let graph = rt.block_on(resolver.resolve(&deps));
         let _ = graph.nodes();
     }
 
     // ── Determinism: same input → same resolve result ───────────────────────
     {
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let mut r1 = Resolver::new("https://registry.npmjs.org");
         let mut r2 = Resolver::new("https://registry.npmjs.org");
         let mut deps = HashMap::new();
         deps.insert(s.to_string(), "1.0.0".to_string());
-        let g1 = r1.resolve(&deps);
-        let g2 = r2.resolve(&deps);
+        let g1 = rt.block_on(r1.resolve(&deps));
+        let g2 = rt.block_on(r2.resolve(&deps));
         assert_eq!(
             g1.nodes().len(),
             g2.nodes().len(),
