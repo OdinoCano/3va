@@ -14,11 +14,16 @@ pub mod semver;
 pub mod signature_verifier;
 pub mod store;
 pub mod workspace;
+pub mod workspace_v2;
 pub mod yarn_lock;
 
 pub use secrets::{SecretFinding, SecretsScanner, Severity as SecretSeverity};
 pub use store::{ContentStore, PruneResult, StoreStats, virtual_entry_name};
 pub use workspace::{WorkspaceConfig, WorkspacePackage, create_workspace_symlinks, merged_deps};
+pub use workspace_v2::{
+    PackageRunResult, RunStatus, WorkspaceGraph, git_changed_files, print_run_results,
+    run_workspace_script,
+};
 
 pub use auditor::{
     AuditReport, VulnFinding, VulnSeverity, Vulnerability, print_audit_report, run_audit,
