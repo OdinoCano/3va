@@ -5,7 +5,7 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
-## [1.0.0] — 2026-06-01
+## [1.0.0] — 2026-06-04
 
 ### Added
 
@@ -31,10 +31,6 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 - `rquickjs-core 0.6.2` vendored at `vendor/rquickjs-core/` with a one-line fix for the `never type fallback` future-incompatibility lint (Rust Edition 2024).
 - All crate versions bumped to `1.0.0`.
-
----
-
-## [Unreleased]
 
 ### Added
 
