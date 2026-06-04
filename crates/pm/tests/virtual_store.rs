@@ -136,6 +136,7 @@ fn multiple_packages_each_get_own_entry() {
 #[cfg(unix)]
 mod unix_symlinks {
     use super::*;
+    use std::path::Path;
 
     fn setup(name: &str, version: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
