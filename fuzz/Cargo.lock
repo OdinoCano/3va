@@ -2522,7 +2522,6 @@ name = "vvva_bundler-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
- "tokio",
  "vvva_bundler",
  "vvva_permissions",
  "vvva_pm",

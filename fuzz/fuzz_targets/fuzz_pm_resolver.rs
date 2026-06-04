@@ -1,8 +1,17 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
-use vvva_pm::{DependencyGraph, DependencyNode, Resolver, Semver, SemverRange};
+use vvva_pm::{DependencyGraph, DependencyNode, Semver, SemverRange};
+
+// NOTE: Resolver::resolve() makes real HTTP calls to the registry and is NOT
+// suitable for fuzz testing. This target exercises only the local, offline
+// components of the package manager:
+//   - Semver::parse / SemverRange::parse
+//   - Semver comparison and SemverRange::matches
+//   - DependencyGraph construction and lookup
+//
+// Network-touching paths (Resolver::resolve) are tested by integration tests,
+// not by the fuzzer.
 
 fuzz_target!(|data: &[u8]| {
     let Ok(s) = std::str::from_utf8(data) else { return };
@@ -17,7 +26,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = v.satisfies(r);
     }
 
-    // ── Ordering: if two Semvers parse from the same string they must be equal
+    // ── Ordering: same input must produce equal Semvers ─────────────────────
     if let (Some(a), Some(b)) = (Semver::parse(s), Semver::parse(s)) {
         assert_eq!(
             a.cmp(&b),
@@ -30,37 +39,18 @@ fuzz_target!(|data: &[u8]| {
     {
         let mut graph = DependencyGraph::new();
 
-        // Insert a node with fuzz-controlled name (version pinned to valid)
         let node = DependencyNode::new(s.to_string(), "1.0.0".to_string());
         graph.add_node(node);
 
-        // Exact lookup with the fuzz input as both name and version
         let _ = graph.get_node(s, s);
         let _ = graph.get_node(s, "1.0.0");
 
-        // resolve_version: fuzz-controlled name and range string
         let _ = graph.resolve_version(s, s);
         let _ = graph.resolve_version(s, "^1.0.0");
         let _ = graph.resolve_version(s, "*");
     }
 
-    // ── Resolver::resolve: arbitrary package name/version never panics ──────
-    {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut resolver = Resolver::new("https://registry.npmjs.org");
-
-        // Single fuzz-controlled dependency
-        let mut deps = HashMap::new();
-        deps.insert(s.to_string(), s.to_string());
-        let graph = rt.block_on(resolver.resolve(&deps));
-
-        // Whatever came back, the graph must be inspectable without panic
-        let _ = graph.nodes();
-        let _ = graph.get_node(s, s);
-    }
-
-    // ── Split input into two tokens for two-package scenarios ───────────────
-    // Use the first NUL byte (if any) as a separator; otherwise split at midpoint.
+    // ── Split input for two-token scenarios ─────────────────────────────────
     let (left, right) = if let Some(pos) = data.iter().position(|&b| b == 0) {
         let l = std::str::from_utf8(&data[..pos]).unwrap_or("");
         let r = std::str::from_utf8(&data[pos + 1..]).unwrap_or("");
@@ -70,30 +60,31 @@ fuzz_target!(|data: &[u8]| {
         (&s[..mid], &s[mid..])
     };
 
-    // Two-package resolve with independent name/version strings
+    // ── Two-token graph with mixed name/version inputs ───────────────────────
     {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut resolver = Resolver::new("https://registry.npmjs.org");
-        let mut deps = HashMap::new();
-        deps.insert(left.to_string(), right.to_string());
-        deps.insert(right.to_string(), left.to_string());
-        let graph = rt.block_on(resolver.resolve(&deps));
-        let _ = graph.nodes();
+        let mut graph = DependencyGraph::new();
+        graph.add_node(DependencyNode::new(left.to_string(), "1.0.0".to_string()));
+        graph.add_node(DependencyNode::new(right.to_string(), "2.0.0".to_string()));
+
+        let _ = graph.get_node(left, "1.0.0");
+        let _ = graph.get_node(right, "2.0.0");
+        let _ = graph.nodes().len();
     }
 
-    // ── Determinism: same input → same resolve result ───────────────────────
+    // ── Determinism: same input → same DependencyGraph outcome ──────────────
     {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut r1 = Resolver::new("https://registry.npmjs.org");
-        let mut r2 = Resolver::new("https://registry.npmjs.org");
-        let mut deps = HashMap::new();
-        deps.insert(s.to_string(), "1.0.0".to_string());
-        let g1 = rt.block_on(r1.resolve(&deps));
-        let g2 = rt.block_on(r2.resolve(&deps));
+        let mut g1 = DependencyGraph::new();
+        let mut g2 = DependencyGraph::new();
+
+        for v in ["1.0.0", "1.5.0", "2.0.0"] {
+            g1.add_node(DependencyNode::new(s.to_string(), v.to_string()));
+            g2.add_node(DependencyNode::new(s.to_string(), v.to_string()));
+        }
+
         assert_eq!(
             g1.nodes().len(),
             g2.nodes().len(),
-            "resolver must be deterministic for input {s:?}"
+            "DependencyGraph must be deterministic for input {s:?}"
         );
     }
 });
