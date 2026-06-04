@@ -16,6 +16,7 @@ APIs available to JavaScript/TypeScript code running inside the 3va runtime. All
 | `TextEncoder` / `TextDecoder` | `builtins/buffer.rs` | UTF-8 encode/decode |
 | `process` | `builtins/process.rs` | `argv`, `env`, `exit()`, `cwd()`, `pid`, `version`, `platform` |
 | `Buffer` | `builtins/buffer.rs` | `Buffer.from()`, `Buffer.alloc()`, `Buffer.concat()`, `.toString(encoding)` |
+| `crypto` | `builtins/crypto.rs` | `randomBytes()`, `getRandomValues()`, `createHash()`, `createHmac()`, `randomUUID()`, `crypto.subtle` (AES-GCM, ECDH, RSA-OAEP, SHA-*) |
 | `URL` | `builtins/modules.rs` | Full URL parsing + relative resolution; `.protocol`, `.host`, `.pathname`, `.searchParams`, `URL.canParse()` |
 | `URLSearchParams` | `builtins/modules.rs` | `append`, `set`, `get`, `getAll`, `has`, `delete`, `forEach`, iteration, `.size` |
 | `FileReader` | `builtins/modules.rs` | `readAsText`, `readAsDataURL`, `readAsArrayBuffer`, `abort`; `onload`, `onerror`, `onabort` callbacks |
@@ -122,13 +123,6 @@ const str = dec.decode(bytes);       // 'hello'
 // PLANNED — security introspection from JS
 3va.security.checkPermission('fs', 'read', '/path')
 3va.security.getAuditLog()
-```
-
-### `crypto.subtle` (Web Crypto API)
-
-```javascript
-// PLANNED — requires ML-KEM/ML-DSA integration (v0.3.0)
-const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
 ```
 
 *There is no `3va.*` or `Deno.*` global namespace today. These are planned for a future version.*
