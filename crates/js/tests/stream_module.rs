@@ -34,11 +34,13 @@ async fn eval_async_result(e: &JsEngine, setup: &str, result_global: &str) -> St
 #[tokio::test]
 async fn stream_module_loads() {
     let e = engine().await;
-    let r = e
-        .eval_to_string("String(typeof require('stream') === 'object')")
-        .await
-        .unwrap();
-    assert_eq!(r, "true");
+    let r = e.eval_to_string("typeof require('stream')").await.unwrap();
+    // Node.js returns a Stream constructor (function), so typeof is "function".
+    // Accept both "function" and "object" — just not "undefined".
+    assert!(
+        r == "function" || r == "object",
+        "require('stream') should load: got typeof = {r}"
+    );
 }
 
 #[tokio::test]
