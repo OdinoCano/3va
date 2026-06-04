@@ -2319,12 +2319,31 @@ mod tests {
 
     #[test]
     fn allow_read_multiple_paths_all_granted() {
-        let reads = vec!["/app".to_string(), "/tmp".to_string()];
+        // Use paths that don't exist so canonicalize() falls back to the raw
+        // string, keeping drive-letter vs. root-relative consistent on Windows.
+        #[cfg(windows)]
+        let (path_a, check_a, path_b, check_b, check_c) = (
+            r"C:\nonexistent_app_3va".to_string(),
+            PathBuf::from(r"C:\nonexistent_app_3va\main.js"),
+            r"C:\nonexistent_tmp_3va".to_string(),
+            PathBuf::from(r"C:\nonexistent_tmp_3va\cache.json"),
+            PathBuf::from(r"C:\Users\blocked_user\.env"),
+        );
+        #[cfg(not(windows))]
+        let (path_a, check_a, path_b, check_b, check_c) = (
+            "/app".to_string(),
+            PathBuf::from("/app/main.js"),
+            "/tmp".to_string(),
+            PathBuf::from("/tmp/cache.json"),
+            PathBuf::from("/home/user/.env"),
+        );
+
+        let reads = vec![path_a, path_b];
         let state = build_permissions(Some(&reads), None, None, None, false, None, false);
 
-        assert!(state.check(&Capability::FileRead(PathBuf::from("/app/main.js"))));
-        assert!(state.check(&Capability::FileRead(PathBuf::from("/tmp/cache.json"))));
-        assert!(!state.check(&Capability::FileRead(PathBuf::from("/home/user/.env"))));
+        assert!(state.check(&Capability::FileRead(check_a)));
+        assert!(state.check(&Capability::FileRead(check_b)));
+        assert!(!state.check(&Capability::FileRead(check_c)));
     }
 
     // ── --allow-net=<host> concede Network con el host exacto ────────────────
