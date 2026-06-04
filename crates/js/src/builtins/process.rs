@@ -28,16 +28,72 @@ mod hostname {
 }
 
 fn mem_total_bytes() -> u64 {
-    parse_meminfo_kb("MemTotal") * 1024
+    #[cfg(target_os = "windows")]
+    return windows_mem_total();
+    #[allow(unreachable_code)]
+    {
+        parse_meminfo_kb("MemTotal") * 1024
+    }
 }
+
 fn mem_free_bytes() -> u64 {
-    parse_meminfo_kb("MemAvailable").max(parse_meminfo_kb("MemFree")) * 1024
+    #[cfg(target_os = "windows")]
+    return windows_mem_free();
+    #[allow(unreachable_code)]
+    {
+        parse_meminfo_kb("MemAvailable").max(parse_meminfo_kb("MemFree")) * 1024
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_mem_total() -> u64 {
+    windows_memory_status().map(|(total, _)| total).unwrap_or(0)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_mem_free() -> u64 {
+    windows_memory_status().map(|(_, free)| free).unwrap_or(0)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_memory_status() -> Option<(u64, u64)> {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        dw_length: u32,
+        dw_memory_load: u32,
+        ull_total_phys: u64,
+        ull_avail_phys: u64,
+        ull_total_page_file: u64,
+        ull_avail_page_file: u64,
+        ull_total_virtual: u64,
+        ull_avail_virtual: u64,
+        ull_avail_extended_virtual: u64,
+    }
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+    }
+    let mut s = MemoryStatusEx {
+        dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        dw_memory_load: 0,
+        ull_total_phys: 0,
+        ull_avail_phys: 0,
+        ull_total_page_file: 0,
+        ull_avail_page_file: 0,
+        ull_total_virtual: 0,
+        ull_avail_virtual: 0,
+        ull_avail_extended_virtual: 0,
+    };
+    if unsafe { GlobalMemoryStatusEx(&mut s) } != 0 {
+        Some((s.ull_total_phys, s.ull_avail_phys))
+    } else {
+        None
+    }
 }
 
 fn parse_meminfo_kb(_key: &str) -> u64 {
     #[cfg(target_os = "linux")]
     if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
-        let needle = format!("{}:", key);
+        let needle = format!("{}:", _key);
         for line in s.lines() {
             if line.starts_with(&needle) {
                 return line
