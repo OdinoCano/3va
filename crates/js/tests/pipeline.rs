@@ -17,6 +17,24 @@ async fn engine_with_read(dir: &TempDir) -> JsEngine {
     JsEngine::new(Arc::new(state)).await.unwrap()
 }
 
+// Drain Promise microtasks by polling idle() until the given global is set.
+async fn wait_global(engine: &JsEngine, global: &str) -> String {
+    for _ in 0..50 {
+        engine.idle().await;
+        tokio::task::yield_now().await;
+        let v = engine
+            .eval_to_string(&format!(
+                "typeof {global} !== 'undefined' ? String({global}) : ''"
+            ))
+            .await
+            .unwrap_or_default();
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    String::new()
+}
+
 async fn write_and_eval(content: &str, filename: &str) -> (TempDir, anyhow::Result<()>) {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join(filename);
@@ -518,10 +536,7 @@ async fn async_function_with_await_resolves() {
         .await
         .expect("async/await debe ejecutar sin error");
 
-    let result = engine
-        .eval_to_string("String(globalThis._async_result)")
-        .await
-        .unwrap();
+    let result = wait_global(&engine, "globalThis._async_result").await;
     assert_eq!(result, "42", "await debe resolver el valor de la promesa");
 }
 
@@ -550,10 +565,7 @@ async fn async_await_with_promise_chain() {
         .await
         .expect("await sobre Promise.resolve debe funcionar");
 
-    let result = engine
-        .eval_to_string("String(globalThis._chain_result)")
-        .await
-        .unwrap();
+    let result = wait_global(&engine, "globalThis._chain_result").await;
     assert_eq!(result, "42", "await chain debe sumar 10 + 32 = 42");
 }
 
@@ -586,10 +598,7 @@ async fn async_await_error_propagates_as_rejection() {
         .await
         .expect("try/catch en async debe capturar el error");
 
-    let caught = engine
-        .eval_to_string("String(globalThis._caught)")
-        .await
-        .unwrap();
+    let caught = wait_global(&engine, "globalThis._caught").await;
     assert_eq!(caught, "true", "el catch async debe ejecutarse");
 
     let msg = engine
