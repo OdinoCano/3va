@@ -5,6 +5,47 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [2.0.0] — 2026-06-04
+
+### Added
+
+- **`3va.config.ts` / `.js` / `.json` project config** — new `vvva_config` crate loads a config file by walking up from the project root. All CLI commands pick up defaults from the config; CLI flags always override. Config-file `.ts`/`.js` object literals are parsed without JS execution (sandboxed static analysis). `3VA_<SECTION>_<KEY>` environment variables override config-file values. New `3va config [key] [--check]` subcommand shows the resolved config.
+
+- **Real `worker_threads` (OS-thread isolation)** — `new Worker(file, { workerData })` now spawns an OS thread with its own `JsEngine` instance and Tokio runtime. Message passing uses `std::sync::mpsc` channels bridged via `__workerCreate` / `__workerSend` / `__workerRecv` / `__workerTerminate` native functions. `parentPort.postMessage` inside workers pushes to the main thread's poll queue. `SharedArrayBuffer`/`Atomics` are a declared non-goal (incompatible with per-thread QuickJS isolation).
+
+- **`dgram` UDP sockets** — `require('dgram').createSocket('udp4'|'udp6')` returns a real UDP socket backed by `std::net::UdpSocket`. Full `bind`, `send`, `close`, `address` API. Incoming datagrams are received on a background thread and polled from JS via `setInterval`. Requires `--allow-net`.
+
+- **Content-Security-Policy for `3va dev`** — all HTML responses from the development server now include a `Content-Security-Policy` header by default. The default policy is `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:`. Disable with `--no-csp`; configure in `3va.config.ts` under `dev.csp`.
+
+- **PQ crypto API alignment** — `pq.kem.generateKeyPair` and `pq.dsa.generateKeyPair` (camelCase) are the new primary names. `generateKeypair` kept as a deprecated alias. `pq.dsa.sign({ key, data })` and `pq.dsa.verify({ key, data, signature })` named-object forms added alongside the old positional form.
+
+- **Parallel test execution** — `3va test --concurrency=N` runs up to N test files concurrently, each in its own `JsEngine` instance. Default: number of logical CPUs. `TestConfig.concurrency` field added to the Rust API.
+
+- **Mock API (`3va:test`)** — `require('3va:test')` exposes `mock.fn(impl?)`, `mock.method(obj, name, impl?)`, and `mock.timers.{enable, tick, reset}`. Each spy tracks `.mock.calls[i].{arguments, result, error}`. `mock.method` restores the original via `.mock.restore()`. Also aliased as `require('node:test')`.
+
+- **JUnit XML and TAP reporters** — `3va test --reporter=junit` emits JUnit XML (Jenkins/GitHub Actions compatible); `--reporter=tap` emits TAP version 13; `--reporter=dot` emits dot format; `--reporter=json` emits JSON array. Default: terminal output.
+
+- **Topological workspace script execution** — `3va workspace run <script>` now builds a dependency DAG from `workspace:*` entries and runs scripts in topological order (leaves first). `--affected [--base=main]` detects packages changed since the merge base via `git diff --name-only`. `--concurrency=N` limits parallel execution slots.
+
+- **Workspace dependency graph** — `3va workspace graph` prints an ASCII DAG with dependency arrows.
+
+- **REPL plugins** — `3va sandbox --plugin=inspect` and `--plugin=history` load built-in plugins. Pass a file path to load a custom plugin. Plugins register dot-commands (e.g. `.inspect <expr>`) dispatched by the REPL loop.
+
+- **Migration tool (`3va codemod`)** — `3va codemod --from=1 --to=2 ./src` applies AST-level source transforms: renames `pq.kem.generateKeypair` → `generateKeyPair`, `pq.dsa.generateKeypair` → `generateKeyPair`, rewrites positional `pq.dsa.sign(k, d)` → `sign({ key, data })`, and `pq.dsa.verify(k, d, s)` → `verify({ key, data, signature })`. `--dry-run` previews changes; `--revert` restores `.bak` backups.
+
+### Changed
+
+- All crate versions bumped from `1.0.0` to `2.0.0`.
+- `process.version` and `process.versions['3va']` updated to `2.0.0`.
+- `WorkspaceAction::Run` now builds a topological graph and uses `vvva_pm::WorkspaceGraph` internally. Old sequential execution replaced.
+
+### Security
+
+- CSP header enabled by default in `3va dev` to reduce XSS risk in development-served HTML.
+- `worker_threads` Workers inherit a read-only copy of the parent `PermissionState`; parents cannot elevate worker permissions after creation.
+
+---
+
 ## [1.0.0] — 2026-06-04
 
 ### Added
