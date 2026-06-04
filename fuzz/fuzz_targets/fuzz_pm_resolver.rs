@@ -56,7 +56,8 @@ fuzz_target!(|data: &[u8]| {
         let r = std::str::from_utf8(&data[pos + 1..]).unwrap_or("");
         (l, r)
     } else {
-        let mid = s.len() / 2;
+        // Split on a char boundary to avoid panicking on multi-byte characters.
+        let mid = s.char_indices().nth(s.chars().count() / 2).map(|(i, _)| i).unwrap_or(0);
         (&s[..mid], &s[mid..])
     };
 
