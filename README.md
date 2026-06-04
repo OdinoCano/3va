@@ -21,7 +21,7 @@ The JavaScript ecosystem has a supply chain security problem. Post-install scrip
 
 ## Comparison
 
-| Feature | Node.js 25 | Bun 1.3 | **3va 1.0** |
+| Feature | Node.js 25 | Bun 1.3 | **3va 2.0** |
 |---|---|---|---|
 | JavaScript runtime | ✓ | ✓ | ✓ |
 | TypeScript (no config) | ✗ | ✓ | ✓ |
@@ -204,7 +204,7 @@ Baseline benchmarks, 100,000 requests at 1,000 concurrent connections:
 | Runtime | Req/s | P50 | P99 | Success |
 |---------|-------|-----|-----|---------|
 | Bun 1.3 | 20,758 | 4.4 ms | 16.0 ms | 100% |
-| **3va 1.0** (debug) | **1,572** | **61 ms** | **143 ms** | **100%** |
+| **3va 2.0** (debug) | **1,572** | **61 ms** | **143 ms** | **100%** |
 
 At 2,000 concurrent connections (stress test, 1,000,000 requests):
 
@@ -212,7 +212,7 @@ At 2,000 concurrent connections (stress test, 1,000,000 requests):
 |---------|-------------|-------|-------|
 | Bun 1.3 | 100% | 21,650 | No connection limiting |
 | Node.js 25 | 99.97% | 8,869 | 281 connection errors |
-| **3va 1.0** (debug) | **70.4%** | **327** | Rate-limited by design |
+| **3va 2.0** (debug) | **70.4%** | **327** | Rate-limited by design |
 
 3va deliberately limits active connections to protect the process from overload. At 2,000 concurrent connections the rate limiter drops excess connections rather than queuing them indefinitely. This is the intended behavior for production deployments. Slowloris protection is also built into the HTTP layer.
 
@@ -342,7 +342,7 @@ Full post-quantum TLS in production is the v3 roadmap target.
 
 Framework detection in `3va dev` supports: Next.js, Astro, Nuxt, SvelteKit, Remix, Gatsby, SolidStart, Qwik. For Express, Fastify, Koa and similar server frameworks — they run under `3va run` with appropriate permission flags.
 
-**Node.js compatibility note:** v1.0.0 covers the core API surface (fs, net, http, crypto, path, os, events, stream, buffer, timers, url, util, child_process, worker_threads stubs). Some advanced APIs (`cluster`, `dgram`, full `dns` resolver, `stream/web` WHATWG Streams) are targeted for v2.0.0.
+**Node.js compatibility note:** v2.0.0 covers the core API surface (fs, net, http, crypto, path, os, events, stream, buffer, timers, url, util, child_process, worker_threads stubs). Some advanced APIs (`cluster`, `dgram`, full `dns` resolver, `stream/web` WHATWG Streams) are targeted for v2.0.0.
 
 ---
 
@@ -372,7 +372,7 @@ The JavaScript engine is QuickJS embedded via `rquickjs`. QuickJS is a small, em
 
 | Version | Target | Focus |
 |---------|--------|-------|
-| **1.0.0 LTS** | 2026-06-01 ✅ | Full runtime + PM + toolchain + Inspector + NAPI + WASM + PQ-TLS |
+| **2.0.0** | 2026-06-01 ✅ | Full runtime + PM + toolchain + Inspector + NAPI + WASM + PQ-TLS |
 | **1.5** | 2026 Q3 | `permissions suggest` (static analysis), `permissions learn` (syscall interception), package.json `"3va"` key, permission profiles for common frameworks |
 | **2.0.0** | 2027 | Node.js compat v2 (cluster, dgram, full dns, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting |
 | **3.0** | TBD | Post-quantum TLS in full production mode |
