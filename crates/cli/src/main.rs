@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
+use vvva_config::ProjectConfig;
 
 pub mod accessibility;
 pub mod proc;
@@ -259,7 +260,52 @@ async fn format_repl_result(engine: &vvva_js::JsEngine, code: &str) -> Option<St
     }
 }
 
-async fn run_sandbox_shell() -> anyhow::Result<()> {
+// ── REPL plugin support (v2.0.0) ──────────────────────────────────────────────
+
+struct ReplPlugin {
+    commands: std::collections::HashMap<String, String>,
+    banner: Option<String>,
+}
+
+fn load_repl_plugins(plugin_args: &[String]) -> Vec<ReplPlugin> {
+    let mut plugins: Vec<ReplPlugin> = Vec::new();
+    for arg in plugin_args {
+        match arg.as_str() {
+            "inspect" => plugins.push(ReplPlugin {
+                commands: [("inspect".to_string(),
+                    "(function(args){ console.log(JSON.stringify(eval(args), null, 2)); })".to_string())]
+                    .into_iter().collect(),
+                banner: Some("inspect plugin: .inspect <expr>".to_string()),
+            }),
+            "history" => plugins.push(ReplPlugin {
+                commands: [("history".to_string(),
+                    "(function(_){ if(globalThis.__replHistory) globalThis.__replHistory.forEach(function(l,i){console.log(i+': '+l);}); else console.log('(no history)'); })".to_string())]
+                    .into_iter().collect(),
+                banner: Some("history plugin: .history".to_string()),
+            }),
+            path => match std::fs::read_to_string(path) {
+                Ok(src) => plugins.push(ReplPlugin {
+                    commands: [("_plugin_src".to_string(), src)].into_iter().collect(),
+                    banner: Some(format!("plugin loaded: {path}")),
+                }),
+                Err(e) => eprintln!("Warning: could not load plugin {path}: {e}"),
+            },
+        }
+    }
+    plugins
+}
+
+async fn run_sandbox_shell_with_plugins(plugin_args: &[String]) -> anyhow::Result<()> {
+    let plugins = load_repl_plugins(plugin_args);
+    for p in &plugins {
+        if let Some(b) = &p.banner {
+            println!("  [{b}]");
+        }
+    }
+    run_sandbox_shell_impl(plugins).await
+}
+
+async fn run_sandbox_shell_impl(plugins: Vec<ReplPlugin>) -> anyhow::Result<()> {
     use std::io::{self, BufRead, Write};
     use vvva_permissions::Capability;
 
@@ -282,6 +328,16 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
 
     let permissions = Arc::new(vvva_permissions::PermissionState::new());
     let mut engine = vvva_js::JsEngine::new(permissions.clone()).await?;
+
+    // Load file-based plugins.
+    for plugin in &plugins {
+        if let Some(src) = plugin.commands.get("_plugin_src") {
+            let wrapped = format!("(function(){{ {} }})();", src);
+            if let Err(e) = engine.eval(&wrapped).await {
+                eprintln!("  Warning: plugin init error: {e}");
+            }
+        }
+    }
 
     let mut buffer = String::new(); // multi-line accumulator
     let stdin = io::stdin();
@@ -378,6 +434,28 @@ async fn run_sandbox_shell() -> anyhow::Result<()> {
                 permissions.grant(Capability::EnvAccess);
                 if is_tty {
                     println!("  ✓ Env access granted");
+                }
+                continue;
+            }
+            // Plugin dot-commands
+            cmd if cmd.starts_with('.') => {
+                let cmd_name = cmd[1..].split_whitespace().next().unwrap_or("");
+                let cmd_args = cmd[1..].trim_start_matches(cmd_name).trim();
+                let mut handled = false;
+                for plugin in &plugins {
+                    if let Some(handler_src) = plugin.commands.get(cmd_name) {
+                        let call = format!(
+                            "({})({})",
+                            handler_src,
+                            serde_json::to_string(cmd_args).unwrap_or_else(|_| "\"\"".into())
+                        );
+                        eval_and_print(&engine, &call, is_tty).await;
+                        handled = true;
+                        break;
+                    }
+                }
+                if !handled && !cmd_name.is_empty() && is_tty {
+                    println!("Unknown command: .{cmd_name}  (type .help)");
                 }
                 continue;
             }
@@ -696,11 +774,25 @@ enum BuildEvent {
     Error(String),
 }
 
+/// Default Content-Security-Policy injected on all HTML responses (v2.0.0).
+const DEFAULT_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+     style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+     connect-src 'self' ws: wss:";
+
+fn csp_header(enabled: bool) -> String {
+    if enabled {
+        format!("Content-Security-Policy: {DEFAULT_CSP}\r\n")
+    } else {
+        String::new()
+    }
+}
+
 async fn run_dev_server(
     port: u16,
     host: String,
     open: bool,
     public_dir: PathBuf,
+    csp_enabled: bool,
 ) -> anyhow::Result<()> {
     // Detect framework (Astro, Next.js, Nuxt, etc.) and delegate
     if let Some(fw) = detect_framework() {
@@ -840,7 +932,7 @@ async fn run_dev_server(
                 let pub_dir = public_dir.clone();
                 let out_path = output.clone();
                 tokio::spawn(async move {
-                    let _ = handle_dev_connection(&mut stream, tx_conn, pub_dir, out_path).await;
+                    let _ = handle_dev_connection(&mut stream, tx_conn, pub_dir, out_path, csp_enabled).await;
                 });
             }
             _ = signal::ctrl_c() => {
@@ -896,6 +988,7 @@ async fn handle_dev_connection(
     tx: tokio::sync::broadcast::Sender<BuildEvent>,
     public_dir: PathBuf,
     bundle_path: PathBuf,
+    csp_enabled: bool,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -954,7 +1047,7 @@ async fn handle_dev_connection(
 
     // /bundle.js
     if path == "/bundle.js" {
-        return serve_file(stream, &bundle_path, false).await;
+        return serve_file_csp(stream, &bundle_path, csp_enabled).await;
     }
 
     // Static assets from public/
@@ -962,14 +1055,14 @@ async fn handle_dev_connection(
     if !rel.is_empty() {
         let candidate = public_dir.join(rel);
         if candidate.exists() && candidate.is_file() {
-            return serve_file(stream, &candidate, false).await;
+            return serve_file_csp(stream, &candidate, csp_enabled).await;
         }
     }
 
     // SPA fallback: serve public/index.html injecting HMR client, or a default page
     let index = public_dir.join("index.html");
     if index.exists() {
-        return serve_html_with_hmr(stream, &index).await;
+        return serve_html_with_hmr_csp(stream, &index, csp_enabled).await;
     }
 
     // No index.html — serve built-in dev page
@@ -981,8 +1074,9 @@ async fn handle_dev_connection(
         {HMR_CLIENT_JS}</body></html>",
         bundle_path.display()
     );
+    let csp = csp_header(csp_enabled);
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n{csp}Connection: close\r\n\r\n{}",
         html.len(), html
     );
     stream.write_all(response.as_bytes()).await?;
@@ -1009,18 +1103,28 @@ fn mime_type(path: &std::path::Path) -> &'static str {
     }
 }
 
+#[cfg(test)]
 async fn serve_file(
     stream: &mut tokio::net::TcpStream,
     path: &std::path::Path,
     _inject_hmr: bool,
 ) -> anyhow::Result<()> {
+    serve_file_csp(stream, path, false).await
+}
+
+async fn serve_file_csp(
+    stream: &mut tokio::net::TcpStream,
+    path: &std::path::Path,
+    csp_enabled: bool,
+) -> anyhow::Result<()> {
     use tokio::io::AsyncWriteExt;
     match std::fs::read(path) {
         Ok(bytes) => {
             let ct = mime_type(path);
+            let csp = csp_header(csp_enabled && ct.starts_with("text/html"));
             let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-                ct, bytes.len()
+                "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n{csp}Connection: close\r\n\r\n",
+                bytes.len()
             );
             stream.write_all(header.as_bytes()).await?;
             stream.write_all(&bytes).await?;
@@ -1036,9 +1140,18 @@ async fn serve_file(
     Ok(())
 }
 
+#[cfg(test)]
 async fn serve_html_with_hmr(
     stream: &mut tokio::net::TcpStream,
     path: &std::path::Path,
+) -> anyhow::Result<()> {
+    serve_html_with_hmr_csp(stream, path, false).await
+}
+
+async fn serve_html_with_hmr_csp(
+    stream: &mut tokio::net::TcpStream,
+    path: &std::path::Path,
+    csp_enabled: bool,
 ) -> anyhow::Result<()> {
     use tokio::io::AsyncWriteExt;
     let html = match std::fs::read_to_string(path) {
@@ -1058,8 +1171,9 @@ async fn serve_html_with_hmr(
     } else {
         format!("{}{}", html, HMR_CLIENT_JS)
     };
+    let csp = csp_header(csp_enabled);
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n{csp}Connection: close\r\n\r\n{}",
         injected.len(), injected
     );
     stream.write_all(response.as_bytes()).await?;
@@ -1293,11 +1407,25 @@ enum WorkspaceAction {
     List,
     /// Show workspace + store statistics
     Info,
-    /// Run a script in every workspace package that defines it
+    /// Run a script in topological dependency order
     Run {
         /// Script name from the "scripts" field in each package.json
         script: String,
+        /// Only run in packages affected since the base branch
+        #[arg(long = "affected")]
+        affected: bool,
+        /// Base branch for affected detection (default: main)
+        #[arg(long = "base", default_value = "main")]
+        base: String,
+        /// Run in parallel (ignore topological ordering)
+        #[arg(long = "parallel")]
+        parallel: bool,
+        /// Max concurrent packages (default from config or 4)
+        #[arg(long = "concurrency", default_value_t = 0)]
+        concurrency: usize,
     },
+    /// Visualize the workspace dependency graph
+    Graph,
 }
 
 #[derive(Subcommand)]
@@ -1450,6 +1578,9 @@ enum Commands {
         /// Public directory to serve static assets from
         #[arg(long = "public-dir", default_value = "public")]
         public_dir: PathBuf,
+        /// Disable the Content-Security-Policy header (v2.0.0 default: enabled)
+        #[arg(long = "no-csp")]
+        no_csp: bool,
     },
     /// Start a managed process in production (daemon)
     Start {
@@ -1523,6 +1654,14 @@ enum Commands {
         /// Update snapshots instead of failing on mismatch
         #[arg(long = "update-snapshots", short = 'u')]
         update_snapshots: bool,
+
+        /// Max concurrent test files (0 = CPU count, default v2.0.0)
+        #[arg(long = "concurrency", default_value_t = 0)]
+        concurrency: usize,
+
+        /// Output format: terminal | json | junit | tap | dot
+        #[arg(long = "reporter", default_value = "terminal")]
+        reporter: String,
     },
     /// Audit dependencies for known vulnerabilities (OSV) and malware patterns
     Audit {
@@ -1564,7 +1703,40 @@ enum Commands {
     /// Check runtime health
     Doctor,
     /// Enter an isolated interactive sandbox
-    Sandbox,
+    Sandbox {
+        /// Load a REPL plugin (built-in: inspect, history; or a .js/.ts file path)
+        #[arg(long = "plugin", num_args = 0.., value_delimiter = ',')]
+        plugins: Vec<String>,
+    },
+    /// Show or validate the resolved project configuration (v2.0.0)
+    Config {
+        /// Dot-path key to display (e.g. dev.port)
+        key: Option<String>,
+        /// Validate without running any command
+        #[arg(long)]
+        check: bool,
+    },
+    /// Migrate source code from one 3va version to another (v2.0.0)
+    Codemod {
+        /// Paths to migrate (files or directories)
+        #[arg(num_args = 1..)]
+        paths: Vec<PathBuf>,
+        /// Source version (default: 1)
+        #[arg(long = "from", default_value = "1")]
+        from: String,
+        /// Target version (default: 2)
+        #[arg(long = "to", default_value = "2")]
+        to: String,
+        /// Preview without writing
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Skip .bak backup files
+        #[arg(long = "no-backup")]
+        no_backup: bool,
+        /// Restore from .bak backups
+        #[arg(long = "revert")]
+        revert: bool,
+    },
 }
 
 async fn run_audit_human(deny: bool, update_cache: bool, scan_secrets: bool) -> anyhow::Result<()> {
@@ -1966,52 +2138,71 @@ async fn main() -> anyhow::Result<()> {
                     }
                     vvva_pm::store_status();
                 }
-                WorkspaceAction::Run { script } => {
-                    match vvva_pm::WorkspaceConfig::discover(&cwd)? {
-                        None => {
-                            eprintln!("Not a workspace root.");
-                            std::process::exit(1);
-                        }
-                        Some(cfg) => {
-                            let pkgs = cfg.resolve_packages(&cwd)?;
-                            let mut ran = 0usize;
-                            for pkg in &pkgs {
-                                let pkg_json = pkg.path.join("package.json");
-                                let cmd_str_opt = std::fs::read_to_string(&pkg_json)
-                                    .ok()
-                                    .and_then(|c| {
-                                        serde_json::from_str::<serde_json::Value>(&c).ok()
-                                    })
-                                    .and_then(|v| {
-                                        v["scripts"][script.as_str()]
-                                            .as_str()
-                                            .map(|s| s.to_string())
-                                    });
+                WorkspaceAction::Run {
+                    script,
+                    affected,
+                    base,
+                    parallel: _,
+                    concurrency,
+                } => match vvva_pm::WorkspaceConfig::discover(&cwd)? {
+                    None => {
+                        eprintln!("Not a workspace root.");
+                        std::process::exit(1);
+                    }
+                    Some(cfg) => {
+                        let pkgs = cfg.resolve_packages(&cwd)?;
+                        let graph = vvva_pm::WorkspaceGraph::build(&cwd, &pkgs)?;
 
-                                if let Some(cmd_str) = cmd_str_opt {
-                                    println!();
-                                    println!("> {} — {}", pkg.name, cmd_str);
-                                    let status = std::process::Command::new("sh")
-                                        .arg("-c")
-                                        .arg(&cmd_str)
-                                        .current_dir(&pkg.path)
-                                        .status();
-                                    match status {
-                                        Ok(s) if s.success() => ran += 1,
-                                        Ok(s) => eprintln!(
-                                            "  ✗ {} exited with {}",
-                                            pkg.name,
-                                            s.code().unwrap_or(-1)
-                                        ),
-                                        Err(e) => eprintln!("  ✗ {}: {}", pkg.name, e),
-                                    }
-                                }
-                            }
-                            println!();
-                            println!("Ran '{}' in {}/{} packages.", script, ran, pkgs.len());
+                        let affected_set = if *affected {
+                            let changed =
+                                vvva_pm::git_changed_files(&cwd, base).unwrap_or_default();
+                            Some(graph.affected_packages(&changed))
+                        } else {
+                            None
+                        };
+
+                        let cfg_ws = ProjectConfig::discover(cwd.clone())
+                            .ok()
+                            .flatten()
+                            .map(|c| c.workspace)
+                            .unwrap_or_default();
+                        let eff_concurrency = if *concurrency > 0 {
+                            *concurrency
+                        } else {
+                            cfg_ws.parallelism
+                        };
+
+                        let results = vvva_pm::run_workspace_script(
+                            &cwd,
+                            &graph,
+                            script,
+                            affected_set.as_ref(),
+                            eff_concurrency,
+                        )
+                        .await?;
+                        vvva_pm::print_run_results(script, &results);
+
+                        let failed: usize = results
+                            .iter()
+                            .filter(|r| matches!(r.status, vvva_pm::RunStatus::Failed(_)))
+                            .count();
+                        if failed > 0 {
+                            anyhow::bail!("{} package(s) failed.", failed);
                         }
                     }
-                }
+                },
+                WorkspaceAction::Graph => match vvva_pm::WorkspaceConfig::discover(&cwd)? {
+                    None => {
+                        eprintln!("Not a workspace root.");
+                        std::process::exit(1);
+                    }
+                    Some(cfg) => {
+                        let pkgs = cfg.resolve_packages(&cwd)?;
+                        let graph = vvva_pm::WorkspaceGraph::build(&cwd, &pkgs)?;
+                        println!("\nWorkspace dependency graph:");
+                        print!("{}", graph.ascii_graph());
+                    }
+                },
             }
         }
         Commands::Store { action } => {
@@ -2117,6 +2308,8 @@ async fn main() -> anyhow::Result<()> {
             watch,
             coverage,
             update_snapshots,
+            concurrency,
+            reporter,
         } => {
             let target_paths = if paths.is_empty() {
                 vec![PathBuf::from(".")]
@@ -2131,9 +2324,21 @@ async fn main() -> anyhow::Result<()> {
                 info!("Running tests...");
                 let cfg = vvva_test::TestConfig {
                     update_snapshots: *update_snapshots,
+                    concurrency: *concurrency,
                     ..Default::default()
                 };
                 let results = vvva_test::run_tests(target_paths.clone(), Some(cfg)).await?;
+
+                let fmt = match reporter.as_str() {
+                    "junit" => Some(vvva_test::ReportFormat::Junit),
+                    "tap" => Some(vvva_test::ReportFormat::Tap),
+                    "dot" => Some(vvva_test::ReportFormat::Dot),
+                    "json" => Some(vvva_test::ReportFormat::Json),
+                    _ => None,
+                };
+                if let Some(fmt) = fmt {
+                    println!("{}", vvva_test::TestReporter::new(fmt).report(&results));
+                }
 
                 if *coverage {
                     let root = target_paths
@@ -2204,16 +2409,54 @@ async fn main() -> anyhow::Result<()> {
         Commands::Doctor => {
             check_system_info()?;
         }
-        Commands::Sandbox => {
-            run_sandbox_shell().await?;
+        Commands::Sandbox { plugins } => {
+            run_sandbox_shell_with_plugins(plugins).await?;
         }
         Commands::Dev {
             port,
             host,
             open,
             public_dir,
+            no_csp,
         } => {
-            run_dev_server(*port, host.clone(), *open, public_dir.clone()).await?;
+            let cwd = std::env::current_dir()?;
+            let cfg_dev = ProjectConfig::discover(cwd)
+                .ok()
+                .flatten()
+                .map(|c| c.dev)
+                .unwrap_or_default();
+            let csp_enabled = cfg_dev.csp.enabled && !no_csp;
+            run_dev_server(*port, host.clone(), *open, public_dir.clone(), csp_enabled).await?;
+        }
+        Commands::Config { key, check } => {
+            let cwd = std::env::current_dir()?;
+            match ProjectConfig::discover(cwd)? {
+                None => {
+                    if *check {
+                        println!("No 3va.config.* file found — using built-in defaults.");
+                    } else {
+                        let defaults = ProjectConfig::default();
+                        print_config(&defaults, key.as_deref());
+                    }
+                }
+                Some(cfg) => {
+                    if *check {
+                        println!("Config file OK.");
+                    } else {
+                        print_config(&cfg, key.as_deref());
+                    }
+                }
+            }
+        }
+        Commands::Codemod {
+            paths,
+            from,
+            to,
+            dry_run,
+            no_backup,
+            revert,
+        } => {
+            run_codemod(paths, from, to, *dry_run, *no_backup, *revert)?;
         }
         Commands::Start { name, entry, args } => {
             let cwd = std::env::current_dir()?;
@@ -2286,10 +2529,330 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Config subcommand helpers ─────────────────────────────────────────────────
+
+fn print_config(cfg: &ProjectConfig, key: Option<&str>) {
+    let json = serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null);
+    let val = if let Some(path) = key {
+        path.split('.').fold(&json, |acc, k| {
+            acc.get(k).unwrap_or(&serde_json::Value::Null)
+        })
+    } else {
+        &json
+    };
+    println!("{}", serde_json::to_string_pretty(val).unwrap_or_default());
+}
+
+// ── Codemod helpers ───────────────────────────────────────────────────────────
+
+fn run_codemod(
+    paths: &[PathBuf],
+    from: &str,
+    to: &str,
+    dry_run: bool,
+    no_backup: bool,
+    revert: bool,
+) -> anyhow::Result<()> {
+    if revert {
+        return codemod_revert(paths);
+    }
+    if from != "1" || to != "2" {
+        anyhow::bail!("Only --from=1 --to=2 is supported in this release.");
+    }
+    let files = collect_js_ts_files(paths);
+    if files.is_empty() {
+        println!("No .js/.ts files found.");
+        return Ok(());
+    }
+    let mut changed = 0usize;
+    for file in &files {
+        let src = std::fs::read_to_string(file)?;
+        let transformed = apply_v1_to_v2_transforms(&src);
+        if transformed == src {
+            continue;
+        }
+        let diff = unified_diff(&src, &transformed, &file.display().to_string());
+        if dry_run {
+            println!("{diff}");
+        } else {
+            if !no_backup {
+                let bak = file.with_extension(format!(
+                    "{}.bak",
+                    file.extension().unwrap_or_default().to_string_lossy()
+                ));
+                std::fs::copy(file, &bak)?;
+            }
+            std::fs::write(file, &transformed)?;
+            println!("  ✓ {}", file.display());
+        }
+        changed += 1;
+    }
+    let verb = if dry_run { "would change" } else { "changed" };
+    println!("\nCodemod: {verb} {changed}/{} file(s).", files.len());
+    Ok(())
+}
+
+fn codemod_revert(paths: &[PathBuf]) -> anyhow::Result<()> {
+    let files = collect_js_ts_files(paths);
+    let mut reverted = 0usize;
+    for file in &files {
+        let bak_ext = format!(
+            "{}.bak",
+            file.extension().unwrap_or_default().to_string_lossy()
+        );
+        let bak = file.with_extension(&bak_ext);
+        if bak.exists() {
+            std::fs::copy(&bak, file)?;
+            std::fs::remove_file(&bak)?;
+            println!("  ↩ {}", file.display());
+            reverted += 1;
+        }
+    }
+    println!("\nReverted {reverted} file(s).");
+    Ok(())
+}
+
+fn collect_js_ts_files(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for p in paths {
+        if p.is_file() {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext == "js" || ext == "ts" {
+                out.push(p.clone());
+            }
+        } else if p.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(p) {
+                for entry in rd.flatten() {
+                    let ep = entry.path();
+                    if ep.is_file() {
+                        let ext = ep.extension().and_then(|e| e.to_str()).unwrap_or("");
+                        if ext == "js" || ext == "ts" {
+                            out.push(ep);
+                        }
+                    } else if ep.is_dir() {
+                        out.extend(collect_js_ts_files(&[ep]));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn apply_v1_to_v2_transforms(src: &str) -> String {
+    let mut out = src.replace("pq.kem.generateKeypair", "pq.kem.generateKeyPair");
+    out = out.replace("pq.dsa.generateKeypair", "pq.dsa.generateKeyPair");
+    out = rewrite_pq_sign(&out);
+    out = rewrite_pq_verify(&out);
+    out
+}
+
+fn rewrite_pq_sign(src: &str) -> String {
+    rewrite_two_arg_call(src, "pq.dsa.sign", |a, b| {
+        format!("pq.dsa.sign({{ key: {a}, data: {b} }})")
+    })
+}
+
+fn rewrite_pq_verify(src: &str) -> String {
+    rewrite_three_arg_call(src, "pq.dsa.verify", |a, b, c| {
+        format!("pq.dsa.verify({{ key: {a}, data: {b}, signature: {c} }})")
+    })
+}
+
+fn rewrite_two_arg_call(src: &str, needle: &str, rewrite: impl Fn(&str, &str) -> String) -> String {
+    let mut result = String::new();
+    let mut rest = src;
+    while let Some(pos) = rest.find(needle) {
+        result.push_str(&rest[..pos]);
+        let after = &rest[pos + needle.len()..];
+        if !after.starts_with('(') {
+            result.push_str(needle);
+            rest = after;
+            continue;
+        }
+        if let Some((args_str, end)) = extract_call_args(after) {
+            let args = split_top_level_args(&args_str);
+            if args.len() == 2 {
+                result.push_str(&rewrite(args[0].trim(), args[1].trim()));
+            } else {
+                result.push_str(needle);
+                result.push_str(&after[..end + 1]);
+            }
+            rest = &after[end + 1..];
+        } else {
+            result.push_str(needle);
+            rest = after;
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+fn rewrite_three_arg_call(
+    src: &str,
+    needle: &str,
+    rewrite: impl Fn(&str, &str, &str) -> String,
+) -> String {
+    let mut result = String::new();
+    let mut rest = src;
+    while let Some(pos) = rest.find(needle) {
+        result.push_str(&rest[..pos]);
+        let after = &rest[pos + needle.len()..];
+        if !after.starts_with('(') {
+            result.push_str(needle);
+            rest = after;
+            continue;
+        }
+        if let Some((args_str, end)) = extract_call_args(after) {
+            let args = split_top_level_args(&args_str);
+            if args.len() == 3 {
+                result.push_str(&rewrite(args[0].trim(), args[1].trim(), args[2].trim()));
+            } else {
+                result.push_str(needle);
+                result.push_str(&after[..end + 1]);
+            }
+            rest = &after[end + 1..];
+        } else {
+            result.push_str(needle);
+            rest = after;
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+fn extract_call_args(s: &str) -> Option<(String, usize)> {
+    let bytes = s.as_bytes();
+    if bytes.first() != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_str: Option<u8> = None;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if b == b'\\' && in_str.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(q) = in_str {
+            if b == q {
+                in_str = None;
+            }
+        } else if b == b'"' || b == b'\'' || b == b'`' {
+            in_str = Some(b);
+        } else if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some((s[1..i].to_string(), i));
+            }
+        }
+    }
+    None
+}
+
+fn split_top_level_args(s: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let mut depth = 0usize;
+    let mut in_str: Option<u8> = None;
+    let mut escaped = false;
+    let mut start = 0;
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if b == b'\\' && in_str.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(q) = in_str {
+            if b == q {
+                in_str = None;
+            }
+        } else if b == b'"' || b == b'\'' || b == b'`' {
+            in_str = Some(b);
+        } else if b == b'(' || b == b'[' || b == b'{' {
+            depth += 1;
+        } else if b == b')' || b == b']' || b == b'}' {
+            depth -= 1;
+        } else if b == b',' && depth == 0 {
+            args.push(&s[start..i]);
+            start = i + 1;
+        }
+    }
+    args.push(&s[start..]);
+    args
+}
+
+fn unified_diff(before: &str, after: &str, filename: &str) -> String {
+    let mut out = format!("--- {filename}\n+++ {filename}\n");
+    for (i, (a, b)) in before.lines().zip(after.lines()).enumerate() {
+        if a != b {
+            out.push_str(&format!("@@ line {} @@\n-{a}\n+{b}\n", i + 1));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use vvva_permissions::Capability;
+
+    // ── CSP header tests (v2.0.0) ─────────────────────────────────────────────
+
+    #[test]
+    fn csp_header_enabled_contains_directive() {
+        let h = csp_header(true);
+        assert!(h.contains("Content-Security-Policy:"));
+        assert!(h.contains("default-src 'self'"));
+        assert!(h.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn csp_header_disabled_is_empty() {
+        assert!(csp_header(false).is_empty());
+    }
+
+    // ── Codemod tests (v2.0.0) ────────────────────────────────────────────────
+
+    #[test]
+    fn codemod_renames_keypair() {
+        let src = "const kp = pq.kem.generateKeypair(); const kp2 = pq.dsa.generateKeypair();";
+        let out = apply_v1_to_v2_transforms(src);
+        assert!(
+            out.contains("generateKeyPair"),
+            "should rename to camelCase"
+        );
+        assert!(!out.contains("generateKeypair"), "old name should be gone");
+    }
+
+    #[test]
+    fn codemod_rewrites_pq_sign() {
+        let src = r#"const s = pq.dsa.sign(sk, msg);"#;
+        let out = apply_v1_to_v2_transforms(src);
+        assert!(
+            out.contains("pq.dsa.sign({ key:"),
+            "sign should use named params"
+        );
+    }
+
+    #[test]
+    fn codemod_rewrites_pq_verify() {
+        let src = r#"const ok = pq.dsa.verify(vk, msg, sig);"#;
+        let out = apply_v1_to_v2_transforms(src);
+        assert!(
+            out.contains("pq.dsa.verify({ key:"),
+            "verify should use named params"
+        );
+    }
 
     // ── Sin flags: todo denegado ──────────────────────────────────────────────
     // Refleja docs/06-permissions/01-capability-model.md §1.2 (deny-by-default)

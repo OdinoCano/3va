@@ -317,6 +317,9 @@ pub struct TestConfig {
     pub verbose: bool,
     pub test_timeout_ms: u64,
     pub update_snapshots: bool,
+    /// Maximum number of test files to run concurrently.
+    /// 0 = number of logical CPUs (default).
+    pub concurrency: usize,
 }
 
 impl Default for TestConfig {
@@ -325,6 +328,7 @@ impl Default for TestConfig {
             verbose: false,
             test_timeout_ms: 5000,
             update_snapshots: false,
+            concurrency: 0,
         }
     }
 }
@@ -454,31 +458,71 @@ impl TestRunner {
         dir: &'a Path,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
-            let mut entries: Vec<_> = std::fs::read_dir(dir)?.flatten().collect();
-            entries.sort_by_key(|e| e.path());
-
-            for entry in entries {
-                let path = entry.path();
-                if path.is_dir() {
-                    // Skip node_modules and hidden directories
-                    let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    if name.starts_with('.') || name == "node_modules" {
-                        continue;
-                    }
-                    self.run_directory(&path).await?;
-                } else {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    if name.ends_with(".test.js")
-                        || name.ends_with(".test.ts")
-                        || name.ends_with(".spec.js")
-                        || name.ends_with(".spec.ts")
-                    {
-                        self.run_file(&path).await?;
-                    }
-                }
-            }
-            Ok(())
+            let files = collect_test_files_in_dir(dir);
+            self.run_files_parallel(files).await
         })
+    }
+
+    /// Run `files` in parallel up to `config.concurrency` tasks at a time.
+    /// Concurrency 0 → number of logical CPUs.
+    pub async fn run_files_parallel(
+        &mut self,
+        files: Vec<std::path::PathBuf>,
+    ) -> anyhow::Result<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
+
+        let concurrency = if self.config.concurrency == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        } else {
+            self.config.concurrency
+        };
+
+        // When concurrency==1 fall through to sequential to avoid overhead.
+        if concurrency == 1 || files.len() == 1 {
+            for file in files {
+                self.run_file(&file).await?;
+            }
+            return Ok(());
+        }
+
+        use std::sync::{Arc, Mutex};
+        let config = self.config.clone();
+        let all_results: Arc<Mutex<Vec<TestResult>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Use a semaphore-like approach: chunk files and join.
+        let chunks: Vec<_> = files
+            .chunks(concurrency.max(1))
+            .map(|c| c.to_vec())
+            .collect();
+        for chunk in chunks {
+            let mut tasks = Vec::new();
+            for file in chunk {
+                let cfg = config.clone();
+                let results_ref = all_results.clone();
+                let task = tokio::spawn(async move {
+                    let mut runner = TestRunner::new(cfg);
+                    if let Err(e) = runner.run_file(&file).await {
+                        eprintln!("[test runner] error in {}: {e}", file.display());
+                    }
+                    results_ref.lock().unwrap().extend(runner.results);
+                });
+                tasks.push(task);
+            }
+            for t in tasks {
+                let _ = t.await;
+            }
+        }
+
+        let collected = Arc::try_unwrap(all_results)
+            .unwrap_or_else(|a| std::sync::Mutex::new(a.lock().unwrap().clone()))
+            .into_inner()
+            .unwrap_or_default();
+        self.results.extend(collected);
+        Ok(())
     }
 
     pub fn get_results(&self) -> &Vec<TestResult> {
@@ -530,23 +574,189 @@ impl TestRunner {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Recursively collect `.test.js`, `.test.ts`, `.spec.js`, `.spec.ts` files.
+pub fn collect_test_files_in_dir(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.path());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if name.starts_with('.') || name == "node_modules" {
+                continue;
+            }
+            out.extend(collect_test_files_in_dir(&path));
+        } else {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if name.ends_with(".test.js")
+                || name.ends_with(".test.ts")
+                || name.ends_with(".spec.js")
+                || name.ends_with(".spec.ts")
+            {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportFormat {
     Json,
     Junit,
+    Tap,
     Dot,
 }
 
-pub struct TestReporter;
+pub struct TestReporter {
+    format: ReportFormat,
+}
 
 impl TestReporter {
-    pub fn new(_format: ReportFormat) -> Self {
-        Self
+    pub fn new(format: ReportFormat) -> Self {
+        Self { format }
     }
 
     pub fn report(&self, results: &[TestResult]) -> String {
+        match self.format {
+            ReportFormat::Json => self.report_json(results),
+            ReportFormat::Junit => self.report_junit(results),
+            ReportFormat::Tap => self.report_tap(results),
+            ReportFormat::Dot => self.report_dot(results),
+        }
+    }
+
+    fn report_json(&self, results: &[TestResult]) -> String {
         serde_json::to_string_pretty(results).unwrap_or_default()
     }
+
+    /// JUnit XML format compatible with Jenkins, GitHub Actions, and most CI systems.
+    fn report_junit(&self, results: &[TestResult]) -> String {
+        let passed = results
+            .iter()
+            .filter(|r| r.status == TestStatus::Passed)
+            .count();
+        let failed = results
+            .iter()
+            .filter(|r| r.status == TestStatus::Failed)
+            .count();
+        let skipped = results
+            .iter()
+            .filter(|r| r.status == TestStatus::Skipped)
+            .count();
+        let total_ms: u64 = results.iter().map(|r| r.duration_ms).sum();
+
+        let mut xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="{total}" failures="{failed}" skipped="{skipped}" time="{time:.3}">
+  <testsuite name="3va" tests="{total}" failures="{failed}" skipped="{skipped}" time="{time:.3}">
+"#,
+            total = results.len(),
+            failed = failed,
+            skipped = skipped,
+            time = total_ms as f64 / 1000.0
+        );
+
+        for r in results {
+            let time = r.duration_ms as f64 / 1000.0;
+            let name = xml_escape(&r.name);
+            match r.status {
+                TestStatus::Passed => {
+                    xml.push_str(&format!(
+                        "    <testcase name=\"{name}\" time=\"{time:.3}\"/>\n"
+                    ));
+                }
+                TestStatus::Failed => {
+                    let msg = xml_escape(r.error.as_deref().unwrap_or("test failed"));
+                    xml.push_str(&format!(
+                        "    <testcase name=\"{name}\" time=\"{time:.3}\">\n\
+                               <failure message=\"{msg}\"/>\n\
+                         </testcase>\n"
+                    ));
+                }
+                TestStatus::Skipped | TestStatus::Pending => {
+                    xml.push_str(&format!(
+                        "    <testcase name=\"{name}\" time=\"{time:.3}\">\n\
+                         <skipped/>\n\
+                         </testcase>\n"
+                    ));
+                }
+            }
+        }
+
+        xml.push_str("  </testsuite>\n</testsuites>\n");
+        let _ = passed; // suppress unused warning
+        xml
+    }
+
+    /// TAP (Test Anything Protocol) version 13 output.
+    fn report_tap(&self, results: &[TestResult]) -> String {
+        let mut out = format!("TAP version 13\n1..{}\n", results.len());
+        for (i, r) in results.iter().enumerate() {
+            match r.status {
+                TestStatus::Passed => {
+                    out.push_str(&format!("ok {} {}\n", i + 1, r.name));
+                }
+                TestStatus::Failed => {
+                    out.push_str(&format!("not ok {} {}\n", i + 1, r.name));
+                    if let Some(err) = &r.error {
+                        for line in err.lines() {
+                            out.push_str(&format!("  # {line}\n"));
+                        }
+                    }
+                }
+                TestStatus::Skipped | TestStatus::Pending => {
+                    out.push_str(&format!("ok {} {} # SKIP\n", i + 1, r.name));
+                }
+            }
+        }
+        out
+    }
+
+    /// Dot reporter: `.` for pass, `F` for fail, `S` for skip.
+    fn report_dot(&self, results: &[TestResult]) -> String {
+        let dots: String = results
+            .iter()
+            .map(|r| match r.status {
+                TestStatus::Passed => '.',
+                TestStatus::Failed => 'F',
+                TestStatus::Skipped | TestStatus::Pending => 'S',
+            })
+            .collect();
+
+        let failed: Vec<_> = results
+            .iter()
+            .filter(|r| r.status == TestStatus::Failed)
+            .collect();
+        let mut out = format!(
+            "{dots}\n\n{} tests, {} passed, {} failed\n",
+            results.len(),
+            results
+                .iter()
+                .filter(|r| r.status == TestStatus::Passed)
+                .count(),
+            failed.len()
+        );
+        for r in &failed {
+            out.push_str(&format!("  FAIL: {}\n", r.name));
+            if let Some(err) = &r.error {
+                out.push_str(&format!("       {err}\n"));
+            }
+        }
+        out
+    }
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]
@@ -559,16 +769,88 @@ mod tests {
         assert_eq!(runner.get_results().len(), 0);
     }
 
+    fn sample_results() -> Vec<TestResult> {
+        vec![
+            TestResult {
+                name: "passes".into(),
+                status: TestStatus::Passed,
+                duration_ms: 5,
+                error: None,
+            },
+            TestResult {
+                name: "fails".into(),
+                status: TestStatus::Failed,
+                duration_ms: 2,
+                error: Some("oops".into()),
+            },
+            TestResult {
+                name: "skips".into(),
+                status: TestStatus::Skipped,
+                duration_ms: 0,
+                error: None,
+            },
+        ]
+    }
+
     #[test]
-    fn test_reporter() {
-        let reporter = TestReporter::new(ReportFormat::Json);
-        let results = vec![TestResult {
-            name: "test".to_string(),
-            status: TestStatus::Passed,
-            duration_ms: 10,
-            error: None,
-        }];
-        let output = reporter.report(&results);
-        assert!(output.contains("test"));
+    fn test_reporter_json() {
+        let r = TestReporter::new(ReportFormat::Json);
+        let out = r.report(&sample_results());
+        assert!(out.contains("passes"));
+        let _: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    }
+
+    #[test]
+    fn test_reporter_junit() {
+        let r = TestReporter::new(ReportFormat::Junit);
+        let out = r.report(&sample_results());
+        assert!(out.contains("<?xml version"));
+        assert!(out.contains("<testsuites"));
+        assert!(out.contains("<failure"));
+        assert!(out.contains("passes"));
+        assert!(out.contains("oops"));
+    }
+
+    #[test]
+    fn test_reporter_tap() {
+        let r = TestReporter::new(ReportFormat::Tap);
+        let out = r.report(&sample_results());
+        assert!(out.starts_with("TAP version 13"));
+        assert!(out.contains("ok 1 passes"));
+        assert!(out.contains("not ok 2 fails"));
+        assert!(out.contains("# oops"));
+    }
+
+    #[test]
+    fn test_reporter_dot() {
+        let r = TestReporter::new(ReportFormat::Dot);
+        let out = r.report(&sample_results());
+        assert!(out.contains('.'));
+        assert!(out.contains('F'));
+    }
+
+    #[test]
+    fn test_config_has_concurrency() {
+        let cfg = TestConfig::default();
+        assert_eq!(cfg.concurrency, 0); // 0 = use CPU count
+    }
+
+    #[test]
+    fn collect_test_files_finds_spec_files() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.test.js"), "").unwrap();
+        std::fs::write(dir.path().join("b.spec.ts"), "").unwrap();
+        std::fs::write(dir.path().join("c.js"), "").unwrap(); // not a test file
+        let files = collect_test_files_in_dir(dir.path());
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn xml_escape_replaces_entities() {
+        assert_eq!(
+            xml_escape("<foo & 'bar\">"),
+            "&lt;foo &amp; &apos;bar&quot;&gt;"
+        );
     }
 }
