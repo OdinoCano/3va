@@ -5286,6 +5286,126 @@ if (typeof globalThis.Platform === 'undefined') {
 }());
     "#)?;
 
+    // ── 3va:test — native mock / spy API (v2.0.0) ─────────────────────────────
+    ctx.eval::<(), _>(r#"
+(function() {
+    // ── mock.fn ───────────────────────────────────────────────────────────────
+    function createMockFn(impl_) {
+        var calls = [];
+        function spy() {
+            var args = Array.prototype.slice.call(arguments);
+            var result, error;
+            try {
+                result = impl_ ? impl_.apply(this, args) : undefined;
+            } catch(e) {
+                error = e;
+                throw e;
+            } finally {
+                calls.push({ arguments: args, result: result, error: error });
+            }
+            return result;
+        }
+        spy.mock = {
+            get calls() { return calls; },
+            resetCalls: function() { calls = []; },
+            restore: function() {}
+        };
+        spy.mockImplementation = function(fn) { impl_ = fn; return spy; };
+        spy.mockReturnValue = function(v) { impl_ = function() { return v; }; return spy; };
+        spy.mockResolvedValue = function(v) {
+            impl_ = function() { return Promise.resolve(v); };
+            return spy;
+        };
+        spy.mockRejectedValue = function(v) {
+            impl_ = function() { return Promise.reject(v); };
+            return spy;
+        };
+        return spy;
+    }
+
+    // ── mock.method ───────────────────────────────────────────────────────────
+    function mockMethod(obj, methodName, impl_) {
+        var original = obj[methodName];
+        var spy = createMockFn(impl_ || original.bind(obj));
+        spy.mock.restore = function() { obj[methodName] = original; };
+        obj[methodName] = spy;
+        return spy;
+    }
+
+    // ── mock.timers ───────────────────────────────────────────────────────────
+    var _fakeTimersEnabled = false;
+    var _fakeNow = 0;
+    var _fakeQueue = [];
+    var _realSetTimeout, _realClearTimeout, _realSetInterval, _realClearInterval;
+
+    var fakeTimers = {
+        enable: function(opts) {
+            if (_fakeTimersEnabled) return;
+            _fakeTimersEnabled = true;
+            _fakeNow = (opts && opts.now != null) ? opts.now : Date.now();
+            _fakeQueue = [];
+            var _idCounter = 0;
+
+            _realSetTimeout = globalThis.setTimeout;
+            _realClearTimeout = globalThis.clearTimeout;
+            _realSetInterval = globalThis.setInterval;
+            _realClearInterval = globalThis.clearInterval;
+
+            globalThis.setTimeout = function(fn, delay) {
+                var id = ++_idCounter;
+                _fakeQueue.push({ id: id, fn: fn, fireAt: _fakeNow + (delay || 0), repeat: false, interval: 0 });
+                return id;
+            };
+            globalThis.clearTimeout = function(id) {
+                _fakeQueue = _fakeQueue.filter(function(e) { return e.id !== id; });
+            };
+            globalThis.setInterval = function(fn, interval) {
+                var id = ++_idCounter;
+                _fakeQueue.push({ id: id, fn: fn, fireAt: _fakeNow + (interval || 0), repeat: true, interval: interval || 0 });
+                return id;
+            };
+            globalThis.clearInterval = globalThis.clearTimeout;
+        },
+
+        tick: function(ms) {
+            _fakeNow += ms;
+            var toFire = _fakeQueue.filter(function(e) { return e.fireAt <= _fakeNow; });
+            toFire.sort(function(a, b) { return a.fireAt - b.fireAt; });
+            _fakeQueue = _fakeQueue.filter(function(e) { return e.fireAt > _fakeNow; });
+            for (var i = 0; i < toFire.length; i++) {
+                var e = toFire[i];
+                try { e.fn(); } catch(ex) {}
+                if (e.repeat) {
+                    e.fireAt = _fakeNow + e.interval;
+                    _fakeQueue.push(e);
+                }
+            }
+        },
+
+        reset: function() {
+            if (!_fakeTimersEnabled) return;
+            _fakeTimersEnabled = false;
+            _fakeQueue = [];
+            if (_realSetTimeout)   { globalThis.setTimeout   = _realSetTimeout; }
+            if (_realClearTimeout) { globalThis.clearTimeout  = _realClearTimeout; }
+            if (_realSetInterval)  { globalThis.setInterval   = _realSetInterval; }
+            if (_realClearInterval){ globalThis.clearInterval = _realClearInterval; }
+        }
+    };
+
+    var mock = {
+        fn: createMockFn,
+        method: mockMethod,
+        timers: fakeTimers
+    };
+
+    // Expose as require('3va:test')
+    var testModule = { mock: mock };
+    globalThis.__requireCache['3va:test'] = testModule;
+    globalThis.__requireCache['node:test'] = testModule; // alias for Node.js compat
+}());
+    "#)?;
+
     Ok(())
 }
 
