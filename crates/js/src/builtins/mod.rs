@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod child_process;
 pub mod console;
 pub mod crypto;
+pub mod dgram;
 pub mod fetch;
 pub mod ffi;
 pub mod fs;
@@ -12,6 +13,7 @@ pub mod process;
 pub mod tcp;
 pub mod timers;
 pub mod websocket;
+pub mod worker_threads;
 pub mod zlib;
 
 use rquickjs::Ctx;
@@ -87,6 +89,10 @@ pub fn inject_all(
     child_process::inject_child_process(ctx, permissions.clone())?;
     crypto::inject_crypto(ctx)?;
     ffi::inject_ffi(ctx, permissions.clone())?;
-    napi::inject_napi(ctx, permissions)?;
+    napi::inject_napi(ctx, permissions.clone())?;
+    // Must run after inject_require so the worker_threads stub is already loaded.
+    worker_threads::inject_worker_threads_native(ctx, permissions.clone())?;
+    // dgram (UDP) — after inject_require so it populates __requireCache['dgram'].
+    dgram::inject_dgram(ctx, permissions)?;
     Ok(())
 }
