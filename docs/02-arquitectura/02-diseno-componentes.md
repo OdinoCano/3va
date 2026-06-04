@@ -190,7 +190,8 @@ Post-quantum cryptography utilities. Standalone crate for future TLS integration
 ### 2.8.2 Status
 - Lamport one-time signatures: implemented
 - HKDF key derivation: implemented
-- ML-KEM / ML-DSA (NIST PQC): interface defined, implementation returns `NotAvailable` — planned for v0.3.0
+- ML-KEM-768 (FIPS 203): implemented in `crates/crypto/src/kem.rs`
+- ML-DSA-65 (FIPS 204): implemented in `crates/crypto/src/dsa.rs`
 
 ---
 

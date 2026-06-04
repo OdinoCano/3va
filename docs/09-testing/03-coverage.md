@@ -22,7 +22,7 @@ No external tool (Istanbul, nyc, c8) is required. The entire pipeline runs in Ru
 |--------|----------|-------|
 | Statements | ✅ | Every executable statement gets its own counter |
 | Lines | ✅ | Derived from statement positions; a line is covered when any statement on it is hit |
-| Branches | ❌ | Not tracked (v0.1.0); planned for v0.2.0 |
+| Branches | ❌ | Not tracked; planned for a future version |
 | Functions | ❌ | Not tracked separately; function bodies are covered as statements |
 
 ### Excluded from instrumentation
@@ -104,7 +104,7 @@ impl CoverageResult {
 }
 ```
 
-## 3.7 Limitations (v0.1.0)
+## 3.7 Limitations
 
 - **No branch coverage.** `if/else`, ternary, and `&&`/`||` short-circuits are not tracked as separate branches.
 - **Single-file granularity.** Coverage counters are per test file, not per source module. If one test file imports multiple modules, all their statements are counted together.

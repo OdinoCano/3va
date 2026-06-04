@@ -756,7 +756,173 @@ Stops (if running) and permanently removes a process from 3va's management, incl
 
 ---
 
-## 2.9 Global Option
+### 2.7.4 `prof`
+
+Analyzes a `.cpuprofile` file produced by `3va run --prof` and prints the top hot functions or generates a flamegraph SVG.
+
+**Signature:**
+```
+3va prof <FILE> [--top <N>] [--format <text|flamegraph>] [--out <PATH>]
+```
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `FILE` | `path` (required) | Path to the `.cpuprofile` JSON file |
+| `--top <N>` | `integer` | Number of hottest functions to display (default: 20) |
+| `--format <fmt>` | `"text"\|"flamegraph"` | Output format: `text` (default) prints a ranked table; `flamegraph` writes an SVG file |
+| `--out <PATH>` | `path` | Output path for the flamegraph SVG (only used with `--format=flamegraph`, default: `flamegraph.svg`) |
+
+**Collecting a profile:**
+```bash
+# Record a profile while running a script
+3va run app.ts --prof --prof-out profile.cpuprofile --prof-interval 10
+```
+
+**Examples:**
+```bash
+# Print top 20 hot functions
+3va prof profile.cpuprofile
+
+# Print top 5 hot functions
+3va prof profile.cpuprofile --top 5
+
+# Generate flamegraph SVG
+3va prof profile.cpuprofile --format flamegraph --out flame.svg
+```
+
+**Sample output (`--format=text`):**
+```
+Self%  Function
+--------------------------------------------------
+ 34%  processRequest (server.ts:42)
+ 18%  parseJSON (utils.ts:11)
+  9%  validateSchema (middleware.ts:87)
+```
+
+---
+
+## 2.9 Workspace Commands
+
+Commands for managing monorepo workspaces. A workspace is detected automatically when `package.json` contains a `workspaces` field.
+
+### 2.9.1 `workspace install`
+
+Installs all dependencies across every workspace package.
+
+**Signature:**
+```
+3va workspace install [--allow-net=<hosts>]
+```
+
+**Examples:**
+```bash
+3va workspace install --allow-net=registry.npmjs.org
+```
+
+---
+
+### 2.9.2 `workspace list`
+
+Lists all packages discovered in the workspace.
+
+**Signature:**
+```
+3va workspace list
+```
+
+**Examples:**
+```bash
+3va workspace list
+# packages/core  (1.0.0)
+# packages/ui    (1.0.0)
+# apps/web       (0.1.0)
+```
+
+---
+
+### 2.9.3 `workspace info`
+
+Displays workspace root, package count, and global content-store statistics.
+
+**Signature:**
+```
+3va workspace info
+```
+
+---
+
+### 2.9.4 `workspace run`
+
+Runs a script (defined in `package.json` `"scripts"`) in every workspace package that defines it.
+
+**Signature:**
+```
+3va workspace run <SCRIPT>
+```
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `SCRIPT` | `string` (required) | Script name as defined in each package's `"scripts"` field |
+
+**Examples:**
+```bash
+3va workspace run build
+3va workspace run test
+```
+
+---
+
+## 2.10 Store Commands
+
+Commands for managing the global content-addressable package cache stored at `~/.3va/store/`.
+
+### 2.10.1 `store status`
+
+Displays statistics for the global package store (entry count, disk usage).
+
+**Signature:**
+```
+3va store status
+```
+
+---
+
+### 2.10.2 `store repair`
+
+Removes corrupt or incomplete cache entries left by a prior crash or interrupted download.
+
+**Signature:**
+```
+3va store repair
+```
+
+---
+
+### 2.10.3 `store prune`
+
+Removes packages from the global store that are not referenced by any lockfile in the current project.
+
+**Signature:**
+```
+3va store prune
+```
+
+---
+
+### 2.10.4 `store verify`
+
+Verifies that every cached package has a complete extraction (no missing files).
+
+**Signature:**
+```
+3va store verify
+```
+
+---
+
+## 2.11 Global Option (`--accessible`)
 
 ### `--accessible`
 

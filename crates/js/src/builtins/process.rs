@@ -470,11 +470,11 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     let process = Object::new(ctx.clone())?;
 
     // Strings and numbers
-    process.set("version", "3va/0.1.0")?;
+    process.set("version", "3va/1.0.0")?;
     process.set("pid", std::process::id())?;
 
     let versions = Object::new(ctx.clone())?;
-    versions.set("3va", "0.1.0")?;
+    versions.set("3va", "1.0.0")?;
     // Expose fake Node.js-compatible version strings so packages checking
     // process.versions.node / process.versions.v8 don't crash.
     versions.set("node", "20.0.0")?;

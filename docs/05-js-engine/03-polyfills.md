@@ -115,26 +115,6 @@ emitter.removeAllListeners('data');
 
 These allow packages to `require()` the module without throwing, but provide minimal or no real I/O.
 
-### `crypto` (minimal stub)
-
-```javascript
-const crypto = require('crypto');
-
-// randomBytes — uses Math.random(), NOT cryptographically secure
-crypto.randomBytes(16);   // Uint8Array
-
-// createHash — returns base64 of input, NOT a real hash
-const h = crypto.createHash('sha256');
-h.update('data');
-h.digest('hex');  // returns btoa(data), not SHA-256
-
-// createHmac — returns empty string
-const hmac = crypto.createHmac('sha256', 'key');
-hmac.update('data').digest('hex');  // ''
-```
-
-**Note:** `crypto.createHash` and `crypto.createHmac` are stubs — they do not produce correct cryptographic output. Use the `vvva_crypto` Rust crate for real hashing.
-
 ### `net` / `tls` (stub)
 
 `createConnection()` returns an emitter. No real TCP connection is made. Planned: expose `tokio::net::TcpStream` as a Rust builtin.
@@ -259,7 +239,55 @@ const { stdout } = await execAsync('echo hello');
 
 **Note:** `execSync` and `spawnSync` throw `Error: not available in 3va` — the module is async-only. Use the callback or Promise wrapper forms above.
 
-## 3.9 `TextEncoder` / `TextDecoder` (global)
+## 3.9 `crypto` (`require('crypto')` + global)
+
+Full implementation in `builtins/crypto.rs`. All operations use real cryptography (no stubs).
+
+```javascript
+const crypto = require('crypto');
+
+// CSPRNG — cryptographically secure random bytes
+crypto.randomBytes(16);           // Buffer (Uint8Array)
+crypto.getRandomValues(new Uint8Array(16));  // fills in place
+
+// Hash — real SHA-1/SHA-224/SHA-256/SHA-384/SHA-512
+const h = crypto.createHash('sha256');
+h.update('data');
+h.digest('hex');     // 3a6eb0790f39ac87c94f3856b2dd2c5d110e6811994bdbe...
+h.digest('base64');  // Om6weQ85rIfJTzhWst0sXREOaBGZS9veOQ...
+
+// HMAC — real HMAC with all SHA variants
+const hmac = crypto.createHmac('sha256', 'secret-key');
+hmac.update('data').digest('hex');  // real HMAC output
+
+// UUID
+crypto.randomUUID();  // 'f47ac10b-58cc-4372-a567-0e02b2c3d479'
+```
+
+### `crypto.subtle` (Web Crypto API)
+
+```javascript
+// Digest
+const hash = await crypto.subtle.digest('SHA-256', data);  // ArrayBuffer
+
+// Symmetric — AES-GCM
+const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+const ct  = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
+const pt  = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+
+// Asymmetric — ECDH, RSA-OAEP
+const { privateKey, publicKey } = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']);
+
+// Import / Export
+const raw  = await crypto.subtle.exportKey('raw', key);
+const key2 = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+```
+
+Supported algorithms: SHA-1, SHA-256, SHA-384, SHA-512, AES-GCM (128/256), AES-CBC, HMAC, ECDH (P-256/P-384), RSA-OAEP.
+
+---
+
+## 3.10 `TextEncoder` / `TextDecoder` (global)
 
 ```javascript
 const enc = new TextEncoder();
@@ -410,12 +438,12 @@ FileReader.DONE     // 2
 process.pid              // number — OS PID of the 3va process
 process.platform         // 'linux' | 'darwin' | 'win32' | 'unknown'
 process.arch             // 'x64' | 'arm64' | 'unknown'
-process.version          // '3va/0.1.0'
+process.version          // '3va/1.0.0'
 
 // Versions (Node-compatible keys for package compatibility checks)
 process.versions.node    // '20.0.0'  — fake, but structurally compatible
 process.versions.v8      // '11.3.244.8-node.20'
-process.versions['3va']  // '0.1.0'
+process.versions['3va']  // '1.0.0'
 
 // Working directory
 process.cwd()            // string — real CWD via std::env::current_dir()
@@ -575,16 +603,6 @@ The real `expo-modules-core` npm package is also loadable directly; the platform
 ## 3.20 Planned Polyfills (not yet implemented)
 
 > **Status: PENDING** — these APIs appear in the compatibility roadmap. Using them currently throws `ReferenceError` or silently no-ops.
-
-### Real `crypto` (Web Crypto API)
-
-The current `crypto` stub uses `Math.random()` and `btoa()`. Full Web Crypto API planned for v0.3.0:
-
-```javascript
-// PLANNED — requires ml-kem + ml-dsa crates
-const bytes = crypto.getRandomValues(new Uint8Array(16)); // real CSPRNG
-const hash = await crypto.subtle.digest('SHA-256', data);
-```
 
 ---
 
