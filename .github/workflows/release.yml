@@ -43,11 +43,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cargo-zigbuild
+      - name: Install zig + cargo-zigbuild
         if: matrix.zigbuild
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild
+          tool: zig,cargo-zigbuild
 
       - name: Build (zigbuild, musl)
         if: matrix.zigbuild
