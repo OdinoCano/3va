@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::{CString, c_void};
+use std::ffi::{CString, c_char, c_void};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,10 +66,10 @@ enum ArgStorage {
     F64(Box<f64>),
     /// Pointer value (stored as usize to keep it FFI-safe).
     Ptr(Box<usize>),
-    /// CString keeps the string buffer alive; the Box<*const i8> is what libffi reads.
+    /// CString keeps the string buffer alive; the Box<*const c_char> is what libffi reads.
     /// The CString field is intentionally kept for its Drop impl.
     #[allow(dead_code)]
-    CStr(CString, Box<*const i8>),
+    CStr(CString, Box<*const c_char>),
 }
 
 impl ArgStorage {
@@ -198,7 +198,7 @@ unsafe fn call_native(
             serde_json::json!(r as usize)
         }
         "cstring" => {
-            let ptr: *const i8 = cif.call(code, &ffi_args);
+            let ptr: *const c_char = cif.call(code, &ffi_args);
             if ptr.is_null() {
                 serde_json::Value::Null
             } else {
