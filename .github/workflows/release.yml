@@ -21,21 +21,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # musl targets: zigbuild uses Zig as C cross-compiler, handles musl
+          # libc and compiles OpenSSL from source (OPENSSL_VENDORED=1).
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            cross: true
+            zigbuild: true
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            cross: true
+            zigbuild: true
           - target: x86_64-apple-darwin
             os: macos-13
-            cross: false
           - target: aarch64-apple-darwin
             os: macos-latest
-            cross: false
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            cross: false
 
     steps:
       - uses: actions/checkout@v4
@@ -44,18 +43,23 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.cross
+      - name: Install cargo-zigbuild
+        if: matrix.zigbuild
         uses: taiki-e/install-action@v2
         with:
-          tool: cross
+          tool: cargo-zigbuild
 
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} --bin 3va
+      - name: Build (zigbuild, musl)
+        if: matrix.zigbuild
+        env:
+          OPENSSL_VENDORED: "1"
+        run: cargo zigbuild --release --target ${{ matrix.target }} --bin 3va
 
       - name: Build (native)
-        if: ${{ !matrix.cross }}
+        if: ${{ !matrix.zigbuild }}
+        env:
+          # libffi-sys CFI directives require macOS 11+ SDK on Apple Silicon.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: cargo build --release --target ${{ matrix.target }} --bin 3va
 
       - name: Package binary (Unix)
