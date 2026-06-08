@@ -1,8 +1,13 @@
 [package]
 name = "vvva_test"
 version = "2.0.0"
-license = "MIT OR Apache-2.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Test framework and runner for .test.js/.test.ts files in the 3va JavaScript runtime"
+repository = "https://github.com/OdinoCano/3va"
+homepage = "https://github.com/OdinoCano/3va"
+keywords = ["testing", "javascript", "typescript", "runner", "3va"]
+categories = ["development-tools::testing"]
 
 [dependencies]
 serde.workspace = true

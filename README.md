@@ -309,6 +309,8 @@ const sig = pq.dsa.sign(kp.secretKey, message);
 const valid = pq.dsa.verify(kp.publicKey, message, sig);
 ```
 
+> **Compatibility alias:** `generateKeypair` (lowercase `p`) is accepted as an alias for `generateKeyPair` for v1 source compatibility. New code should use `generateKeyPair`. The `3va codemod` command migrates old call sites automatically.
+
 **Hybrid TLS** — `__pqTlsConnect` establishes a classical TLS connection with an additional ML-KEM-768 key exchange, producing a 32-byte hybrid shared secret:
 
 ```js

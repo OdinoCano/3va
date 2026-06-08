@@ -1,8 +1,13 @@
 [package]
 name = "vvva_pm"
 version = "2.0.0"
-license = "MIT OR Apache-2.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Content-addressable package manager for the 3va runtime — npm-compatible resolver, virtual store, lockfile, OSV audit"
+repository = "https://github.com/OdinoCano/3va"
+homepage = "https://github.com/OdinoCano/3va"
+keywords = ["package-manager", "npm", "lockfile", "audit", "3va"]
+categories = ["development-tools"]
 
 [dependencies]
 serde.workspace = true

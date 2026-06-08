@@ -1,14 +1,15 @@
 [package]
-name = "rquickjs-sys"
+name = "vvva-rquickjs-sys"
 version = "0.6.2"
 authors = ["Mees Delzenne <mees.delzenne@gmail.com>"]
 edition = "2021"
 license = "MIT"
 readme = "README.md"
-description = "QuickJS bindings for rquickjs"
-keywords = ["quickjs", "ecmascript", "javascript", "es6", "es2020"]
+description = "Patched QuickJS C bindings for the 3va runtime (stack-overflow protection, AsyncLocalStorage job-queue, column-number errors)"
+keywords = ["quickjs", "javascript", "3va", "runtime", "ffi"]
 categories = ["external-ffi-bindings"]
-repository = "https://github.com/DelSkayn/rquickjs.git"
+repository = "https://github.com/OdinoCano/3va"
+homepage = "https://3va.run"
 
 [build-dependencies]
 cc = "1"

@@ -1,8 +1,13 @@
 [package]
 name = "vvva_js"
 version = "2.0.0"
-license = "MIT OR Apache-2.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "QuickJS-based JavaScript/TypeScript engine for the 3va runtime — ESM, TypeScript, async/await, NAPI, CDP inspector, profiler"
+repository = "https://github.com/OdinoCano/3va"
+homepage = "https://github.com/OdinoCano/3va"
+keywords = ["javascript", "typescript", "quickjs", "runtime", "3va"]
+categories = ["api-bindings"]
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -92,7 +97,7 @@ path = "tests/express_jwt.rs"
 
 [dependencies]
 rquickjs.workspace = true
-rquickjs-sys = { path = "../../vendor/rquickjs-sys" }
+rquickjs-sys = { package = "vvva-rquickjs-sys", path = "../../vendor/rquickjs-sys" }
 anyhow.workspace = true
 sha2 = { workspace = true }
 sha1 = { workspace = true }

@@ -1,8 +1,13 @@
 [package]
 name = "vvva_wasm"
 version = "2.0.0"
-license = "MIT OR Apache-2.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "WebAssembly / WASI execution engine for the 3va runtime (Wasmtime-backed, capability-sandboxed)"
+repository = "https://github.com/OdinoCano/3va"
+homepage = "https://github.com/OdinoCano/3va"
+keywords = ["wasm", "wasi", "wasmtime", "sandbox", "3va"]
+categories = ["wasm"]
 
 [dependencies]
 anyhow.workspace = true

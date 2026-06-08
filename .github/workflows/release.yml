@@ -1,0 +1,199 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+
+permissions:
+  contents: write   # create GitHub releases and upload assets
+  id-token: write   # OIDC token for crates.io Trusted Publishing
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Build precompiled binaries ────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} --bin 3va
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }} --bin 3va
+
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          TARGET="${{ matrix.target }}"
+          ARCHIVE="3va-${VERSION}-${TARGET}.tar.gz"
+          cp "target/${TARGET}/release/3va" 3va
+          tar czf "${ARCHIVE}" 3va
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $VERSION = "${{ github.ref_name }}"
+          $TARGET  = "${{ matrix.target }}"
+          $ARCHIVE = "3va-${VERSION}-${TARGET}.zip"
+          Copy-Item "target\${TARGET}\release\3va.exe" 3va.exe
+          Compress-Archive -Path 3va.exe -DestinationPath $ARCHIVE
+          (Get-FileHash $ARCHIVE -Algorithm SHA256).Hash.ToLower() + "  $ARCHIVE" | Out-File "${ARCHIVE}.sha256" -Encoding ascii
+          "ARCHIVE=$ARCHIVE" | Out-File -Append $Env:GITHUB_ENV
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+          retention-days: 1
+
+  # ── Create GitHub Release ─────────────────────────────────────────────────────
+  github-release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/**
+
+  # ── Publish to crates.io (Trusted Publishing / OIDC) ─────────────────────────
+  publish:
+    name: Publish crates
+    needs: github-release
+    runs-on: ubuntu-latest
+    environment: crates-io   # maps to the crates.io Trusted Publishing config
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Exchange the GitHub OIDC token for a short-lived crates.io token.
+      - name: Obtain crates.io token (OIDC)
+        uses: rust-lang/crates-io-auth-action@v1
+
+      # Publish in strict dependency order.  Each step waits 20 s so the
+      # registry index has time to propagate before the next crate tries to
+      # resolve it.
+      - name: Publish vvva-rquickjs-sys
+        run: |
+          cargo publish --package vvva-rquickjs-sys --allow-dirty
+          sleep 20
+
+      - name: Publish vvva-rquickjs-core
+        run: |
+          cargo publish --package vvva-rquickjs-core --allow-dirty
+          sleep 20
+
+      - name: Publish vvva-rquickjs
+        run: |
+          cargo publish --package vvva-rquickjs --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_permissions
+        run: |
+          cargo publish --package vvva_permissions --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_config
+        run: |
+          cargo publish --package vvva_config --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_core
+        run: |
+          cargo publish --package vvva_core --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_crypto
+        run: |
+          cargo publish --package vvva_crypto --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_firewall
+        run: |
+          cargo publish --package vvva_firewall --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_pm
+        run: |
+          cargo publish --package vvva_pm --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_js
+        run: |
+          cargo publish --package vvva_js --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_wasm
+        run: |
+          cargo publish --package vvva_wasm --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_bundler
+        run: |
+          cargo publish --package vvva_bundler --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_test
+        run: |
+          cargo publish --package vvva_test --allow-dirty
+          sleep 20
+
+      - name: Publish vvva_cli
+        run: cargo publish --package vvva_cli --allow-dirty

@@ -1,8 +1,13 @@
 [package]
 name = "vvva_cli"
 version = "2.0.0"
-license = "MIT OR Apache-2.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "3va — secure-by-default JavaScript/TypeScript runtime built on QuickJS with post-quantum crypto and capability-based sandboxing"
+repository = "https://github.com/OdinoCano/3va"
+homepage = "https://github.com/OdinoCano/3va"
+keywords = ["javascript", "typescript", "runtime", "sandbox", "3va"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "3va"

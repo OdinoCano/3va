@@ -11,13 +11,13 @@
 
 [package]
 edition = "2021"
-name = "rquickjs-core"
+name = "vvva-rquickjs-core"
 version = "0.6.2"
 authors = [
     "Mees Delzenne <mees.delzenne@gmail.com>",
     "K. <kayo@illumium.org>",
 ]
-description = "High level bindings to the QuickJS JavaScript engine"
+description = "Patched high-level QuickJS bindings for the 3va runtime"
 readme = "README.md"
 keywords = [
     "quickjs",
@@ -28,7 +28,8 @@ keywords = [
 ]
 categories = ["api-bindings"]
 license = "MIT"
-repository = "https://github.com/DelSkayn/rquickjs.git"
+repository = "https://github.com/OdinoCano/3va"
+homepage = "https://github.com/OdinoCano/3va"
 
 [package.metadata.docs.rs]
 features = [
@@ -66,6 +67,7 @@ optional = true
 
 [dependencies.rquickjs-sys]
 version = "0.6.2"
+package = "vvva-rquickjs-sys"
 
 [dev-dependencies.approx]
 version = "0.5"
