@@ -9,7 +9,7 @@ description = "Patched QuickJS C bindings for the 3va runtime (stack-overflow pr
 keywords = ["quickjs", "javascript", "3va", "runtime", "ffi"]
 categories = ["external-ffi-bindings"]
 repository = "https://github.com/OdinoCano/3va"
-homepage = "https://3va.run"
+homepage = "https://github.com/OdinoCano/3va"
 
 [build-dependencies]
 cc = "1"

@@ -3102,7 +3102,9 @@ async fn permissions_learn(file: &PathBuf, script_args: &[String]) -> anyhow::Re
     for event in &audit.events {
         match event {
             AuditEvent::NetworkAccess {
-                host, allowed: true, ..
+                host,
+                allowed: true,
+                ..
             } => {
                 net_hosts.insert(host.clone());
             }
