@@ -21,11 +21,12 @@ pub mod inspector;
 pub mod profiler;
 pub mod transpiler;
 
-use rquickjs::{AsyncContext, AsyncRuntime, Function, Module};
+use rquickjs::{AsyncContext, AsyncRuntime, Function};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use vvva_core::Runtime;
+use vvva_firewall::Firewall;
 use vvva_permissions::PermissionState;
 
 use builtins::TimerManager;
@@ -81,7 +82,14 @@ pub struct JsEngine {
 
 impl JsEngine {
     pub async fn new(permissions: Arc<PermissionState>) -> anyhow::Result<Self> {
-        Self::new_with_inspector(permissions, None).await
+        Self::new_full(permissions, None, None, None).await
+    }
+
+    pub async fn new_with_firewall(
+        permissions: Arc<PermissionState>,
+        firewall: Arc<Firewall>,
+    ) -> anyhow::Result<Self> {
+        Self::new_full(permissions, None, None, Some(firewall)).await
     }
 
     /// Create a `JsEngine` with an optional CDP inspector bound to `inspect_addr`.
@@ -89,7 +97,15 @@ impl JsEngine {
         permissions: Arc<PermissionState>,
         inspect_addr: Option<SocketAddr>,
     ) -> anyhow::Result<Self> {
-        Self::new_full(permissions, inspect_addr, None).await
+        Self::new_full(permissions, inspect_addr, None, None).await
+    }
+
+    pub async fn new_with_firewall_and_inspector(
+        permissions: Arc<PermissionState>,
+        firewall: Arc<Firewall>,
+        inspect_addr: Option<SocketAddr>,
+    ) -> anyhow::Result<Self> {
+        Self::new_full(permissions, inspect_addr, None, Some(firewall)).await
     }
 
     /// Create a `JsEngine` with CPU profiling enabled.
@@ -99,13 +115,14 @@ impl JsEngine {
         permissions: Arc<PermissionState>,
         interval_ms: u32,
     ) -> anyhow::Result<Self> {
-        Self::new_full(permissions, None, Some(interval_ms)).await
+        Self::new_full(permissions, None, Some(interval_ms), None).await
     }
 
     async fn new_full(
         permissions: Arc<PermissionState>,
         inspect_addr: Option<SocketAddr>,
         prof_interval_ms: Option<u32>,
+        firewall: Option<Arc<Firewall>>,
     ) -> anyhow::Result<Self> {
         let runtime = AsyncRuntime::new()?;
         let timer_manager = TimerManager::new();
@@ -139,6 +156,7 @@ impl JsEngine {
             let insp = inspector.clone();
             let prof_js = prof_interval_ms.map(profiler::profiler_js);
             let prof_handle = profiler.clone();
+            let fw = firewall;
             context
                 .with(move |ctx: rquickjs::Ctx| {
                     // Install async context hook FIRST — must be wired before any
@@ -148,7 +166,7 @@ impl JsEngine {
                         unsafe { rquickjs_sys::JS_GetRuntime(rt_ptr) } as *mut std::ffi::c_void;
                     unsafe { async_context::install(&ctx, rt_ptr) }?;
 
-                    builtins::inject_all(&ctx, perms, tm)?;
+                    builtins::inject_all(&ctx, perms, tm, fw)?;
 
                     // Inject __3va_debugger__ if inspector is active.
                     if let Some(state) = insp {
@@ -260,6 +278,7 @@ impl JsEngine {
         let source = std::fs::read_to_string(path)?;
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_jsx_ext = matches!(ext, "tsx" | "jsx");
         let transpiled = match ext {
             "tsx" | "jsx" => transpiler::transpile_jsx(&source),
             "ts" | "mts" | "cts" => transpiler::transpile(&source),
@@ -287,42 +306,56 @@ impl JsEngine {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
+        // Compute a proper file:// URL for import.meta.url.
+        let meta_url = url::Url::from_file_path(&canonical)
+            .map(|u| u.to_string())
+            .unwrap_or_else(|_| format!("file://{}", filename.replace('\\', "/")));
+
         let is_esm = is_esm_source(&code);
+
+        // When the entry file is ESM (has import/export), convert to CJS via OXC so
+        // all `import` statements become `require()` calls handled by the existing shim.
+        // transpile_to_cjs also rewrites import.meta.* → __vvva_meta_* stubs.
+        // Non-ESM files may still contain import.meta (e.g. CJS bundles from frameworks),
+        // so we always run the import.meta replacer regardless.
+        let code = if is_esm {
+            transpiler::transpile_to_cjs(&code, is_jsx_ext)
+        } else {
+            transpiler::replace_import_meta(&code)
+        };
 
         self.context
             .with(|ctx| -> anyhow::Result<()> {
                 // Escape backslashes first (Windows paths), then quotes.
                 let f = filename.replace('\\', "\\\\").replace('\'', "\\'");
                 let d = dirname.replace('\\', "\\\\").replace('\'', "\\'");
+                let u = meta_url.replace('\\', "\\\\").replace('\'', "\\'");
 
-                if is_esm {
-                    let argv_setup = format!(
-                        "if (globalThis.process && Array.isArray(globalThis.process.argv) \
-                         && globalThis.process.argv.length < 2) \
-                         {{ globalThis.process.argv.push('{}'); }}",
-                        f
-                    );
-                    ctx.eval::<(), _>(argv_setup.as_str())
-                        .map_err(|e| catch_js(&ctx, e))?;
-                    let module = Module::declare(ctx.clone(), filename.as_str(), code.as_str())
-                        .map_err(|e| catch_js(&ctx, e))?;
-                    let (_module_eval, _promise) = module.eval().map_err(|e| catch_js(&ctx, e))?;
-                    Ok(())
-                } else {
-                    let setup = format!(
-                        "globalThis.__filename = '{f}'; globalThis.__dirname = '{d}';\
-                         if (globalThis.process && Array.isArray(globalThis.process.argv) \
-                         && globalThis.process.argv.length < 2) \
-                         {{ globalThis.process.argv.push('{f}'); }}",
-                        f = f,
-                        d = d,
-                    );
-                    ctx.eval::<(), _>(setup.as_str())
-                        .map_err(|e| catch_js(&ctx, e))?;
-                    ctx.eval::<rquickjs::Value, _>(code.as_str())
-                        .map(|_| ())
-                        .map_err(|e| catch_js(&ctx, e))
-                }
+                let setup = format!(
+                    "globalThis.__filename = '{f}'; globalThis.__dirname = '{d}';\
+                     globalThis.__vvva_meta_url__ = '{u}';\
+                     globalThis.__vvva_meta_env__ = (typeof process !== 'undefined' ? \
+                       Object.assign(Object.create(null), \
+                         {{ MODE: (process.env && process.env.NODE_ENV) || 'production', \
+                            PROD: (process.env && process.env.NODE_ENV) !== 'development', \
+                            DEV:  (process.env && process.env.NODE_ENV) === 'development', \
+                            SSR:  true, \
+                            BASE_URL: '/' }}, process.env) : \
+                       {{ MODE: 'production', PROD: true, DEV: false, SSR: true, BASE_URL: '/' }});\
+                     if (typeof globalThis.__vvva_meta_resolve__ === 'undefined') \
+                       globalThis.__vvva_meta_resolve__ = function(s) {{ return require.resolve(s); }};\
+                     if (typeof globalThis.__vvva_meta_glob__ === 'undefined') \
+                       globalThis.__vvva_meta_glob__ = function() {{ return {{}}; }};\
+                     if (globalThis.process && Array.isArray(globalThis.process.argv) \
+                     && globalThis.process.argv.length < 2) \
+                     {{ globalThis.process.argv.push('{f}'); }}",
+                    f = f, d = d, u = u,
+                );
+                ctx.eval::<(), _>(setup.as_str())
+                    .map_err(|e| catch_js(&ctx, e))?;
+                ctx.eval::<rquickjs::Value, _>(code.as_str())
+                    .map(|_| ())
+                    .map_err(|e| catch_js(&ctx, e))
             })
             .await?;
 
@@ -394,6 +427,14 @@ impl JsEngine {
                     .await
                     .is_err();
             has_pending_async = idle_timed_out;
+
+            // 3.5a Drain NAPI threadsafe function call queue (background threads → JS main thread)
+            self.context
+                .with(|_ctx| -> rquickjs::Result<()> {
+                    unsafe { builtins::napi::drain_tsfn_queue() };
+                    Ok(())
+                })
+                .await?;
 
             // 3.5 Drain setImmediate queue (Node.js "check" phase, after I/O and promises)
             self.context

@@ -18,6 +18,7 @@ pub mod zlib;
 
 use rquickjs::Ctx;
 use std::sync::Arc;
+use vvva_firewall::Firewall;
 use vvva_permissions::PermissionState;
 
 pub use timers::TimerManager;
@@ -26,6 +27,7 @@ pub fn inject_all(
     ctx: &Ctx,
     permissions: Arc<PermissionState>,
     timer_manager: Arc<TimerManager>,
+    firewall: Option<Arc<Firewall>>,
 ) -> rquickjs::Result<()> {
     console::inject_console(ctx)?;
     timers::inject_timers(ctx, timer_manager)?;
@@ -81,7 +83,7 @@ pub fn inject_all(
     fetch::inject_fetch(ctx, permissions.clone())?;
     fs::inject_fs(ctx, permissions.clone())?;
     tcp::inject_tcp(ctx, permissions.clone())?;
-    http_server::inject_http_server(ctx, permissions.clone())?;
+    http_server::inject_http_server(ctx, permissions.clone(), firewall)?;
     modules::inject_require(ctx, permissions.clone())?;
     websocket::inject_websocket(ctx, permissions.clone())?;
     // These run after inject_require so they can overwrite the placeholder stubs

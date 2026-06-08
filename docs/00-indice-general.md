@@ -77,6 +77,7 @@
 - [05-post-quantum.md](10-security/05-post-quantum.md) - Post-quantum cryptography
 - [06-osv-audit.md](10-security/06-osv-audit.md) - Vulnerability audit (OSV)
 - [07-http-performance.md](10-security/07-http-performance.md) - HTTP benchmarks, connection rate limiting, Slowloris protection
+- [08-firewall.md](10-security/08-firewall.md) - Firewall interno HTTP: Slowloris, RUDY, rate limiting, blocklist, configuración
 
 ## Volume 11: APIs and Reference
 
@@ -109,12 +110,13 @@
 - [CHANGELOG.md](CHANGELOG.md) — Version history (Keep a Changelog 1.0.0)
 - [changelog-2026-06-01.md](changelog-2026-06-01.md) — Security/correctness fixes from code-review (10 findings)
 - [changelog-2026-06-03.md](changelog-2026-06-03.md) — Expo/React Native package support + ESM→CJS engine fixes (45/45 tests)
+- [changelog-2026-06-05.md](changelog-2026-06-05.md) — Firewall interno HTTP (`vvva_firewall`): Slowloris/RUDY/rate-limit/blocklist + 13 nuevos tests
 
 ---
 
 **Document Identifier:** 3VA-SPEC-2026-001
 **Version:** 2.0.0
-**Date:** 2026-06-03
+**Date:** 2026-06-05
 **Classification:** Public
 **Status:** v1.0.0 Released · v2.0.0 Draft
 

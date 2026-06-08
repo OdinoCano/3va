@@ -8,6 +8,7 @@ edition = "2024"
 tempfile.workspace = true
 tungstenite = { workspace = true }
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+vvva_firewall = { path = "../firewall" }
 
 [[test]]
 name = "fs_watch"
@@ -48,6 +49,10 @@ path = "tests/blob_file_module.rs"
 [[test]]
 name = "http_server"
 path = "tests/http_server.rs"
+
+[[test]]
+name = "framework_compat"
+path = "tests/framework_compat.rs"
 
 [[test]]
 name = "net_server"
@@ -97,6 +102,7 @@ pbkdf2 = { workspace = true }
 scrypt = { workspace = true }
 vvva_core = { path = "../core" }
 vvva_crypto = { path = "../crypto" }
+vvva_firewall = { path = "../firewall" }
 vvva_permissions = { path = "../permissions" }
 hex = "0.4"
 base64.workspace = true

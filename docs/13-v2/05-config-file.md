@@ -74,6 +74,22 @@ export default {
     hoisting: true,
     parallelism: 4,      // max concurrent packages during workspace run
   },
+
+  // HTTP server firewall (applied to all http.createServer() instances)
+  firewall: {
+    enabled: true,
+    rateLimitRps: 100,           // max sustained req/s per IP
+    rateLimitBurst: 200,         // burst capacity before throttling
+    autoBlockThreshold: 10,      // violations before auto-block
+    blockDurationSecs: 300,      // block duration in seconds
+    maxConnectionsPerIp: 50,     // simultaneous connections per IP
+    maxConnectionsTotal: 10_000, // total simultaneous connections
+    headerTimeoutMs: 10_000,     // Slowloris protection: header read deadline
+    bodyTimeoutMs: 30_000,       // RUDY protection: body read deadline
+    maxHeaderCount: 100,         // max HTTP headers per request
+    maxHeaderBytes: 16_384,      // max combined header size (bytes)
+    maxBodyBytes: 0,             // 0 = internal 100 MiB cap
+  },
 } satisfies Config;
 ```
 

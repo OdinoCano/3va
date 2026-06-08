@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use vvva_config::ProjectConfig;
+use vvva_firewall::{Firewall, FirewallConfig};
 
 pub mod accessibility;
 pub mod proc;
@@ -1297,10 +1298,16 @@ fn build_permissions(
             permissions.grant(vvva_permissions::Capability::FileRead(root));
         } else {
             for path in reads {
-                let canon = std::path::Path::new(path)
-                    .canonicalize()
-                    .unwrap_or_else(|_| PathBuf::from(path));
-                permissions.grant(vvva_permissions::Capability::FileRead(canon));
+                let raw = PathBuf::from(path);
+                // Grant both the path as specified AND its canonicalized form.
+                // This lets users write --allow-read=/lib even when /lib is a
+                // symlink to /usr/lib — paths under both /lib and /usr/lib match.
+                permissions.grant(vvva_permissions::Capability::FileRead(raw.clone()));
+                if let Ok(canon) = raw.canonicalize() {
+                    if canon != raw {
+                        permissions.grant(vvva_permissions::Capability::FileRead(canon));
+                    }
+                }
             }
         }
     }
@@ -1323,10 +1330,13 @@ fn build_permissions(
             permissions.grant(vvva_permissions::Capability::FileWrite(root));
         } else {
             for path in writes {
-                let canon = std::path::Path::new(path)
-                    .canonicalize()
-                    .unwrap_or_else(|_| PathBuf::from(path));
-                permissions.grant(vvva_permissions::Capability::FileWrite(canon));
+                let raw = PathBuf::from(path);
+                permissions.grant(vvva_permissions::Capability::FileWrite(raw.clone()));
+                if let Ok(canon) = raw.canonicalize() {
+                    if canon != raw {
+                        permissions.grant(vvva_permissions::Capability::FileWrite(canon));
+                    }
+                }
             }
         }
     }
@@ -2003,6 +2013,36 @@ async fn main() -> anyhow::Result<()> {
             let permissions = Arc::new(permissions);
             info!("3va Runtime initialized securely.");
 
+            // Build firewall from project config (falls back to safe defaults).
+            let firewall = {
+                let cwd = file
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf();
+                let fw_cfg = ProjectConfig::discover(cwd)
+                    .ok()
+                    .flatten()
+                    .map(|c| {
+                        let fc = &c.firewall;
+                        FirewallConfig {
+                            enabled: fc.enabled,
+                            rate_limit_rps: fc.rate_limit_rps,
+                            rate_limit_burst: fc.rate_limit_burst,
+                            auto_block_threshold: fc.auto_block_threshold,
+                            block_duration_secs: fc.block_duration_secs,
+                            max_connections_per_ip: fc.max_connections_per_ip,
+                            max_connections_total: fc.max_connections_total,
+                            header_timeout_ms: fc.header_timeout_ms,
+                            body_timeout_ms: fc.body_timeout_ms,
+                            max_header_count: fc.max_header_count,
+                            max_header_bytes: fc.max_header_bytes,
+                            max_body_bytes: fc.max_body_bytes,
+                        }
+                    })
+                    .unwrap_or_default();
+                Firewall::new(fw_cfg)
+            };
+
             let inspect_addr = inspect.as_deref().map(|s| {
                 s.parse::<std::net::SocketAddr>().unwrap_or_else(|_| {
                     eprintln!("[inspector] Invalid address '{s}', defaulting to 127.0.0.1:9229");
@@ -2045,10 +2085,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             } else {
-                let engine =
-                    vvva_js::JsEngine::new_with_inspector(permissions.clone(), inspect_addr)
-                        .await?;
-                // Execute file (transpiles TypeScript automatically); event loop runs inside eval_file
+                let engine = vvva_js::JsEngine::new_with_firewall_and_inspector(
+                    permissions.clone(),
+                    firewall,
+                    inspect_addr,
+                )
+                .await?;
                 engine.eval_file_with_args(file, script_args).await?;
             }
 

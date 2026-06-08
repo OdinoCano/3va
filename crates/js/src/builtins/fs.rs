@@ -84,15 +84,55 @@ fn js_err<'js>(ctx: &Ctx<'js>, msg: String) -> rquickjs::Error {
     }
 }
 
+/// Create a Node.js-style filesystem error with a `.code` property so that
+/// callers (e.g. Prisma) can distinguish ENOENT from other errors.
+fn fs_err<'js>(ctx: &Ctx<'js>, io_err: &std::io::Error, path: &str) -> rquickjs::Error {
+    let code = match io_err.kind() {
+        std::io::ErrorKind::NotFound => "ENOENT",
+        std::io::ErrorKind::PermissionDenied => "EACCES",
+        std::io::ErrorKind::AlreadyExists => "EEXIST",
+        std::io::ErrorKind::IsADirectory => "EISDIR",
+        _ => "EIO",
+    };
+    let msg = format!(
+        "{}: {} (os error {}): '{}'",
+        code,
+        io_err,
+        io_err.raw_os_error().unwrap_or(0),
+        path
+    );
+    let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped_path = path.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        "(function(){{var e=new Error(\"{}\");e.code=\"{}\";e.path=\"{}\";return e;}})()",
+        escaped_msg, code, escaped_path
+    );
+    match ctx.eval::<rquickjs::Value, _>(script.as_str()) {
+        Ok(v) => ctx.throw(v),
+        Err(e) => e,
+    }
+}
+
 fn perm_err<'js>(ctx: &Ctx<'js>, flag: &str, path: &std::path::Path) -> rquickjs::Error {
-    js_err(
-        ctx,
-        format!(
-            "Permission denied: --allow-{}={} is required",
-            flag,
-            path.display()
-        ),
-    )
+    let msg = format!(
+        "Permission denied: --allow-{}={} is required",
+        flag,
+        path.display()
+    );
+    let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped_path = path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let script = format!(
+        "(function(){{var e=new Error(\"{}\");e.code=\"EACCES\";e.path=\"{}\";return e;}})()",
+        escaped_msg, escaped_path
+    );
+    match ctx.eval::<rquickjs::Value, _>(script.as_str()) {
+        Ok(v) => ctx.throw(v),
+        Err(_) => js_err(ctx, msg),
+    }
 }
 
 fn stat_meta_to_json(meta: &std::fs::Metadata) -> String {
@@ -519,8 +559,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 if !perms.check(&Capability::FileRead(path.clone())) {
                     return Err(perm_err(&ctx, "read", &path));
                 }
-                let entries = std::fs::read_dir(&path)
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
+                let entries = std::fs::read_dir(&path).map_err(|e| fs_err(&ctx, &e, &path_str))?;
                 let names: Vec<String> = entries
                     .flatten()
                     .filter_map(|e| e.file_name().into_string().ok())

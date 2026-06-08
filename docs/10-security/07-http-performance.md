@@ -81,17 +81,23 @@ Read headers (with timeout)
 
 ---
 
-## 7.5 v2 Roadmap: Adaptive Rate Limiting and RUDY Detection
+## 7.5 v2.0.0: Firewall Interno (`vvva_firewall`)
 
-The v2 roadmap targets two additional protections:
+La v2.0.0 implementa el firewall completo como un crate separado. Sustituye el limitador de conexiones fijo anterior.
 
-### Adaptive rate limiting
+### Rate limiting adaptativo por IP
 
-Instead of a fixed connection ceiling, the limiter will track request rate per source IP and apply per-IP caps. Connections from well-behaved clients are unaffected; a single client driving excessive load gets throttled independently.
+El token bucket per-IP (`rate_limit_rps` / `rate_limit_burst`) throttlea a cada origen de forma independiente. Las IPs legítimas no se ven afectadas por el abuso de otras. Tras `auto_block_threshold` violaciones, la IP se añade al blocklist automáticamente.
 
-### RUDY (R-U-Dead-Yet) detection
+### Detección de RUDY
 
-RUDY attacks send POST bodies extremely slowly to hold connections open. Unlike Slowloris (which targets headers), RUDY targets the body read phase. v2 will add a body read timeout that applies the same shed-and-close logic used for Slowloris.
+El cuerpo de la petición ahora está protegido por `body_timeout_ms`. Un cliente que envía el cuerpo byte a byte no puede bloquear un slot de conexión indefinidamente — la lectura de `read_exact` se cancela con timeout.
+
+### Límites de cabeceras
+
+`max_header_count` y `max_header_bytes` frenan los ataques de header flood antes de que el cuerpo sea leído.
+
+> Documentación completa: [`08-firewall.md`](08-firewall.md)
 
 ---
 

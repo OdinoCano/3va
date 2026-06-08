@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use vvva_firewall::{Firewall, FirewallConfig};
 use vvva_js::JsEngine;
 use vvva_permissions::{Capability, PermissionState};
 
@@ -20,6 +21,15 @@ async fn engine_with_net() -> JsEngine {
     let perms = PermissionState::new();
     perms.grant(Capability::Network("127.0.0.1".to_string()));
     JsEngine::new(Arc::new(perms)).await.unwrap()
+}
+
+async fn engine_with_firewall(config: FirewallConfig) -> JsEngine {
+    let perms = PermissionState::new();
+    perms.grant(Capability::Network("127.0.0.1".to_string()));
+    let fw = Firewall::new(config);
+    JsEngine::new_with_firewall(Arc::new(perms), fw)
+        .await
+        .unwrap()
 }
 
 fn free_port() -> u16 {
@@ -362,4 +372,251 @@ async fn server_survives_oversized_content_length_with_early_close() {
     // A legitimate follow-up request must still succeed.
     let resp = drive_until(&e, raw_http(port, "GET", "/health", "")).await;
     assert_eq!(response_status(&resp), 200);
+}
+
+// ── Firewall tests ─────────────────────────────────────────────────────────────
+
+/// Verify that every accepted request contains the `remoteAddress` of the client
+/// in `req.socket.remoteAddress` (populated from the `remoteAddress` JSON field).
+#[tokio::test]
+async fn request_exposes_remote_address() {
+    let port = free_port();
+    let e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__remoteAddr = '';
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__remoteAddr = req.socket.remoteAddress;
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drive_until(&e, raw_http(port, "GET", "/", "")).await;
+
+    let addr = e.eval_to_string("globalThis.__remoteAddr").await.unwrap();
+    assert_eq!(addr, "127.0.0.1");
+}
+
+/// Verify that once a client exhausts its token-bucket burst, subsequent requests
+/// receive HTTP 429 Too Many Requests without crashing the server.
+///
+/// Config: burst=2, rps=1. Requests 1-2 are allowed; request 3 is rate-limited.
+#[tokio::test]
+async fn firewall_rate_limits_after_burst_exhausted() {
+    let port = free_port();
+    let e = engine_with_firewall(FirewallConfig {
+        rate_limit_rps: 1,
+        rate_limit_burst: 2,
+        auto_block_threshold: 100, // don't auto-block during this test
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // First two requests consume the burst — must succeed.
+    let r1 = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(response_status(&r1), 200, "request 1 should be allowed");
+
+    let r2 = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(response_status(&r2), 200, "request 2 should be allowed");
+
+    // Third request with no time to refill → rate limited.
+    let r3 = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(
+        response_status(&r3),
+        429,
+        "request 3 should be rate limited\nfull response:\n{}",
+        r3
+    );
+}
+
+/// Verify that after enough rate-limit violations the IP is auto-blocked and
+/// subsequent connection attempts receive HTTP 403 Forbidden.
+///
+/// Config: burst=2, rps=1, threshold=3.
+/// Requests 1-2 → 200; requests 3-4 → 429 (violations 1-2); request 5 → 403 (auto-blocked).
+#[tokio::test]
+async fn firewall_auto_blocks_after_threshold() {
+    let port = free_port();
+    let e = engine_with_firewall(FirewallConfig {
+        rate_limit_rps: 1,
+        rate_limit_burst: 2,
+        auto_block_threshold: 3,
+        block_duration_secs: 60,
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut statuses = Vec::new();
+    for _ in 0..5 {
+        let resp = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+        statuses.push(response_status(&resp));
+    }
+
+    assert_eq!(statuses[0], 200, "req 1 should be allowed");
+    assert_eq!(statuses[1], 200, "req 2 should be allowed");
+    assert_eq!(statuses[2], 429, "req 3 should be rate limited");
+    assert_eq!(statuses[3], 429, "req 4 should be rate limited");
+    assert_eq!(
+        statuses[4], 403,
+        "req 5 should be blocked (auto-blocked after threshold)"
+    );
+}
+
+/// Verify the server drops a request that sends more headers than `max_header_count`
+/// and continues accepting subsequent valid requests.
+#[tokio::test]
+async fn firewall_rejects_header_flood_and_continues() {
+    let port = free_port();
+    let e = engine_with_firewall(FirewallConfig {
+        max_header_count: 5,
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__okCount = 0;
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__okCount++;
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send a request with 10 headers (exceeds limit of 5) — server should drop it.
+    drive_until(&e, async move {
+        if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+            let mut req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n".to_string();
+            for i in 0..10 {
+                req.push_str(&format!("X-Flood-{i}: value\r\n"));
+            }
+            req.push_str("\r\n");
+            let _ = stream.write_all(req.as_bytes()).await;
+            // Read whatever comes back (may be empty — server drops the connection).
+            let mut buf = vec![0u8; 256];
+            let _ = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf)).await;
+        }
+    })
+    .await;
+
+    // Allow the server event loop to recover.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // A normal request must still succeed.
+    let resp = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(
+        response_status(&resp),
+        200,
+        "server must accept requests after header flood"
+    );
+
+    let count = e
+        .eval_to_string("String(globalThis.__okCount)")
+        .await
+        .unwrap();
+    assert_eq!(count, "1", "only the valid request should have reached JS");
+}
+
+/// Verify that a slow connection (Slowloris: sends the request line then stalls)
+/// is timed out and the server recovers to serve subsequent requests normally.
+#[tokio::test]
+async fn firewall_slowloris_timeout_and_recovery() {
+    let port = free_port();
+    let e = engine_with_firewall(FirewallConfig {
+        header_timeout_ms: 300, // very tight: 300 ms
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__okCount = 0;
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__okCount++;
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Simulate Slowloris: connect and send only the request line, then stall.
+    // Never send the blank line that ends the headers, so the server's read_line
+    // call will time out after header_timeout_ms.
+    drive_until(&e, async move {
+        if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+            // Send the request line but never the header-terminating \r\n.
+            let _ = stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+                .await;
+            // Hold the connection open past the timeout.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await;
+
+    // A normal request after the timeout must succeed.
+    let resp = drive_until(&e, raw_http(port, "GET", "/ok", "")).await;
+    assert_eq!(
+        response_status(&resp),
+        200,
+        "server must recover after Slowloris timeout"
+    );
+
+    let count = e
+        .eval_to_string("String(globalThis.__okCount)")
+        .await
+        .unwrap();
+    assert_eq!(count, "1");
 }
