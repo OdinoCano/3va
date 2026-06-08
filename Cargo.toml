@@ -42,7 +42,10 @@ wat = "1.0"
 ml-kem = { version = "0.3", features = ["getrandom"] }
 ml-dsa = { version = "0.1", features = ["getrandom"] }
 aes-gcm = "0.10"
-native-tls = "0.2"
+# "vendored" compiles OpenSSL from source on Linux (no-op on macOS/Windows).
+# Required for cross-compilation to aarch64 where the target sysroot has no
+# pre-installed OpenSSL dev headers.
+native-tls = { version = "0.2", features = ["vendored"] }
 rsa = "0.9"
 p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
 p384 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
