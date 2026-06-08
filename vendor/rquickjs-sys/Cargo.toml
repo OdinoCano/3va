@@ -27,7 +27,7 @@ categories = ["external-ffi-bindings"]
 license = "MIT"
 repository = "https://github.com/OdinoCano/3va"
 homepage = "https://github.com/OdinoCano/3va"
-exclude = ["Cargo.toml.orig"]
+exclude = ["Cargo.toml.orig", ".cargo_vcs_info.json"]
 
 [build-dependencies.bindgen-rs]
 version = "0.69"
