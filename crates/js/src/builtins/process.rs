@@ -467,6 +467,20 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         })?,
     )?;
 
+    // --- __isatty(fd) — real TTY detection via std::io::IsTerminal ---
+    globals.set(
+        "__isatty",
+        Function::new(ctx.clone(), |fd: i32| -> bool {
+            use std::io::IsTerminal;
+            match fd {
+                0 => std::io::stdin().is_terminal(),
+                1 => std::io::stdout().is_terminal(),
+                2 => std::io::stderr().is_terminal(),
+                _ => false,
+            }
+        })?,
+    )?;
+
     // --- process object built via native Rust APIs (no format-string injection risk) ---
     let process = Object::new(ctx.clone())?;
 

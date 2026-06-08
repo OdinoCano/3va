@@ -118,6 +118,9 @@ tokio.workspace = true
 url.workspace = true
 flate2.workspace = true
 aes-gcm = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+ctr = { workspace = true }
 native-tls = { workspace = true }
 rsa = { workspace = true }
 p256 = { workspace = true }

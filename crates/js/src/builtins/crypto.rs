@@ -1,3 +1,6 @@
+use aes::cipher::{
+    BlockDecryptMut, BlockEncryptMut, KeyIvInit, StreamCipher, block_padding::Pkcs7,
+};
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce};
 use hmac::{Hmac, Mac};
@@ -10,6 +13,16 @@ use rquickjs::{Ctx, Function, Result};
 use sha1::Sha1;
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 use vvva_crypto as pq;
+
+type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+type Aes192CbcEnc = cbc::Encryptor<aes::Aes192>;
+type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
+type Aes192CbcDec = cbc::Decryptor<aes::Aes192>;
+type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
+type Aes192Ctr = ctr::Ctr128BE<aes::Aes192>;
+type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
 
 /// Encode DER bytes as a PEM block (64-char line wrapping).
 fn to_pem(label: &str, der: &[u8]) -> String {
@@ -301,6 +314,93 @@ async fn do_pbkdf2(
     .await?
 }
 
+fn do_pbkdf2_sync(
+    password: Vec<u8>,
+    salt: Vec<u8>,
+    iterations: u32,
+    keylen: usize,
+    digest: String,
+) -> anyhow::Result<Vec<u8>> {
+    let keylen = keylen.min(64 * 1024);
+    let mut out = vec![0u8; keylen];
+    match norm_alg(&digest).as_str() {
+        "sha1" => pbkdf2_hmac::<Sha1>(&password, &salt, iterations, &mut out),
+        "sha224" => pbkdf2_hmac::<Sha224>(&password, &salt, iterations, &mut out),
+        "sha256" => pbkdf2_hmac::<Sha256>(&password, &salt, iterations, &mut out),
+        "sha384" => pbkdf2_hmac::<Sha384>(&password, &salt, iterations, &mut out),
+        "sha512" => pbkdf2_hmac::<Sha512>(&password, &salt, iterations, &mut out),
+        other => return Err(anyhow::anyhow!("unsupported PBKDF2 digest: {other}")),
+    }
+    Ok(out)
+}
+
+fn do_cipher_one_shot(
+    alg: &str,
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    encrypt: bool,
+) -> anyhow::Result<Vec<u8>> {
+    let alg_lower = alg.to_lowercase();
+    match alg_lower.as_str() {
+        "aes-128-cbc" | "aes128" if encrypt => {
+            let enc = Aes128CbcEnc::new_from_slices(key, iv)
+                .map_err(|e| anyhow::anyhow!("aes-128-cbc key/iv error: {e}"))?;
+            Ok(enc.encrypt_padded_vec_mut::<Pkcs7>(data))
+        }
+        "aes-192-cbc" if encrypt => {
+            let enc = Aes192CbcEnc::new_from_slices(key, iv)
+                .map_err(|e| anyhow::anyhow!("aes-192-cbc key/iv error: {e}"))?;
+            Ok(enc.encrypt_padded_vec_mut::<Pkcs7>(data))
+        }
+        "aes-256-cbc" | "aes256" if encrypt => {
+            let enc = Aes256CbcEnc::new_from_slices(key, iv)
+                .map_err(|e| anyhow::anyhow!("aes-256-cbc key/iv error: {e}"))?;
+            Ok(enc.encrypt_padded_vec_mut::<Pkcs7>(data))
+        }
+        "aes-128-cbc" | "aes128" => {
+            let dec = Aes128CbcDec::new_from_slices(key, iv)
+                .map_err(|e| anyhow::anyhow!("aes-128-cbc key/iv error: {e}"))?;
+            dec.decrypt_padded_vec_mut::<Pkcs7>(data)
+                .map_err(|e| anyhow::anyhow!("aes-128-cbc decrypt error: {e}"))
+        }
+        "aes-192-cbc" => {
+            let dec = Aes192CbcDec::new_from_slices(key, iv)
+                .map_err(|e| anyhow::anyhow!("aes-192-cbc key/iv error: {e}"))?;
+            dec.decrypt_padded_vec_mut::<Pkcs7>(data)
+                .map_err(|e| anyhow::anyhow!("aes-192-cbc decrypt error: {e}"))
+        }
+        "aes-256-cbc" | "aes256" => {
+            let dec = Aes256CbcDec::new_from_slices(key, iv)
+                .map_err(|e| anyhow::anyhow!("aes-256-cbc key/iv error: {e}"))?;
+            dec.decrypt_padded_vec_mut::<Pkcs7>(data)
+                .map_err(|e| anyhow::anyhow!("aes-256-cbc decrypt error: {e}"))
+        }
+        "aes-128-ctr" => {
+            let mut cipher = Aes128Ctr::new_from_slices(key, iv)
+                .map_err(|e| anyhow::anyhow!("aes-128-ctr key/iv error: {e}"))?;
+            let mut out = data.to_vec();
+            cipher.apply_keystream(&mut out);
+            Ok(out)
+        }
+        "aes-192-ctr" => {
+            let mut cipher = Aes192Ctr::new_from_slices(key, iv)
+                .map_err(|e| anyhow::anyhow!("aes-192-ctr key/iv error: {e}"))?;
+            let mut out = data.to_vec();
+            cipher.apply_keystream(&mut out);
+            Ok(out)
+        }
+        "aes-256-ctr" => {
+            let mut cipher = Aes256Ctr::new_from_slices(key, iv)
+                .map_err(|e| anyhow::anyhow!("aes-256-ctr key/iv error: {e}"))?;
+            let mut out = data.to_vec();
+            cipher.apply_keystream(&mut out);
+            Ok(out)
+        }
+        other => Err(anyhow::anyhow!("unsupported cipher algorithm: {other}")),
+    }
+}
+
 async fn do_scrypt(
     password: Vec<u8>,
     salt: Vec<u8>,
@@ -445,6 +545,27 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
                         .map_err(|e| js_err("pbkdf2", e))
                 },
             ),
+        )?,
+    )?;
+
+    ctx.globals().set(
+        "__cryptoPbkdf2Sync",
+        Function::new(
+            ctx.clone(),
+            |password: Vec<u8>, salt: Vec<u8>, iterations: u32, keylen: usize, digest: String| {
+                do_pbkdf2_sync(password, salt, iterations, keylen, digest)
+                    .map_err(|e| js_err("pbkdf2Sync", e))
+            },
+        )?,
+    )?;
+
+    ctx.globals().set(
+        "__cryptoCipherOneShot",
+        Function::new(
+            ctx.clone(),
+            |alg: String, key: Vec<u8>, iv: Vec<u8>, data: Vec<u8>, encrypt: bool| {
+                do_cipher_one_shot(&alg, &key, &iv, &data, encrypt).map_err(|e| js_err("cipher", e))
+            },
         )?,
     )?;
 
@@ -771,7 +892,7 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
 
         createHash: function(alg) {
             var chunks = [];
-            return {
+            var h = {
                 update: function(data /*, encoding */) {
                     chunks.push(toBytes(data));
                     return this;
@@ -785,9 +906,12 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
                     return encodeBytes(raw, encoding);
                 },
                 copy: function() {
-                    throw new Error('Hash.copy() is not supported');
+                    var clone = crypto.createHash(alg);
+                    for (var i = 0; i < chunks.length; i++) clone.update(chunks[i]);
+                    return clone;
                 }
             };
+            return h;
         },
 
         // Shorthand: crypto.hash(alg, data[, outputEncoding]) — Node 21.7+
@@ -905,49 +1029,73 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
             return new Uint8Array(__cryptoScryptSync(toBytes(password), toBytes(salt), N, r, p, keylen));
         },
 
-        // ── Cipher (AES-GCM backed, Node-compatible API shape) ────────────────
-        // createCipheriv / createDecipheriv are used by many auth libraries.
-        // We only support 'aes-128-gcm' and 'aes-256-gcm' since that's what
-        // crypto.subtle can do natively.
+        // ── Cipher (AES-CBC/CTR/GCM, Node-compatible API shape) ──────────────
         createCipheriv: function(algorithm, key, iv, options) {
-            var alg = algorithm.toLowerCase().replace(/-/g, '');
+            var alg = algorithm.toLowerCase();
+            var isGcm = alg.indexOf('gcm') !== -1;
             var keyBytes = toBytes(key);
-            var ivBytes = toBytes(iv);
+            var ivBytes = iv ? toBytes(iv) : new Uint8Array(0);
             var chunks = [];
             var aad = new Uint8Array(0);
-            return {
+            var self = {
                 setAAD: function(buf) { aad = toBytes(buf); return this; },
-                update: function(data) { chunks.push(toBytes(data)); return new Uint8Array(0); },
-                final: function() {
-                    var all = [];
-                    for (var i = 0; i < chunks.length; i++) for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
-                    var result = __cryptoAesGcmEncrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), all, Array.from(aad));
-                    // result = ciphertext + 16-byte tag; expose tag via getAuthTag
-                    var ct = new Uint8Array(result.slice(0, result.length - 16));
-                    this._tag = new Uint8Array(result.slice(result.length - 16));
-                    return ct;
+                update: function(data, inputEncoding, outputEncoding) {
+                    var bytes = toBytes(data);
+                    if (!isGcm) {
+                        // For CBC/CTR: buffer all data, return empty until final()
+                        chunks.push(bytes);
+                        return new Uint8Array(0);
+                    }
+                    chunks.push(bytes);
+                    return new Uint8Array(0);
                 },
-                getAuthTag: function() { return this._tag || new Uint8Array(16); }
+                final: function(outputEncoding) {
+                    var all = [];
+                    for (var i = 0; i < chunks.length; i++)
+                        for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
+                    if (isGcm) {
+                        var result = __cryptoAesGcmEncrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), all, Array.from(aad));
+                        var ct = new Uint8Array(result.slice(0, result.length - 16));
+                        self._tag = new Uint8Array(result.slice(result.length - 16));
+                        return ct;
+                    } else {
+                        var result2 = __cryptoCipherOneShot(alg, Array.from(keyBytes), Array.from(ivBytes), all, true);
+                        return new Uint8Array(result2);
+                    }
+                },
+                getAuthTag: function() { return self._tag || new Uint8Array(16); }
             };
+            return self;
         },
 
         createDecipheriv: function(algorithm, key, iv, options) {
+            var alg = algorithm.toLowerCase();
+            var isGcm = alg.indexOf('gcm') !== -1;
             var keyBytes = toBytes(key);
-            var ivBytes = toBytes(iv);
+            var ivBytes = iv ? toBytes(iv) : new Uint8Array(0);
             var chunks = [];
             var aad = new Uint8Array(0);
             var authTag = null;
             return {
                 setAAD: function(buf) { aad = toBytes(buf); return this; },
                 setAuthTag: function(tag) { authTag = toBytes(tag); return this; },
-                update: function(data) { chunks.push(toBytes(data)); return new Uint8Array(0); },
-                final: function() {
+                update: function(data, inputEncoding, outputEncoding) {
+                    chunks.push(toBytes(data));
+                    return new Uint8Array(0);
+                },
+                final: function(outputEncoding) {
                     var all = [];
-                    for (var i = 0; i < chunks.length; i++) for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
-                    var tag = authTag || new Uint8Array(16);
-                    var ct_and_tag = all.concat(Array.from(tag));
-                    var result = __cryptoAesGcmDecrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), ct_and_tag, Array.from(aad));
-                    return new Uint8Array(result);
+                    for (var i = 0; i < chunks.length; i++)
+                        for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
+                    if (isGcm) {
+                        var tag = authTag || new Uint8Array(16);
+                        var ct_and_tag = all.concat(Array.from(tag));
+                        var result = __cryptoAesGcmDecrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), ct_and_tag, Array.from(aad));
+                        return new Uint8Array(result);
+                    } else {
+                        var result2 = __cryptoCipherOneShot(alg, Array.from(keyBytes), Array.from(ivBytes), all, false);
+                        return new Uint8Array(result2);
+                    }
                 }
             };
         },
