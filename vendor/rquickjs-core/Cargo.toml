@@ -30,6 +30,7 @@ categories = ["api-bindings"]
 license = "MIT"
 repository = "https://github.com/OdinoCano/3va"
 homepage = "https://github.com/OdinoCano/3va"
+exclude = ["Cargo.toml.orig"]
 
 [lib]
 doctest = false
