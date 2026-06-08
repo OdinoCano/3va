@@ -2859,9 +2859,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             };
         })();
 
-        // navigator — minimal WinterCG-compatible object
+        // navigator — minimal WinterCG-compatible object (not frozen so stubs can extend it)
         if (!globalThis.navigator) {
-            globalThis.navigator = Object.freeze({
+            globalThis.navigator = {
                 userAgent: '3va/0.1 (QuickJS)',
                 language: 'en-US',
                 languages: Object.freeze(['en-US', 'en']),
@@ -2870,7 +2870,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 platform: 'Linux x86_64',
                 cookieEnabled: false,
                 doNotTrack: '1',
-            });
+            };
         }
 
         // ── Headers ──────────────────────────────────────────────────────────
