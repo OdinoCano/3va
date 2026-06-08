@@ -250,6 +250,7 @@ fn format_ipv6_hex(hex: &str) -> String {
 /// Primary: runs `ip -j addr` (iproute2, available on all modern Linux).
 /// Fallback: parses /proc/net/if_inet6 for IPv6-only data.
 fn network_interfaces_json() -> String {
+    #[allow(unused_mut)] // mut is needed inside #[cfg(target_os = "linux")] blocks
     let mut result = serde_json::Map::new();
 
     #[cfg(target_os = "linux")]

@@ -1539,6 +1539,7 @@ pub async fn update_packages(
 /// moved without breaking links.  On non-Unix platforms we fall back to a
 /// direct hard-link copy because creating directory symlinks requires elevated
 /// privileges on Windows.
+#[allow(unused_variables)] // `version` used only in non-Windows cfg blocks
 fn create_virtual_symlink(
     name: &str,
     version: &str,
