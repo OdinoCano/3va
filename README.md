@@ -344,7 +344,7 @@ Full post-quantum TLS in production is the v3 roadmap target.
 
 Framework detection in `3va dev` supports: Next.js, Astro, Nuxt, SvelteKit, Remix, Gatsby, SolidStart, Qwik. For Express, Fastify, Koa and similar server frameworks — they run under `3va run` with appropriate permission flags.
 
-**Node.js compatibility note:** v2.0.0 covers the core API surface (fs, net, http, crypto, path, os, events, stream, buffer, timers, url, util, child_process, worker_threads stubs). Some advanced APIs (`cluster`, `dgram`, full `dns` resolver, `stream/web` WHATWG Streams) are targeted for v2.0.0.
+**Node.js compatibility note:** v2.0.0 covers the core API surface (fs, net, http, https, crypto, path, os, events, stream, buffer, timers, url, util, child_process, worker_threads, cluster). `dgram`, full DNS record resolution (MX/TXT/SRV/NS/CNAME), and some advanced APIs are partially implemented — see [`docs/05-js-engine/05-node-compat.md`](docs/05-js-engine/05-node-compat.md) for details.
 
 ---
 
@@ -376,7 +376,7 @@ The JavaScript engine is QuickJS embedded via `rquickjs`. QuickJS is a small, em
 |---------|--------|-------|
 | **2.0.0** | 2026-06-01 ✅ | Full runtime + PM + toolchain + Inspector + NAPI + WASM + PQ-TLS |
 | **1.5** | 2026 Q3 | `permissions suggest` (static analysis), `permissions learn` (syscall interception), package.json `"3va"` key, permission profiles for common frameworks |
-| **2.0.0** | 2027 | Node.js compat v2 (cluster, dgram, full dns, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting |
+| **2.0.0** | 2027 | Node.js compat v2 (full dns record resolution, repl, wasi, trace_events, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting |
 | **3.0** | TBD | Post-quantum TLS in full production mode |
 
 Full roadmap: [`docs/12-roadmap/`](docs/12-roadmap/)
