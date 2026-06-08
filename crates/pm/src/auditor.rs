@@ -574,7 +574,7 @@ pub async fn run_audit_in(force_refresh: bool, project_dir: &Path) -> anyhow::Re
 
     if !to_fetch.is_empty() {
         let client = reqwest::Client::builder()
-            .user_agent("3va-audit/0.1 (+https://github.com/sophava/3va)")
+            .user_agent("3va-audit/0.1 (+https://github.com/OdinoCano/3va)")
             .build()?;
 
         for chunk in to_fetch.chunks(BATCH_CHUNK_SIZE) {

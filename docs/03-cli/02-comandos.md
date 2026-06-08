@@ -756,7 +756,7 @@ Stops (if running) and permanently removes a process from 3va's management, incl
 
 ---
 
-### 2.7.4 `prof`
+### 2.8.7 `prof`
 
 Analyzes a `.cpuprofile` file produced by `3va run --prof` and prints the top hot functions or generates a flamegraph SVG.
 

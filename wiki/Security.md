@@ -4,7 +4,7 @@
 
 **Do not open a public issue.**
 
-Email `security@sophava.com` with:
+Email `edgarcano.166@gmail.com` with:
 - A description of the vulnerability
 - Reproduction steps
 - Affected versions (if known)

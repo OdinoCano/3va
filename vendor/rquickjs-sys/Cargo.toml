@@ -11,10 +11,10 @@
 
 [package]
 edition = "2021"
-name = "rquickjs-sys"
+name = "vvva-rquickjs-sys"
 version = "0.6.2"
 authors = ["Mees Delzenne <mees.delzenne@gmail.com>"]
-description = "QuickJS bindings for rquickjs"
+description = "Patched QuickJS C bindings for the 3va runtime"
 readme = "README.md"
 keywords = [
     "quickjs",
@@ -25,7 +25,8 @@ keywords = [
 ]
 categories = ["external-ffi-bindings"]
 license = "MIT"
-repository = "https://github.com/DelSkayn/rquickjs.git"
+repository = "https://github.com/OdinoCano/3va"
+homepage = "https://github.com/OdinoCano/3va"
 
 [build-dependencies.bindgen-rs]
 version = "0.69"

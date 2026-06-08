@@ -403,5 +403,5 @@ contra adversarios cuánticos futuros.
 
 ## Security Contact
 
-To report vulnerabilities: edgar@sophava.com
+To report vulnerabilities: edgarcano.166@gmail.com
 Do NOT open a public GitHub issue for security bugs.

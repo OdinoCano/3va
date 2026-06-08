@@ -44,4 +44,4 @@ Changes to the following require maintainer review regardless of who authored th
 
 ## Reporting security vulnerabilities
 
-Do **not** open a public issue. Email `security@sophava.com` with a description and reproduction steps.
+Do **not** open a public issue. Email `edgarcano.166@gmail.com` with a description and reproduction steps.

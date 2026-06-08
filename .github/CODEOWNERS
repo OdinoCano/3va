@@ -3,18 +3,18 @@
 # before the PR can be merged, regardless of who opened it.
 
 # Security-critical: permission model, capability enforcement
-/crates/permissions/                  @edgar-sophava
-/crates/js/src/builtins/             @edgar-sophava
-/crates/wasm/src/                    @edgar-sophava
+/crates/permissions/                  @OdinoCano
+/crates/js/src/builtins/             @OdinoCano
+/crates/wasm/src/                    @OdinoCano
 
 # CI / security pipelines — no one can weaken gates without review
-/.github/                             @edgar-sophava
+/.github/                             @OdinoCano
 
 # Dependency declarations — must be reviewed for supply-chain risk
-/Cargo.toml                           @edgar-sophava
-/Cargo.lock                           @edgar-sophava
-/deny.toml                            @edgar-sophava
+/Cargo.toml                           @OdinoCano
+/Cargo.lock                           @OdinoCano
+/deny.toml                            @OdinoCano
 
 # Workspace-wide configuration
-/.cargo/                              @edgar-sophava
-/rust-toolchain.toml                  @edgar-sophava
+/.cargo/                              @OdinoCano
+/rust-toolchain.toml                  @OdinoCano

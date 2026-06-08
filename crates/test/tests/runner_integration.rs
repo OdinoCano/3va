@@ -1,5 +1,5 @@
 // Pruebas de integración para TestRunner: verifica el pipeline completo
-// desde archivos .test.js/.test.ts hasta resultados ParseadosD.
+// desde archivos .test.js/.test.ts hasta resultados Parseados.
 //
 // Ejecutar: cargo test -p vvva_test --test runner_integration
 

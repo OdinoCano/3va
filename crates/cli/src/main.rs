@@ -1451,6 +1451,27 @@ enum StoreAction {
 }
 
 #[derive(Subcommand)]
+enum PermissionsAction {
+    /// Statically analyze source files and suggest the minimum required permissions
+    Suggest {
+        /// Files or directories to scan (default: current directory)
+        #[arg(num_args = 0..)]
+        paths: Vec<PathBuf>,
+        /// Output equivalent CLI flags instead of a config-file snippet
+        #[arg(long = "flags")]
+        flags: bool,
+    },
+    /// Run a script with all permissions enabled and report which ones it actually uses
+    Learn {
+        /// The script to observe
+        file: PathBuf,
+        /// Arguments to pass to the script (after --)
+        #[arg(last = true)]
+        script_args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Run a JavaScript or TypeScript file
@@ -1746,6 +1767,11 @@ enum Commands {
         /// Restore from .bak backups
         #[arg(long = "revert")]
         revert: bool,
+    },
+    /// Analyze or observe permissions required by this project
+    Permissions {
+        #[command(subcommand)]
+        action: PermissionsAction,
     },
 }
 
@@ -2500,6 +2526,14 @@ async fn main() -> anyhow::Result<()> {
         } => {
             run_codemod(paths, from, to, *dry_run, *no_backup, *revert)?;
         }
+        Commands::Permissions { action } => match action {
+            PermissionsAction::Suggest { paths, flags } => {
+                permissions_suggest(paths, *flags)?;
+            }
+            PermissionsAction::Learn { file, script_args } => {
+                permissions_learn(file, script_args).await?;
+            }
+        },
         Commands::Start { name, entry, args } => {
             let cwd = std::env::current_dir()?;
             let process_name = match name {
@@ -2841,6 +2875,373 @@ fn unified_diff(before: &str, after: &str, filename: &str) -> String {
         }
     }
     out
+}
+
+// ── permissions suggest ───────────────────────────────────────────────────────
+
+fn permissions_suggest(paths: &[PathBuf], flags: bool) -> anyhow::Result<()> {
+    let scan_paths: Vec<PathBuf> = if paths.is_empty() {
+        vec![std::env::current_dir()?]
+    } else {
+        paths.to_vec()
+    };
+
+    let files = collect_js_ts_files(&scan_paths);
+    if files.is_empty() {
+        println!("No .js/.ts files found to analyze.");
+        return Ok(());
+    }
+
+    let mut need_net = false;
+    let mut need_read = false;
+    let mut need_write = false;
+    let mut need_env = false;
+    let mut need_child_process = false;
+    let mut need_ffi = false;
+
+    for file in &files {
+        let Ok(src) = std::fs::read_to_string(file) else {
+            continue;
+        };
+
+        if src.contains("fetch(")
+            || src.contains("fetch (")
+            || src.contains("new Request(")
+            || src.contains("require('http')")
+            || src.contains("require(\"http\")")
+            || src.contains("require('https')")
+            || src.contains("require(\"https\")")
+            || src.contains("require('net')")
+            || src.contains("require(\"net\")")
+            || src.contains("from 'node:http'")
+            || src.contains("from \"node:http\"")
+            || src.contains("from 'http'")
+            || src.contains("from \"http\"")
+            || src.contains("from 'https'")
+            || src.contains("from \"https\"")
+        {
+            need_net = true;
+        }
+
+        if src.contains("readFile")
+            || src.contains("readFileSync")
+            || src.contains("readdir")
+            || src.contains("readdirSync")
+            || src.contains("require('fs')")
+            || src.contains("require(\"fs\")")
+            || src.contains("from 'fs'")
+            || src.contains("from \"fs\"")
+            || src.contains("from 'node:fs'")
+            || src.contains("from \"node:fs\"")
+            || src.contains("Deno.readFile")
+            || src.contains("Deno.readTextFile")
+            || src.contains("Deno.open")
+            || src.contains("fs.read")
+        {
+            need_read = true;
+        }
+
+        if src.contains("writeFile")
+            || src.contains("writeFileSync")
+            || src.contains("appendFile")
+            || src.contains("appendFileSync")
+            || src.contains("mkdirSync")
+            || src.contains("Deno.writeFile")
+            || src.contains("Deno.writeTextFile")
+            || src.contains("fs.write")
+            || src.contains("fs.unlink")
+            || src.contains("fs.rm(")
+            || src.contains("fs.rmdir")
+        {
+            need_write = true;
+        }
+
+        if src.contains("process.env")
+            || src.contains("Deno.env")
+            || src.contains("import.meta.env")
+        {
+            need_env = true;
+        }
+
+        if src.contains("child_process")
+            || src.contains("execSync")
+            || src.contains("spawnSync")
+            || src.contains("Deno.run")
+            || src.contains("Deno.Command")
+        {
+            need_child_process = true;
+        }
+
+        if src.contains("dlopen")
+            || src.contains("Deno.dlopen")
+            || src.contains("require('ffi')")
+            || src.contains("require(\"ffi\")")
+            || src.contains(".node\"")
+            || src.contains(".node'")
+        {
+            need_ffi = true;
+        }
+    }
+
+    println!("Analyzed {} file(s).\n", files.len());
+
+    if !need_net && !need_read && !need_write && !need_env && !need_child_process && !need_ffi {
+        println!("No permissions required — script appears fully sandboxed.");
+        return Ok(());
+    }
+
+    if flags {
+        let mut flag_parts: Vec<&str> = Vec::new();
+        if need_net {
+            flag_parts.push("--allow-net=");
+        }
+        if need_read {
+            flag_parts.push("--allow-read=.");
+        }
+        if need_write {
+            flag_parts.push("--allow-write=.");
+        }
+        if need_env {
+            flag_parts.push("--allow-env");
+        }
+        if need_child_process {
+            flag_parts.push("--allow-child-process");
+        }
+        if need_ffi {
+            flag_parts.push("--allow-ffi=.");
+        }
+        println!("3va run <your-script> {}", flag_parts.join(" "));
+    } else {
+        println!("Suggested `3va.config.toml` permissions section:\n");
+        println!("[run.permissions]");
+        if need_net {
+            println!("net = [\"*\"]  # narrow to specific hosts for tighter security");
+        }
+        if need_read {
+            println!("read = [\".\"]");
+        }
+        if need_write {
+            println!("write = [\".\"]");
+        }
+        if need_env {
+            println!("env = []  # scope to specific variables (e.g. [\"NODE_ENV\", \"PORT\"])");
+        }
+        if need_child_process {
+            println!("childProcess = true");
+        }
+        if need_ffi {
+            println!("ffi = [\".\"]");
+        }
+        println!();
+        println!(
+            "Note: paths set to '.' cover the current directory. Run\n\
+             `3va permissions learn <script>` to observe the exact paths\n\
+             accessed at runtime and further tighten the policy."
+        );
+    }
+
+    Ok(())
+}
+
+// ── permissions learn ─────────────────────────────────────────────────────────
+
+async fn permissions_learn(file: &PathBuf, script_args: &[String]) -> anyhow::Result<()> {
+    use std::collections::BTreeSet;
+    use vvva_permissions::AuditEvent;
+
+    // Grant every capability so nothing is blocked during observation.
+    let mut permissions = vvva_permissions::PermissionState::new();
+    permissions.grant(vvva_permissions::Capability::FileRead(PathBuf::from("/")));
+    permissions.grant(vvva_permissions::Capability::FileWrite(PathBuf::from("/")));
+    permissions.grant(vvva_permissions::Capability::Network("*".to_string()));
+    permissions.grant(vvva_permissions::Capability::EnvAccess);
+    permissions.grant(vvva_permissions::Capability::SpawnProcess);
+    permissions.grant(vvva_permissions::Capability::FFI(PathBuf::from("/")));
+
+    let log = Arc::new(Mutex::new(vvva_permissions::AuditLog::new()));
+    permissions.enable_audit(log.clone(), false); // record all checks, not just denials
+
+    let permissions = Arc::new(permissions);
+
+    println!(
+        "Running '{}' with all permissions to observe usage...\n",
+        file.display()
+    );
+
+    let engine = vvva_js::JsEngine::new(permissions.clone()).await?;
+
+    if !script_args.is_empty() {
+        let file_arg = serde_json::to_string(file.to_str().unwrap_or(""))?;
+        let args_json = serde_json::to_string(script_args)?;
+        let _ = engine
+            .eval(&format!(
+                "globalThis.process = globalThis.process || {{}}; \
+                 globalThis.process.argv = ['3va', {file_arg}].concat({args_json});"
+            ))
+            .await;
+    }
+
+    let src = std::fs::read_to_string(file)
+        .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", file.display(), e))?;
+
+    if let Err(e) = engine.eval(&src).await {
+        eprintln!("Warning: script exited with error: {e}");
+        eprintln!("Permissions observed before the error are still reported.\n");
+    }
+
+    let audit = log.lock().unwrap();
+
+    let mut net_hosts: BTreeSet<String> = Default::default();
+    let mut read_paths: BTreeSet<PathBuf> = Default::default();
+    let mut write_paths: BTreeSet<PathBuf> = Default::default();
+    let mut env_vars: BTreeSet<String> = Default::default();
+    let mut need_env_all = false;
+    let mut need_child_process = false;
+    let mut ffi_paths: BTreeSet<PathBuf> = Default::default();
+
+    for event in &audit.events {
+        match event {
+            AuditEvent::NetworkAccess {
+                host, allowed: true, ..
+            } => {
+                net_hosts.insert(host.clone());
+            }
+            AuditEvent::FileAccess {
+                path,
+                operation,
+                allowed: true,
+                ..
+            } => {
+                if operation == "read" {
+                    read_paths.insert(path.clone());
+                } else {
+                    write_paths.insert(path.clone());
+                }
+            }
+            AuditEvent::EnvAccess {
+                variable,
+                allowed: true,
+                ..
+            } => {
+                if variable == "*" {
+                    need_env_all = true;
+                } else {
+                    env_vars.insert(variable.clone());
+                }
+            }
+            AuditEvent::ProcessSpawn { allowed: true, .. } => {
+                need_child_process = true;
+            }
+            // FFI is encoded as PermissionDenied with reason="allowed" (see capability.rs).
+            AuditEvent::PermissionDenied {
+                capability,
+                resource,
+                reason,
+                ..
+            } if capability == "FFI" && reason == "allowed" => {
+                ffi_paths.insert(PathBuf::from(resource));
+            }
+            _ => {}
+        }
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let shorten = |p: &PathBuf| -> String {
+        p.strip_prefix(&cwd)
+            .map(|rel| format!("./{}", rel.display()))
+            .unwrap_or_else(|_| p.display().to_string())
+    };
+
+    // Remove paths that are already covered by another, shorter path in the set.
+    let minimize_paths = |paths: &BTreeSet<PathBuf>| -> Vec<String> {
+        let sorted: Vec<&PathBuf> = paths.iter().collect();
+        let mut mins: Vec<&PathBuf> = Vec::new();
+        for p in &sorted {
+            if !mins.iter().any(|m| p.starts_with(m)) {
+                mins.push(p);
+            }
+        }
+        mins.iter().map(|p| shorten(p)).collect()
+    };
+
+    let has_any = !net_hosts.is_empty()
+        || !read_paths.is_empty()
+        || !write_paths.is_empty()
+        || need_env_all
+        || !env_vars.is_empty()
+        || need_child_process
+        || !ffi_paths.is_empty();
+
+    if !has_any {
+        println!("No permission checks observed — script ran fully sandboxed.");
+        return Ok(());
+    }
+
+    let reads = minimize_paths(&read_paths);
+    let writes = minimize_paths(&write_paths);
+    let ffis = minimize_paths(&ffi_paths);
+
+    println!("Observed usage — suggested `3va.config.toml` section:\n");
+    println!("[run.permissions]");
+
+    if !net_hosts.is_empty() {
+        let hosts: Vec<String> = net_hosts.iter().map(|h| format!("\"{}\"", h)).collect();
+        println!("net = [{}]", hosts.join(", "));
+    }
+    if !reads.is_empty() {
+        let r: Vec<String> = reads.iter().map(|p| format!("\"{}\"", p)).collect();
+        println!("read = [{}]", r.join(", "));
+    }
+    if !writes.is_empty() {
+        let w: Vec<String> = writes.iter().map(|p| format!("\"{}\"", p)).collect();
+        println!("write = [{}]", w.join(", "));
+    }
+    if need_env_all {
+        println!("env = []  # script accessed all env vars; consider scoping to specific names");
+    } else if !env_vars.is_empty() {
+        let v: Vec<String> = env_vars.iter().map(|v| format!("\"{}\"", v)).collect();
+        println!("env = [{}]", v.join(", "));
+    }
+    if need_child_process {
+        println!("childProcess = true");
+    }
+    if !ffis.is_empty() {
+        let f: Vec<String> = ffis.iter().map(|p| format!("\"{}\"", p)).collect();
+        println!("ffi = [{}]", f.join(", "));
+    }
+
+    println!("\nEquivalent CLI flags:");
+    let mut cli_flags: Vec<String> = Vec::new();
+    if !net_hosts.is_empty() {
+        cli_flags.push(format!(
+            "--allow-net={}",
+            net_hosts.iter().cloned().collect::<Vec<_>>().join(",")
+        ));
+    }
+    if !reads.is_empty() {
+        cli_flags.push(format!("--allow-read={}", reads.join(",")));
+    }
+    if !writes.is_empty() {
+        cli_flags.push(format!("--allow-write={}", writes.join(",")));
+    }
+    if need_env_all {
+        cli_flags.push("--allow-env".to_string());
+    } else if !env_vars.is_empty() {
+        cli_flags.push(format!(
+            "--allow-env={}",
+            env_vars.iter().cloned().collect::<Vec<_>>().join(",")
+        ));
+    }
+    if need_child_process {
+        cli_flags.push("--allow-child-process".to_string());
+    }
+    if !ffis.is_empty() {
+        cli_flags.push(format!("--allow-ffi={}", ffis.join(",")));
+    }
+    println!("3va run {} {}", file.display(), cli_flags.join(" "));
+
+    Ok(())
 }
 
 #[cfg(test)]

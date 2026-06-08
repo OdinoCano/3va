@@ -1999,6 +1999,187 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             Http2Session.prototype.remoteSettings = { headerTableSize: 4096, enablePush: true, initialWindowSize: 65535, maxFrameSize: 16384, maxHeaderListSize: Infinity };
             Http2Session.prototype.localSettings = Http2Session.prototype.remoteSettings;
 
+            function _makeHttp2Server(handler) {
+                var serverId = null;
+                var _listeners = {};
+
+                var server = {
+                    listening: false,
+                    _host: '0.0.0.0',
+                    _port: 0,
+                    address: function() {
+                        return serverId !== null ? { address: server._host, port: server._port, family: 'IPv4' } : null;
+                    },
+                    on: function(ev, fn) {
+                        _listeners[ev] = _listeners[ev] || [];
+                        _listeners[ev].push(fn);
+                        return server;
+                    },
+                    once: function(ev, fn) {
+                        function w() { fn.apply(this, arguments); server.off(ev, w); }
+                        return server.on(ev, w);
+                    },
+                    off: function(ev, fn) {
+                        if (_listeners[ev]) _listeners[ev] = _listeners[ev].filter(function(f) { return f !== fn; });
+                        return server;
+                    },
+                    emit: function(ev) {
+                        var args = Array.prototype.slice.call(arguments, 1);
+                        (_listeners[ev] || []).slice().forEach(function(fn) { fn.apply(server, args); });
+                    },
+                    listen: function(port, host, cb) {
+                        if (typeof port === 'object' && port !== null) {
+                            var o = port; port = o.port || 0; host = o.host || '0.0.0.0'; cb = host;
+                        }
+                        if (typeof host === 'function') { cb = host; host = '0.0.0.0'; }
+                        if (typeof port === 'function') { cb = port; port = 0; host = '0.0.0.0'; }
+                        host = host || '0.0.0.0';
+                        port = port || 0;
+                        server._host = host;
+                        server._port = port;
+                        try {
+                            serverId = __httpListen(port, host);
+                            server.listening = true;
+                        } catch(e) {
+                            server.emit('error', e);
+                            return server;
+                        }
+                        if (cb) setTimeout(cb, 0);
+                        server.emit('listening');
+                        _acceptNext();
+                        return server;
+                    },
+                    close: function(cb) {
+                        if (serverId !== null) { __httpClose(serverId); serverId = null; server.listening = false; }
+                        if (cb) setTimeout(cb, 0);
+                        return server;
+                    },
+                };
+
+                if (handler) server.on('request', handler);
+
+                function _acceptNext() {
+                    if (serverId === null) return;
+                    __httpAcceptAsync(serverId).then(function(reqJson) {
+                        _handleRequest(JSON.parse(reqJson));
+                        _acceptNext();
+                    }).catch(function(e) {
+                        if (serverId !== null) { server.emit('error', e); _acceptNext(); }
+                    });
+                }
+
+                function _handleRequest(reqData) {
+                    var connId = reqData.conn_id;
+
+                    // Http2ServerStream — shared object for both stream and compat APIs.
+                    function Http2ServerStream() {
+                        EventEmitter.call(this);
+                        this._connId = connId;
+                        this._statusCode = 200;
+                        this._resHeaders = {};
+                        this._chunks = [];
+                        this._responded = false;
+                    }
+                    util.inherits(Http2ServerStream, EventEmitter);
+
+                    Http2ServerStream.prototype.respond = function(headers, opts) {
+                        var h = headers || {};
+                        this._statusCode = h[':status'] || 200;
+                        var self = this;
+                        Object.keys(h).forEach(function(k) {
+                            if (k.charAt(0) !== ':') self._resHeaders[k] = h[k];
+                        });
+                        if (opts && opts.endStream) this._flush('');
+                        return this;
+                    };
+                    Http2ServerStream.prototype.setHeader = function(k, v) { this._resHeaders[k] = v; };
+                    Http2ServerStream.prototype.getHeader = function(k) { return this._resHeaders[k]; };
+                    Http2ServerStream.prototype.write = function(chunk) {
+                        this._chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
+                        return true;
+                    };
+                    Http2ServerStream.prototype.end = function(chunk) {
+                        if (chunk !== undefined && chunk !== null && chunk !== '') this.write(chunk);
+                        this._flush(this._chunks.join(''));
+                    };
+                    Http2ServerStream.prototype._flush = function(body) {
+                        if (this._responded) return;
+                        this._responded = true;
+                        var st = this._statusCode;
+                        try {
+                            __httpRespond(this._connId, st, STATUS_CODES[st] || 'OK',
+                                JSON.stringify(this._resHeaders), body);
+                        } catch(_) {}
+                        this.emit('close');
+                    };
+                    Http2ServerStream.prototype.destroy = function() { this._flush(''); };
+
+                    var stream = new Http2ServerStream();
+
+                    // Pseudo-headers exposed as the `headers` argument in the stream event.
+                    var reqHeaders = Object.assign(
+                        { ':method': reqData.method, ':path': reqData.url,
+                          ':scheme': 'https',
+                          ':authority': (reqData.headers || {}).host || server._host + ':' + server._port },
+                        reqData.headers || {}
+                    );
+
+                    // Deliver request body asynchronously.
+                    setTimeout(function() {
+                        if (reqData.body) stream.emit('data', reqData.body);
+                        stream.emit('end');
+                    }, 0);
+
+                    var hasRequestListeners = (_listeners['request'] || []).length > 0;
+                    var hasStreamListeners = (_listeners['stream'] || []).length > 0;
+
+                    // Stream API (primary http2 interface).
+                    if (hasStreamListeners) {
+                        server.emit('stream', stream, reqHeaders);
+                    }
+
+                    // Compat request/response API.
+                    if (hasRequestListeners) {
+                        var req = new EventEmitter();
+                        req.headers = reqHeaders;
+                        req.method = reqData.method;
+                        req.url = reqData.url;
+                        req.httpVersion = '2.0';
+                        req.stream = stream;
+                        setTimeout(function() {
+                            if (reqData.body) req.emit('data', reqData.body);
+                            req.emit('end');
+                        }, 0);
+
+                        var res = new EventEmitter();
+                        res.statusCode = 200;
+                        res.headersSent = false;
+                        res.stream = stream;
+                        res.setHeader = function(k, v) { stream.setHeader(k, v); };
+                        res.getHeader = function(k) { return stream.getHeader(k); };
+                        res.writeHead = function(status, msg, headers) {
+                            stream._statusCode = status;
+                            if (typeof msg === 'object' && msg) headers = msg;
+                            if (headers) Object.assign(stream._resHeaders, headers);
+                        };
+                        res.write = function(chunk) { return stream.write(chunk); };
+                        res.end = function(chunk) { stream.end(chunk); };
+
+                        server.emit('request', req, res);
+                    }
+
+                    // If neither handler is registered, fall back to 404 after a tick.
+                    if (!hasRequestListeners && !hasStreamListeners) {
+                        setTimeout(function() {
+                            try { __httpRespond(connId, 501, 'Not Implemented',
+                                JSON.stringify({'content-type':'text/plain'}), 'http2 server: no handler registered'); } catch(_) {}
+                        }, 0);
+                    }
+                }
+
+                return server;
+            }
+
             var http2Mod = {
                 connect: function(authority, opts, cb) {
                     if (typeof opts === 'function') { cb = opts; opts = {}; }
@@ -2007,17 +2188,75 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     setTimeout(function() { session.emit('connect', session, {}); }, 0);
                     return session;
                 },
-                createServer: function(opts, cb) {
-                    if (typeof opts === 'function') { cb = opts; }
-                    return { listen: function() {}, close: function() {}, address: function() { return {}; } };
+                createServer: function(opts, handler) {
+                    if (typeof opts === 'function') { handler = opts; opts = {}; }
+                    return _makeHttp2Server(handler);
                 },
-                createSecureServer: function(opts, cb) { return http2Mod.createServer(opts, cb); },
+                createSecureServer: function(opts, handler) {
+                    if (typeof opts === 'function') { handler = opts; opts = {}; }
+                    return _makeHttp2Server(handler);
+                },
                 constants: HTTP2_CONSTANTS,
                 sensitiveHeaders: Symbol('sensitiveHeaders'),
             };
 
             globalThis.__requireCache['http2'] = http2Mod;
             globalThis.__requireCache['node:http2'] = http2Mod;
+
+            // ── cluster — single-primary emulation ────────────────────────────────
+            // 3va is single-process: clustering is emulated so that apps guarded by
+            // `if (cluster.isPrimary)` work as single-instance servers. fork() returns
+            // a mock Worker that fires 'online' asynchronously, allowing startup code
+            // that iterates over CPU cores to complete without crashing.
+            (function() {
+                function ClusterWorker(id) {
+                    EventEmitter.call(this);
+                    this.id = id;
+                    this.process = { pid: 0 };
+                    this.exitedAfterDisconnect = false;
+                    this.suicide = false; // legacy alias
+                    var self = this;
+                    setTimeout(function() {
+                        self.emit('online');
+                        clusterMod.emit('online', self);
+                    }, 0);
+                }
+                util.inherits(ClusterWorker, EventEmitter);
+                ClusterWorker.prototype.send = function(msg, cb) { if (cb) cb(null); return true; };
+                ClusterWorker.prototype.isDead = function() { return false; };
+                ClusterWorker.prototype.isConnected = function() { return true; };
+                ClusterWorker.prototype.kill = function(signal) {
+                    signal = signal || 'SIGTERM';
+                    delete clusterMod.workers[this.id];
+                    this.emit('exit', 0, signal);
+                    clusterMod.emit('exit', this, 0, signal);
+                };
+                ClusterWorker.prototype.disconnect = function() { this.kill('disconnect'); };
+
+                var _nextId = 1;
+                var clusterMod = new EventEmitter();
+                clusterMod.isMaster  = true; // legacy Node.js name
+                clusterMod.isPrimary = true;
+                clusterMod.isWorker  = false;
+                clusterMod.workers   = {};
+                clusterMod.settings  = {};
+                clusterMod.schedulingPolicy = 2; // SCHED_RR
+                clusterMod.SCHED_NONE = 1;
+                clusterMod.SCHED_RR   = 2;
+
+                clusterMod.fork = function(env) {
+                    var w = new ClusterWorker(_nextId++);
+                    clusterMod.workers[w.id] = w;
+                    clusterMod.emit('fork', w);
+                    return w;
+                };
+                clusterMod.setupMaster  = function(s) { Object.assign(clusterMod.settings, s || {}); };
+                clusterMod.setupPrimary = clusterMod.setupMaster;
+                clusterMod.disconnect   = function(cb) { if (cb) setTimeout(cb, 0); };
+
+                globalThis.__requireCache['cluster']      = clusterMod;
+                globalThis.__requireCache['node:cluster'] = clusterMod;
+            }());
 
             // ── debug (common logging utility) ───────────────────────────────────
             globalThis.__requireCache['debug'] = function(ns) { return function() {}; };

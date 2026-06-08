@@ -1,8 +1,13 @@
 [package]
 name = "vvva_core"
 version = "2.0.0"
-license = "MIT OR Apache-2.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Core async primitives and runtime utilities shared across the 3va JavaScript runtime crates"
+repository = "https://github.com/OdinoCano/3va"
+homepage = "https://github.com/OdinoCano/3va"
+keywords = ["runtime", "async", "javascript", "3va"]
+categories = ["asynchronous"]
 
 [dependencies]
 tokio.workspace = true
