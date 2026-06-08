@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write   # create GitHub releases and upload assets
-  id-token: write   # OIDC token for crates.io Trusted Publishing
 
 env:
   CARGO_TERM_COLOR: always
@@ -112,20 +111,18 @@ jobs:
           generate_release_notes: true
           files: dist/**
 
-  # ── Publish to crates.io (Trusted Publishing / OIDC) ─────────────────────────
+  # ── Publish to crates.io (token from GitHub environment secret) ──────────────
   publish:
     name: Publish crates
     needs: github-release
     runs-on: ubuntu-latest
-    environment: crates-io   # maps to the crates.io Trusted Publishing config
+    environment: crates-io   # secret CARGO_REGISTRY_TOKEN lives here
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-
-      # Exchange the GitHub OIDC token for a short-lived crates.io token.
-      - name: Obtain crates.io token (OIDC)
-        uses: rust-lang/crates-io-auth-action@v1
 
       # Publish in strict dependency order.  Each step waits 20 s so the
       # registry index has time to propagate before the next crate tries to
