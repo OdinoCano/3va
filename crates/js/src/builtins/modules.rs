@@ -4466,18 +4466,7 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
                 number_of_detached_contexts: 0
             };
         },
-        getHeapSpaceStatistics: function() {
-            var rss = 0;
-            try {
-                var mu2 = (typeof process !== 'undefined' && typeof process.memoryUsage === 'function')
-                    ? process.memoryUsage() : null;
-                if (mu2) rss = mu2.rss || 0;
-            } catch(e) {}
-            return [
-                { space_name: 'new_space', space_size: rss, space_used_size: rss, space_available_size: 0, physical_space_size: rss },
-                { space_name: 'old_space', space_size: 0, space_used_size: 0, space_available_size: 0, physical_space_size: 0 }
-            ];
-        },
+        getHeapSpaceStatistics: function() { return []; },
         getHeapCodeStatistics: function() { return { code_and_metadata_size: 0, bytecode_and_metadata_size: 0, external_script_source_size: 0 }; },
         getHeapSnapshot: function() { return null; },
         setFlagsFromString: function() {},
