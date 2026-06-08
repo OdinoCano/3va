@@ -43,11 +43,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install zig + cargo-zigbuild
+      # zig is not in taiki-e/install-action; use the dedicated setup action.
+      - name: Install zig
+        if: matrix.zigbuild
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild
         if: matrix.zigbuild
         uses: taiki-e/install-action@v2
         with:
-          tool: zig,cargo-zigbuild
+          tool: cargo-zigbuild
 
       - name: Build (zigbuild, musl)
         if: matrix.zigbuild
@@ -55,11 +60,18 @@ jobs:
           OPENSSL_VENDORED: "1"
         run: cargo zigbuild --release --target ${{ matrix.target }} --bin 3va
 
+      # libffi-sys 2.3.0 build script ignores MACOSX_DEPLOYMENT_TARGET and
+      # hardcodes the current SDK version; its arm64 assembly fails with the
+      # Apple assembler in Xcode 16. Fix: use the Homebrew-provided libffi
+      # (already built correctly) instead of compiling it from source.
+      - name: Install libffi via Homebrew (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libffi
+          echo "PKG_CONFIG_PATH=$(brew --prefix libffi)/lib/pkgconfig" >> "$GITHUB_ENV"
+
       - name: Build (native)
         if: ${{ !matrix.zigbuild }}
-        env:
-          # libffi-sys CFI directives require macOS 11+ SDK on Apple Silicon.
-          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: cargo build --release --target ${{ matrix.target }} --bin 3va
 
       - name: Package binary (Unix)
