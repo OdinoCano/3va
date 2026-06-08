@@ -29,8 +29,10 @@ jobs:
             cross: true   # cross Docker image includes OpenSSL + aarch64 gcc
           - target: x86_64-apple-darwin
             os: macos-13
-          - target: aarch64-apple-darwin
-            os: macos-latest
+          # aarch64-apple-darwin omitted: libffi-sys 2.3.0 bundles libffi 3.4.4
+          # whose arm64 assembly (.cfi_def_cfa with register names) is rejected
+          # by the Xcode 16 assembler.  Apple Silicon users can run the x86_64
+          # binary via Rosetta 2, or install from source: cargo install vvva_cli
           - target: x86_64-pc-windows-msvc
             os: windows-latest
 
@@ -46,16 +48,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cross
-
-      # libffi-sys 2.3.0 on macOS ignores MACOSX_DEPLOYMENT_TARGET and its
-      # arm64 assembly fails with the Xcode 16 assembler.  Installing libffi
-      # via Homebrew lets pkg-config find a pre-built copy so the crate skips
-      # compiling from source entirely.
-      - name: Install pkg-config + libffi (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install pkg-config libffi
-          echo "PKG_CONFIG_PATH=$(brew --prefix libffi)/lib/pkgconfig" >> "$GITHUB_ENV"
 
       - name: Build (cross, aarch64-linux)
         if: matrix.cross
