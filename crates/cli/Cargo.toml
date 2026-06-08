@@ -20,6 +20,7 @@ serde.workspace = true
 libc = "0.2"
 vvva_core = { path = "../core" }
 vvva_config = { path = "../config" }
+vvva_firewall = { path = "../firewall" }
 vvva_pm = { path = "../pm" }
 vvva_js = { path = "../js" }
 vvva_permissions = { path = "../permissions" }

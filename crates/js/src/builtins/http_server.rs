@@ -1,17 +1,17 @@
 //! HTTP/1.1 server backend for `http.createServer()`.
 //!
-//! Rust primitives exposed to JS:
-//!   __httpListen(port, host) → server_id   synchronous; binds immediately via std + Tokio
-//!   __httpAcceptAsync(server_id) → `Promise<JSON>`   awaits next connection
-//!   __httpRespond(conn_id, status, status_text, headers_json, body) → void  (sync)
-//!   __httpClose(server_id) → void  (sync)
-//!
-//! The sync bind means the port is available the moment `server.listen()` returns in JS,
-//! so tests and user code don't need to wait for an async bind promise to resolve.
+//! Security hardening (v2.1):
+//!   - Header read timeout  → Slowloris protection
+//!   - Body read timeout    → RUDY protection
+//!   - Max header count + total header bytes
+//!   - Per-IP token-bucket rate limiting (vvva_firewall)
+//!   - Auto-block IPs that exceed violation threshold
+//!   - Per-IP and total connection caps
+//!   - Client IP forwarded to JS in every request object
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::net::TcpStream as StdTcpStream;
+use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream};
 use std::sync::{Arc, Mutex};
 
 use rquickjs::function::Async;
@@ -19,7 +19,10 @@ use rquickjs::{Ctx, Function, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::TcpListener;
 
+use vvva_firewall::{Firewall, FirewallDecision};
 use vvva_permissions::{Capability, PermissionState};
+
+const HARD_MAX_BODY: usize = 100 * 1024 * 1024;
 
 struct ConnEntry {
     stream: StdTcpStream,
@@ -61,42 +64,90 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-/// Parse an HTTP/1.1 request from a Tokio TcpStream.
+fn parse_extra_headers(headers_json: &str) -> Vec<(String, String)> {
+    serde_json::from_str(headers_json)
+        .ok()
+        .and_then(|v: serde_json::Value| {
+            v.as_object().map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+// ── Request parser ─────────────────────────────────────────────────────────────
+
+struct ParsedRequest {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    std_stream: StdTcpStream,
+}
+
 async fn parse_request(
     stream: tokio::net::TcpStream,
-) -> std::result::Result<(String, String, Vec<(String, String)>, Vec<u8>, StdTcpStream), String> {
+    header_timeout: std::time::Duration,
+    body_timeout: std::time::Duration,
+    max_header_count: usize,
+    max_header_bytes: usize,
+    max_body_bytes: usize,
+) -> std::result::Result<ParsedRequest, String> {
     let mut reader = BufReader::new(stream);
 
+    // Request line — timeout protects against connections that never send data.
     let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
+    tokio::time::timeout(header_timeout, reader.read_line(&mut request_line))
         .await
+        .map_err(|_| "timeout: request line not received in time (Slowloris?)")?
         .map_err(|e| e.to_string())?;
-    let request_line = request_line.trim_end_matches(['\r', '\n']);
 
+    let request_line = request_line.trim_end_matches(['\r', '\n']);
     let mut parts = request_line.splitn(3, ' ');
     let method = parts.next().unwrap_or("GET").to_string();
     let path = parts.next().unwrap_or("/").to_string();
 
+    // Headers — each read_line call is independently timed.
+    let max_body = if max_body_bytes == 0 {
+        HARD_MAX_BODY
+    } else {
+        max_body_bytes
+    };
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut content_length: usize = 0;
+    let mut total_header_bytes: usize = 0;
+
     loop {
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
+        tokio::time::timeout(header_timeout, reader.read_line(&mut line))
             .await
+            .map_err(|_| "timeout: headers not received in time (Slowloris?)")?
             .map_err(|e| e.to_string())?;
+
+        total_header_bytes += line.len();
+        if total_header_bytes > max_header_bytes {
+            return Err(format!("header flood: exceeded {} bytes", max_header_bytes));
+        }
+
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             break;
         }
+
+        if headers.len() >= max_header_count {
+            return Err(format!(
+                "header flood: more than {} headers",
+                max_header_count
+            ));
+        }
+
         if let Some(colon) = trimmed.find(':') {
             let name = trimmed[..colon].trim().to_lowercase();
             let value = trimmed[colon + 1..].trim().to_string();
             if name == "content-length" {
-                content_length = value.parse::<usize>().unwrap_or(0).min(100 * 1024 * 1024);
-                // Forward the effective (capped) length so JS sees the same
-                // value that was actually read from the socket.
+                content_length = value.parse::<usize>().unwrap_or(0).min(max_body);
                 headers.push((name, content_length.to_string()));
             } else {
                 headers.push((name, value));
@@ -104,33 +155,57 @@ async fn parse_request(
         }
     }
 
+    // Body — timeout protects against RUDY (slow body drip).
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        reader
-            .read_exact(&mut body)
+        tokio::time::timeout(body_timeout, reader.read_exact(&mut body))
             .await
+            .map_err(|_| "timeout: body not received in time (RUDY?)")?
             .map_err(|e| e.to_string())?;
     }
 
-    let tokio_stream = reader.into_inner();
-    let std_stream = tokio_stream.into_std().map_err(|e| e.to_string())?;
-
-    Ok((method, path, headers, body, std_stream))
+    let std_stream = reader.into_inner().into_std().map_err(|e| e.to_string())?;
+    Ok(ParsedRequest {
+        method,
+        path,
+        headers,
+        body,
+        std_stream,
+    })
 }
 
-pub fn inject_http_server(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    // server_id → Arc<TcpListener> (Arc lets accept close share it)
+/// Send a firewall-rejection response before a conn_id is allocated.
+fn reject_stream(stream: tokio::net::TcpStream, status: u16, msg: &'static str) {
+    let response = format!(
+        "HTTP/1.1 {status} {msg}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{msg}",
+        len = msg.len()
+    );
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut s = stream;
+        let _ = s.write_all(response.as_bytes()).await;
+    });
+}
+
+// ── Injection ──────────────────────────────────────────────────────────────────
+
+pub fn inject_http_server(
+    ctx: &Ctx,
+    permissions: Arc<PermissionState>,
+    firewall: Option<Arc<Firewall>>,
+) -> Result<()> {
     let servers: Arc<Mutex<HashMap<u32, Arc<TcpListener>>>> = Arc::new(Mutex::new(HashMap::new()));
     let conns: Arc<Mutex<HashMap<u32, ConnEntry>>> = Arc::new(Mutex::new(HashMap::new()));
     let next_server_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
     let next_conn_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(1));
+    let fw: Arc<Option<Arc<Firewall>>> = Arc::new(firewall);
 
-    // ── __httpListen(port, host) → server_id  (synchronous) ──────────────────
-    // Binds immediately using std, then registers with Tokio I/O driver.
+    // ── __httpListen ──────────────────────────────────────────────────────────
     {
         let perms = permissions.clone();
         let servers = servers.clone();
         let nid = next_server_id.clone();
+        let fw = fw.clone();
         ctx.globals().set(
             "__httpListen",
             Function::new(
@@ -144,15 +219,11 @@ pub fn inject_http_server(ctx: &Ctx, permissions: Arc<PermissionState>) -> Resul
                         ));
                     }
 
-                    // Synchronous bind via std — the OS immediately starts queuing connections.
                     let std_listener = std::net::TcpListener::bind(format!("{}:{}", host, port))
                         .map_err(|e| js_code_err(&ctx, "EADDRINUSE", &e.to_string()))?;
-                    // Non-blocking is required by tokio::net::TcpListener::from_std.
                     std_listener
                         .set_nonblocking(true)
                         .map_err(|e| js_err(&ctx, e.to_string()))?;
-
-                    // Register with Tokio's I/O driver (must be called from inside a Tokio runtime).
                     let tokio_listener = TcpListener::from_std(std_listener)
                         .map_err(|e| js_err(&ctx, format!("TcpListener::from_std: {}", e)))?;
 
@@ -163,88 +234,150 @@ pub fn inject_http_server(ctx: &Ctx, permissions: Arc<PermissionState>) -> Resul
                         id
                     };
                     servers.lock().unwrap().insert(id, Arc::new(tokio_listener));
+
+                    // Start background blocklist/bucket cleanup once.
+                    if id == 0
+                        && let Some(firewall) = fw.as_ref().as_ref()
+                    {
+                        vvva_firewall::spawn_cleanup_task(
+                            firewall.clone(),
+                            std::time::Duration::from_secs(60),
+                        );
+                    }
                     Ok(id)
                 },
             ),
         )?;
     }
 
-    // ── __httpAcceptAsync(server_id) → Promise<JSON string> ──────────────────
+    // ── __httpAcceptAsync ────────────────────────────────────────────────────
     {
         let servers = servers.clone();
         let conns = conns.clone();
         let nid = next_conn_id.clone();
+        let fw = fw.clone();
         ctx.globals().set(
             "__httpAcceptAsync",
-            Function::new(
-                ctx.clone(),
-                Async(move |server_id: u32| {
-                    let servers = servers.clone();
-                    let conns = conns.clone();
-                    let nid = nid.clone();
-                    async move {
-                        let listener = {
-                            let guard = servers.lock().unwrap();
-                            guard.get(&server_id).cloned()
+            Function::new(ctx.clone(), Async(move |server_id: u32| {
+                let servers = servers.clone();
+                let conns   = conns.clone();
+                let nid     = nid.clone();
+                let fw      = fw.clone();
+                async move {
+                    let listener = {
+                        let guard = servers.lock().unwrap();
+                        guard.get(&server_id).cloned()
+                    };
+                    let listener = listener.ok_or_else(|| {
+                        rquickjs::Error::new_from_js_message("ENOENT", "ENOENT", "unknown server id")
+                    })?;
+
+                    loop {
+                        let (stream, peer_addr) = listener.accept().await.map_err(|e| {
+                            rquickjs::Error::new_from_js_message("ECONNRESET", "ECONNRESET", e.to_string())
+                        })?;
+
+                        let ip: IpAddr = match peer_addr {
+                            SocketAddr::V4(a) => IpAddr::V4(*a.ip()),
+                            SocketAddr::V6(a) => IpAddr::V6(*a.ip()),
                         };
-                        let listener = listener.ok_or_else(|| {
-                            rquickjs::Error::new_from_js_message(
-                                "ENOENT",
-                                "ENOENT",
-                                "unknown server id".to_string(),
-                            )
-                        })?;
 
-                        let (stream, _addr) = listener.accept().await.map_err(|e| {
-                            rquickjs::Error::new_from_js_message(
-                                "ECONNRESET",
-                                "ECONNRESET",
-                                e.to_string(),
-                            )
-                        })?;
+                        // ── Firewall: connection gate ─────────────────────
+                        if let Some(firewall) = fw.as_ref().as_ref() {
+                            match firewall.check_connection(ip) {
+                                FirewallDecision::Allow => { firewall.on_connect(ip); }
+                                decision => {
+                                    reject_stream(stream, decision.http_status(), decision.message());
+                                    continue;
+                                }
+                            }
+                        }
 
-                        let (method, url, headers, body, std_stream) =
-                            parse_request(stream).await.map_err(|e| {
-                                rquickjs::Error::new_from_js_message("EIO", "EIO", e)
-                            })?;
+                        // ── Parser limits from firewall config ────────────
+                        let (hdr_timeout, body_timeout, max_hdr_count, max_hdr_bytes, max_body) =
+                            if let Some(firewall) = fw.as_ref().as_ref() {
+                                let c = &firewall.config;
+                                (
+                                    std::time::Duration::from_millis(c.header_timeout_ms),
+                                    std::time::Duration::from_millis(c.body_timeout_ms),
+                                    c.max_header_count as usize,
+                                    c.max_header_bytes as usize,
+                                    c.max_body_bytes as usize,
+                                )
+                            } else {
+                                (
+                                    std::time::Duration::from_secs(10),
+                                    std::time::Duration::from_secs(30),
+                                    100, 16_384, 0,
+                                )
+                            };
 
+                        let parsed = parse_request(
+                            stream, hdr_timeout, body_timeout,
+                            max_hdr_count, max_hdr_bytes, max_body,
+                        ).await;
+
+                        let parsed = match parsed {
+                            Ok(p) => p,
+                            Err(_) => {
+                                if let Some(firewall) = fw.as_ref().as_ref() {
+                                    firewall.on_disconnect(ip);
+                                }
+                                continue; // drop connection, accept next
+                            }
+                        };
+
+                        // ── Firewall: per-request rate limit ──────────────
+                        if let Some(firewall) = fw.as_ref().as_ref() {
+                            match firewall.check_request(ip) {
+                                FirewallDecision::Allow => {}
+                                decision => {
+                                    // Write rejection into the already-parsed stream.
+                                    let resp = format!(
+                                        "HTTP/1.1 {s} {m}\r\nContent-Length: {l}\r\nConnection: close\r\n\r\n{m}",
+                                        s = decision.http_status(), m = decision.message(),
+                                        l = decision.message().len(),
+                                    );
+                                    let _ = { let mut s = parsed.std_stream; s.write_all(resp.as_bytes()) };
+                                    firewall.on_disconnect(ip);
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // ── Allocate conn_id and return to JS ─────────────
                         let conn_id = {
                             let mut n = nid.lock().unwrap();
-                            let id = *n;
-                            *n = n.wrapping_add(1);
-                            id
+                            let id = *n; *n = n.wrapping_add(1); id
                         };
-                        conns
-                            .lock()
-                            .unwrap()
-                            .insert(conn_id, ConnEntry { stream: std_stream });
+                        conns.lock().unwrap().insert(conn_id, ConnEntry { stream: parsed.std_stream });
 
-                        let hdr_pairs: Vec<String> = headers
-                            .iter()
-                            .map(|(k, v)| {
-                                format!("\"{}\":\"{}\"", json_escape(k), json_escape(v))
-                            })
+                        let hdr_pairs: Vec<String> = parsed.headers.iter()
+                            .map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)))
                             .collect();
-                        let body_str = String::from_utf8_lossy(&body);
+                        let body_str = String::from_utf8_lossy(&parsed.body);
                         let json = format!(
-                            "{{\"method\":\"{method}\",\"url\":\"{url}\",\"headers\":{{{headers}}},\"body\":\"{body}\",\"conn_id\":{conn_id}}}",
-                            method = json_escape(&method),
-                            url = json_escape(&url),
-                            headers = hdr_pairs.join(","),
-                            body = json_escape(&body_str),
-                            conn_id = conn_id,
+                            "{{\"method\":\"{m}\",\"url\":\"{u}\",\"headers\":{{{h}}},\
+                             \"body\":\"{b}\",\"conn_id\":{c},\"remoteAddress\":\"{ip}\"}}",
+                            m  = json_escape(&parsed.method),
+                            u  = json_escape(&parsed.path),
+                            h  = hdr_pairs.join(","),
+                            b  = json_escape(&body_str),
+                            c  = conn_id,
+                            ip = ip,
                         );
 
-                        Ok::<String, rquickjs::Error>(json)
+                        return Ok::<String, rquickjs::Error>(json);
                     }
-                }),
-            ),
+                }
+            })),
         )?;
     }
 
-    // ── __httpRespond(conn_id, status, status_text, headers_json, body) ───────
+    // ── __httpRespond ─────────────────────────────────────────────────────────
     {
         let conns = conns.clone();
+        let fw = fw.clone();
         ctx.globals().set(
             "__httpRespond",
             Function::new(
@@ -257,56 +390,47 @@ pub fn inject_http_server(ctx: &Ctx, permissions: Arc<PermissionState>) -> Resul
                       body: String|
                       -> Result<()> {
                     let body_bytes = body.as_bytes();
-
-                    let extra_headers: Vec<(String, String)> = serde_json::from_str(&headers_json)
-                        .ok()
-                        .and_then(|v: serde_json::Value| {
-                            v.as_object().map(|obj| {
-                                obj.iter()
-                                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                                    .collect()
-                            })
-                        })
-                        .unwrap_or_default();
-
-                    let mut response = format!("HTTP/1.1 {} {}\r\n", status, status_text);
-                    response.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
-                    response.push_str("Connection: close\r\n");
-
-                    for (k, v) in &extra_headers {
+                    let extra = parse_extra_headers(&headers_json);
+                    let mut resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
+                    resp.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
+                    resp.push_str("Connection: close\r\n");
+                    for (k, v) in &extra {
                         let kl = k.to_lowercase();
                         if kl != "content-length" && kl != "connection" {
-                            response.push_str(&format!("{}: {}\r\n", k, v));
+                            resp.push_str(&format!("{}: {}\r\n", k, v));
                         }
                     }
-                    response.push_str("\r\n");
+                    resp.push_str("\r\n");
 
                     let mut guard = conns.lock().unwrap();
                     let conn = guard
                         .get_mut(&conn_id)
                         .ok_or_else(|| js_code_err(&ctx, "ENOENT", "unknown conn_id"))?;
-
                     conn.stream
-                        .write_all(response.as_bytes())
+                        .write_all(resp.as_bytes())
                         .map_err(|e| js_err(&ctx, e.to_string()))?;
                     conn.stream
                         .write_all(body_bytes)
                         .map_err(|e| js_err(&ctx, e.to_string()))?;
                     conn.stream.flush().ok();
-
                     drop(guard);
-                    conns.lock().unwrap().remove(&conn_id);
+
+                    if let Some(entry) = conns.lock().unwrap().remove(&conn_id)
+                        && let Some(firewall) = fw.as_ref().as_ref()
+                        && let Ok(peer) = entry.stream.peer_addr()
+                    {
+                        firewall.on_disconnect(peer.ip());
+                    }
                     Ok(())
                 },
             ),
         )?;
     }
 
-    // ── __httpRespondBytes(conn_id, status, status_text, headers_json, body_bytes) ─
-    // Binary-safe version of __httpRespond. Accepts Vec<u8> so file content,
-    // images, and other non-text payloads round-trip without corruption.
+    // ── __httpRespondBytes ────────────────────────────────────────────────────
     {
         let conns = conns.clone();
+        let fw = fw.clone();
         ctx.globals().set(
             "__httpRespondBytes",
             Function::new(
@@ -318,54 +442,46 @@ pub fn inject_http_server(ctx: &Ctx, permissions: Arc<PermissionState>) -> Resul
                       headers_json: String,
                       body: Vec<u8>|
                       -> Result<()> {
-                    let extra_headers: Vec<(String, String)> = serde_json::from_str(&headers_json)
-                        .ok()
-                        .and_then(|v: serde_json::Value| {
-                            v.as_object().map(|obj| {
-                                obj.iter()
-                                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                                    .collect()
-                            })
-                        })
-                        .unwrap_or_default();
-
-                    let mut response = format!("HTTP/1.1 {} {}\r\n", status, status_text);
-                    response.push_str(&format!("Content-Length: {}\r\n", body.len()));
-                    response.push_str("Connection: close\r\n");
-
-                    for (k, v) in &extra_headers {
+                    let extra = parse_extra_headers(&headers_json);
+                    let mut resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
+                    resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                    resp.push_str("Connection: close\r\n");
+                    for (k, v) in &extra {
                         let kl = k.to_lowercase();
                         if kl != "content-length" && kl != "connection" && kl != "transfer-encoding"
                         {
-                            response.push_str(&format!("{}: {}\r\n", k, v));
+                            resp.push_str(&format!("{}: {}\r\n", k, v));
                         }
                     }
-                    response.push_str("\r\n");
+                    resp.push_str("\r\n");
 
                     let mut guard = conns.lock().unwrap();
                     let conn = guard
                         .get_mut(&conn_id)
                         .ok_or_else(|| js_code_err(&ctx, "ENOENT", "unknown conn_id"))?;
-
                     conn.stream
-                        .write_all(response.as_bytes())
+                        .write_all(resp.as_bytes())
                         .map_err(|e| js_err(&ctx, e.to_string()))?;
                     conn.stream
                         .write_all(&body)
                         .map_err(|e| js_err(&ctx, e.to_string()))?;
                     conn.stream.flush().ok();
-
                     drop(guard);
-                    conns.lock().unwrap().remove(&conn_id);
+
+                    if let Some(entry) = conns.lock().unwrap().remove(&conn_id)
+                        && let Some(firewall) = fw.as_ref().as_ref()
+                        && let Ok(peer) = entry.stream.peer_addr()
+                    {
+                        firewall.on_disconnect(peer.ip());
+                    }
                     Ok(())
                 },
             ),
         )?;
     }
 
-    // ── __httpClose(server_id) ────────────────────────────────────────────────
+    // ── __httpClose ───────────────────────────────────────────────────────────
     {
-        let servers = servers.clone();
         ctx.globals().set(
             "__httpClose",
             Function::new(

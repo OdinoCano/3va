@@ -845,7 +845,8 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 constants: {
                     signals: { SIGHUP: 1, SIGINT: 2, SIGTERM: 15, SIGKILL: 9, SIGPIPE: 13, SIGCHLD: 17, SIGUSR1: 10, SIGUSR2: 12 },
                     errno: { ENOENT: -2, EACCES: -13, EEXIST: -17, EISDIR: -21, ENOTDIR: -20, ENOTEMPTY: -39, EPERM: -1 },
-                    priority: { PRIORITY_LOW: 19, PRIORITY_BELOW_NORMAL: 10, PRIORITY_NORMAL: 0, PRIORITY_ABOVE_NORMAL: -7, PRIORITY_HIGH: -14, PRIORITY_HIGHEST: -20 }
+                    priority: { PRIORITY_LOW: 19, PRIORITY_BELOW_NORMAL: 10, PRIORITY_NORMAL: 0, PRIORITY_ABOVE_NORMAL: -7, PRIORITY_HIGH: -14, PRIORITY_HIGHEST: -20 },
+                    dlopen: { RTLD_LAZY: 1, RTLD_NOW: 2, RTLD_GLOBAL: 8, RTLD_LOCAL: 4, RTLD_DEEPBIND: 8 }
                 },
                 getPriority: function() { return 0; },
                 setPriority: function() {},
@@ -857,7 +858,31 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             // ── url ───────────────────────────────────────────────────────────────
             var url = {
-                parse: function(s) { try { var u = new URL(s); return { protocol: u.protocol, host: u.host, hostname: u.hostname, port: u.port, pathname: u.pathname, search: u.search, hash: u.hash, href: u.href, path: (u.pathname + (u.search || '')), slashes: true, auth: null, query: u.search ? u.search.slice(1) : null }; } catch(e) { return { href: s }; } },
+                parse: function(s, parseQueryString) {
+                    var result;
+                    try {
+                        var u = new URL(s);
+                        result = { protocol: u.protocol, slashes: true, auth: null, host: u.host, port: u.port || null, hostname: u.hostname, hash: u.hash || null, search: u.search || null, pathname: u.pathname, path: u.pathname + (u.search || ''), href: u.href };
+                    } catch(e) {
+                        // Relative or path-only URL (e.g. '/hello?a=1#x')
+                        var href = s || '/';
+                        var hash = null, search = null, pathname = href, path = href;
+                        var hi = href.indexOf('#');
+                        if (hi !== -1) { hash = href.slice(hi); href = href.slice(0, hi); pathname = href; path = href; }
+                        var qi = href.indexOf('?');
+                        if (qi !== -1) { search = href.slice(qi); pathname = href.slice(0, qi); path = href; }
+                        result = { protocol: null, slashes: null, auth: null, host: null, port: null, hostname: null, hash: hash, search: search, pathname: pathname, path: path, href: s || '/' };
+                    }
+                    if (parseQueryString) {
+                        var qs = result.search ? result.search.slice(1) : '';
+                        var q = {};
+                        if (qs) qs.split('&').forEach(function(p) { var kv = p.split('='); if (kv[0]) q[decodeURIComponent(kv[0])] = kv[1] !== undefined ? decodeURIComponent(kv[1]) : ''; });
+                        result.query = q;
+                    } else {
+                        result.query = result.search ? result.search.slice(1) : null;
+                    }
+                    return result;
+                },
                 format: function(obj) {
                     if (typeof obj === 'string') return obj;
                     if (obj && typeof obj.href === 'string' && !obj.protocol && !obj.host) return obj.href;
@@ -1842,9 +1867,32 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__requireCache['node:process'] = globalThis.process || {};
 
             // ── perf_hooks ────────────────────────────────────────────────────────
-            globalThis.__requireCache['perf_hooks'] = { performance: { now: function() { return Date.now(); } } };
+            var __perfOrigin = Date.now();
+            var __perfObj = {
+              timeOrigin: __perfOrigin,
+              now: function() { return Date.now() - __perfOrigin; },
+              mark: function() {},
+              measure: function() {},
+              getEntriesByName: function() { return []; },
+              getEntriesByType: function() { return []; },
+              clearMarks: function() {},
+              clearMeasures: function() {},
+            };
+            globalThis.performance = __perfObj;
+            globalThis.__requireCache['perf_hooks'] = { performance: __perfObj, PerformanceObserver: function() {} };
             globalThis.__requireCache['node:perf_hooks'] = globalThis.__requireCache['perf_hooks'];
-            globalThis.__requireCache['perf_hooks'].PerformanceObserver = function() {};
+
+            // ── WeakRef polyfill (QuickJS lacks native WeakRef / FinalizationRegistry) ──
+            // Strong-reference fallback: memory isn't reclaimed early but semantics work.
+            if (typeof globalThis.WeakRef === 'undefined') {
+                globalThis.WeakRef = function WeakRef(target) { this._t = target; };
+                globalThis.WeakRef.prototype.deref = function() { return this._t; };
+            }
+            if (typeof globalThis.FinalizationRegistry === 'undefined') {
+                globalThis.FinalizationRegistry = function FinalizationRegistry(cb) { this._cb = cb; };
+                globalThis.FinalizationRegistry.prototype.register = function() {};
+                globalThis.FinalizationRegistry.prototype.unregister = function() {};
+            }
 
             // ── agent-base / https-proxy-agent (proxy stubs, not supported in sandbox) ──
             function AgentBase() {}
@@ -1977,6 +2025,29 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             // ── proxy-from-env ───────────────────────────────────────────────────
             globalThis.__requireCache['proxy-from-env'] = { getProxyForUrl: function() { return null; } };
+
+            // ── tr46 (Unicode IDNA) ───────────────────────────────────────────────
+            // QuickJS cannot parse tr46's large supplementary-plane Unicode regexes.
+            // This stub handles ASCII hostnames correctly; IDN (non-ASCII) domains
+            // are passed through unchanged — sufficient for localhost / IP connections.
+            (function() {
+              function toASCII(domain, options) {
+                if (typeof domain !== 'string') return null;
+                var lower = domain.toLowerCase();
+                // Reject labels with leading/trailing hyphens or double-hyphen in pos 3-4
+                var labels = lower.split('.');
+                for (var i = 0; i < labels.length; i++) {
+                  var lbl = labels[i];
+                  if (lbl.length === 0) return null;
+                  if (lbl[0] === '-' || lbl[lbl.length - 1] === '-') return null;
+                }
+                return lower;
+              }
+              function toUnicode(domain, options) {
+                return { domain: domain, error: false };
+              }
+              globalThis.__requireCache['tr46'] = { toASCII: toASCII, toUnicode: toUnicode };
+            })();
 
             // ── AbortSignal ───────────────────────────────────────────────────────
             function AbortSignal() {
@@ -2851,6 +2922,17 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     // ESM→CJS inline transformer for loading ESM packages via require()
     ctx.eval::<(), _>(r#"
         globalThis.__esmToCjs = function(src) {
+            // Replace import.meta.* patterns before line-by-line ESM→CJS conversion.
+            // These are syntax errors in QuickJS script mode; we swap them with the
+            // named stubs that the require() module wrapper injects into every module.
+            src = src
+                .replace(/import\.meta\.resolve\(/g, '__vvva_meta_resolve__(')
+                .replace(/import\.meta\.glob\(/g,    '__vvva_meta_glob__(')
+                .replace(/import\.meta\.hot\b/g,     'undefined')
+                .replace(/import\.meta\.vitest\b/g,  'undefined')
+                .replace(/import\.meta\.env\b/g,     '__vvva_meta_env__')
+                .replace(/import\.meta\.url\b/g,     '__vvva_meta_url__');
+
             var lines = src.split('\n');
             var out = [];
             // Function/class exports must be deferred to end of file so the
@@ -3110,7 +3192,31 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             }
 
             // Execute the module with CJS wrapper, passing the module-scoped require.
+            // Preamble: declare import.meta.* stubs scoped to this module's __filename.
+            // Each module gets its own __vvva_meta_url__ based on its own path, so
+            // frameworks that use import.meta.url for relative asset resolution work
+            // correctly regardless of which file is currently executing.
+            var _metaPreamble =
+                'var __vvva_meta_url__=(function(){' +
+                  'try{return require("url").pathToFileURL(__filename).href;}' +
+                  'catch(e){return "file:///"+__filename.replace(/\\\\/g,"/");}' +
+                '})();' +
+                // Use globalThis.process to avoid QuickJS TDZ errors when a module
+                // declares `const process = require("process")` in its body —
+                // that `const` is in TDZ for the entire function scope, so any
+                // bare `process` reference in the metaPreamble would throw.
+                'var __vvva_meta_env__=(function(){var _p=globalThis.process;return(_p&&_p.env)' +
+                  '?Object.assign(Object.create(null),' +
+                    '{MODE:(_p.env.NODE_ENV)||"production",' +
+                    'PROD:_p.env.NODE_ENV!=="development",' +
+                    'DEV:_p.env.NODE_ENV==="development",' +
+                    'SSR:true,BASE_URL:"/"},_p.env)' +
+                  ':{MODE:"production",PROD:true,DEV:false,SSR:true,BASE_URL:"/"};}());' +
+                'function __vvva_meta_resolve__(s){return require.resolve(s);}' +
+                'function __vvva_meta_glob__(){return {};}';
+
             var wrapper = '(function(exports, module, require, __filename, __dirname) {\n' +
+                _metaPreamble + '\n' +
                 source +
                 '\n})(globalThis.exports, globalThis.module, moduleRequire, globalThis.__filename, globalThis.__dirname);';
             eval(wrapper);
@@ -4298,7 +4404,11 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
     var fs = globalThis.__requireCache['fs'];
     if (fs && !fs.constants) fs.constants = constants;
     var osM = globalThis.__requireCache['os'];
-    if (osM && !osM.constants) osM.constants = { signals: {}, errno: {}, priority: {} };
+    if (osM && !osM.constants) osM.constants = {
+        signals: {}, errno: {}, priority: {},
+        // dlopen flags — used by Prisma and other NAPI loaders
+        dlopen: { RTLD_LAZY: 1, RTLD_NOW: 2, RTLD_GLOBAL: 8, RTLD_LOCAL: 4, RTLD_DEEPBIND: 8 }
+    };
 }());
 
 // ── process: complete stdin + signals + missing fields ───────────────────────
@@ -5442,7 +5552,7 @@ pub fn resolve_path_from(path: &str, basedir: Option<&str>) -> PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| cwd.clone());
 
-    if path.starts_with("./") || path.starts_with("../") {
+    let raw = if path.starts_with("./") || path.starts_with("../") || path == "." || path == ".." {
         resolve_file_path(&base_dir.join(path))
     } else if path.starts_with('/') {
         resolve_file_path(&PathBuf::from(path))
@@ -5450,7 +5560,29 @@ pub fn resolve_path_from(path: &str, basedir: Option<&str>) -> PathBuf {
         // Bare specifier: may have a subpath like 'pkg/subpath' or '@scope/pkg/sub'
         let (pkg_name, subpath) = split_bare_specifier(path);
         resolve_node_module_from(&base_dir, &cwd, pkg_name, subpath)
+    };
+
+    // Normalize to remove redundant `.` and `..` components so that the same
+    // file always gets the same cache key regardless of how __dirname accumulated
+    // extra `/.` segments during nested require() calls.
+    normalize_path(&raw)
+}
+
+/// Canonicalize a resolved module path so that the same file always gets the
+/// same cache key, even when `__dirname` has accumulated redundant `/.`
+/// segments during nested require() calls.
+///
+/// Only applies to paths that actually exist as files — for unresolved/error
+/// paths (directories, missing files) we return the path unchanged so that
+/// the caller fails with a clear ENOENT rather than silently resolving a
+/// `../../..` sequence to an existing directory and then failing with EISDIR.
+fn normalize_path(p: &Path) -> PathBuf {
+    if p.is_file()
+        && let Ok(canon) = std::fs::canonicalize(p)
+    {
+        return canon;
     }
+    p.to_path_buf()
 }
 
 /// Convenience wrapper using CWD as the base.
@@ -5574,12 +5706,12 @@ fn resolve_in_pkg_dir(pkg_dir: &Path, subpath: Option<&str>) -> PathBuf {
 
 /// Extract the CJS-compatible path from a package exports value.
 /// Walks nested objects preferring "require" and "default" conditions.
+/// Falls back to "import"/"module" so ESM-only packages still resolve via CJS require().
 fn exports_cjs_path(val: &serde_json::Value) -> Option<&str> {
     match val {
         serde_json::Value::String(s) => Some(s.as_str()),
         serde_json::Value::Object(_) => {
-            // Prefer require condition (CJS), then node, then default
-            for key in &["require", "node", "default"] {
+            for key in &["require", "node", "default", "import", "module"] {
                 if let Some(child) = val.get(key)
                     && let Some(path) = exports_cjs_path(child)
                 {

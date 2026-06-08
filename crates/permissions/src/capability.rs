@@ -305,13 +305,31 @@ fn normalize_path(p: &std::path::Path) -> std::borrow::Cow<'_, std::path::Path> 
     std::borrow::Cow::Borrowed(p)
 }
 
+/// Resolve symlinks for path comparison — falls back to the original path when
+/// canonicalize fails (e.g. path doesn't exist yet).
+fn canon_path(p: &std::path::Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Check if `target` is covered by `allowed`, resolving symlinks on both sides
+/// so that `/lib64` (symlink → `/usr/lib64`) matches `--allow-read=/lib64`.
+fn path_covered_by(target: &std::path::Path, allowed: &std::path::Path) -> bool {
+    let norm_t = normalize_path(target);
+    let norm_a = normalize_path(allowed);
+    if norm_t.starts_with(norm_a.as_ref()) {
+        return true;
+    }
+    // Re-check after resolving symlinks on both sides.
+    canon_path(norm_t.as_ref()).starts_with(canon_path(norm_a.as_ref()))
+}
+
 fn caps_match(granted: &Capability, required: &Capability) -> bool {
     match (granted, required) {
         (Capability::FileRead(allowed), Capability::FileRead(target)) => {
-            normalize_path(target).starts_with(normalize_path(allowed).as_ref())
+            path_covered_by(target, allowed)
         }
         (Capability::FileWrite(allowed), Capability::FileWrite(target)) => {
-            normalize_path(target).starts_with(normalize_path(allowed).as_ref())
+            path_covered_by(target, allowed)
         }
         (Capability::Network(allowed), Capability::Network(target)) => {
             host_matches(allowed, target)
@@ -320,8 +338,8 @@ fn caps_match(granted: &Capability, required: &Capability) -> bool {
         (Capability::EnvAccess, Capability::EnvAccess) => true,
         (Capability::EnvAccess, Capability::EnvVar(_)) => true,
         (Capability::EnvVar(a), Capability::EnvVar(b)) => a == b,
-        // FFI: el path requerido debe comenzar con el path concedido.
-        (Capability::FFI(allowed), Capability::FFI(target)) => target.starts_with(allowed),
+        // FFI: el path requerido debe comenzar con el path concedido (con symlinks).
+        (Capability::FFI(allowed), Capability::FFI(target)) => path_covered_by(target, allowed),
         // Capabilities sin parámetros: igualdad de variante
         (a, b) => a == b,
     }

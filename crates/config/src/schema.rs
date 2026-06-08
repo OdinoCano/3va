@@ -12,6 +12,69 @@ pub struct ProjectConfig {
     pub audit: AuditConfig,
     pub bundle: BundleConfig,
     pub workspace: WorkspaceConfig,
+    pub firewall: FirewallConfig,
+}
+
+// ── firewall ──────────────────────────────────────────────────────────────────
+
+/// HTTP server firewall — rate limiting, DDoS/Slowloris/RUDY protection.
+/// All fields have safe defaults so adding `firewall: {}` is enough to opt in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FirewallConfig {
+    pub enabled: bool,
+    /// Token-bucket refill rate: max sustained requests per second per IP.
+    #[serde(rename = "rateLimitRps")]
+    pub rate_limit_rps: u32,
+    /// Burst capacity: requests an IP can fire before the rate limit activates.
+    #[serde(rename = "rateLimitBurst")]
+    pub rate_limit_burst: u32,
+    /// Consecutive violations before an IP is automatically blocked.
+    #[serde(rename = "autoBlockThreshold")]
+    pub auto_block_threshold: u32,
+    /// How long to keep an offending IP blocked, in seconds.
+    #[serde(rename = "blockDurationSecs")]
+    pub block_duration_secs: u64,
+    /// Max simultaneous open connections from a single IP.
+    #[serde(rename = "maxConnectionsPerIp")]
+    pub max_connections_per_ip: u32,
+    /// Max total simultaneous open connections.
+    #[serde(rename = "maxConnectionsTotal")]
+    pub max_connections_total: u32,
+    /// Timeout (ms) to receive the full request line + headers. Stops Slowloris.
+    #[serde(rename = "headerTimeoutMs")]
+    pub header_timeout_ms: u64,
+    /// Timeout (ms) to receive the full request body after headers. Stops RUDY.
+    #[serde(rename = "bodyTimeoutMs")]
+    pub body_timeout_ms: u64,
+    /// Maximum number of HTTP headers per request.
+    #[serde(rename = "maxHeaderCount")]
+    pub max_header_count: u32,
+    /// Maximum combined size of all headers in bytes.
+    #[serde(rename = "maxHeaderBytes")]
+    pub max_header_bytes: u32,
+    /// Maximum body size in bytes (0 = runtime default of 100 MB).
+    #[serde(rename = "maxBodyBytes")]
+    pub max_body_bytes: u32,
+}
+
+impl Default for FirewallConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            rate_limit_rps: 100,
+            rate_limit_burst: 200,
+            auto_block_threshold: 10,
+            block_duration_secs: 300,
+            max_connections_per_ip: 50,
+            max_connections_total: 10_000,
+            header_timeout_ms: 10_000,
+            body_timeout_ms: 30_000,
+            max_header_count: 100,
+            max_header_bytes: 16_384,
+            max_body_bytes: 0,
+        }
+    }
 }
 
 // ── run ───────────────────────────────────────────────────────────────────────

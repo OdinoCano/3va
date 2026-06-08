@@ -4602,6 +4602,7 @@ dependencies = [
  "vvva_bundler",
  "vvva_config",
  "vvva_core",
+ "vvva_firewall",
  "vvva_js",
  "vvva_permissions",
  "vvva_pm",
@@ -4648,6 +4649,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vvva_firewall"
+version = "2.0.0"
+dependencies = [
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "vvva_js"
 version = "2.0.0"
 dependencies = [
@@ -4689,6 +4699,7 @@ dependencies = [
  "url",
  "vvva_core",
  "vvva_crypto",
+ "vvva_firewall",
  "vvva_permissions",
 ]
 

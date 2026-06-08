@@ -779,6 +779,30 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             var _uncaughtCb = null;
             process.setUncaughtExceptionCaptureCallback = function(fn) { _uncaughtCb = fn; };
             process.hasUncaughtExceptionCaptureCallback = function() { return _uncaughtCb !== null; };
+
+            // process.emitWarning — used by Node.js built-ins and drivers (e.g. MongoDB)
+            var _warnListeners = [];
+            process.emitWarning = function(message, options) {
+                var code = (options && typeof options === 'object') ? options.code : options;
+                var w = new Error(typeof message === 'string' ? message : String(message));
+                w.name = 'Warning';
+                if (code) w.code = code;
+                if (typeof process.emit === 'function') process.emit('warning', w);
+                return w;
+            };
+
+            // process.dlopen — used by Prisma and other NAPI loaders instead of require()
+            // Mirrors Node.js: process.dlopen(module, filename[, flags])
+            // After the call, module.exports contains the native addon's exports.
+            process.dlopen = function(mod, filename, flags) {
+                if (typeof globalThis.__napiRequire !== 'function') {
+                    throw new Error('process.dlopen requires --allow-ffi');
+                }
+                var exports = globalThis.__napiRequire(filename);
+                if (mod && typeof mod === 'object') {
+                    mod.exports = exports || {};
+                }
+            };
         }());"#,
     )?;
 

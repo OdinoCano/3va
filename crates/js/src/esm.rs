@@ -65,10 +65,12 @@ impl Loader for EsmLoader {
         let source = std::fs::read_to_string(path)
             .map_err(|e| rquickjs::Error::new_loading_message(name, e.to_string()))?;
 
-        let source = if name.ends_with(".ts") || name.ends_with(".tsx") {
+        let source = if name.ends_with(".tsx") || name.ends_with(".jsx") {
+            transpiler::transpile_jsx(&source)
+        } else if name.ends_with(".ts") || name.ends_with(".mts") || name.ends_with(".cts") {
             transpiler::transpile(&source)
         } else {
-            source
+            transpiler::transpile_js(&source)
         };
 
         Module::declare(ctx.clone(), name, source)
