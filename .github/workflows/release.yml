@@ -27,14 +27,15 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             cross: true   # cross Docker image includes OpenSSL + aarch64 gcc
-          - target: x86_64-apple-darwin
-            os: macos-13
+          # Disabled: macOS runners queue for hours with no progress.
+          # - target: x86_64-apple-darwin
+          #   os: macos-13
           # Build arm64 on the Intel (macos-13 / Xcode 15) runner via cross-
           # compilation.  Xcode 16 on macos-latest rejects the .cfi_def_cfa
           # register-name syntax in libffi-sys 2.3.0's bundled arm64 assembly;
           # Xcode 15 accepts it fine.
-          - target: aarch64-apple-darwin
-            os: macos-13
+          # - target: aarch64-apple-darwin
+          #   os: macos-13
           - target: x86_64-pc-windows-msvc
             os: windows-latest
 

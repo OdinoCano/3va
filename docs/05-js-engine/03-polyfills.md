@@ -170,7 +170,7 @@ https.get('https://api.example.com/ping', (res) => {
 console.log(http.STATUS_CODES[404]); // 'Not Found'
 ```
 
-`createServer()` returns a no-op object (server-side HTTP requires TCP socket support).
+`createServer(handler)` returns a real server backed by `builtins/http_server.rs` (`__httpListen` / `__httpAcceptAsync` / `__httpRespond` / `__httpClose`). It exposes the full event-emitter API (`on`, `once`, `off`, `emit`, `listen`, `close`, `address`). Requires `--allow-net`.
 
 ## 3.6 `zlib` (Rust implementation via `flate2`)
 

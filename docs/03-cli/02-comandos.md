@@ -939,4 +939,216 @@ Can be combined with any subcommand:
 
 ---
 
+---
+
+## 2.11 Publishing Commands
+
+### 2.11.1 `pack`
+
+Creates a tarball (`.tgz`) of the current package, respecting the `files` field in `package.json` and default excludes (`node_modules`, `.git`, `*.lock`, etc.).
+
+**Signature:**
+```
+3va pack [--output=<path>] [--dry-run]
+```
+
+**Options:**
+| Option | Type | Description |
+|--------|------|-------------|
+| `--output=<path>` | `path` (optional) | Destination path for the `.tgz`. Defaults to `<name>-<version>.tgz` in the current directory. |
+| `--dry-run` | `bool` | Lists files that would be packed without writing the archive. |
+
+**Behavior:**
+1. Reads `name` and `version` from `package.json`.
+2. Collects all files under the project root, excluding `node_modules`, `.git`, `*.tgz`, and lock files.
+3. If the `files` field is set in `package.json`, only matching paths are included (plus `package.json` and `README` unconditionally).
+4. Writes a gzip-compressed tar archive with all entries under the `package/` prefix (npm convention).
+
+**Examples:**
+```bash
+# Create <name>-<version>.tgz in the current directory
+3va pack
+
+# Specify output path
+3va pack --output=dist/my-lib.tgz
+
+# Preview what would be packed
+3va pack --dry-run
+```
+
+---
+
+### 2.11.2 `publish`
+
+Publishes the current package to a registry. Packs the package into a temporary tarball and uploads it via the npm CouchDB PUT API.
+
+**Signature:**
+```
+3va publish [--registry=<url>] [--dry-run] [--access=<public|restricted>]
+```
+
+**Options:**
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--registry=<url>` | `string` | `https://registry.npmjs.org` | Registry base URL. |
+| `--dry-run` | `bool` | `false` | Pack to a temp file but do not upload. |
+| `--access=<scope>` | `"public"\|"restricted"` | — | Access level for scoped packages. |
+
+**Authentication:** reads `_authToken` for the registry host from `~/.npmrc`. Run `3va login` first.
+
+**Examples:**
+```bash
+# Publish to npm
+3va publish --allow-net=registry.npmjs.org
+
+# Publish to a private registry
+3va publish --registry=https://registry.corp.internal --allow-net=registry.corp.internal
+
+# Dry run (pack only, no upload)
+3va publish --dry-run
+```
+
+---
+
+### 2.11.3 `login`
+
+Authenticates with a registry and saves the bearer token to `~/.npmrc`.
+
+**Signature:**
+```
+3va login [--registry=<url>]
+```
+
+**Options:**
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--registry=<url>` | `string` | `https://registry.npmjs.org` | Registry to authenticate against. |
+
+**Behavior:** prompts for `Username` and `Password`, sends a CouchDB PUT to `/-/user/org.couchdb.user:<name>`, and writes `//host/:_authToken=<token>` to `~/.npmrc`.
+
+**Examples:**
+```bash
+3va login
+3va login --registry=https://registry.corp.internal
+```
+
+---
+
+### 2.11.4 `logout`
+
+Removes the stored auth token for a registry from `~/.npmrc`.
+
+**Signature:**
+```
+3va logout [--registry=<url>]
+```
+
+**Examples:**
+```bash
+3va logout
+3va logout --registry=https://registry.corp.internal
+```
+
+---
+
+### 2.11.5 `link`
+
+Creates a symlink between a local package and `node_modules/`, enabling development of inter-dependent packages without publishing.
+
+**Signature:**
+```
+3va link [<package>]
+```
+
+**Behavior:**
+- **No argument:** registers the current package globally in `~/.3va/linked/<name>`.
+- **With `<package>`:** creates `node_modules/<package>` → `~/.3va/linked/<package>`. The target must have been globally linked first.
+
+**Examples:**
+```bash
+# In your library directory — register it globally
+cd my-lib && 3va link
+
+# In the consuming project — link the library into node_modules
+cd my-app && 3va link my-lib
+```
+
+---
+
+### 2.11.6 `unlink`
+
+Removes a symlink created by `3va link`.
+
+**Signature:**
+```
+3va unlink [<package>]
+```
+
+**Behavior:**
+- **No argument:** removes the global registration of the current package.
+- **With `<package>`:** removes `node_modules/<package>` if it is a symlink.
+
+**Examples:**
+```bash
+3va unlink            # remove global registration of current package
+3va unlink my-lib     # remove node_modules/my-lib symlink
+```
+
+---
+
+### 2.11.7 `init`
+
+Interactively creates a `package.json` in the current directory.
+
+**Signature:**
+```
+3va init [--yes]
+```
+
+**Options:**
+| Option | Description |
+|--------|-------------|
+| `--yes` | Skip all prompts; accept all defaults. |
+
+**Prompted fields:** `name` (default: directory name), `version` (1.0.0), `description`, `main` (index.js), `author`, `license` (MIT).
+
+**Examples:**
+```bash
+3va init          # interactive
+3va init --yes    # all defaults, no prompts
+```
+
+---
+
+### 2.11.8 `why`
+
+Explains why a package is installed by tracing direct and transitive dependency paths.
+
+**Signature:**
+```
+3va why <package>
+```
+
+**Sources checked (in order):**
+1. `dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies` in `package.json`.
+2. `dependencies` of every entry in `3va-lock.json`.
+3. `dependencies` / `peerDependencies` fields of every package in `node_modules/`.
+
+**Examples:**
+```bash
+3va why lodash
+3va why typescript
+```
+
+**Sample output:**
+```
+  Why is lodash installed?
+
+  Direct dependencies (^4.17.21): my-app
+  Transitive: required by express
+  Transitive: webpack → lodash (^4.17.11)
+```
+
+---
+
 *Commands compliant with IEEE 829 and secure-by-default CLI design.*

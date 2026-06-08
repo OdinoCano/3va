@@ -78,6 +78,8 @@ The AI MUST verify that any API it references, documents, or generates actually 
 | `crypto.createCipheriv()` / `createDecipheriv()` | **Real** — AES-128-GCM and AES-256-GCM streaming encryption/decryption | `builtins/crypto.rs` |
 | `crypto.generateKeyPair()` / `generateKeyPairSync()` | **Real** — asymmetric RSA and EC key pair generation | `builtins/crypto.rs` |
 | `crypto.createPrivateKey()` / `createPublicKey()` / `createSecretKey()` | **Real** — imports PEM keys into compatible KeyObject wrappers | `builtins/crypto.rs` |
+| `worker_threads` | **Real** — each `new Worker(file)` spawns a real OS thread with its own `JsEngine`; `postMessage` passes JSON via `std::sync::mpsc`; `SharedArrayBuffer`/`Atomics` are **not supported** (non-goal: isolated heaps) | `builtins/worker_threads.rs` |
+| `cluster` | **Real** — single-process emulation; `isPrimary: true`, `fork()` returns a mock `ClusterWorker` that emits `online`/`exit` so `if (cluster.isPrimary)` guards work | `builtins/modules.rs` |
 | `http2` | **Partial stub** — client API backed by `__fetchAsync`; no real HTTP/2 framing | `builtins/modules.rs` |
 | `events` | **Real** — full `EventEmitter` class (prependListener, rawListeners, etc.) | `builtins/modules.rs` |
 | `stream` | **JS implementation** — `Readable`/`Writable`/`Transform` | `builtins/modules.rs` |
@@ -103,6 +105,7 @@ The following methods exist in the require cache but **throw at call time**. The
 |------|-------------|-------------|
 | `crypto.subtle.wrapKey()` | `wrapKey not implemented` (`NotSupportedError`) | use `exportKey` + encrypt manually |
 | `crypto.subtle.unwrapKey()` | `unwrapKey not implemented` (`NotSupportedError`) | use `importKey` + decrypt manually |
+| `crypto.createHash().copy()` | `Hash.copy() is not supported` | create a new `createHash()` instance |
 | `fs.watch()` | returns stub EventEmitter that never fires | no alternative in sandbox |
 
 ### 2.3 APIs That Are Partial Stubs — Document Limitations
@@ -113,6 +116,15 @@ The following methods exist in the require cache but **throw at call time**. The
 | `process.chdir()` | No-op stub; sandboxed runtime does not change working directory |
 | `fs.watch()` | Returns a stub EventEmitter; no inotify in sandbox |
 | `AbortController.abort()` | Races against `__fetchAsync` via `Promise.race`; cannot cancel in-flight I/O at socket level |
+| `tty.isatty(fd)` | Calls real `__isatty` (Rust `std::io::IsTerminal`); `process.stdout.isTTY` / `process.stdin.isTTY` reflect actual TTY state |
+| `v8.getHeapStatistics()` | Returns a zeroed object; `getHeapSpaceStatistics()` returns `[]` |
+| `vm.runInNewContext(code, sandbox)` | Uses `with(sandbox)` so sandbox vars shadow globals; `globalThis`/`require`/`process` still reachable — no real V8-style context isolation. Use `worker_threads` for process-level sandboxing |
+| `dns.resolveMx/Txt/Srv/Ns/Cname/Naptr/Ptr/Soa` | Callback receives `ENOTSUP` error |
+| `dns.reverse(ip, cb)` | Callback receives `ENOTSUP` error |
+| `dns.lookupService(addr, port, cb)` | Callback receives `ENOTSUP` error |
+| `readline.createInterface()` | No real stdin backing; `question()` always resolves with `''`; async iterator yields nothing |
+| `worker_threads.Worker` | No `SharedArrayBuffer`/`Atomics` — all data sharing must use `postMessage` |
+| `repl`, `wasi`, `trace_events` | Not implemented; `require()` throws `MODULE_NOT_FOUND` |
 
 ### 2.4 Behavior Differences from Node.js
 

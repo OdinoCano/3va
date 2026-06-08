@@ -1773,6 +1773,60 @@ enum Commands {
         #[command(subcommand)]
         action: PermissionsAction,
     },
+    /// Pack a package into a .tgz tarball (like npm pack)
+    Pack {
+        /// Output file path (default: <name>-<version>.tgz)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Dry run: list files without writing
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+    /// Publish a package to a registry
+    Publish {
+        /// Registry URL (default: https://registry.npmjs.org)
+        #[arg(long, default_value = "https://registry.npmjs.org")]
+        registry: String,
+        /// Dry run without uploading
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Allow publishing with an existing tag
+        #[arg(long = "access")]
+        access: Option<String>,
+    },
+    /// Authenticate with a registry
+    Login {
+        /// Registry URL (default: https://registry.npmjs.org)
+        #[arg(long, default_value = "https://registry.npmjs.org")]
+        registry: String,
+    },
+    /// Remove saved credentials for a registry
+    Logout {
+        /// Registry URL (default: https://registry.npmjs.org)
+        #[arg(long, default_value = "https://registry.npmjs.org")]
+        registry: String,
+    },
+    /// Symlink current package into the global package directory
+    Link {
+        /// Package to link FROM the global dir into this project (omit to link this project globally)
+        package: Option<String>,
+    },
+    /// Remove a symlink created by link
+    Unlink {
+        /// Package to unlink (omit to remove global link for this project)
+        package: Option<String>,
+    },
+    /// Create a package.json in the current directory
+    Init {
+        /// Accept defaults without prompting
+        #[arg(long = "yes", short = 'y')]
+        yes: bool,
+    },
+    /// Show why a package is installed
+    Why {
+        /// Package name to explain
+        package: String,
+    },
 }
 
 async fn run_audit_human(deny: bool, update_cache: bool, scan_secrets: bool) -> anyhow::Result<()> {
@@ -2600,6 +2654,34 @@ async fn main() -> anyhow::Result<()> {
             proc::delete_process(name)?;
             println!("  ✓ Deleted process '{}'", name);
         }
+        Commands::Pack { output, dry_run } => {
+            pm_pack(output.as_deref(), *dry_run)?;
+        }
+        Commands::Publish {
+            registry,
+            dry_run,
+            access,
+        } => {
+            pm_publish(registry, *dry_run, access.as_deref()).await?;
+        }
+        Commands::Login { registry } => {
+            pm_login(registry)?;
+        }
+        Commands::Logout { registry } => {
+            pm_logout(registry)?;
+        }
+        Commands::Link { package } => {
+            pm_link(package.as_deref())?;
+        }
+        Commands::Unlink { package } => {
+            pm_unlink(package.as_deref())?;
+        }
+        Commands::Init { yes } => {
+            pm_init(*yes)?;
+        }
+        Commands::Why { package } => {
+            pm_why(package)?;
+        }
     }
 
     Ok(())
@@ -2865,6 +2947,596 @@ fn split_top_level_args(s: &str) -> Vec<&str> {
     }
     args.push(&s[start..]);
     args
+}
+
+// ── PM helpers (pack / publish / login / logout / link / init / why) ─────────
+
+fn pm_pack(output: Option<&std::path::Path>, dry_run: bool) -> anyhow::Result<()> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    let cwd = std::env::current_dir()?;
+    let pkg_json_path = cwd.join("package.json");
+    let pkg_json: serde_json::Value = std::fs::read_to_string(&pkg_json_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let name = pkg_json["name"]
+        .as_str()
+        .unwrap_or("package")
+        .replace('/', "-")
+        .replace('@', "");
+    let version = pkg_json["version"].as_str().unwrap_or("0.0.0");
+    let tgz_name = format!("{}-{}.tgz", name, version);
+    let out_path = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| cwd.join(&tgz_name));
+
+    // Collect files (respect .npmignore / files field / default excludes)
+    let files_field: Vec<String> = pkg_json["files"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let entries = collect_pack_files(&cwd, &files_field)?;
+
+    println!();
+    println!("  Packing {} files:", entries.len());
+    for e in &entries {
+        println!("    {}", e.strip_prefix(&cwd).unwrap_or(e).display());
+    }
+
+    if dry_run {
+        println!();
+        println!("  (dry run — no file written)");
+        println!("  Would create: {}", out_path.display());
+        return Ok(());
+    }
+
+    let tgz_file = std::fs::File::create(&out_path)?;
+    let gz = GzEncoder::new(tgz_file, Compression::default());
+    let mut tar = tar::Builder::new(gz);
+
+    for path in &entries {
+        let rel = path.strip_prefix(&cwd).unwrap_or(path);
+        let tar_path = std::path::Path::new("package").join(rel);
+        tar.append_path_with_name(path, &tar_path)?;
+    }
+    tar.finish()?;
+
+    println!();
+    println!("  ✓ Created: {}", out_path.display());
+    println!(
+        "    Size: {} bytes",
+        std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0)
+    );
+    println!();
+    Ok(())
+}
+
+fn collect_pack_files(
+    cwd: &std::path::Path,
+    files_field: &[String],
+) -> anyhow::Result<Vec<PathBuf>> {
+    let default_excludes = [
+        "node_modules",
+        ".git",
+        ".3va-cache",
+        "*.tgz",
+        ".DS_Store",
+        ".npmignore",
+        ".gitignore",
+        "*.lock",
+        "3va-lock.json",
+    ];
+
+    let mut result = Vec::new();
+
+    fn walk(
+        dir: &std::path::Path,
+        cwd: &std::path::Path,
+        files_field: &[String],
+        excludes: &[&str],
+        result: &mut Vec<PathBuf>,
+    ) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let rel = path
+                .strip_prefix(cwd)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+
+            // Skip excluded patterns
+            if excludes.iter().any(|pat| {
+                if let Some(suffix) = pat.strip_prefix('*') {
+                    name.ends_with(suffix)
+                } else {
+                    name == *pat || rel.starts_with(pat)
+                }
+            }) {
+                continue;
+            }
+
+            // If files field specified, only include matching paths
+            if !files_field.is_empty()
+                && !files_field.iter().any(|f| rel.starts_with(f.as_str()))
+                && name != "package.json"
+                && !name.to_lowercase().starts_with("readme")
+            {
+                continue;
+            }
+
+            if path.is_dir() {
+                walk(&path, cwd, files_field, excludes, result);
+            } else if path.is_file() {
+                result.push(path);
+            }
+        }
+    }
+
+    walk(cwd, cwd, files_field, &default_excludes, &mut result);
+    result.sort();
+    Ok(result)
+}
+
+async fn pm_publish(registry: &str, dry_run: bool, _access: Option<&str>) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let pkg_json: serde_json::Value = std::fs::read_to_string(cwd.join("package.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let name = pkg_json["name"].as_str().unwrap_or("(unnamed)");
+    let version = pkg_json["version"].as_str().unwrap_or("0.0.0");
+
+    println!();
+    println!("  Publishing {}@{} to {}", name, version, registry);
+
+    if dry_run {
+        // Pack to temp dir and report
+        let tmp_dir = tempfile::tempdir()?;
+        let tgz_path = tmp_dir.path().join(format!(
+            "{}-{}.tgz",
+            name.replace('/', "-").replace('@', ""),
+            version
+        ));
+        pm_pack(Some(&tgz_path), false)?;
+        println!(
+            "  (dry run — tarball created at {} but not uploaded)",
+            tgz_path.display()
+        );
+        return Ok(());
+    }
+
+    // Pack to temp, then PUT to registry
+    let tmp_dir = tempfile::tempdir()?;
+    let safe_name = name.replace('/', "-").replace('@', "");
+    let tgz_name = format!("{}-{}.tgz", safe_name, version);
+    let tgz_path = tmp_dir.path().join(&tgz_name);
+    pm_pack(Some(&tgz_path), false)?;
+
+    let tgz_bytes = std::fs::read(&tgz_path)?;
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &tgz_bytes);
+
+    // Read auth token from .npmrc
+    let token = read_npmrc_token(registry);
+
+    let body = serde_json::json!({
+        "_id": name,
+        "name": name,
+        "description": pkg_json["description"],
+        "dist-tags": { "latest": version },
+        "versions": {
+            version: pkg_json
+        },
+        "_attachments": {
+            tgz_name: {
+                "content_type": "application/octet-stream",
+                "data": b64,
+                "length": tgz_bytes.len()
+            }
+        }
+    });
+
+    let url = format!("{}/{}", registry.trim_end_matches('/'), name);
+    let mut req = ureq::put(&url)
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json");
+    if let Some(tok) = &token {
+        req = req.set("Authorization", &format!("Bearer {tok}"));
+    }
+
+    match req.send_string(&serde_json::to_string(&body)?) {
+        Ok(resp) => {
+            println!("  ✓ Published {}@{}", name, version);
+            println!("    Status: {}", resp.status());
+        }
+        Err(e) => {
+            anyhow::bail!("Publish failed: {e}");
+        }
+    }
+    Ok(())
+}
+
+fn pm_login(registry: &str) -> anyhow::Result<()> {
+    use std::io::{self, BufRead, Write};
+
+    println!();
+    println!("  Log in to {}", registry);
+    println!();
+
+    let stdin = io::stdin();
+    print!("  Username: ");
+    io::stdout().flush()?;
+    let username = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+
+    print!("  Password: ");
+    io::stdout().flush()?;
+    let password = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+
+    // Authenticate with registry
+    let url = format!("{registry}/-/user/org.couchdb.user:{username}");
+    let body = serde_json::json!({
+        "_id": format!("org.couchdb.user:{username}"),
+        "name": username,
+        "password": password,
+        "type": "user",
+        "roles": [],
+    });
+
+    match ureq::put(&url)
+        .set("Content-Type", "application/json")
+        .send_string(&serde_json::to_string(&body)?)
+    {
+        Ok(resp) => {
+            let json: serde_json::Value = resp.into_json().unwrap_or_default();
+            if let Some(token) = json["token"].as_str() {
+                save_npmrc_token(registry, token)?;
+                println!("  ✓ Logged in as {}", username);
+                println!("    Token saved to ~/.npmrc");
+            } else {
+                println!("  ✓ Authenticated (no token in response)");
+            }
+        }
+        Err(e) => {
+            anyhow::bail!("Login failed: {e}");
+        }
+    }
+    Ok(())
+}
+
+fn pm_logout(registry: &str) -> anyhow::Result<()> {
+    remove_npmrc_token(registry)?;
+    println!("  ✓ Logged out from {}", registry);
+    Ok(())
+}
+
+fn pm_link(package: Option<&str>) -> anyhow::Result<()> {
+    let global_link_dir = global_link_dir();
+    std::fs::create_dir_all(&global_link_dir)?;
+
+    match package {
+        None => {
+            // Link current package globally
+            let cwd = std::env::current_dir()?;
+            let pkg_json: serde_json::Value = std::fs::read_to_string(cwd.join("package.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let name = pkg_json["name"].as_str().unwrap_or("package");
+            let link_path = global_link_dir.join(name);
+            if link_path.exists() || link_path.is_symlink() {
+                std::fs::remove_file(&link_path)
+                    .or_else(|_| std::fs::remove_dir_all(&link_path))
+                    .ok();
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&cwd, &link_path)?;
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_dir(&cwd, &link_path)?;
+            println!("  ✓ Linked {} → {}", name, link_path.display());
+        }
+        Some(pkg) => {
+            // Link global package into local node_modules
+            let link_src = global_link_dir.join(pkg);
+            if !link_src.exists() {
+                anyhow::bail!("Package '{}' is not linked globally. Run: 3va link in that package's directory.", pkg);
+            }
+            let cwd = std::env::current_dir()?;
+            let nm_path = cwd.join("node_modules").join(pkg);
+            std::fs::create_dir_all(nm_path.parent().unwrap_or(&cwd))?;
+            if nm_path.exists() || nm_path.is_symlink() {
+                std::fs::remove_file(&nm_path)
+                    .or_else(|_| std::fs::remove_dir_all(&nm_path))
+                    .ok();
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&link_src, &nm_path)?;
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_dir(&link_src, &nm_path)?;
+            println!("  ✓ Linked {} into node_modules/", pkg);
+        }
+    }
+    Ok(())
+}
+
+fn pm_unlink(package: Option<&str>) -> anyhow::Result<()> {
+    let global_link_dir = global_link_dir();
+    match package {
+        None => {
+            let cwd = std::env::current_dir()?;
+            let pkg_json: serde_json::Value = std::fs::read_to_string(cwd.join("package.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let name = pkg_json["name"].as_str().unwrap_or("package");
+            let link_path = global_link_dir.join(name);
+            if link_path.is_symlink() || link_path.exists() {
+                std::fs::remove_file(&link_path)
+                    .or_else(|_| std::fs::remove_dir_all(&link_path))?;
+                println!("  ✓ Unlinked {} from global directory", name);
+            } else {
+                println!("  (no global link found for {})", name);
+            }
+        }
+        Some(pkg) => {
+            let cwd = std::env::current_dir()?;
+            let nm_path = cwd.join("node_modules").join(pkg);
+            if nm_path.is_symlink() {
+                std::fs::remove_file(&nm_path)?;
+                println!("  ✓ Removed node_modules/{} symlink", pkg);
+            } else {
+                println!("  (no symlink found for {})", pkg);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pm_init(yes: bool) -> anyhow::Result<()> {
+    use std::io::{self, BufRead, Write};
+
+    let cwd = std::env::current_dir()?;
+    let pkg_json_path = cwd.join("package.json");
+
+    if pkg_json_path.exists() && !yes {
+        print!("  package.json already exists. Overwrite? [y/N] ");
+        io::stdout().flush()?;
+        let answer = io::stdin()
+            .lock()
+            .lines()
+            .next()
+            .unwrap_or(Ok(String::new()))?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("  Aborted.");
+            return Ok(());
+        }
+    }
+
+    fn prompt(label: &str, default: &str, yes: bool) -> String {
+        if yes {
+            return default.to_string();
+        }
+        use std::io::{self, BufRead, Write};
+        print!("  {} ({}): ", label, default);
+        io::stdout().flush().ok();
+        let line = io::stdin()
+            .lock()
+            .lines()
+            .next()
+            .unwrap_or(Ok(String::new()))
+            .unwrap_or_default();
+        let trimmed = line.trim().to_string();
+        if trimmed.is_empty() {
+            default.to_string()
+        } else {
+            trimmed
+        }
+    }
+
+    let dir_name = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("package");
+    let name = prompt("package name", dir_name, yes);
+    let version = prompt("version", "1.0.0", yes);
+    let desc = prompt("description", "", yes);
+    let main = prompt("main", "index.js", yes);
+    let author = prompt("author", "", yes);
+    let license = prompt("license", "MIT", yes);
+
+    let pkg = serde_json::json!({
+        "name": name,
+        "version": version,
+        "description": desc,
+        "main": main,
+        "scripts": { "test": "echo \"Error: no test specified\" && exit 1" },
+        "author": author,
+        "license": license
+    });
+
+    let pretty = serde_json::to_string_pretty(&pkg)?;
+    std::fs::write(&pkg_json_path, &pretty)?;
+    println!();
+    println!("  ✓ Wrote {}", pkg_json_path.display());
+    println!();
+    println!("{}", pretty);
+    Ok(())
+}
+
+fn pm_why(package: &str) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+
+    // Check direct dependencies in package.json
+    let pkg_json: serde_json::Value = std::fs::read_to_string(cwd.join("package.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let mut reasons: Vec<String> = Vec::new();
+
+    for dep_field in &[
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        if let Some(deps) = pkg_json[dep_field].as_object() {
+            if deps.contains_key(package) {
+                let ver = deps[package].as_str().unwrap_or("*");
+                reasons.push(format!(
+                    "  Direct {} ({}): {}",
+                    dep_field,
+                    ver,
+                    cwd.file_name().and_then(|n| n.to_str()).unwrap_or(".")
+                ));
+            }
+        }
+    }
+
+    // Check lockfile for transitive deps
+    let lockfile_path = cwd.join("3va-lock.json");
+    if lockfile_path.exists() {
+        if let Ok(lf) = vvva_pm::Lockfile::load(&lockfile_path) {
+            for (locked_name, locked_dep) in &lf.dependencies {
+                if locked_name == package {
+                    continue;
+                }
+                if let Some(sub_deps) = &locked_dep.dependencies {
+                    if sub_deps.contains_key(package) {
+                        reasons.push(format!("  Transitive: required by {}", locked_name));
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check node_modules/<pkg>/package.json of all installed packages
+    let nm = cwd.join("node_modules");
+    if nm.is_dir() {
+        for entry in std::fs::read_dir(&nm).into_iter().flatten().flatten() {
+            let ep = entry.path();
+            if !ep.is_dir() {
+                continue;
+            }
+            let name = ep
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            if name == package || name.starts_with('.') {
+                continue;
+            }
+            let dep_pkg: serde_json::Value = std::fs::read_to_string(ep.join("package.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            for df in &["dependencies", "peerDependencies"] {
+                if dep_pkg[df]
+                    .as_object()
+                    .map(|d| d.contains_key(package))
+                    .unwrap_or(false)
+                {
+                    let ver = dep_pkg[df][package].as_str().unwrap_or("*");
+                    reasons.push(format!("  Transitive: {} → {} ({})", name, package, ver));
+                    break;
+                }
+            }
+        }
+    }
+
+    println!();
+    if reasons.is_empty() {
+        println!(
+            "  {} is not installed or not referenced by any dependency.",
+            package
+        );
+    } else {
+        println!("  Why is {} installed?", package);
+        println!();
+        // Deduplicate and show
+        reasons.sort();
+        reasons.dedup();
+        for r in &reasons {
+            println!("{}", r);
+        }
+    }
+    println!();
+    Ok(())
+}
+
+fn global_link_dir() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".3va").join("linked")
+}
+
+fn read_npmrc_token(registry: &str) -> Option<String> {
+    let npmrc_path = dirs_npmrc();
+    let content = std::fs::read_to_string(npmrc_path).ok()?;
+    let host = registry
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    for line in content.lines() {
+        if line.contains(host) && line.contains(":_authToken=") {
+            return line
+                .split(":_authToken=")
+                .nth(1)
+                .map(|s| s.trim().to_string());
+        }
+    }
+    None
+}
+
+fn save_npmrc_token(registry: &str, token: &str) -> anyhow::Result<()> {
+    let npmrc_path = dirs_npmrc();
+    let host = registry
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let entry = format!("//{}/:_authToken={}", host, token);
+
+    let existing = std::fs::read_to_string(&npmrc_path).unwrap_or_default();
+    let mut lines: Vec<String> = existing
+        .lines()
+        .filter(|l| !l.contains(host))
+        .map(|l| l.to_string())
+        .collect();
+    lines.push(entry);
+    std::fs::write(&npmrc_path, lines.join("\n") + "\n")?;
+    Ok(())
+}
+
+fn remove_npmrc_token(registry: &str) -> anyhow::Result<()> {
+    let npmrc_path = dirs_npmrc();
+    let host = registry
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let existing = std::fs::read_to_string(&npmrc_path).unwrap_or_default();
+    let filtered: String = existing
+        .lines()
+        .filter(|l| !l.contains(host))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(&npmrc_path, filtered)?;
+    Ok(())
+}
+
+fn dirs_npmrc() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".npmrc")
 }
 
 fn unified_diff(before: &str, after: &str, filename: &str) -> String {

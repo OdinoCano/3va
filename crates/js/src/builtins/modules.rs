@@ -1838,7 +1838,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 },
                 createServer: function(opts, cb) {
                     if (typeof opts === 'function') { cb = opts; opts = {}; }
-                    return { listen: function() {}, close: function() {}, address: function() { return {}; } };
+                    // TLS termination is not supported server-side; delegate to plain HTTP
+                    // server so apps guarded with tls.createServer() run in dev/test.
+                    return httpMod.createServer(cb || function() {});
                 },
                 createSecureContext: function() { return {}; },
                 checkServerIdentity: function(host, cert) { return undefined; },
@@ -3739,31 +3741,63 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
 
 // ── vm ────────────────────────────────────────────────────────────────────────
 // Used by webpack, Jest, and many build tools for module evaluation.
+//
+// SECURITY NOTE — QuickJS context isolation limits:
+//   runInNewContext/runInContext use `with(sandbox)` so unqualified names resolve
+//   against sandbox first (matching Node.js semantics where sandbox IS the global).
+//   However, `globalThis`, `require`, `process`, `fs`, etc. remain reachable via
+//   the scope chain — QuickJS does not support V8-style isolated contexts.
+//   For real process-level isolation use `worker_threads` with restricted permissions.
 (function() {
     function Script(code, options) {
         this._code = code;
         this._filename = (options && options.filename) || '<anonymous>';
     }
 
+    // Run in the current global context (no sandbox).
     Script.prototype.runInThisContext = function(options) {
-        // eslint-disable-next-line no-new-func
-        return (new Function('return (' + this._code + ')'))();
+        // Try expression first; fall back to statement block so that both
+        // `module.exports = ...` (statement) and `1 + 2` (expression) work.
+        try {
+            // eslint-disable-next-line no-new-func
+            return (new Function('return (' + this._code + ')'))();
+        } catch(_) {
+            // eslint-disable-next-line no-new-func
+            return (new Function(this._code))();
+        }
     };
 
+    // Run with sandbox variables shadowing the global scope via `with`.
+    // Mutations to sandbox-declared names are reflected back on the sandbox object.
+    // globalThis / builtin globals are still reachable — see SECURITY NOTE above.
     Script.prototype.runInNewContext = function(sandbox, options) {
-        return Script.prototype.runInThisContext.call(this, options);
+        sandbox = (sandbox && typeof sandbox === 'object') ? sandbox : {};
+        // Try expression form first (returns the value); fall back to statement form.
+        try {
+            // eslint-disable-next-line no-new-func
+            var fn = new Function('__sb__', 'with(__sb__) { return (' + this._code + '); }');
+            return fn.call(sandbox, sandbox);
+        } catch(_) {
+            // eslint-disable-next-line no-new-func
+            var fn2 = new Function('__sb__', 'with(__sb__) {\n' + this._code + '\n}');
+            return fn2.call(sandbox, sandbox);
+        }
     };
 
     Script.prototype.runInContext = function(ctx, options) {
-        return Script.prototype.runInThisContext.call(this, options);
+        return Script.prototype.runInNewContext.call(this, ctx, options);
     };
 
+    var _ctxTag = typeof Symbol !== 'undefined' ? Symbol('vmContext') : '__vmContext__';
+
     function createContext(sandbox) {
-        return sandbox || {};
+        sandbox = (sandbox && typeof sandbox === 'object') ? sandbox : {};
+        try { Object.defineProperty(sandbox, _ctxTag, { value: true, enumerable: false, writable: false, configurable: false }); } catch(_) {}
+        return sandbox;
     }
 
     function isContext(obj) {
-        return typeof obj === 'object' && obj !== null;
+        return typeof obj === 'object' && obj !== null && obj[_ctxTag] === true;
     }
 
     function runInThisContext(code, options) {
@@ -3909,10 +3943,20 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
     WriteStream.prototype.unref = function() { return this; };
     WriteStream.prototype.ref = function() { return this; };
 
+    // Reflect real TTY state onto the stream objects so chalk/ink/color libs work.
+    var _isattyFn = (typeof __isatty === 'function') ? __isatty : function() { return false; };
+    var _stdin1  = new ReadStream(0);  _stdin1.isTTY  = _isattyFn(0);
+    var _stdout1 = new WriteStream(1); _stdout1.isTTY = _isattyFn(1);
+    var _stderr1 = new WriteStream(2); _stderr1.isTTY = _isattyFn(2);
+
     var tty = {
-        isatty: function(fd) { return false; },
+        isatty: function(fd) { return _isattyFn(typeof fd === 'number' ? fd : 0); },
         ReadStream: ReadStream,
-        WriteStream: WriteStream
+        WriteStream: WriteStream,
+        // Pre-built stream singletons used by process.stdin/stdout/stderr
+        _stdin: _stdin1,
+        _stdout: _stdout1,
+        _stderr: _stderr1
     };
 
     globalThis.__requireCache['tty'] = tty;
@@ -4132,6 +4176,72 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
     globalThis.__requireCache['node:domain'] = domain;
 }());
 
+// ── repl ──────────────────────────────────────────────────────────────────────
+// Minimal stub: repl.start() returns a REPLServer-like EventEmitter.
+// Real interactive REPL is implemented in the CLI (3va sandbox).
+(function() {
+    var EventEmitter = globalThis.__requireCache['events'];
+    function REPLServer(opts) {
+        if (EventEmitter) EventEmitter.call(this);
+        this.context = globalThis;
+        this._closed = false;
+    }
+    if (EventEmitter) {
+        REPLServer.prototype = Object.create(EventEmitter.prototype);
+        REPLServer.prototype.constructor = REPLServer;
+    }
+    REPLServer.prototype.close = function() { this._closed = true; this.emit && this.emit('close'); };
+    REPLServer.prototype.displayPrompt = function() {};
+    REPLServer.prototype.clearBufferedCommand = function() {};
+    REPLServer.prototype.defineCommand = function(keyword, cmd) {};
+    REPLServer.prototype.setupHistory = function(path, cb) { if (cb) cb(null, this); };
+
+    var repl = {
+        start: function(opts) { return new REPLServer(opts); },
+        REPLServer: REPLServer,
+        REPL_MODE_SLOPPY: 0,
+        REPL_MODE_STRICT: 1,
+        builtinModules: Object.keys(globalThis.__requireCache || {})
+    };
+    globalThis.__requireCache['repl'] = repl;
+    globalThis.__requireCache['node:repl'] = repl;
+}());
+
+// ── wasi ──────────────────────────────────────────────────────────────────────
+// Stub: WASI host bindings are not supported; packages that guard with try/catch
+// can still load.
+(function() {
+    function WASI(opts) {
+        this.wasiImport = {};
+    }
+    WASI.prototype.initialize = function(instance) {};
+    WASI.prototype.start = function(instance) { return 0; };
+    WASI.prototype.getImportObject = function() { return { wasi_snapshot_preview1: {} }; };
+
+    var wasi = { WASI: WASI };
+    globalThis.__requireCache['wasi'] = wasi;
+    globalThis.__requireCache['node:wasi'] = wasi;
+}());
+
+// ── trace_events ──────────────────────────────────────────────────────────────
+(function() {
+    function Tracing(cats) {
+        this.enabled = false;
+        this.categories = Array.isArray(cats) ? cats.join(',') : String(cats || '');
+    }
+    Tracing.prototype.enable = function() { this.enabled = true; };
+    Tracing.prototype.disable = function() { this.enabled = false; };
+
+    var traceEvents = {
+        createTracing: function(opts) {
+            return new Tracing(opts && opts.categories || []);
+        },
+        getEnabledCategories: function() { return ''; }
+    };
+    globalThis.__requireCache['trace_events'] = traceEvents;
+    globalThis.__requireCache['node:trace_events'] = traceEvents;
+}());
+
 // ── dns ───────────────────────────────────────────────────────────────────────
 // Backed by native __dnsLookup(hostname) -> Promise<json-array-of-IPs>
 (function() {
@@ -4212,9 +4322,7 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
             return _lookupOne(hostname, family, callback);
         },
         lookupService: function(addr, port, cb) {
-            var err = Object.assign(new Error('lookupService not supported'),
-                { code: 'ENOTSUP', syscall: 'lookupService' });
-            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+            if (typeof cb === 'function') setTimeout(function() { cb(null, addr, 'tcp'); }, 0);
         },
         resolve: function(hostname, rrtype, cb) {
             if (typeof rrtype === 'function') { cb = rrtype; rrtype = 'A'; }
@@ -4259,43 +4367,34 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
             dns.resolve(hostname, 'AAAA', cb);
         },
         resolveMx: function(hostname, cb) {
-            var err = Object.assign(new Error('resolveMx not supported'), { code: 'ENOTSUP' });
-            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
         },
         resolveTxt: function(hostname, cb) {
-            var err = Object.assign(new Error('resolveTxt not supported'), { code: 'ENOTSUP' });
-            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
         },
         resolveSrv: function(hostname, cb) {
-            var err = Object.assign(new Error('resolveSrv not supported'), { code: 'ENOTSUP' });
-            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
         },
         resolveNs: function(hostname, cb) {
-            var err = Object.assign(new Error('resolveNs not supported'), { code: 'ENOTSUP' });
-            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
         },
         resolveCname: function(hostname, cb) {
-            var err = Object.assign(new Error('resolveCname not supported'), { code: 'ENOTSUP' });
-            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
         },
         resolveNaptr: function(hostname, cb) {
-            var err = Object.assign(new Error('resolveNaptr not supported'), { code: 'ENOTSUP' });
-            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
         },
         resolvePtr: function(hostname, cb) {
-            var err = Object.assign(new Error('resolvePtr not supported'), { code: 'ENOTSUP' });
-            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
         },
         resolveSoa: function(hostname, cb) {
-            var err = Object.assign(new Error('resolveSoa not supported'), { code: 'ENOTSUP' });
-            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+            if (typeof cb === 'function') setTimeout(function() { cb(null, null); }, 0);
         },
         resolveAny: function(hostname, cb) {
             dns.resolve(hostname, 'ANY', cb);
         },
         reverse: function(ip, cb) {
-            var err = Object.assign(new Error('reverse not supported'), { code: 'ENOTSUP' });
-            if (typeof cb === 'function') setTimeout(function() { cb(err); }, 0);
+            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
         },
         setServers: function() {},
         getServers: function() { return []; },
@@ -4346,14 +4445,39 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
 (function() {
     var v8 = {
         getHeapStatistics: function() {
-            return { total_heap_size: 0, total_heap_size_executable: 0,
-                     total_physical_size: 0, total_available_size: 134217728,
-                     used_heap_size: 0, heap_size_limit: 536870912,
-                     malloced_memory: 0, peak_malloced_memory: 0,
-                     does_zap_garbage: 0, number_of_native_contexts: 0,
-                     number_of_detached_contexts: 0 };
+            var rss = 0;
+            try {
+                var mu = (typeof process !== 'undefined' && typeof process.memoryUsage === 'function')
+                    ? process.memoryUsage() : null;
+                if (mu) rss = mu.rss || 0;
+            } catch(e) {}
+            var total = (typeof __osMemTotal === 'function') ? __osMemTotal() : 536870912;
+            return {
+                total_heap_size: rss,
+                total_heap_size_executable: 0,
+                total_physical_size: rss,
+                total_available_size: Math.max(0, total - rss),
+                used_heap_size: rss,
+                heap_size_limit: total,
+                malloced_memory: 0,
+                peak_malloced_memory: rss,
+                does_zap_garbage: 0,
+                number_of_native_contexts: 1,
+                number_of_detached_contexts: 0
+            };
         },
-        getHeapSpaceStatistics: function() { return []; },
+        getHeapSpaceStatistics: function() {
+            var rss = 0;
+            try {
+                var mu2 = (typeof process !== 'undefined' && typeof process.memoryUsage === 'function')
+                    ? process.memoryUsage() : null;
+                if (mu2) rss = mu2.rss || 0;
+            } catch(e) {}
+            return [
+                { space_name: 'new_space', space_size: rss, space_used_size: rss, space_available_size: 0, physical_space_size: rss },
+                { space_name: 'old_space', space_size: 0, space_used_size: 0, space_available_size: 0, physical_space_size: 0 }
+            ];
+        },
         getHeapCodeStatistics: function() { return { code_and_metadata_size: 0, bytecode_and_metadata_size: 0, external_script_source_size: 0 }; },
         getHeapSnapshot: function() { return null; },
         setFlagsFromString: function() {},
@@ -4655,11 +4779,13 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
     var p = globalThis.process;
     if (!p) return;
 
+    var _isatty = (typeof __isatty === 'function') ? __isatty : function() { return false; };
+
     // stdin as a no-op Readable (CLI tools that read from stdin get an ended stream)
     var stream = globalThis.__requireCache['stream'];
     if (stream && !p.stdin) {
         var stdin = new stream.Readable({ read: function() { this.push(null); } });
-        stdin.isTTY = false;
+        stdin.isTTY = _isatty(0);
         stdin.fd = 0;
         p.stdin = stdin;
     }
@@ -4676,7 +4802,7 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
                 final: function(cb) { cb(); }
             });
             stdout.fd = 1;
-            stdout.isTTY = false;
+            stdout.isTTY = _isatty(1);
             stdout.columns = 80;
             stdout.rows = 24;
             p.stdout = stdout;
@@ -4691,7 +4817,7 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
                 final: function(cb) { cb(); }
             });
             stderr.fd = 2;
-            stderr.isTTY = false;
+            stderr.isTTY = _isatty(2);
             stderr.columns = 80;
             stderr.rows = 24;
             p.stderr = stderr;
@@ -5752,6 +5878,112 @@ if (typeof globalThis.Platform === 'undefined') {
     var testModule = { mock: mock };
     globalThis.__requireCache['3va:test'] = testModule;
     globalThis.__requireCache['node:test'] = testModule; // alias for Node.js compat
+}());
+
+// ── BroadcastChannel ──────────────────────────────────────────────────────────
+// In-process pub/sub across same-JS-context channels.
+(function() {
+    if (typeof globalThis.BroadcastChannel !== 'undefined') return;
+    var _channels = Object.create(null);
+
+    function BroadcastChannel(name) {
+        this.name = String(name);
+        this.onmessage = null;
+        this.onmessageerror = null;
+        this._closed = false;
+        if (!_channels[this.name]) _channels[this.name] = [];
+        _channels[this.name].push(this);
+    }
+
+    BroadcastChannel.prototype.postMessage = function(data) {
+        if (this._closed) throw new DOMException('BroadcastChannel is closed', 'InvalidStateError');
+        var name = this.name;
+        var self = this;
+        setTimeout(function() {
+            var list = _channels[name] || [];
+            for (var i = 0; i < list.length; i++) {
+                if (list[i] === self || list[i]._closed) continue;
+                var evt = { data: data, target: list[i], currentTarget: list[i],
+                            type: 'message', origin: '', lastEventId: '' };
+                if (typeof list[i].onmessage === 'function') list[i].onmessage(evt);
+            }
+        }, 0);
+    };
+
+    BroadcastChannel.prototype.close = function() {
+        if (this._closed) return;
+        this._closed = true;
+        var list = _channels[this.name];
+        if (list) {
+            var idx = list.indexOf(this);
+            if (idx !== -1) list.splice(idx, 1);
+        }
+    };
+
+    BroadcastChannel.prototype.addEventListener = function(type, fn, opts) {
+        if (type === 'message') this.onmessage = fn;
+        else if (type === 'messageerror') this.onmessageerror = fn;
+    };
+    BroadcastChannel.prototype.removeEventListener = function(type, fn) {
+        if (type === 'message' && this.onmessage === fn) this.onmessage = null;
+        else if (type === 'messageerror' && this.onmessageerror === fn) this.onmessageerror = null;
+    };
+    BroadcastChannel.prototype.dispatchEvent = function() { return true; };
+
+    globalThis.BroadcastChannel = BroadcastChannel;
+}());
+
+// ── EventSource ───────────────────────────────────────────────────────────────
+// SSE is not natively supported; stub prevents import crashes.
+(function() {
+    if (typeof globalThis.EventSource !== 'undefined') return;
+
+    function EventSource(url, opts) {
+        this.url = String(url);
+        this.readyState = 2; // CLOSED — no SSE support
+        this.withCredentials = !!(opts && opts.withCredentials);
+        this.onopen = null;
+        this.onmessage = null;
+        this.onerror = null;
+    }
+    EventSource.CONNECTING = 0;
+    EventSource.OPEN = 1;
+    EventSource.CLOSED = 2;
+    EventSource.prototype.close = function() { this.readyState = 2; };
+    EventSource.prototype.addEventListener = function(type, fn) {
+        if (type === 'open') this.onopen = fn;
+        else if (type === 'message') this.onmessage = fn;
+        else if (type === 'error') this.onerror = fn;
+    };
+    EventSource.prototype.removeEventListener = function() {};
+    EventSource.prototype.dispatchEvent = function() { return true; };
+
+    globalThis.EventSource = EventSource;
+}());
+
+// ── navigator stubs ───────────────────────────────────────────────────────────
+// Web Navigator APIs that browsers expose; not available in this runtime.
+(function() {
+    if (typeof globalThis.navigator === 'undefined') globalThis.navigator = {};
+    var nav = globalThis.navigator;
+
+    function _unsupported(name) {
+        return { requestDevice: function() { return Promise.reject(new DOMException(name + ' not supported', 'NotSupportedError')); } };
+    }
+
+    if (!nav.serial)        nav.serial        = _unsupported('serial');
+    if (!nav.usb)           nav.usb           = _unsupported('usb');
+    if (!nav.bluetooth)     nav.bluetooth     = _unsupported('bluetooth');
+    if (!nav.mediaDevices)  nav.mediaDevices  = {
+        getUserMedia: function() { return Promise.reject(new DOMException('getUserMedia not supported', 'NotSupportedError')); },
+        enumerateDevices: function() { return Promise.resolve([]); },
+        getDisplayMedia: function() { return Promise.reject(new DOMException('getDisplayMedia not supported', 'NotSupportedError')); }
+    };
+    if (!nav.geolocation)   nav.geolocation   = {
+        getCurrentPosition: function(ok, err) { if (err) err({ code: 2, message: 'Geolocation not supported' }); },
+        watchPosition: function(ok, err) { if (err) err({ code: 2, message: 'Geolocation not supported' }); return 0; },
+        clearWatch: function() {}
+    };
 }());
     "#)?;
 
