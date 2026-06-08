@@ -31,6 +31,14 @@ license = "MIT"
 repository = "https://github.com/OdinoCano/3va"
 homepage = "https://github.com/OdinoCano/3va"
 
+[lib]
+doctest = false
+
+# Suppress clippy lints on upstream vendor code — we only patch specific
+# behaviour and don't want to maintain style fixes for the whole codebase.
+[lints.clippy]
+all = "allow"
+
 [package.metadata.docs.rs]
 features = [
     "full-async",

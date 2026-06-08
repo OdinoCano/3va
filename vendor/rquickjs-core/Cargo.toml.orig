@@ -9,7 +9,13 @@ description = "Patched high-level QuickJS bindings for the 3va runtime (AsyncLoc
 keywords = ["quickjs", "javascript", "3va", "runtime", "api-bindings"]
 categories = ["api-bindings"]
 repository = "https://github.com/OdinoCano/3va"
-homepage = "https://3va.run"
+homepage = "https://github.com/OdinoCano/3va"
+
+[lib]
+doctest = false
+
+[lints.clippy]
+all = "allow"
 
 [dependencies.phf]
 version = "0.11"
