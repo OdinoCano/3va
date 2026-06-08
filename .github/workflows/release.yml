@@ -29,10 +29,12 @@ jobs:
             cross: true   # cross Docker image includes OpenSSL + aarch64 gcc
           - target: x86_64-apple-darwin
             os: macos-13
-          # aarch64-apple-darwin omitted: libffi-sys 2.3.0 bundles libffi 3.4.4
-          # whose arm64 assembly (.cfi_def_cfa with register names) is rejected
-          # by the Xcode 16 assembler.  Apple Silicon users can run the x86_64
-          # binary via Rosetta 2, or install from source: cargo install vvva_cli
+          # Build arm64 on the Intel (macos-13 / Xcode 15) runner via cross-
+          # compilation.  Xcode 16 on macos-latest rejects the .cfi_def_cfa
+          # register-name syntax in libffi-sys 2.3.0's bundled arm64 assembly;
+          # Xcode 15 accepts it fine.
+          - target: aarch64-apple-darwin
+            os: macos-13
           - target: x86_64-pc-windows-msvc
             os: windows-latest
 
