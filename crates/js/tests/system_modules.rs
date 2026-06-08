@@ -855,7 +855,7 @@ async fn http_create_server_returns_full_server_object() {
 // ── crypto stubs that must throw ──────────────────────────────────────────────
 
 #[tokio::test]
-async fn crypto_hash_copy_throws() {
+async fn crypto_hash_copy_returns_independent_clone() {
     let e = engine().await;
     let r = e
         .eval_to_string(
@@ -863,14 +863,17 @@ async fn crypto_hash_copy_throws() {
             var crypto = require('crypto');
             var h = crypto.createHash('sha256');
             h.update('hello');
-            var threw = false;
-            try { h.copy(); } catch(e) { threw = true; }
-            String(threw)
+            var h2 = h.copy();
+            h2.update(' world');
+            // Original digest must reflect only 'hello'; clone must reflect 'hello world'
+            var orig   = h.digest('hex');
+            var cloned = h2.digest('hex');
+            String(typeof h2 === 'object' && orig !== cloned && orig.length === 64)
             "#,
         )
         .await
         .unwrap();
-    assert_eq!(r, "true", "Hash.copy() must throw");
+    assert_eq!(r, "true", "Hash.copy() must return an independent clone");
 }
 
 #[tokio::test]
