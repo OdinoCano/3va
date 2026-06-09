@@ -1,0 +1,43 @@
+name: 3va
+base: core24
+version: '1.0.0'
+summary: Secure-by-default JavaScript and TypeScript runtime.
+description: |
+  3va is a JavaScript and TypeScript runtime built on QuickJS with
+  capability-based sandboxing, post-quantum cryptography (ML-KEM / ML-DSA),
+  and WebAssembly support.
+
+  Every permission — filesystem, network, environment variables, subprocess
+  execution — is denied by default and must be explicitly granted per script.
+  Post-install scripts are blocked unconditionally.
+  Built-in process supervisor; no pm2 required. MIT licensed.
+
+grade: stable
+confinement: strict
+
+# Strict confinement mirrors 3va's deny-by-default philosophy at the
+# distribution layer.  Scripts that need real filesystem or network access
+# must use 3va's own permission flags; the snap does not pre-grant anything
+# beyond what the runtime itself requires to execute.
+apps:
+  3va:
+    command: bin/3va
+    plugs:
+      - home
+      - network
+      - network-bind
+
+parts:
+  3va:
+    plugin: rust
+    source: https://github.com/OdinoCano/3va.git
+    source-tag: v1.0.0
+    source-type: git
+    rust-features:
+      - []
+    build-packages:
+      - pkg-config
+      - libssl-dev
+    override-build: |
+      cargo build --release --bin 3va
+      install -Dm755 target/release/3va $SNAPCRAFT_PART_INSTALL/bin/3va

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>3va</id>
+    <version>1.0.0</version>
+    <title>3va</title>
+    <authors>OdinoCano</authors>
+    <projectUrl>https://github.com/OdinoCano/3va</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/OdinoCano/3va/main/docs/logo.png</iconUrl>
+    <licenseUrl>https://github.com/OdinoCano/3va/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/OdinoCano/3va</projectSourceUrl>
+    <docsUrl>https://github.com/OdinoCano/3va/wiki</docsUrl>
+    <bugTrackerUrl>https://github.com/OdinoCano/3va/issues</bugTrackerUrl>
+    <tags>javascript typescript runtime sandbox security cli developer-tools</tags>
+    <summary>Secure-by-default JavaScript and TypeScript runtime.</summary>
+    <description>
+3va is a secure-by-default JavaScript and TypeScript runtime built on QuickJS with post-quantum cryptography and capability-based sandboxing.
+
+Key properties:
+- Deny-by-default permission model — filesystem, network, env, and subprocess access must be explicitly granted per script
+- Post-install scripts blocked unconditionally — 3va never executes arbitrary code at package install time
+- No pm2 or process manager required — built-in process supervision
+- Post-quantum TLS (ML-KEM / ML-DSA) and WASM support included
+- MIT licensed
+
+Install with: choco install 3va
+Run: 3va --help
+    </description>
+    <releaseNotes>https://github.com/OdinoCano/3va/releases/tag/v1.0.0</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

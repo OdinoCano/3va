@@ -1,0 +1,30 @@
+VERIFICATION
+Verification is intended to assist the Chocolatey moderators and community
+in verifying that this package's contents are trustworthy.
+
+Package: 3va
+Version: 1.0.0
+
+The binary distributed by this package is built by the upstream CI pipeline
+(GitHub Actions) from the source code at:
+
+  https://github.com/OdinoCano/3va
+
+The canonical download location is the GitHub Release page:
+
+  https://github.com/OdinoCano/3va/releases/tag/v1.0.0
+
+File: 3va-v1.0.0-x86_64-pc-windows-msvc.zip
+
+1. Visit https://github.com/OdinoCano/3va/releases/download/v1.0.0/3va-v1.0.0-x86_64-pc-windows-msvc.zip
+2. Download the file.
+3. Verify SHA256:
+     PowerShell: (Get-FileHash '.\3va-v1.0.0-x86_64-pc-windows-msvc.zip' -Algorithm SHA256).Hash
+   Expected:    SHA256_WINDOWS_X64
+
+The SHA256 is also published alongside each release asset as
+  3va-v1.0.0-x86_64-pc-windows-msvc.zip.sha256
+at the same GitHub Releases URL.
+
+License: MIT
+License URL: https://github.com/OdinoCano/3va/blob/main/LICENSE
