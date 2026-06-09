@@ -126,73 +126,73 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Publish in strict dependency order.  Each step waits 20 s so the
-      # registry index has time to propagate before the next crate tries to
-      # resolve it.
+      # Publish in strict dependency order.  Each step waits 60 s so the
+      # registry index has time to propagate and to stay within the crates.io
+      # rate limit for new crates (see https://crates.io/docs/rate-limits).
       - name: Publish vvva-rquickjs-sys
         run: |
           cargo publish --package vvva-rquickjs-sys --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva-rquickjs-core
         run: |
           cargo publish --package vvva-rquickjs-core --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva-rquickjs
         run: |
           cargo publish --package vvva-rquickjs --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_permissions
         run: |
           cargo publish --package vvva_permissions --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_config
         run: |
           cargo publish --package vvva_config --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_core
         run: |
           cargo publish --package vvva_core --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_crypto
         run: |
           cargo publish --package vvva_crypto --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_firewall
         run: |
           cargo publish --package vvva_firewall --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_pm
         run: |
           cargo publish --package vvva_pm --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_js
         run: |
           cargo publish --package vvva_js --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_wasm
         run: |
           cargo publish --package vvva_wasm --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_bundler
         run: |
           cargo publish --package vvva_bundler --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_test
         run: |
           cargo publish --package vvva_test --allow-dirty
-          sleep 20
+          sleep 60
 
       - name: Publish vvva_cli
         run: cargo publish --package vvva_cli --allow-dirty
