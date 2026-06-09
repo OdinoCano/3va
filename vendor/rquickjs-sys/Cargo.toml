@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "vvva-rquickjs-sys"
-version = "0.6.2"
+version = "0.6.3"
 authors = ["Mees Delzenne <mees.delzenne@gmail.com>"]
 description = "Patched QuickJS C bindings for the 3va runtime"
 readme = "README.md"

@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "vvva-rquickjs-core"
-version = "0.6.2"
+version = "0.6.3"
 authors = [
     "Mees Delzenne <mees.delzenne@gmail.com>",
     "K. <kayo@illumium.org>",
@@ -75,7 +75,7 @@ version = "1.9"
 optional = true
 
 [dependencies.rquickjs-sys]
-version = "0.6.2"
+version = "0.6.3"
 package = "vvva-rquickjs-sys"
 
 [dev-dependencies.approx]

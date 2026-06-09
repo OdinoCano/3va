@@ -1,6 +1,6 @@
 [package]
 name = "vvva-rquickjs"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "High-level QuickJS bindings used by the 3va runtime (re-exports vvva-rquickjs-core + rquickjs-macro)"
@@ -13,7 +13,7 @@ homepage = "https://github.com/OdinoCano/3va"
 # code from rquickjs-macro (which emits ::rquickjs_core:: paths) resolves correctly.
 [dependencies.rquickjs-core]
 package = "vvva-rquickjs-core"
-version = "0.6.2"
+version = "0.6.3"
 path = "../rquickjs-core"
 
 [dependencies.rquickjs-macro]
