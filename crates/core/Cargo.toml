@@ -12,7 +12,7 @@ categories = ["asynchronous"]
 [dependencies]
 tokio.workspace = true
 anyhow.workspace = true
-vvva_permissions = { path = "../permissions" }
+vvva_permissions = { version = "2.0.0", path = "../permissions" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

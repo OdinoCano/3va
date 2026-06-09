@@ -16,7 +16,7 @@ anyhow.workspace = true
 tracing.workspace = true
 regex-lite = "0.1"
 notify = "6.1"
-vvva_pm = { path = "../pm" }
+vvva_pm = { version = "2.0.0", path = "../pm" }
 oxc_allocator = "0.132.0"
 oxc_parser = "0.132.0"
 oxc_ast = "0.132.0"
@@ -28,5 +28,5 @@ oxc_span = "0.132.0"
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
-vvva_js = { path = "../js" }
-vvva_permissions = { path = "../permissions" }
+vvva_js = { version = "2.0.0", path = "../js" }
+vvva_permissions = { version = "2.0.0", path = "../permissions" }

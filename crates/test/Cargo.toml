@@ -14,8 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-vvva_js = { path = "../js" }
-vvva_permissions = { path = "../permissions" }
+vvva_js = { version = "2.0.0", path = "../js" }
+vvva_permissions = { version = "2.0.0", path = "../permissions" }
 tokio.workspace = true
 notify = "8.0"
 lazy_static = "1.4"
