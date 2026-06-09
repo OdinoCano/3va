@@ -97,7 +97,7 @@ path = "tests/express_jwt.rs"
 
 [dependencies]
 rquickjs.workspace = true
-rquickjs-sys = { version = "0.6.3", package = "vvva-rquickjs-sys", path = "../../vendor/rquickjs-sys" }
+rquickjs-sys = { version = "0.6.4", package = "vvva-rquickjs-sys", path = "../../vendor/rquickjs-sys" }
 anyhow.workspace = true
 sha2 = { workspace = true }
 sha1 = { workspace = true }
