@@ -1,21 +1,27 @@
 name: Release Distribution
 
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]*"
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
 
 permissions:
   contents: write   # commit Formula/ and bucket/ back to this repo
 
 env:
-  VERSION: ${{ github.ref_name }}  # e.g. v1.0.0
+  # workflow_run does not expose github.ref_name directly — read the tag from
+  # the triggering workflow's head_branch (GitHub sets it to the tag name).
+  VERSION: ${{ github.event.workflow_run.head_branch }}
 
 jobs:
   # ── Collect SHA256 hashes from the GitHub Release assets ─────────────────────
   collect-hashes:
     name: Collect SHA256 hashes
     runs-on: ubuntu-latest
+    # Only run when the Release workflow succeeded and was triggered by a tag.
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
     outputs:
       linux_x64:    ${{ steps.hashes.outputs.linux_x64 }}
       linux_arm64:  ${{ steps.hashes.outputs.linux_arm64 }}
