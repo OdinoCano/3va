@@ -1,0 +1,47 @@
+{
+  "name": "3va",
+  "version": "1.0.0",
+  "description": "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally. MIT license.",
+  "keywords": [
+    "javascript",
+    "typescript",
+    "runtime",
+    "sandbox",
+    "security",
+    "deno-alternative",
+    "quickjs",
+    "wasm"
+  ],
+  "homepage": "https://github.com/OdinoCano/3va",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OdinoCano/3va.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OdinoCano/3va/issues"
+  },
+  "license": "MIT",
+  "author": "OdinoCano",
+  "bin": {
+    "3va": "./bin/3va"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/",
+    "install.js"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

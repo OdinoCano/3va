@@ -1,0 +1,252 @@
+name: Release Distribution
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+
+permissions:
+  contents: write   # commit Formula/ and bucket/ back to this repo
+
+env:
+  VERSION: ${{ github.ref_name }}  # e.g. v1.0.0
+
+jobs:
+  # ── Collect SHA256 hashes from the GitHub Release assets ─────────────────────
+  collect-hashes:
+    name: Collect SHA256 hashes
+    runs-on: ubuntu-latest
+    outputs:
+      linux_x64:    ${{ steps.hashes.outputs.linux_x64 }}
+      linux_arm64:  ${{ steps.hashes.outputs.linux_arm64 }}
+      darwin_x64:   ${{ steps.hashes.outputs.darwin_x64 }}
+      darwin_arm64: ${{ steps.hashes.outputs.darwin_arm64 }}
+      windows_x64:  ${{ steps.hashes.outputs.windows_x64 }}
+    steps:
+      - name: Download .sha256 files from GitHub Release
+        run: |
+          VER="${{ env.VERSION }}"
+          BASE="https://github.com/OdinoCano/3va/releases/download/${VER}"
+          curl -fsSL "${BASE}/3va-${VER}-x86_64-unknown-linux-gnu.tar.gz.sha256"    -o linux_x64.sha256
+          curl -fsSL "${BASE}/3va-${VER}-aarch64-unknown-linux-gnu.tar.gz.sha256"   -o linux_arm64.sha256
+          curl -fsSL "${BASE}/3va-${VER}-x86_64-apple-darwin.tar.gz.sha256"         -o darwin_x64.sha256
+          curl -fsSL "${BASE}/3va-${VER}-aarch64-apple-darwin.tar.gz.sha256"        -o darwin_arm64.sha256
+          curl -fsSL "${BASE}/3va-${VER}-x86_64-pc-windows-msvc.zip.sha256"         -o windows_x64.sha256
+
+      - name: Parse hashes
+        id: hashes
+        run: |
+          echo "linux_x64=$(awk '{print $1}' linux_x64.sha256)"       >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(awk '{print $1}' linux_arm64.sha256)"   >> "$GITHUB_OUTPUT"
+          echo "darwin_x64=$(awk '{print $1}' darwin_x64.sha256)"     >> "$GITHUB_OUTPUT"
+          echo "darwin_arm64=$(awk '{print $1}' darwin_arm64.sha256)" >> "$GITHUB_OUTPUT"
+          echo "windows_x64=$(awk '{print $1}' windows_x64.sha256)"   >> "$GITHUB_OUTPUT"
+
+  # ── Publish to npm ────────────────────────────────────────────────────────────
+  publish-npm:
+    name: Publish to npm
+    needs: collect-hashes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Patch SHA256 hashes and version into install.js
+        env:
+          LINUX_X64:    ${{ needs.collect-hashes.outputs.linux_x64 }}
+          LINUX_ARM64:  ${{ needs.collect-hashes.outputs.linux_arm64 }}
+          DARWIN_X64:   ${{ needs.collect-hashes.outputs.darwin_x64 }}
+          DARWIN_ARM64: ${{ needs.collect-hashes.outputs.darwin_arm64 }}
+          WINDOWS_X64:  ${{ needs.collect-hashes.outputs.windows_x64 }}
+        run: |
+          VER="${{ env.VERSION }}"
+          VER_BARE="${VER#v}"
+          cd dist/npm
+          sed -i "s/SHA256_LINUX_X64/${LINUX_X64}/"       install.js
+          sed -i "s/SHA256_LINUX_ARM64/${LINUX_ARM64}/"   install.js
+          sed -i "s/SHA256_DARWIN_X64/${DARWIN_X64}/"     install.js
+          sed -i "s/SHA256_DARWIN_ARM64/${DARWIN_ARM64}/" install.js
+          sed -i "s/SHA256_WINDOWS_X64/${WINDOWS_X64}/"   install.js
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VER_BARE}\"/" package.json
+
+      - name: Publish
+        run: npm publish dist/npm/ --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ── Update Formula/ and bucket/ in this repo ─────────────────────────────────
+  update-homebrew-and-scoop:
+    name: Update Formula and Scoop manifest
+    needs: collect-hashes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Use the built-in token — no extra secrets needed.
+          token: ${{ github.token }}
+
+      - name: Generate Formula/3va.rb
+        env:
+          LINUX_X64:    ${{ needs.collect-hashes.outputs.linux_x64 }}
+          LINUX_ARM64:  ${{ needs.collect-hashes.outputs.linux_arm64 }}
+          DARWIN_X64:   ${{ needs.collect-hashes.outputs.darwin_x64 }}
+          DARWIN_ARM64: ${{ needs.collect-hashes.outputs.darwin_arm64 }}
+          VER: ${{ env.VERSION }}
+        run: |
+          VER_BARE="${VER#v}"
+          cat > Formula/3va.rb <<FORMULA
+          class ThreeVa < Formula
+            desc "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally."
+            homepage "https://github.com/OdinoCano/3va"
+            license "MIT"
+            version "${VER_BARE}"
+
+            on_macos do
+              on_intel do
+                url "https://github.com/OdinoCano/3va/releases/download/${VER}/3va-${VER}-x86_64-apple-darwin.tar.gz"
+                sha256 "${DARWIN_X64}"
+              end
+              on_arm do
+                url "https://github.com/OdinoCano/3va/releases/download/${VER}/3va-${VER}-aarch64-apple-darwin.tar.gz"
+                sha256 "${DARWIN_ARM64}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/OdinoCano/3va/releases/download/${VER}/3va-${VER}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${LINUX_X64}"
+              end
+              on_arm do
+                url "https://github.com/OdinoCano/3va/releases/download/${VER}/3va-${VER}-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${LINUX_ARM64}"
+              end
+            end
+
+            def install
+              bin.install "3va"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/3va --version")
+            end
+          end
+          FORMULA
+
+      - name: Generate bucket/3va.json
+        env:
+          WINDOWS_X64: ${{ needs.collect-hashes.outputs.windows_x64 }}
+          VER: ${{ env.VERSION }}
+        run: |
+          VER_BARE="${VER#v}"
+          cat > bucket/3va.json <<JSON
+          {
+            "version": "${VER_BARE}",
+            "description": "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally. MIT license.",
+            "homepage": "https://github.com/OdinoCano/3va",
+            "license": "MIT",
+            "architecture": {
+              "64bit": {
+                "url": "https://github.com/OdinoCano/3va/releases/download/${VER}/3va-${VER}-x86_64-pc-windows-msvc.zip",
+                "hash": "${WINDOWS_X64}",
+                "bin": "3va.exe"
+              }
+            },
+            "checkver": {
+              "github": "https://github.com/OdinoCano/3va",
+              "regex": "v([\\d.]+)"
+            },
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/OdinoCano/3va/releases/download/v\$version/3va-v\$version-x86_64-pc-windows-msvc.zip",
+                  "hash": {
+                    "url": "https://github.com/OdinoCano/3va/releases/download/v\$version/3va-v\$version-x86_64-pc-windows-msvc.zip.sha256",
+                    "regex": "^([a-fA-F0-9]{64})"
+                  }
+                }
+              }
+            }
+          }
+          JSON
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/3va.rb bucket/3va.json
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: update Formula and Scoop manifest for ${{ env.VERSION }}"
+          git push origin HEAD:main
+
+  # ── Publish to Chocolatey ────────────────────────────────────────────────────
+  publish-chocolatey:
+    name: Publish to Chocolatey
+    needs: collect-hashes
+    runs-on: windows-latest
+    environment: chocolate
+    env:
+      CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch version and checksum into nuspec and install script
+        env:
+          WINDOWS_X64: ${{ needs.collect-hashes.outputs.windows_x64 }}
+          VER: ${{ env.VERSION }}
+        shell: pwsh
+        run: |
+          $VER_BARE = $env:VER -replace '^v', ''
+
+          # Bump version in .nuspec
+          (Get-Content dist\chocolatey\3va.nuspec) `
+            -replace '<version>[^<]*</version>', "<version>$VER_BARE</version>" |
+            Set-Content dist\chocolatey\3va.nuspec
+
+          # Patch URL and checksum in install script
+          $url = "https://github.com/OdinoCano/3va/releases/download/$env:VER/3va-$env:VER-x86_64-pc-windows-msvc.zip"
+          (Get-Content dist\chocolatey\tools\chocolateyInstall.ps1) `
+            -replace "version\s*=\s*'[^']*'", "version     = '$VER_BARE'" `
+            -replace "url64\s*=\s*`"[^`"]*`"", "url64       = `"$url`"" `
+            -replace 'checksum64\s*=\s*''[^'']*''', "checksum64  = '$($env:WINDOWS_X64)'" |
+            Set-Content dist\chocolatey\tools\chocolateyInstall.ps1
+
+      - name: Pack
+        run: choco pack dist\chocolatey\3va.nuspec --out dist\chocolatey\
+
+      - name: Push to Chocolatey
+        run: |
+          choco push dist\chocolatey\3va.$($env:VERSION -replace '^v','').nupkg `
+            --source https://push.chocolatey.org/ `
+            --api-key $env:CHOCO_API_KEY
+
+  # ── Submit winget PR ──────────────────────────────────────────────────────────
+  submit-winget:
+    name: Submit winget PR
+    needs: collect-hashes
+    runs-on: windows-latest
+    environment: winget
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - name: Install winget-create
+        run: |
+          $url = "https://github.com/microsoft/winget-create/releases/latest/download/wingetcreate.exe"
+          Invoke-WebRequest -Uri $url -OutFile wingetcreate.exe
+
+      - name: Submit to winget-pkgs
+        env:
+          VER: ${{ env.VERSION }}
+        shell: pwsh
+        run: |
+          $VER_BARE = $env:VER -replace '^v', ''
+          $URL = "https://github.com/OdinoCano/3va/releases/download/$env:VER/3va-$env:VER-x86_64-pc-windows-msvc.zip"
+          .\wingetcreate.exe update OdinoCano.3va `
+            --version $VER_BARE `
+            --urls    $URL `
+            --token   $env:WINGET_TOKEN `
+            --submit

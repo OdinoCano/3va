@@ -1,0 +1,23 @@
+[package]
+name = "three-va"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally. MIT license."
+repository = "https://github.com/OdinoCano/3va"
+homepage = "https://github.com/OdinoCano/3va"
+documentation = "https://github.com/OdinoCano/3va/wiki"
+readme = "README.md"
+keywords = ["javascript", "typescript", "runtime", "sandbox", "security"]
+categories = ["command-line-utilities"]
+
+# This crate is a thin re-export wrapper so that `cargo install three-va`
+# places the `3va` binary on $PATH.  The real implementation lives in
+# vvva_cli; this package exists solely because crates.io rejects names that
+# start with a digit, making `cargo install 3va` impossible.
+[[bin]]
+name = "3va"
+path = "src/main.rs"
+
+[dependencies]
+vvva_cli = "1.0.0"

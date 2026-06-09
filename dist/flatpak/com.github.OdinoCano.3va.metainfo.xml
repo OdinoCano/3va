@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="console-application">
+  <id>com.github.OdinoCano.3va</id>
+  <name>3va</name>
+  <summary>Secure-by-default JavaScript and TypeScript runtime</summary>
+  <description>
+    <p>
+      3va is a JavaScript and TypeScript runtime built on QuickJS with
+      capability-based sandboxing, post-quantum cryptography (ML-KEM / ML-DSA),
+      and WebAssembly support.
+    </p>
+    <p>
+      Every permission — filesystem, network, environment variables, subprocess
+      execution — is denied by default and must be explicitly granted per
+      script. Post-install scripts are blocked unconditionally; there is no
+      configuration that enables them.
+    </p>
+    <p>
+      3va ships a built-in process supervisor so pm2 and similar tools are not
+      needed. It is MIT licensed and statically linked with no runtime
+      dependencies.
+    </p>
+  </description>
+
+  <url type="homepage">https://github.com/OdinoCano/3va</url>
+  <url type="bugtracker">https://github.com/OdinoCano/3va/issues</url>
+  <url type="vcs-browser">https://github.com/OdinoCano/3va</url>
+
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <developer id="com.github.OdinoCano">
+    <name>OdinoCano</name>
+  </developer>
+
+  <categories>
+    <category>Development</category>
+    <category>System</category>
+  </categories>
+
+  <keywords>
+    <keyword>javascript</keyword>
+    <keyword>typescript</keyword>
+    <keyword>runtime</keyword>
+    <keyword>sandbox</keyword>
+    <keyword>security</keyword>
+    <keyword>quickjs</keyword>
+    <keyword>wasm</keyword>
+    <keyword>post-quantum</keyword>
+  </keywords>
+
+  <releases>
+    <release version="1.0.0" date="2026-06-01">
+      <description>
+        <p>Initial public release of 3va.</p>
+      </description>
+      <url>https://github.com/OdinoCano/3va/releases/tag/v1.0.0</url>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>

@@ -1,0 +1,32 @@
+app-id: com.github.OdinoCano.3va
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: 3va
+
+# 3va enforces deny-by-default permissions at the script level.
+# The Flatpak sandbox mirrors this philosophy: no host filesystem access,
+# no network access, and no session bus access are granted to the installer.
+# Users who run scripts that require network or filesystem access grant those
+# permissions explicitly via 3va's own permission flags, not via Flatpak
+# finish-args.
+finish-args:
+  - --filesystem=home
+  - --share=network
+
+modules:
+  - name: 3va
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 3va /app/bin/3va
+    sources:
+      - type: archive
+        url: https://github.com/OdinoCano/3va/releases/download/v1.0.0/3va-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
+        sha256: SHA256_LINUX_X64
+        only-arches:
+          - x86_64
+      - type: archive
+        url: https://github.com/OdinoCano/3va/releases/download/v1.0.0/3va-v1.0.0-aarch64-unknown-linux-gnu.tar.gz
+        sha256: SHA256_LINUX_ARM64
+        only-arches:
+          - aarch64
