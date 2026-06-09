@@ -29,15 +29,28 @@ jobs:
       darwin_arm64: ${{ steps.hashes.outputs.darwin_arm64 }}
       windows_x64:  ${{ steps.hashes.outputs.windows_x64 }}
     steps:
-      - name: Download .sha256 files from GitHub Release
+      - name: Download .sha256 files via GitHub API
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VER="${{ env.VERSION }}"
-          BASE="https://github.com/OdinoCano/3va/releases/download/${VER}"
-          curl -fsSL "${BASE}/3va-${VER}-x86_64-unknown-linux-gnu.tar.gz.sha256"    -o linux_x64.sha256
-          curl -fsSL "${BASE}/3va-${VER}-aarch64-unknown-linux-gnu.tar.gz.sha256"   -o linux_arm64.sha256
-          curl -fsSL "${BASE}/3va-${VER}-x86_64-apple-darwin.tar.gz.sha256"         -o darwin_x64.sha256
-          curl -fsSL "${BASE}/3va-${VER}-aarch64-apple-darwin.tar.gz.sha256"        -o darwin_arm64.sha256
-          curl -fsSL "${BASE}/3va-${VER}-x86_64-pc-windows-msvc.zip.sha256"         -o windows_x64.sha256
+          # gh release download uses the API — no CDN propagation delay.
+          # Retry up to 5 times (30 s apart) in case the release was just created.
+          for i in 1 2 3 4 5; do
+            gh release download "$VER" \
+              --repo OdinoCano/3va \
+              --pattern "*.sha256" \
+              --dir hashes/ && break
+            echo "Attempt $i failed, retrying in 30s…"
+            sleep 30
+          done
+          # Flatten to named files for the next step.
+          VER="${{ env.VERSION }}"
+          cp "hashes/3va-${VER}-x86_64-unknown-linux-gnu.tar.gz.sha256"    linux_x64.sha256
+          cp "hashes/3va-${VER}-aarch64-unknown-linux-gnu.tar.gz.sha256"   linux_arm64.sha256
+          cp "hashes/3va-${VER}-x86_64-apple-darwin.tar.gz.sha256"         darwin_x64.sha256
+          cp "hashes/3va-${VER}-aarch64-apple-darwin.tar.gz.sha256"        darwin_arm64.sha256
+          cp "hashes/3va-${VER}-x86_64-pc-windows-msvc.zip.sha256"         windows_x64.sha256
 
       - name: Parse hashes
         id: hashes
