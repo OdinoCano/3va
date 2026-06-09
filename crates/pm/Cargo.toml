@@ -1,6 +1,6 @@
 [package]
 name = "vvva_pm"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Content-addressable package manager for the 3va runtime — npm-compatible resolver, virtual store, lockfile, OSV audit"
@@ -16,7 +16,7 @@ toml.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-vvva_permissions = { version = "2.0.0", path = "../permissions" }
+vvva_permissions = { version = "2.0.1", path = "../permissions" }
 reqwest = { version = "0.12", features = ["json", "gzip"] }
 sha2.workspace = true
 base64.workspace = true
