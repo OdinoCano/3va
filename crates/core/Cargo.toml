@@ -1,6 +1,6 @@
 [package]
 name = "vvva_core"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Core async primitives and runtime utilities shared across the 3va JavaScript runtime crates"
@@ -12,7 +12,6 @@ categories = ["asynchronous"]
 [dependencies]
 tokio.workspace = true
 anyhow.workspace = true
-vvva_permissions = { version = "2.0.0", path = "../permissions" }
-
+vvva_permissions = { version = "2.0.1", path = "../permissions" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

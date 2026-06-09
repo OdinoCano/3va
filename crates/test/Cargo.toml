@@ -1,6 +1,6 @@
 [package]
 name = "vvva_test"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Test framework and runner for .test.js/.test.ts files in the 3va JavaScript runtime"
@@ -14,8 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-vvva_js = { version = "2.0.0", path = "../js" }
-vvva_permissions = { version = "2.0.0", path = "../permissions" }
+vvva_js = { version = "2.0.1", path = "../js" }
+vvva_permissions = { version = "2.0.1", path = "../permissions" }
 tokio.workspace = true
 notify = "8.0"
 lazy_static = "1.4"

@@ -4640,9 +4640,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.23.2"
+version = "1.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d258b83ceec21034727ecee8c382cfa6c3e133699b0742c64571814fb420c9f7"
+checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -4674,7 +4674,7 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "vvva-rquickjs"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "rquickjs-macro",
  "vvva-rquickjs-core",
@@ -4682,7 +4682,7 @@ dependencies = [
 
 [[package]]
 name = "vvva-rquickjs-core"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "approx",
  "async-lock",
@@ -4700,7 +4700,7 @@ dependencies = [
 
 [[package]]
 name = "vvva-rquickjs-sys"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "bindgen",
  "cc",
@@ -4709,7 +4709,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_bundler"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "notify 6.1.1",
@@ -4733,7 +4733,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_cli"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -4762,7 +4762,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_config"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "regex-lite",
@@ -4774,7 +4774,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "tokio",
@@ -4783,7 +4783,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_crypto"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "hex",
  "hmac",
@@ -4800,7 +4800,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_firewall"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "serde",
  "tokio",
@@ -4809,7 +4809,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_js"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4858,7 +4858,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_permissions"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4871,7 +4871,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_pm"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -4897,7 +4897,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_test"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -4918,7 +4918,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_wasm"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "tempfile",
