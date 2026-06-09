@@ -21,21 +21,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # gnu targets: the ubuntu runner has libssl-dev so no OpenSSL setup needed.
+          # Linux — native and cross via cross Docker image.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            cross: true   # cross Docker image includes OpenSSL + aarch64 gcc
-          # Disabled: macOS runners queue for hours with no progress.
+            cross: true
+          # macOS — cross-compiled from Linux with cargo-zigbuild (no macOS
+          # runner needed; avoids the multi-hour queue on macos-13/14).
+          # Zig ships its own libc headers so no macOS SDK is required.
           - target: x86_64-apple-darwin
-            os: macos-13
-          # Build arm64 on the Intel (macos-13 / Xcode 15) runner via cross-
-          # compilation.  Xcode 16 on macos-latest rejects the .cfi_def_cfa
-          # register-name syntax in libffi-sys 2.3.0's bundled arm64 assembly;
-          # Xcode 15 accepts it fine.
+            os: ubuntu-latest
+            zigbuild: true
           - target: aarch64-apple-darwin
-            os: macos-13
+            os: ubuntu-latest
+            zigbuild: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
 
@@ -52,12 +52,22 @@ jobs:
         with:
           tool: cross
 
+      - name: Install cargo-zigbuild + Zig (macOS cross-compile)
+        if: matrix.zigbuild
+        run: |
+          pip3 install ziglang --quiet
+          cargo install cargo-zigbuild --locked --quiet
+
       - name: Build (cross, aarch64-linux)
         if: matrix.cross
         run: cross build --release --target ${{ matrix.target }} --bin 3va
 
+      - name: Build (zigbuild, macOS from Linux)
+        if: matrix.zigbuild
+        run: cargo zigbuild --release --target ${{ matrix.target }} --bin 3va
+
       - name: Build (native)
-        if: ${{ !matrix.cross }}
+        if: ${{ !matrix.cross && !matrix.zigbuild }}
         run: cargo build --release --target ${{ matrix.target }} --bin 3va
 
       - name: Package binary (Unix)
