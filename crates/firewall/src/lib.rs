@@ -14,7 +14,7 @@
 //!
 //! ## Quick start
 //!
-//! ```rust,ignore
+//! ```rust
 //! use vvva_firewall::{Firewall, FirewallConfig};
 //!
 //! let fw = Firewall::new(FirewallConfig::default());

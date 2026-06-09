@@ -4674,7 +4674,7 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "vvva-rquickjs"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "rquickjs-macro",
  "vvva-rquickjs-core",
@@ -4682,7 +4682,7 @@ dependencies = [
 
 [[package]]
 name = "vvva-rquickjs-core"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "approx",
  "async-lock",
@@ -4700,7 +4700,7 @@ dependencies = [
 
 [[package]]
 name = "vvva-rquickjs-sys"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "bindgen",
  "cc",
