@@ -126,73 +126,32 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Publish in strict dependency order.  Each step waits 60 s so the
-      # registry index has time to propagate and to stay within the crates.io
-      # rate limit for new crates (see https://crates.io/docs/rate-limits).
-      - name: Publish vvva-rquickjs-sys
+      # Publish in strict dependency order.  publish_crate() skips a crate that
+      # is already on the index (safe to re-run after a partial failure) and
+      # waits 60 s between publishes to stay within the crates.io rate limit
+      # for new crates (see https://crates.io/docs/rate-limits).
+      - name: Publish all crates
         run: |
-          cargo publish --package vvva-rquickjs-sys --allow-dirty
-          sleep 60
+          publish_crate() {
+            local pkg="$1"
+            local out
+            out=$(cargo publish --package "$pkg" --allow-dirty 2>&1) && { echo "$out"; return 0; }
+            echo "$out"
+            echo "$out" | grep -q "already exists" && { echo "↳ $pkg already published, skipping."; return 0; }
+            return 1
+          }
 
-      - name: Publish vvva-rquickjs-core
-        run: |
-          cargo publish --package vvva-rquickjs-core --allow-dirty
-          sleep 60
-
-      - name: Publish vvva-rquickjs
-        run: |
-          cargo publish --package vvva-rquickjs --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_permissions
-        run: |
-          cargo publish --package vvva_permissions --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_config
-        run: |
-          cargo publish --package vvva_config --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_core
-        run: |
-          cargo publish --package vvva_core --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_crypto
-        run: |
-          cargo publish --package vvva_crypto --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_firewall
-        run: |
-          cargo publish --package vvva_firewall --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_pm
-        run: |
-          cargo publish --package vvva_pm --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_js
-        run: |
-          cargo publish --package vvva_js --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_wasm
-        run: |
-          cargo publish --package vvva_wasm --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_bundler
-        run: |
-          cargo publish --package vvva_bundler --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_test
-        run: |
-          cargo publish --package vvva_test --allow-dirty
-          sleep 60
-
-      - name: Publish vvva_cli
-        run: cargo publish --package vvva_cli --allow-dirty
+          publish_crate vvva-rquickjs-sys  && sleep 60
+          publish_crate vvva-rquickjs-core && sleep 60
+          publish_crate vvva-rquickjs      && sleep 60
+          publish_crate vvva_permissions   && sleep 60
+          publish_crate vvva_config        && sleep 60
+          publish_crate vvva_core          && sleep 60
+          publish_crate vvva_crypto        && sleep 60
+          publish_crate vvva_firewall      && sleep 60
+          publish_crate vvva_pm            && sleep 60
+          publish_crate vvva_js            && sleep 60
+          publish_crate vvva_wasm          && sleep 60
+          publish_crate vvva_bundler       && sleep 60
+          publish_crate vvva_test          && sleep 60
+          publish_crate vvva_cli
