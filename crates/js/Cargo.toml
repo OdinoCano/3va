@@ -13,7 +13,7 @@ categories = ["api-bindings"]
 tempfile.workspace = true
 tungstenite = { workspace = true }
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
-vvva_firewall = { path = "../firewall" }
+vvva_firewall = { version = "2.0.0", path = "../firewall" }
 
 [[test]]
 name = "fs_watch"
@@ -105,10 +105,10 @@ hmac = { workspace = true }
 rand = { workspace = true }
 pbkdf2 = { workspace = true }
 scrypt = { workspace = true }
-vvva_core = { path = "../core" }
-vvva_crypto = { path = "../crypto" }
-vvva_firewall = { path = "../firewall" }
-vvva_permissions = { path = "../permissions" }
+vvva_core = { version = "2.0.0", path = "../core" }
+vvva_crypto = { version = "2.0.0", path = "../crypto" }
+vvva_firewall = { version = "2.0.0", path = "../firewall" }
+vvva_permissions = { version = "2.0.0", path = "../permissions" }
 hex = "0.4"
 base64.workspace = true
 serde_json.workspace = true
