@@ -12,7 +12,7 @@
   },
   "checkver": {
     "github": "https://github.com/OdinoCano/3va",
-    "regex": "v([\d.]+)"
+    "regex": "v([\\d.]+)"
   },
   "autoupdate": {
     "architecture": {
@@ -24,5 +24,6 @@
         }
       }
     }
-  }
+  },
+  "notes": "3va blocks post-install scripts unconditionally — this is intentional. Run '3va --help' to get started."
 }
