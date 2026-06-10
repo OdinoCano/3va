@@ -147,6 +147,7 @@ jobs:
         with:
           generate_release_notes: true
           files: dist/**
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   # ── Publish to crates.io (token from GitHub environment secret) ──────────────
   publish:
