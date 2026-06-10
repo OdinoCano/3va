@@ -75,7 +75,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Patch SHA256 hashes and version into install.js
         env:
@@ -96,9 +95,13 @@ jobs:
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VER_BARE}\"/" package.json
 
       - name: Publish
-        run: npm publish dist/npm/ --access public
+        # Write .npmrc directly into the package directory so auth is always
+        # resolved relative to the package being published, regardless of CWD.
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > dist/npm/.npmrc
+          npm publish dist/npm/ --access public
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # ── Update Formula/ and bucket/ in this repo ─────────────────────────────────
   update-homebrew-and-scoop:
