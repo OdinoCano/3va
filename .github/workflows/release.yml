@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v2.0.0)"
+        required: true
 
 permissions:
   contents: write   # create GitHub releases and upload assets
@@ -11,6 +16,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # On tag push github.ref_name is the tag; on workflow_dispatch use the input.
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   # ── Build precompiled binaries ────────────────────────────────────────────────
@@ -62,7 +69,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          VERSION="${{ github.ref_name }}"
+          VERSION="${{ env.RELEASE_TAG }}"
           TARGET="${{ matrix.target }}"
           ARCHIVE="3va-${VERSION}-${TARGET}.tar.gz"
           cp "target/${TARGET}/release/3va" 3va
@@ -74,7 +81,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $VERSION = "${{ github.ref_name }}"
+          $VERSION = "${{ env.RELEASE_TAG }}"
           $TARGET  = "${{ matrix.target }}"
           $ARCHIVE = "3va-${VERSION}-${TARGET}.zip"
           Copy-Item "target\${TARGET}\release\3va.exe" 3va.exe
