@@ -39,6 +39,26 @@ fn free_port() -> u16 {
     port
 }
 
+/// Poll until the JS server has bound to `port`, without opening any connection.
+///
+/// Try to bind to the same port. If binding succeeds the server hasn't taken
+/// it yet — drop the listener and retry. If binding fails ("address already in
+/// use") the server is listening. This avoids the flaky fixed sleep AND never
+/// sends a spurious request that would corrupt request-count assertions in the
+/// firewall tests.
+async fn wait_for_port(port: u16) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_err() {
+            return; // port taken → server is up
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("port {port} never became ready within 5 s");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn raw_http(port: u16, method: &str, path: &str, body: &str) -> String {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
         .await
@@ -163,7 +183,7 @@ async fn server_responds_200() {
     .unwrap();
 
     // Give engine a moment to start the accept loop.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     let resp = drive_until(&e, raw_http(port, "GET", "/", "")).await;
 
@@ -192,7 +212,7 @@ async fn server_reads_method_and_url() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     drive_until(&e, raw_http(port, "POST", "/test-path", "")).await;
 
@@ -221,7 +241,7 @@ async fn server_reads_request_body() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     drive_until(&e, raw_http(port, "POST", "/", "hello body")).await;
 
@@ -249,7 +269,7 @@ async fn server_responds_with_custom_status() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     let resp = drive_until(&e, raw_http(port, "GET", "/missing", "")).await;
 
@@ -278,7 +298,7 @@ async fn server_handles_multiple_requests() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     for _ in 0..3u32 {
         drive_until(&e, raw_http(port, "GET", "/", "")).await;
@@ -318,7 +338,7 @@ async fn content_length_header_matches_allocated_body_bytes() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     let body = "hello world";
     drive_until(&e, raw_http(port, "POST", "/", body)).await;
@@ -359,7 +379,7 @@ async fn server_survives_oversized_content_length_with_early_close() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     // Send a request claiming 200 MiB but providing 0 bytes then closing —
     // the server should handle the EOF gracefully without panicking.
@@ -399,7 +419,7 @@ async fn request_exposes_remote_address() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
     drive_until(&e, raw_http(port, "GET", "/", "")).await;
 
     let addr = e.eval_to_string("globalThis.__remoteAddr").await.unwrap();
@@ -433,7 +453,7 @@ async fn firewall_rate_limits_after_burst_exhausted() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     // First two requests consume the burst — must succeed.
     let r1 = drive_until(&e, raw_http(port, "GET", "/", "")).await;
@@ -481,7 +501,7 @@ async fn firewall_auto_blocks_after_threshold() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     let mut statuses = Vec::new();
     for _ in 0..5 {
@@ -526,7 +546,7 @@ async fn firewall_rejects_header_flood_and_continues() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     // Send a request with 10 headers (exceeds limit of 5) — server should drop it.
     drive_until(&e, async move {
@@ -589,7 +609,7 @@ async fn firewall_slowloris_timeout_and_recovery() {
     .await
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_port(port).await;
 
     // Simulate Slowloris: connect and send only the request line, then stall.
     // Never send the blank line that ends the headers, so the server's read_line
