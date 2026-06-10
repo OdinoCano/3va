@@ -81,7 +81,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          # No registry-url here: that flag injects NODE_AUTH_TOKEN into .npmrc
+          # which conflicts with OIDC trusted publishing. npm defaults to the
+          # public registry and uses the OIDC exchange when --provenance is set.
 
       - name: Patch SHA256 hashes and version into install.js
         env:
@@ -103,11 +105,13 @@ jobs:
 
       - name: Publish (trusted publishing — no token needed)
         working-directory: dist/npm
+        env:
+          NODE_AUTH_TOKEN: ''   # ensure setup-node's token doesn't override OIDC
         run: |
           out=$(npm publish --access public --provenance 2>&1); rc=$?
           echo "$out"
-          # E404/E409 = version already exists on registry — treat as success
-          echo "$out" | grep -qE 'E404|E409|already been published' && exit 0
+          # Version already published (E404/E409) — treat as success
+          echo "$out" | grep -qE 'E404|E409|already been published|previously published' && exit 0
           exit $rc
 
   # ── Update Formula/ and bucket/ in this repo ─────────────────────────────────
