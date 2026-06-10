@@ -1,6 +1,6 @@
 # 05 - 3VA v2.0.0 ROADMAP
 
-**Target:** 2027 · **Base:** v1.0.0 LTS (2026-06-01)
+**Released:** 2026-06-10 · **Base:** v1.0.0 LTS (2026-06-01)
 
 ---
 
@@ -22,7 +22,7 @@ v1.0.0 established the secure-by-default runtime foundation: permissions, post-q
 |---------|--------|
 | CPU sampling profiler | Sampling-based profiler emitting V8-compatible `.cpuprofile` JSON |
 | Flamegraph export | `--prof-out flamegraph.svg` — Inferno-style SVG output |
-| Memory snapshot | `--heap-snapshot` — exports a `.heapsnapshot` compatible with Chrome DevTools Memory panel |
+| Memory snapshot | `--heap-snapshot` — planned; not yet implemented in v2.0.0 |
 | `console.profile()` / `console.profileEnd()` | JS-side profiler start/stop markers |
 | `3va prof <file>` subcommand | Post-hoc analysis: load a `.cpuprofile` and print top-N hot functions |
 
@@ -30,7 +30,6 @@ v1.0.0 established the secure-by-default runtime foundation: permissions, post-q
 
 ```bash
 3va run app.ts --prof --prof-out=profile.cpuprofile
-3va run app.ts --heap-snapshot=heap.heapsnapshot
 3va prof profile.cpuprofile --top 20
 ```
 
@@ -44,7 +43,7 @@ v1.0.0 established the secure-by-default runtime foundation: permissions, post-q
 
 | Module | v1.0.0 state | v2.0.0 target |
 |--------|-------------|---------------|
-| `cluster` | Not implemented | Stub with single-process fallback + `isMaster`/`isPrimary` |
+| `cluster` | ✅ Single-process emulation: `isPrimary: true`, `fork()` returns mock workers | |
 | `worker_threads` | Not implemented | `Worker`, `parentPort`, `workerData`, `MessageChannel` |
 | `dgram` | Not implemented | UDP send/receive |
 | `dns` | Stub only | `dns.resolve`, `dns.lookup`, `dns.promises.*` |

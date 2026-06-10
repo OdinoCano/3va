@@ -3,7 +3,7 @@
 [![CI](https://github.com/OdinoCano/3va/actions/workflows/ci.yml/badge.svg)](https://github.com/OdinoCano/3va/actions/workflows/ci.yml)
 [![Security](https://github.com/OdinoCano/3va/actions/workflows/security.yml/badge.svg)](https://github.com/OdinoCano/3va/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust Edition 2021](https://img.shields.io/badge/Rust-2021-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
+[![Rust Edition 2024](https://img.shields.io/badge/Rust-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/)
 
 > *Veni, Vidi, Vici, Abiit — He came, he saw, he conquered, he left.*
 
@@ -397,7 +397,7 @@ Every PR must pass all CI gates before merge:
 |------|-------------|
 | `cargo fmt --check` | Yes |
 | `cargo clippy -D warnings` | Yes |
-| `cargo test` (872 tests) | Yes |
+| `cargo test` (1008 tests) | Yes |
 | `cargo deny check` (CVEs + licenses) | Yes |
 | Gitleaks secret scanning | Yes |
 | Semgrep SAST (ERROR severity) | Yes |

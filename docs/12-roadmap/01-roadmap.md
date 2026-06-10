@@ -102,7 +102,7 @@
 |---------|----------------|----------|--------|
 | 0.1.0-dev | May 2026 | CLI + Core + JS (ESM/CJS/async) + PM + Bundler + Test runner + Dev server + Security (malware + secrets + OSV) | ✅ |
 | 1.0.0 LTS | **2026-06-01** | Inspector/CDP + WASM + NAPI + PQ-TLS + stable API | ✅ **Released** |
-| 2.0.0 | 2027 | Performance profiling + Node.js compat improvements + workspace v2 + REPL plugins | 🔲 |
+| 2.0.0 | **2026-06-10** | Performance profiling + Node.js compat improvements + workspace v2 + REPL plugins | ✅ **Released** |
 
 ---
 

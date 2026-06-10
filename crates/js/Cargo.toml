@@ -95,6 +95,14 @@ path = "tests/wintercg_globals.rs"
 name = "express_jwt"
 path = "tests/express_jwt.rs"
 
+[[test]]
+name = "async_hooks_module"
+path = "tests/async_hooks_module.rs"
+
+[[test]]
+name = "compat_priority"
+path = "tests/compat_priority.rs"
+
 [dependencies]
 rquickjs.workspace = true
 rquickjs-sys = { version = "0.6.4", package = "vvva-rquickjs-sys", path = "../../vendor/rquickjs-sys" }
