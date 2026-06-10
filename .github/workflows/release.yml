@@ -34,13 +34,16 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             cross: true
-          # macOS — macos-14 (Apple Silicon / M1) has far better queue times
-          # than macos-13 on public repos.  aarch64 is native; x86_64 is a
-          # standard Rust cross-compile using the macOS SDK already on the runner.
+          # macos-13 is deprecated (fully unsupported Dec 2025) — long queues.
+          # macos-14 (M1) is the current runner. Xcode 15 is pinned explicitly
+          # because libffi-sys 2.3.0 (wasmtime dep) fails with Xcode 16's
+          # stricter CFI validation on arm64 Mach-O assembly.
           - target: aarch64-apple-darwin
-            os: macos-13
+            os: macos-14
+            xcode: '15.4'
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
+            xcode: '15.4'
           - target: x86_64-pc-windows-msvc
             os: windows-latest
 
@@ -50,6 +53,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Select Xcode version (macOS only)
+        if: matrix.xcode
+        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
 
       - name: Install cross
         if: matrix.cross
