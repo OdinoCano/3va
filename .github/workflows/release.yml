@@ -46,6 +46,12 @@ jobs:
             xcode: '15.4'
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+          # Android / Termux — API 24 (Android 7.0) covers ~99 % of active devices.
+          # cargo-ndk sets up the NDK linker and sysroot automatically.
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            ndk: true
+            ndk_api: 24
 
     steps:
       - uses: actions/checkout@v4
@@ -58,18 +64,35 @@ jobs:
         if: matrix.xcode
         run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
 
+      - name: Setup Android NDK
+        if: matrix.ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Install cargo-ndk
+        if: matrix.ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
       - name: Install cross
         if: matrix.cross
         uses: taiki-e/install-action@v2
         with:
           tool: cross
 
+      - name: Build (Android NDK)
+        if: matrix.ndk
+        run: cargo ndk --target ${{ matrix.target }} --platform ${{ matrix.ndk_api }} -- build --release --bin 3va
+
       - name: Build (cross, aarch64-linux)
         if: matrix.cross
         run: cross build --release --target ${{ matrix.target }} --bin 3va
 
       - name: Build (native / macOS cross)
-        if: ${{ !matrix.cross }}
+        if: ${{ !matrix.cross && !matrix.ndk }}
         run: cargo build --release --target ${{ matrix.target }} --bin 3va
 
       - name: Package binary (Unix)
