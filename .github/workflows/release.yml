@@ -104,7 +104,7 @@ jobs:
           ARCHIVE="3va-${VERSION}-${TARGET}.tar.gz"
           cp "target/${TARGET}/release/3va" 3va
           tar czf "${ARCHIVE}" 3va
-          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - name: Package binary (Windows)
