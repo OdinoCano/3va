@@ -1,0 +1,26 @@
+name: Force Release v2.0.0
+
+on:
+  workflow_dispatch:
+
+jobs:
+  trigger-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Check if v2.0.0 tag exists
+        run: |
+          if git rev-parse v2.0.0 >/dev/null 2>&1; then
+            echo "Tag v2.0.0 exists, proceeding with force rebuild"
+          else
+            echo "Tag v2.0.0 not found"
+            exit 1
+          fi
+
+      - name: Trigger Release workflow via workflow_run
+        run: |
+          echo "Release workflow will be triggered on next push to main"
+          echo "Current commit: $(git rev-parse HEAD)"
