@@ -10,8 +10,7 @@ struct NpmLockV1 {
     name: String,
     version: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
-    lockfile_version: Option<u32>,
+    _lockfile_version: Option<u32>,
     #[serde(default)]
     dependencies: HashMap<String, NpmDepV1>,
 }

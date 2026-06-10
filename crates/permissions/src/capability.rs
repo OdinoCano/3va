@@ -1,6 +1,7 @@
 use crate::audit::{AuditEvent, AuditLog};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -39,9 +40,9 @@ use std::sync::RwLock;
 #[derive(Debug, Default)]
 pub struct PermissionState {
     /// Capabilities concedidas explícitamente por el usuario.
-    pub granted: RwLock<Vec<Capability>>,
+    pub granted: RwLock<HashSet<Capability>>,
     /// Capabilities denegadas explícitamente (tienen precedencia sobre granted).
-    pub denied: RwLock<Vec<Capability>>,
+    pub denied: RwLock<HashSet<Capability>>,
 
     /// Si está activado, lanza un prompt en consola cuando se detecta un permiso no configurado.
     pub interactive: bool,
@@ -70,18 +71,12 @@ impl PermissionState {
 
     /// Concede una capability. No la agrega si ya existe.
     pub fn grant(&self, cap: Capability) {
-        let mut granted = self.granted.write().unwrap();
-        if !granted.contains(&cap) {
-            granted.push(cap);
-        }
+        self.granted.write().unwrap().insert(cap);
     }
 
     /// Deniega una capability explícita (tiene precedencia sobre `grant`).
     pub fn deny(&self, cap: Capability) {
-        let mut denied = self.denied.write().unwrap();
-        if !denied.contains(&cap) {
-            denied.push(cap);
-        }
+        self.denied.write().unwrap().insert(cap);
     }
 
     /// Deniega toda la categoría de filesystem (lectura y escritura).
@@ -113,7 +108,7 @@ impl PermissionState {
 
     /// Retorna una copia de todas las capabilities concedidas actualmente.
     pub fn list_granted(&self) -> Vec<Capability> {
-        self.granted.read().unwrap().clone()
+        self.granted.read().unwrap().iter().cloned().collect()
     }
 
     /// Verifica si una operación está permitida.
@@ -229,25 +224,25 @@ impl PermissionState {
     fn prompt_user(&self, required: &Capability) -> bool {
         use std::io::IsTerminal;
 
-        // En scripts no interactivos (pipes, CI, integration tests) stdin no es un TTY.
-        // Bloquear esperando input causaría un hang indefinido — denegar silenciosamente.
+        // Non-interactive contexts (pipes, CI, integration tests) have no TTY.
+        // Blocking for input would hang indefinitely — deny silently instead.
         if !std::io::stdin().is_terminal() {
             self.deny(required.clone());
             return false;
         }
 
         let msg = match required {
-            Capability::FileRead(p) => format!("leer el archivo '{}'", p.display()),
-            Capability::FileWrite(p) => format!("escribir el archivo '{}'", p.display()),
-            Capability::Network(h) => format!("conectarse a la red '{}'", h),
-            Capability::SpawnProcess => "crear procesos hijos".to_string(),
-            Capability::EnvAccess => "acceder a todas las variables de entorno".to_string(),
-            Capability::EnvVar(v) => format!("acceder a la variable de entorno '{v}'"),
-            Capability::FFI(p) => format!("llamar a librería nativa '{}'", p.display()),
+            Capability::FileRead(p) => format!("read file '{}'", p.display()),
+            Capability::FileWrite(p) => format!("write file '{}'", p.display()),
+            Capability::Network(h) => format!("connect to network host '{h}'"),
+            Capability::SpawnProcess => "spawn child processes".to_string(),
+            Capability::EnvAccess => "access all environment variables".to_string(),
+            Capability::EnvVar(v) => format!("access environment variable '{v}'"),
+            Capability::FFI(p) => format!("call native library '{}'", p.display()),
         };
 
         eprint!(
-            "\n[!] El script está intentando {msg}.\n¿Permitir? [y (Sí una vez) / N (Denegar) / A (Permitir Siempre)] "
+            "\n[!] The script is requesting permission to {msg}.\nAllow? [y (once) / N (deny) / A (always)] "
         );
         let _ = std::io::stdout().flush();
 
@@ -255,14 +250,14 @@ impl PermissionState {
         if std::io::stdin().read_line(&mut input).is_ok() {
             let choice = input.trim();
             if choice.eq_ignore_ascii_case("y") {
-                return true; // Permitido solo esta vez
+                return true;
             } else if choice == "A" {
                 self.grant(required.clone());
-                return true; // Permitido siempre
+                return true;
             }
         }
 
-        // Cualquier otra cosa (N o enter) es deny
+        // Anything else (N or enter) is deny
         self.deny(required.clone());
         false
     }

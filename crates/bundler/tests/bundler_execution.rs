@@ -438,13 +438,14 @@ async fn bundled_js_syntax_error_propagates_at_eval() {
 
     let root = std::path::PathBuf::from(".");
     let mut bundler = Bundler::new(root);
-    // add_entry may succeed (bundler is lenient), but eval must fail.
     let _ = bundler.add_entry(&entry);
-    if let Ok(code) = bundler.bundle() {
-        let engine = make_engine().await;
-        let result = engine.eval(&code).await;
-        // Either bundle fails or eval fails — either is acceptable.
-        let _ = result; // We just verify no panic occurs.
+    match bundler.bundle() {
+        Err(_) => { /* bundler caught the syntax error — acceptable */ }
+        Ok(code) => {
+            let engine = make_engine().await;
+            let result = engine.eval(&code).await;
+            assert!(result.is_err(), "eval of invalid JS must return an error");
+        }
     }
 }
 

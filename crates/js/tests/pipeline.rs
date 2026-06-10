@@ -167,20 +167,27 @@ async fn ts_as_cast_stripped_correctly() {
     assert_eq!(result, "42");
 }
 
-/// Documenta una limitación conocida del transpilador:
-/// los genéricos `<T>` y return type annotations en arrows no se eliminan,
-/// lo que produce JS inválido. El pipeline debe retornar Err en esos casos.
 #[tokio::test]
-async fn ts_generics_not_supported_by_transpiler() {
-    let ts = r#"function identity<T>(val: T): T { return val; }"#;
-    let (_temp, result) = write_and_eval(ts, "generic.ts").await;
-    // Si el transpilador no maneja genéricos, QuickJS falla con syntax error.
-    // Este test documenta el comportamiento actual sin afirmar que es correcto.
-    if result.is_err() {
-        // Limitación conocida: el transpilador no elimina parámetros de tipo <T>
-        eprintln!("Limitación conocida: genéricos <T> no soportados por el transpilador");
-    }
-    // No falla el test — solo documenta el estado
+async fn ts_generics_stripped_and_evaluated() {
+    let ts = r#"
+        function identity<T>(val: T): T { return val; }
+        globalThis._generic_result = identity(42);
+    "#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("generic.ts");
+    std::fs::write(&path, ts).unwrap();
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    engine
+        .eval_file(&path)
+        .await
+        .expect("TypeScript generics must be stripped by the Oxc transpiler");
+    let v = engine
+        .eval_to_string("String(globalThis._generic_result)")
+        .await
+        .unwrap();
+    assert_eq!(v, "42");
 }
 
 // ── JavaScript CJS: eval_file en modo script ──────────────────────────────────
@@ -940,17 +947,7 @@ async fn esm_import_from_parent_node_modules() {
 }
 
 // ── WebSocket builtin ─────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn websocket_class_exists_in_global_scope() {
-    let state = PermissionState::new();
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
-    let result = engine.eval_to_string("typeof WebSocket").await.unwrap();
-    assert_eq!(
-        result, "function",
-        "WebSocket debe estar disponible como constructor global"
-    );
-}
+// Note: websocket_global_exists is covered in websocket_module.rs
 
 #[tokio::test]
 async fn websocket_constants_are_defined() {

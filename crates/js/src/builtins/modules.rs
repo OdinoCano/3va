@@ -836,6 +836,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     return { username: u, uid: -1, gid: -1, shell: '/bin/sh', homedir: h };
                 },
                 release: function() { return typeof __osRelease === 'function' ? __osRelease() : '6.0.0'; },
+                version: function() { return typeof __osVersion === 'function' ? __osVersion() : ''; },
                 uptime: function() { return typeof __osUptime === 'function' ? __osUptime() : 0; },
                 loadavg: function() {
                     return typeof __osLoadAvg === 'function' ? __osLoadAvg() : [0, 0, 0];

@@ -170,8 +170,13 @@ fn bundle_with_sourcemap_returns_map_json() {
         code.contains("hello"),
         "bundle should contain source content"
     );
-    // map may or may not be Some depending on whether the generator emits one
-    let _ = map; // not asserting presence; just that the call succeeds
+    let map = map.expect("sourcemap: true must produce a source map");
+    let parsed: serde_json::Value = serde_json::from_str(&map).expect("map must be valid JSON");
+    assert_eq!(parsed["version"], 3, "source map version must be 3");
+    assert!(
+        parsed["sources"].is_array(),
+        "source map must have a sources array"
+    );
 }
 
 // ── bundle_file helper ────────────────────────────────────────────────────────
