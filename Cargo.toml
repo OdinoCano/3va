@@ -46,10 +46,11 @@ aes-gcm = "0.10"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 ctr = "0.9"
-# "vendored" compiles OpenSSL from source on Linux (no-op on macOS/Windows).
-# Required for cross-compilation to aarch64 where the target sysroot has no
-# pre-installed OpenSSL dev headers.
+# "vendored" compiles OpenSSL from source, ensuring cargo install works on any OS
+# without requiring pre-installed OpenSSL dev headers (especially important for 
+# Termux, cross-compilation, and restricted environments).
 native-tls = { version = "0.2", features = ["vendored"] }
+openssl-sys = { version = "0.9", features = ["vendored"] }
 rsa = "0.9"
 p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
 p384 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
