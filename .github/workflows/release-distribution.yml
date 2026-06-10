@@ -72,6 +72,7 @@ jobs:
     name: Publish to npm
     needs: collect-hashes
     runs-on: ubuntu-latest
+    environment: npm
     steps:
       - uses: actions/checkout@v4
 
