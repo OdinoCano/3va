@@ -52,6 +52,94 @@ The JavaScript ecosystem has a supply chain security problem. Post-install scrip
 
 ---
 
+## Installation
+
+### npm (all platforms)
+
+```bash
+npm install -g @edge_166/3va
+```
+
+### Homebrew (macOS and Linux)
+
+```bash
+brew install OdinoCano/3va/3va
+```
+
+### Scoop (Windows)
+
+```bash
+scoop bucket add 3va https://github.com/OdinoCano/3va
+scoop install 3va
+```
+
+### Chocolatey (Windows)
+
+```bash
+choco install 3va
+```
+
+### winget (Windows)
+
+```bash
+winget install OdinoCano.3va
+```
+
+### Flatpak (Linux)
+
+```bash
+flatpak install flathub com.github.OdinoCano.3va
+```
+
+### Snap (Linux)
+
+```bash
+snap install 3va
+```
+
+### Nix
+
+```nix
+# flake.nix — add to inputs and overlay
+pkgs.three-va
+```
+
+Or one-shot:
+
+```bash
+nix run github:OdinoCano/3va
+```
+
+### Termux (Android)
+
+```bash
+bash <(curl -fsSL https://github.com/OdinoCano/3va/releases/latest/download/termux-install.sh)
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/OdinoCano/3va.git
+cd 3va
+cargo build --release
+sudo cp target/release/3va /usr/local/bin/
+```
+
+### Direct binary download
+
+Pre-built binaries for every platform are attached to each [GitHub Release](https://github.com/OdinoCano/3va/releases/latest):
+
+| Platform | File |
+|----------|------|
+| Linux x64 | `3va-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 | `3va-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x64 | `3va-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
+| macOS arm64 (M-series) | `3va-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
+| Windows x64 | `3va-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
+| Android arm64 | `3va-vX.Y.Z-aarch64-linux-android.tar.gz` |
+
+---
+
 ## Quick Start
 
 ```bash
