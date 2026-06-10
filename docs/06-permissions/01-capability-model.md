@@ -55,8 +55,8 @@ pub enum Capability {
     EnvVar(String),
     /// Allows creating child processes
     SpawnProcess,
-    /// Allows access to native APIs/FFI
-    FFI,
+    /// Allows access to native APIs/FFI (path-scoped)
+    FFI(PathBuf),
 }
 ```
 
@@ -70,7 +70,7 @@ pub enum Capability {
 | `EnvAccess` | — | `--allow-env=` | Access to **all** environment variables |
 | `EnvVar` | `String` | `--allow-env=VAR` | Access to one specific named variable |
 | `SpawnProcess` | — | `--allow-child-process` | Spawn child processes |
-| `FFI` | — | (reserved) | Native function calls |
+| `FFI` | `PathBuf` | `--allow-ffi=PATH` | Native function calls (path-scoped library access) |
 
 ### 1.3.3 `EnvAccess` vs `EnvVar` coverage
 
@@ -90,6 +90,7 @@ EnvVar("NODE_ENV")  ──does NOT cover──►  EnvAccess
 Enforced in `caps_match` (`crates/permissions/src/capability.rs`):
 
 ```rust
+// Hash-based (O(1)) lookups — granted and denied are HashSet<Capability>.
 (Capability::EnvAccess, Capability::EnvAccess) => true,
 (Capability::EnvAccess, Capability::EnvVar(_))  => true,   // all covers specific
 (Capability::EnvVar(a), Capability::EnvVar(b))  => a == b, // exact name only
@@ -106,10 +107,10 @@ Variables that were not granted are absent (not `undefined`, simply not present)
 ```rust
 #[derive(Debug, Default)]
 pub struct PermissionState {
-    /// List of granted capabilities
-    pub granted: Vec<Capability>,
-    /// List of explicitly denied capabilities
-    pub denied: Vec<Capability>,
+    /// Set of granted capabilities (HashSet for O(1) lookups)
+    pub granted: HashSet<Capability>,
+    /// Set of explicitly denied capabilities (HashSet for O(1) lookups)
+    pub denied: HashSet<Capability>,
     /// Global denial flags
     deny_all_fs: bool,
     deny_all_net: bool,
@@ -120,8 +121,8 @@ pub struct PermissionState {
 impl PermissionState {
     pub fn new() -> Self { ... }
 
-    /// Grant a capability
-    pub fn grant(&mut self, cap: Capability) { ... }
+    /// Grant a capability (HashSet::insert — no-op if already present)
+    pub fn grant(&self, cap: Capability) { ... }
 
     /// Deny a specific capability
     pub fn deny(&mut self, cap: Capability) { ... }
@@ -253,44 +254,25 @@ pub fn from_args(args: &Args) -> PermissionState {
 }
 ```
 
-### 1.6.2 Presets
+## 1.8 Permission Presets
+
+`PermissionPreset` provides ready-made permission bundles for common scenarios:
+
+| Preset | Grants |
+|--------|--------|
+| `Minimal` | Nothing — fully sandboxed baseline |
+| `Development` | FileRead + FileWrite (cwd), Network (`*`), EnvAccess, SpawnProcess |
+| `Production` | FileRead (cwd) only — no write, no network, no env, no processes |
+| `NetworkOnly` | Network (`*`) only |
 
 ```rust
-pub enum PermissionPreset {
-    /// No permissions (deny-all)
-    None,
-    /// Equivalent to Node.js (allows everything)
-    Node,
-    /// Simulates browser
-    Browser,
-    /// Restricted environment
-    Minimal,
-}
+use vvva_permissions::PermissionPreset;
 
-impl PermissionPreset {
-    pub fn apply(&self, state: &mut PermissionState) {
-        match self {
-            PermissionPreset::None => {
-                // deny-by-default, no grants
-            }
-            PermissionPreset::Node => {
-                state.grant(Capability::FileRead(PathBuf::from("/")));
-                state.grant(Capability::FileWrite(PathBuf::from("/")));
-                state.grant(Capability::Network("*".to_string()));
-                state.grant(Capability::EnvAccess);
-                state.grant(Capability::SpawnProcess);
-            }
-            PermissionPreset::Browser => {
-                state.grant(Capability::Network("*".to_string()));
-                state.grant(Capability::FileRead(PathBuf::from(".")));
-                state.grant(Capability::FileWrite(PathBuf::from("./.cache")));
-            }
-            PermissionPreset::Minimal => {
-                // Stdio only
-            }
-        }
-    }
-}
+// Ready-made state
+let state = PermissionPreset::Development.into_state();
+
+// Or apply to an existing state (additive)
+PermissionPreset::NetworkOnly.apply(&existing_state);
 ```
 
 ---

@@ -928,7 +928,7 @@ pub unsafe extern "C" fn napi_delete_reference(env: napi_env, reference: napi_re
 
 // ─ napi_typeof ─────────────────────────────────────────────────────────────
 #[repr(u32)]
-#[allow(non_camel_case_types, dead_code)]
+#[allow(non_camel_case_types)]
 pub enum napi_valuetype {
     napi_undefined = 0,
     napi_null = 1,
@@ -946,26 +946,26 @@ pub enum napi_valuetype {
 pub unsafe extern "C" fn napi_typeof(
     env: napi_env,
     value: napi_value,
-    result: *mut u32,
+    result: *mut napi_valuetype,
 ) -> napi_status {
     if env.is_null() || value.is_null() || result.is_null() {
         return napi_status::napi_invalid_arg;
     }
     let v = jsval(value);
     *result = if qjs::JS_IsUndefined(v) {
-        0
+        napi_valuetype::napi_undefined
     } else if qjs::JS_IsNull(v) {
-        1
+        napi_valuetype::napi_null
     } else if qjs::JS_IsBool(v) {
-        2
+        napi_valuetype::napi_boolean
     } else if qjs::JS_IsNumber(v) {
-        3
+        napi_valuetype::napi_number
     } else if qjs::JS_IsString(v) {
-        4
+        napi_valuetype::napi_string
     } else if qjs::JS_IsFunction(ctx(env), v) != 0 {
-        7
+        napi_valuetype::napi_function
     } else {
-        6 // object or fallback
+        napi_valuetype::napi_object
     };
     napi_status::napi_ok
 }
@@ -1328,7 +1328,7 @@ pub unsafe extern "C" fn napi_create_external_arraybuffer(
 
 // ─ napi_create_typedarray / napi_get_typedarray_info ───────────────────────
 #[repr(u32)]
-#[allow(non_camel_case_types, dead_code)]
+#[allow(non_camel_case_types)]
 pub enum napi_typedarray_type {
     napi_int8_array = 0,
     napi_uint8_array = 1,
@@ -1346,7 +1346,7 @@ pub enum napi_typedarray_type {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn napi_create_typedarray(
     env: napi_env,
-    _type_: u32,
+    _type_: napi_typedarray_type,
     length: usize,
     arraybuffer: napi_value,
     byte_offset: usize,
@@ -1382,7 +1382,7 @@ pub unsafe extern "C" fn napi_create_typedarray(
 pub unsafe extern "C" fn napi_get_typedarray_info(
     env: napi_env,
     typedarray: napi_value,
-    type_: *mut u32,
+    type_: *mut napi_typedarray_type,
     length: *mut usize,
     data: *mut *mut c_void,
     arraybuffer: *mut napi_value,
@@ -1393,8 +1393,8 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
     }
     let v = jsval(typedarray);
     if !type_.is_null() {
-        *type_ = 1;
-    } // uint8
+        *type_ = napi_typedarray_type::napi_uint8_array;
+    }
     if !byte_offset.is_null() {
         *byte_offset = 0;
     }

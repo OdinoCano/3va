@@ -241,6 +241,9 @@ Runs the project's test suite.
 | `--watch` | | Runs tests in watch mode: they are re-executed automatically when file changes are detected. |
 | `--coverage` | | Generates line and branch coverage report upon completion. |
 | `--update-snapshots` | `-u` | Overwrites existing snapshots with current values. |
+| `--concurrency` | | Maximum concurrent test files (`0` = CPU count, default `0`) |
+| `--reporter` | | Output format: `terminal` \| `json` \| `junit` \| `tap` \| `dot` (default: `terminal`) |
+| `--reporter-file` | | Write reporter output to a file instead of stdout (e.g. `--reporter-file=junit.xml`) |
 
 **Auto-discovery:**
 

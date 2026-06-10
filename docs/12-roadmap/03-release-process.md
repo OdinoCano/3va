@@ -75,7 +75,7 @@ git tag v1.0.0
 - Fixed memory leak in module cache
 
 ## Security
-- Patched CVE-2026-XXXX
+- No security fixes in this release
 ```
 
 ---

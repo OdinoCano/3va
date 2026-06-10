@@ -70,7 +70,7 @@ The full list of implemented matchers is documented in `02-matchers.md`.
 
 The first time a test calls `.toMatchSnapshot()`, the serialized value is saved to disk. Subsequent runs compare against that saved value.
 
-- File location: `__snapshots__/<test-name>.snap` alongside the test file.
+- File location: `__snapshots__/<test-name>.snap.json` alongside the test file.
 - Format: Plain JSON with the structure `{ "test name": <serialized value>, ... }`.
 - To update outdated snapshots: `3va test --update-snapshots`.
 
@@ -95,4 +95,4 @@ The `--coverage` flag generates a **line** and **branch** coverage report. See `
 
 ---
 
-*Implemented in `crates/test/src/` (`runner.rs`, `framework.rs`, `matchers.rs`, `coverage.rs`).*
+*Implemented in `crates/test/src/` (`runner.rs`, `framework.rs`, `coverage.rs`).*

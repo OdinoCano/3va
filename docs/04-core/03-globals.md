@@ -68,8 +68,16 @@ Atomics
 process          // global process object
 global           // global namespace
 
-// Console
-console          // console object
+// Console — full Node.js API
+console.log / console.warn / console.error / console.info / console.debug
+console.trace    // stack trace
+console.dir      // object inspection
+console.table    // tabular output
+console.time / console.timeEnd / console.timeLog   // timers
+console.group / console.groupCollapsed / console.groupEnd  // nesting
+console.count / console.countReset  // counters
+console.assert   // conditional log
+console.clear    // clear output
 
 // Timers (functions)
 setTimeout       // execute after delay

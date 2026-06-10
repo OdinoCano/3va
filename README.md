@@ -375,8 +375,8 @@ The JavaScript engine is QuickJS embedded via `rquickjs`. QuickJS is a small, em
 | Version | Target | Focus |
 |---------|--------|-------|
 | **2.0.0** | 2026-06-01 ✅ | Full runtime + PM + toolchain + Inspector + NAPI + WASM + PQ-TLS |
-| **1.5** | 2026 Q3 | `permissions suggest` (static analysis), `permissions learn` (syscall interception), package.json `"3va"` key, permission profiles for common frameworks |
-| **2.0.0** | 2027 | Node.js compat v2 (full dns record resolution, repl, wasi, trace_events, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting |
+| **2.1.0** | 2026 Q3 | `permissions suggest` (static analysis), `permissions learn` (syscall interception), package.json `"3va"` key, permission profiles for common frameworks |
+| **2.2.0** | 2027 | Node.js compat v2 (full dns record resolution, repl, wasi, trace_events, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting |
 | **3.0** | TBD | Post-quantum TLS in full production mode |
 
 Full roadmap: [`docs/12-roadmap/`](docs/12-roadmap/)

@@ -24,7 +24,7 @@ pub struct ProcessInfo {
 
 ```javascript
 // Access in JavaScript
-console.log(process.version);        // "3va/1.0.0"
+console.log(process.version);        // "3va/2.0.1"
 console.log(process.platform);      // "linux"
 console.log(process.arch);           // "x64"
 console.log(process.cwd());          // "/home/user/project"

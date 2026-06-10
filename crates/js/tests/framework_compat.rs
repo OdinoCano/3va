@@ -10,13 +10,6 @@ use tempfile::tempdir;
 use vvva_js::JsEngine;
 use vvva_permissions::{Capability, PermissionState};
 
-#[allow(dead_code)]
-async fn engine() -> JsEngine {
-    JsEngine::new(Arc::new(PermissionState::new()))
-        .await
-        .unwrap()
-}
-
 async fn engine_with_read(path: &str) -> JsEngine {
     let perms = PermissionState::new();
     perms.grant(Capability::FileRead(std::path::PathBuf::from(path)));

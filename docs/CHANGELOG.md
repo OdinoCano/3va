@@ -76,7 +76,7 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 ### Added
 
 - **Expo / React Native package support** (`crates/js/src/builtins/modules.rs`, `crates/js/src/transpiler.rs`):
-  Real Expo npm packages (`expo-modules-core`, `expo-constants`, `expo-asset`, `expo-font`, `expo-file-system`) load and execute without errors. 45/45 tests pass in `test-projects/expo-test/`.
+  Real Expo npm packages (`expo-modules-core`, `expo-constants`, `expo-asset`, `expo-font`, `expo-file-system`) load and execute without errors. Covered by `crates/js/tests/pipeline.rs` (ESM/CJS) and `crates/js/tests/framework_compat.rs` (import.meta).
 
   *ESM→CJS converter fixes:*
   - **Circular dependency guard** — `module.exports` pre-cached before eval; circular requires get the partial exports object instead of re-executing the module (matches Node.js behavior, eliminates stack overflows).

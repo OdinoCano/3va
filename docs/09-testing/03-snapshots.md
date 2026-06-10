@@ -21,30 +21,26 @@ test("renders correctly", () => {
 
 ```
 __snapshots__/
-├── App.test.js.snap
-└── utils.test.js.snap
+├── App.test.js.snap.json
+└── utils.test.js.snap.json
 ```
 
 ## 3.4 Format
 
 ```javascript
-// __snapshots__/test.js.snap
-exports[`test name 1`] = `
-<div>
-  <h1>Hello</h1>
-</div>
-`;
+// __snapshots__/test.js.snap.json
+{ "<test name 1>": "<div>\n  <h1>Hello</h1>\n</div>" }
 ```
+
+Snapshots are stored as **JSON** files. Each test name maps to its serialized value.
 
 ## 3.5 Inline Snapshots
 
 ```javascript
 // Inline snapshot in the test
-expect(value).toMatchInlineSnapshot(`
-  <div>value</div>
-`);
+expect(value).toMatchInlineSnapshot(`<div>value</div>`);
 ```
 
 ---
 
-*Snapshots conforming to Jest snapshot.*
+*Snapshots stored as JSON (`.snap.json`) for portability.*

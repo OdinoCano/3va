@@ -66,10 +66,11 @@ enum ArgStorage {
     F64(Box<f64>),
     /// Pointer value (stored as usize to keep it FFI-safe).
     Ptr(Box<usize>),
-    /// CString keeps the string buffer alive; the Box<*const c_char> is what libffi reads.
-    /// The CString field is intentionally kept for its Drop impl.
-    #[allow(dead_code)]
-    CStr(CString, Box<*const c_char>),
+    /// `_cs` keeps the CString buffer alive while `ptr` is passed to libffi.
+    CStr {
+        _cs: CString,
+        ptr: Box<*const c_char>,
+    },
 }
 
 impl ArgStorage {
@@ -86,8 +87,7 @@ impl ArgStorage {
             ArgStorage::F32(v) => arg(v.as_ref()),
             ArgStorage::F64(v) => arg(v.as_ref()),
             ArgStorage::Ptr(v) => arg(v.as_ref()),
-            // arg() takes a reference to the *const i8 box; libffi reads the pointer value.
-            ArgStorage::CStr(_, ptr_box) => arg(ptr_box.as_ref()),
+            ArgStorage::CStr { ptr, .. } => arg(ptr.as_ref()),
         }
     }
 }
@@ -112,7 +112,10 @@ fn js_value_to_arg(typ: &str, val: &serde_json::Value) -> anyhow::Result<ArgStor
             let s = val.as_str().unwrap_or("");
             let cs = CString::new(s).unwrap_or_else(|_| CString::new("").unwrap());
             let raw_ptr = cs.as_ptr();
-            ArgStorage::CStr(cs, Box::new(raw_ptr))
+            ArgStorage::CStr {
+                _cs: cs,
+                ptr: Box::new(raw_ptr),
+            }
         }
         _ => anyhow::bail!("Unknown FFI type for argument: {typ}"),
     })

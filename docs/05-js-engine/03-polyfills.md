@@ -438,7 +438,7 @@ FileReader.DONE     // 2
 process.pid              // number — OS PID of the 3va process
 process.platform         // 'linux' | 'darwin' | 'win32' | 'unknown'
 process.arch             // 'x64' | 'arm64' | 'unknown'
-process.version          // '3va/1.0.0'
+process.version          // '3va/2.0.1'
 
 // Versions (Node-compatible keys for package compatibility checks)
 process.versions.node    // '20.0.0'  — fake, but structurally compatible

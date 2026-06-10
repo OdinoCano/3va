@@ -1,7 +1,7 @@
 # Changelog — 2026-06-03
 
 Expo / React Native package support + ESM→CJS engine fixes.
-45/45 tests pass in `test-projects/expo-test/`.
+Covered by `crates/js/tests/pipeline.rs` and `crates/js/tests/framework_compat.rs`.
 
 ---
 
