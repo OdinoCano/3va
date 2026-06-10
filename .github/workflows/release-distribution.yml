@@ -255,20 +255,38 @@ jobs:
     env:
       WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Install winget-create
+        shell: pwsh
         run: |
           $url = "https://github.com/microsoft/winget-create/releases/latest/download/wingetcreate.exe"
           Invoke-WebRequest -Uri $url -OutFile wingetcreate.exe
 
-      - name: Submit to winget-pkgs
+      - name: Patch manifests and submit
         env:
           VER: ${{ env.VERSION }}
+          WINDOWS_X64: ${{ needs.collect-hashes.outputs.windows_x64 }}
         shell: pwsh
         run: |
-          $VER_BARE = $env:VER -replace '^v', ''
-          $URL = "https://github.com/OdinoCano/3va/releases/download/$env:VER/3va-$env:VER-x86_64-pc-windows-msvc.zip"
-          .\wingetcreate.exe update OdinoCano.3va `
-            --version $VER_BARE `
-            --urls    $URL `
-            --token   $env:WINGET_TOKEN `
-            --submit
+          $VER_BARE  = $env:VER -replace '^v', ''
+          $URL       = "https://github.com/OdinoCano/3va/releases/download/$env:VER/3va-$env:VER-x86_64-pc-windows-msvc.zip"
+          $SrcDir    = "dist\winget\manifests\o\OdinoCano\3va\2.0.0"
+          $DestDir   = "dist\winget\manifests\o\OdinoCano\3va\$VER_BARE"
+
+          # Copy manifests into a version-named folder and patch dynamic values.
+          if ($VER_Bare -ne "2.0.0") {
+            New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
+            Get-ChildItem $SrcDir | ForEach-Object {
+              (Get-Content $_.FullName -Raw) `
+                -replace 'PackageVersion: 2\.0\.0',              "PackageVersion: $VER_Bare" `
+                -replace 'ReleaseDate: \d{4}-\d{2}-\d{2}',      "ReleaseDate: $(Get-Date -Format 'yyyy-MM-dd')" `
+                -replace 'InstallerUrl: https://[^\r\n]+',       "InstallerUrl: $URL" `
+                -replace 'InstallerSha256: [a-fA-F0-9]{64}',    "InstallerSha256: $($env:WINDOWS_X64)" |
+                Set-Content "$DestDir\$($_.Name)"
+            }
+          }
+
+          # wingetcreate submit works for both new packages and version updates.
+          .\wingetcreate.exe submit "$DestDir" `
+            --token $env:WINGET_TOKEN
