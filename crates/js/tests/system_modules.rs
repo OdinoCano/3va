@@ -37,17 +37,14 @@ async fn zlib_module_loads() {
 #[tokio::test]
 async fn zlib_gzip_roundtrip() {
     let e = engine().await;
-    // We test that gzip/gunzip callbacks are invoked and produce Uint8Array output
     let r = e
         .eval_to_string(
             r#"
             var z = require('zlib');
-            var called = false;
-            z.gzip([72, 101, 108, 108, 111], function(err, compressed) {
-                if (!err && compressed instanceof Uint8Array && compressed.length > 0) called = true;
-            });
-            // Promise-based; result may not be immediate — just confirm callback fired
-            String(typeof z.gzip === 'function')
+            var input = Buffer.from('Hello');
+            var compressed = z.gzipSync(input);
+            var restored = z.gunzipSync(compressed);
+            String(restored.toString() === 'Hello')
             "#,
         )
         .await
@@ -106,14 +103,18 @@ async fn child_process_module_loads() {
 #[tokio::test]
 async fn child_process_exec_denied_without_permission() {
     let e = engine().await;
+    // execSync is synchronous — permission denial throws immediately and is catchable.
     let r = e
         .eval_to_string(
             r#"
             var cp = require('child_process');
-            var got_error = false;
-            cp.exec('echo hello', function(err) { if (err) got_error = true; });
-            // returns immediately; error will arrive in callback
-            String(typeof cp.exec === 'function')
+            var threw = false;
+            try {
+                cp.execSync('echo hello');
+            } catch (e) {
+                threw = e !== null && e !== undefined;
+            }
+            String(threw)
             "#,
         )
         .await
@@ -124,13 +125,13 @@ async fn child_process_exec_denied_without_permission() {
 #[tokio::test]
 async fn child_process_exec_with_permission() {
     let e = engine_with_spawn().await;
-    // Use eval_file-style: just verify exec is callable and returns an object
+    // execSync with permission must not throw and must return the command output.
     let r = e
         .eval_to_string(
             r#"
             var cp = require('child_process');
-            var handle = cp.exec('echo hello', function(err, stdout) {});
-            String(handle !== null && typeof handle === 'object')
+            var out = cp.execSync('echo hello').toString().trim();
+            String(out === 'hello')
             "#,
         )
         .await

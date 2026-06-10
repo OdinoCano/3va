@@ -1,6 +1,14 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+// Wheel thresholds — chosen so each wheel covers roughly 4× the previous one.
+const MS_THRESHOLD_MS: u128 = 64; // < 64 ms  → millisecond wheel
+const S_THRESHOLD_S: u64 = 4; // < 4 s    → second wheel
+const M_THRESHOLD_S: u64 = 240; // < 4 min  → minute wheel
+const H_THRESHOLD_S: u64 = 14_400; // < 4 h    → hour wheel
+const D_THRESHOLD_S: u64 = 345_600; // < 4 days → day wheel
+// ≥ 4 days → large wheel
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TimerId(pub u64);
 
@@ -110,140 +118,66 @@ impl TimerWheel {
 
     fn add_timer(&mut self, timer: Timer) {
         let delay = timer.scheduled_at.duration_since(Instant::now());
-
-        if delay.as_millis() < 64 {
-            self.wheel_ms.push_back(timer);
-        } else if delay.as_secs() < 4 {
-            self.wheel_s.push_back(timer);
-        } else if delay.as_secs() < 240 {
-            self.wheel_m.push_back(timer);
-        } else if delay.as_secs() < 14400 {
-            self.wheel_h.push_back(timer);
-        } else if delay.as_secs() < 345600 {
-            self.wheel_d.push_back(timer);
+        let wheel = if delay.as_millis() < MS_THRESHOLD_MS {
+            &mut self.wheel_ms
+        } else if delay.as_secs() < S_THRESHOLD_S {
+            &mut self.wheel_s
+        } else if delay.as_secs() < M_THRESHOLD_S {
+            &mut self.wheel_m
+        } else if delay.as_secs() < H_THRESHOLD_S {
+            &mut self.wheel_h
+        } else if delay.as_secs() < D_THRESHOLD_S {
+            &mut self.wheel_d
         } else {
-            self.wheel_large.push_back(timer);
+            &mut self.wheel_large
+        };
+        wheel.push_back(timer);
+    }
+
+    /// Drain one ready timer from `wheel`, re-enqueue repeating ones, append to `ready`.
+    fn poll_wheel(wheel: &mut VecDeque<Timer>, ready: &mut Vec<Timer>, repeating_ok: bool) {
+        while let Some(timer) = wheel.pop_front() {
+            if timer.is_ready() {
+                if repeating_ok && timer.repeating {
+                    let mut t = timer;
+                    t.reschedule();
+                    ready.push(t);
+                } else {
+                    ready.push(timer);
+                }
+            } else {
+                wheel.push_front(timer);
+                break;
+            }
         }
     }
 
     pub fn poll(&mut self) -> Vec<Timer> {
         let mut ready = Vec::new();
-
-        while let Some(timer) = self.wheel_ms.pop_front() {
-            if timer.is_ready() {
-                if timer.repeating {
-                    let mut t = timer;
-                    t.reschedule();
-                    ready.push(t);
-                } else {
-                    ready.push(timer);
-                }
-            } else {
-                self.wheel_ms.push_front(timer);
-                break;
-            }
-        }
-
-        while let Some(timer) = self.wheel_s.pop_front() {
-            if timer.is_ready() {
-                if timer.repeating {
-                    let mut t = timer;
-                    t.reschedule();
-                    ready.push(t);
-                } else {
-                    ready.push(timer);
-                }
-            } else {
-                self.wheel_s.push_front(timer);
-                break;
-            }
-        }
-
-        while let Some(timer) = self.wheel_m.pop_front() {
-            if timer.is_ready() {
-                if timer.repeating {
-                    let mut t = timer;
-                    t.reschedule();
-                    ready.push(t);
-                } else {
-                    ready.push(timer);
-                }
-            } else {
-                self.wheel_m.push_front(timer);
-                break;
-            }
-        }
-
-        while let Some(timer) = self.wheel_h.pop_front() {
-            if timer.is_ready() {
-                if timer.repeating {
-                    let mut t = timer;
-                    t.reschedule();
-                    ready.push(t);
-                } else {
-                    ready.push(timer);
-                }
-            } else {
-                self.wheel_h.push_front(timer);
-                break;
-            }
-        }
-
-        while let Some(timer) = self.wheel_d.pop_front() {
-            if timer.is_ready() {
-                if timer.repeating {
-                    let mut t = timer;
-                    t.reschedule();
-                    ready.push(t);
-                } else {
-                    ready.push(timer);
-                }
-            } else {
-                self.wheel_d.push_front(timer);
-                break;
-            }
-        }
-
-        while let Some(timer) = self.wheel_large.pop_front() {
-            if timer.is_ready() {
-                ready.push(timer);
-            } else {
-                self.wheel_large.push_front(timer);
-                break;
-            }
-        }
-
+        Self::poll_wheel(&mut self.wheel_ms, &mut ready, true);
+        Self::poll_wheel(&mut self.wheel_s, &mut ready, true);
+        Self::poll_wheel(&mut self.wheel_m, &mut ready, true);
+        Self::poll_wheel(&mut self.wheel_h, &mut ready, true);
+        Self::poll_wheel(&mut self.wheel_d, &mut ready, true);
+        Self::poll_wheel(&mut self.wheel_large, &mut ready, false);
         ready
     }
 
     pub fn cancel(&mut self, id: TimerId) -> bool {
-        let id = id.0;
-
-        if let Some(pos) = self.wheel_ms.iter().position(|t| t.id.0 == id) {
-            self.wheel_ms.remove(pos);
-            return true;
+        let raw = id.0;
+        for wheel in [
+            &mut self.wheel_ms,
+            &mut self.wheel_s,
+            &mut self.wheel_m,
+            &mut self.wheel_h,
+            &mut self.wheel_d,
+            &mut self.wheel_large,
+        ] {
+            if let Some(pos) = wheel.iter().position(|t| t.id.0 == raw) {
+                wheel.remove(pos);
+                return true;
+            }
         }
-        if let Some(pos) = self.wheel_s.iter().position(|t| t.id.0 == id) {
-            self.wheel_s.remove(pos);
-            return true;
-        }
-        if let Some(pos) = self.wheel_m.iter().position(|t| t.id.0 == id) {
-            self.wheel_m.remove(pos);
-            return true;
-        }
-        if let Some(pos) = self.wheel_h.iter().position(|t| t.id.0 == id) {
-            self.wheel_h.remove(pos);
-            return true;
-        }
-        if let Some(pos) = self.wheel_d.iter().position(|t| t.id.0 == id) {
-            self.wheel_d.remove(pos);
-            return true;
-        }
-        if let Some(pos) = self.wheel_large.iter().position(|t| t.id.0 == id) {
-            self.wheel_large.remove(pos);
-            return true;
-        }
-
         false
     }
 
@@ -257,34 +191,20 @@ impl TimerWheel {
     }
 
     pub fn next_duration(&self) -> Option<Duration> {
-        let mut min = None;
-
-        for timer in &self.wheel_ms {
-            let remaining = timer.scheduled_at.duration_since(Instant::now());
-            min = Some(min.map_or(remaining, |m: Duration| m.min(remaining)));
-        }
-        for timer in &self.wheel_s {
-            let remaining = timer.scheduled_at.duration_since(Instant::now());
-            min = Some(min.map_or(remaining, |m: Duration| m.min(remaining)));
-        }
-        for timer in &self.wheel_m {
-            let remaining = timer.scheduled_at.duration_since(Instant::now());
-            min = Some(min.map_or(remaining, |m: Duration| m.min(remaining)));
-        }
-        for timer in &self.wheel_h {
-            let remaining = timer.scheduled_at.duration_since(Instant::now());
-            min = Some(min.map_or(remaining, |m: Duration| m.min(remaining)));
-        }
-        for timer in &self.wheel_d {
-            let remaining = timer.scheduled_at.duration_since(Instant::now());
-            min = Some(min.map_or(remaining, |m: Duration| m.min(remaining)));
-        }
-        for timer in &self.wheel_large {
-            let remaining = timer.scheduled_at.duration_since(Instant::now());
-            min = Some(min.map_or(remaining, |m: Duration| m.min(remaining)));
-        }
-
-        min
+        let wheels: [&VecDeque<Timer>; 6] = [
+            &self.wheel_ms,
+            &self.wheel_s,
+            &self.wheel_m,
+            &self.wheel_h,
+            &self.wheel_d,
+            &self.wheel_large,
+        ];
+        let now = Instant::now();
+        wheels
+            .iter()
+            .flat_map(|w| w.iter())
+            .map(|t| t.scheduled_at.duration_since(now))
+            .reduce(|a, b| a.min(b))
     }
 }
 

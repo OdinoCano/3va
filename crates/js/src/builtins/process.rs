@@ -197,7 +197,7 @@ fn cpus_info_json() -> String {
     serde_json::to_string(&cpus).unwrap_or_else(|_| "[]".to_string())
 }
 
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 fn prefix_to_ipv4_netmask(prefix: u8) -> String {
     let mask: u32 = if prefix == 0 {
         0
@@ -210,7 +210,7 @@ fn prefix_to_ipv4_netmask(prefix: u8) -> String {
     format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
 }
 
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 fn prefix_to_ipv6_netmask(prefix: u8) -> String {
     let mut groups = Vec::with_capacity(8);
     let mut remaining = prefix as i32;
@@ -229,7 +229,7 @@ fn prefix_to_ipv6_netmask(prefix: u8) -> String {
     groups.join(":")
 }
 
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 fn format_ipv6_hex(hex: &str) -> String {
     if hex.len() != 32 {
         return "::".to_string();
@@ -386,6 +386,20 @@ fn os_release() -> String {
     "1.0.0".to_string()
 }
 
+fn os_version() -> String {
+    #[cfg(target_os = "linux")]
+    if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/version") {
+        return s.trim().to_string();
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(out) = std::process::Command::new("uname").arg("-v").output() {
+        if let Ok(v) = String::from_utf8(out.stdout) {
+            return v.trim().to_string();
+        }
+    }
+    String::new()
+}
+
 fn load_avg() -> Vec<f64> {
     #[cfg(target_os = "linux")]
     if let Ok(s) = std::fs::read_to_string("/proc/loadavg") {
@@ -485,11 +499,11 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     let process = Object::new(ctx.clone())?;
 
     // Strings and numbers
-    process.set("version", "3va/2.0.0")?;
+    process.set("version", "3va/2.0.1")?;
     process.set("pid", std::process::id())?;
 
     let versions = Object::new(ctx.clone())?;
-    versions.set("3va", "2.0.0")?;
+    versions.set("3va", "2.0.1")?;
     // Expose fake Node.js-compatible version strings so packages checking
     // process.versions.node / process.versions.v8 don't crash.
     versions.set("node", "20.0.0")?;
@@ -612,6 +626,7 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     globals.set("__osMemFree", Function::new(ctx.clone(), mem_free_bytes)?)?;
     globals.set("__osUptime", Function::new(ctx.clone(), uptime_secs)?)?;
     globals.set("__osRelease", Function::new(ctx.clone(), os_release)?)?;
+    globals.set("__osVersion", Function::new(ctx.clone(), os_version)?)?;
     globals.set("__osLoadAvg", Function::new(ctx.clone(), load_avg)?)?;
 
     // cpuUsage(): returns "user,sys" microseconds — JS wrapper parses to {user, system}

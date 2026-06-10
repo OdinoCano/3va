@@ -48,7 +48,7 @@ fn collect_test_files(paths: &[PathBuf]) -> Vec<PathBuf> {
     files
 }
 
-async fn run_tests_and_report(paths: &[PathBuf]) -> anyhow::Result<(usize, usize)> {
+async fn run_tests_and_report(paths: &[PathBuf], coverage: bool) -> anyhow::Result<(usize, usize)> {
     let files = collect_test_files(paths);
     if files.is_empty() {
         println!("No test files found.");
@@ -69,6 +69,15 @@ async fn run_tests_and_report(paths: &[PathBuf]) -> anyhow::Result<(usize, usize
     println!("Tests Passed: {}", passed);
     println!("Tests Failed: {}", failed);
     println!();
+
+    if coverage {
+        let root = paths
+            .first()
+            .map(|p| p.as_path())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let report = vvva_test::generate_coverage_report(&results, root);
+        vvva_test::print_coverage_report(&report);
+    }
 
     Ok((passed, failed))
 }
@@ -1181,7 +1190,7 @@ async fn serve_html_with_hmr_csp(
     Ok(())
 }
 
-async fn run_test_watch_mode(paths: Vec<PathBuf>, _coverage: bool) -> anyhow::Result<()> {
+async fn run_test_watch_mode(paths: Vec<PathBuf>, coverage: bool) -> anyhow::Result<()> {
     use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
     use std::sync::mpsc;
 
@@ -1219,7 +1228,7 @@ async fn run_test_watch_mode(paths: Vec<PathBuf>, _coverage: bool) -> anyhow::Re
 
     println!("\nPress 'a' to run all tests, 'f' to run failed only, 'p' to filter, 't' to search by name, 'q' to quit.\n");
 
-    let _ = run_tests_and_report(&paths).await;
+    let _ = run_tests_and_report(&paths, coverage).await;
 
     let mut last_run = Instant::now();
     let debounce_duration = Duration::from_millis(500);
@@ -1249,7 +1258,7 @@ async fn run_test_watch_mode(paths: Vec<PathBuf>, _coverage: bool) -> anyhow::Re
                     println!("\n--- File change detected ---");
                     println!("Changed: {:?}", event.paths);
                     println!();
-                    let _ = run_tests_and_report(&paths).await;
+                    let _ = run_tests_and_report(&paths, coverage).await;
                     last_run = Instant::now();
                 }
             }
@@ -1380,7 +1389,7 @@ fn build_permissions(
 #[derive(Parser)]
 #[command(name = "3va")]
 #[command(author = "Satoshi")]
-#[command(version = "0.1.0")]
+#[command(version = "2.0.1")]
 #[command(about = "Modern, secure-by-default, WASM-first JS/TS runtime", long_about = None)]
 struct Cli {
     /// Activa el modo de accesibilidad para lectores Braille/Screen readers (desactiva color y animaciones)
@@ -1693,6 +1702,10 @@ enum Commands {
         /// Output format: terminal | json | junit | tap | dot
         #[arg(long = "reporter", default_value = "terminal")]
         reporter: String,
+
+        /// Write the reporter output to a file instead of stdout
+        #[arg(long = "reporter-file")]
+        reporter_file: Option<PathBuf>,
     },
     /// Audit dependencies for known vulnerabilities (OSV) and malware patterns
     Audit {
@@ -2432,6 +2445,7 @@ async fn main() -> anyhow::Result<()> {
             update_snapshots,
             concurrency,
             reporter,
+            reporter_file,
         } => {
             let target_paths = if paths.is_empty() {
                 vec![PathBuf::from(".")]
@@ -2459,7 +2473,17 @@ async fn main() -> anyhow::Result<()> {
                     _ => None,
                 };
                 if let Some(fmt) = fmt {
-                    println!("{}", vvva_test::TestReporter::new(fmt).report(&results));
+                    let output = vvva_test::TestReporter::new(fmt).report(&results);
+                    if let Some(path) = reporter_file {
+                        std::fs::write(path, &output).map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to write reporter output to {}: {e}",
+                                path.display()
+                            )
+                        })?;
+                    } else {
+                        println!("{output}");
+                    }
                 }
 
                 if *coverage {
