@@ -28,6 +28,7 @@ jobs:
       darwin_x64:   ${{ steps.hashes.outputs.darwin_x64 }}
       darwin_arm64: ${{ steps.hashes.outputs.darwin_arm64 }}
       windows_x64:  ${{ steps.hashes.outputs.windows_x64 }}
+      android_arm64: ${{ steps.hashes.outputs.android_arm64 }}
     steps:
       - name: Download .sha256 files via GitHub API
         env:
@@ -50,16 +51,18 @@ jobs:
           cp "hashes/3va-${VER}-aarch64-unknown-linux-gnu.tar.gz.sha256"   linux_arm64.sha256
           cp "hashes/3va-${VER}-x86_64-apple-darwin.tar.gz.sha256"         darwin_x64.sha256
           cp "hashes/3va-${VER}-aarch64-apple-darwin.tar.gz.sha256"        darwin_arm64.sha256
-          cp "hashes/3va-${VER}-x86_64-pc-windows-msvc.zip.sha256"         windows_x64.sha256
+          cp "hashes/3va-${VER}-x86_64-pc-windows-msvc.zip.sha256"              windows_x64.sha256
+          cp "hashes/3va-${VER}-aarch64-linux-android.tar.gz.sha256"         android_arm64.sha256
 
       - name: Parse hashes
         id: hashes
         run: |
-          echo "linux_x64=$(awk '{print $1}' linux_x64.sha256)"       >> "$GITHUB_OUTPUT"
-          echo "linux_arm64=$(awk '{print $1}' linux_arm64.sha256)"   >> "$GITHUB_OUTPUT"
-          echo "darwin_x64=$(awk '{print $1}' darwin_x64.sha256)"     >> "$GITHUB_OUTPUT"
-          echo "darwin_arm64=$(awk '{print $1}' darwin_arm64.sha256)" >> "$GITHUB_OUTPUT"
-          echo "windows_x64=$(awk '{print $1}' windows_x64.sha256)"   >> "$GITHUB_OUTPUT"
+          echo "linux_x64=$(awk '{print $1}' linux_x64.sha256)"         >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(awk '{print $1}' linux_arm64.sha256)"     >> "$GITHUB_OUTPUT"
+          echo "darwin_x64=$(awk '{print $1}' darwin_x64.sha256)"       >> "$GITHUB_OUTPUT"
+          echo "darwin_arm64=$(awk '{print $1}' darwin_arm64.sha256)"   >> "$GITHUB_OUTPUT"
+          echo "windows_x64=$(awk '{print $1}' windows_x64.sha256)"     >> "$GITHUB_OUTPUT"
+          echo "android_arm64=$(awk '{print $1}' android_arm64.sha256)" >> "$GITHUB_OUTPUT"
 
   # ── Publish to npm ────────────────────────────────────────────────────────────
   publish-npm:
