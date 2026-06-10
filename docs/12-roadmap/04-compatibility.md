@@ -58,7 +58,7 @@ crypto (some algorithms)
 
 3va runs Expo packages in a web/server context without a bundler or device.
 
-### Supported packages (45/45 tests — `test-projects/expo-test/`)
+### Supported packages
 
 | Package | Version | Status | Notes |
 |---------|---------|--------|-------|
@@ -92,8 +92,9 @@ crypto (some algorithms)
 3va test-compat express
 3va test-compat lodash
 
-# Expo compatibility test
-3va test test-projects/expo-test/expo.test.js
+# Expo / ESM→CJS integration tests
+cargo test -p vvva_js --test pipeline
+cargo test -p vvva_js --test framework_compat
 ```
 
 ---

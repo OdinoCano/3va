@@ -113,4 +113,4 @@ test("user structure", () => {
 
 ---
 
-*Matchers implemented in `crates/test/src/matchers.rs`.*
+*Matchers implemented as inline JavaScript in `crates/test/src/runner.rs` (`TEST_FRAMEWORK_JS`).*

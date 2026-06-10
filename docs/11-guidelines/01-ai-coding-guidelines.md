@@ -106,7 +106,7 @@ The following methods exist in the require cache but **throw at call time**. The
 | `crypto.subtle.wrapKey()` | `wrapKey not implemented` (`NotSupportedError`) | use `exportKey` + encrypt manually |
 | `crypto.subtle.unwrapKey()` | `unwrapKey not implemented` (`NotSupportedError`) | use `importKey` + decrypt manually |
 | `crypto.createHash().copy()` | `Hash.copy() is not supported` | create a new `createHash()` instance |
-| `fs.watch()` | returns stub EventEmitter that never fires | no alternative in sandbox |
+| `fs.watch()` | **implemented** — inotify-backed on Linux; `crates/js/tests/fs_watch.rs` covers the full event cycle | — |
 
 ### 2.3 APIs That Are Partial Stubs — Document Limitations
 
@@ -114,7 +114,7 @@ The following methods exist in the require cache but **throw at call time**. The
 |------|----------------|
 | `http2.connect()` | Client API only; backed by `__fetchAsync`, no real HTTP/2 framing |
 | `process.chdir()` | No-op stub; sandboxed runtime does not change working directory |
-| `fs.watch()` | Returns a stub EventEmitter; no inotify in sandbox |
+| `fs.watch()` | inotify-backed; emits `change`/`rename` events; requires `FileRead` permission on the watched path |
 | `AbortController.abort()` | Races against `__fetchAsync` via `Promise.race`; cannot cancel in-flight I/O at socket level |
 | `tty.isatty(fd)` | Calls real `__isatty` (Rust `std::io::IsTerminal`); `process.stdout.isTTY` / `process.stdin.isTTY` reflect actual TTY state |
 | `v8.getHeapStatistics()` | Returns a zeroed object; `getHeapSpaceStatistics()` returns `[]` |
@@ -218,6 +218,9 @@ Do not invent new `Capability` variants without adding them to `crates/permissio
 | `crates/bundler` | `vvva_bundler` |
 | `crates/test` | `vvva_test` |
 | `crates/crypto` | `vvva_crypto` |
+| `crates/firewall` | `vvva_firewall` |
+| `crates/wasm` | `vvva_wasm` |
+| `crates/config` | `vvva_config` |
 
 ### 4.2 Where to Add New Built-in Modules
 
