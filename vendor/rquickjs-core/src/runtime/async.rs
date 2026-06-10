@@ -429,14 +429,16 @@ mod test {
 
         let number = Arc::new(AtomicUsize::new(0));
         let number_clone = number.clone();
+        let number_check = number.clone();
 
         async_with!(&ctx => |ctx|{
             ctx.spawn(async move {
                 tokio::task::yield_now().await;
                 number_clone.store(1,Ordering::SeqCst);
             });
+            // Must check while holding the lock: the drive task cannot run yet.
+            assert_eq!(number_check.load(Ordering::SeqCst),0);
         }).await;
-        assert_eq!(number.load(Ordering::SeqCst),0);
         // Give drive time to finish the task.
         tokio::time::sleep(Duration::from_secs_f64(0.01)).await;
         assert_eq!(number.load(Ordering::SeqCst),1);
