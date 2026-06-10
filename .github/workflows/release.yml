@@ -31,9 +31,9 @@ jobs:
           # than macos-13 on public repos.  aarch64 is native; x86_64 is a
           # standard Rust cross-compile using the macOS SDK already on the runner.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-13
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-13
           - target: x86_64-pc-windows-msvc
             os: windows-latest
 
