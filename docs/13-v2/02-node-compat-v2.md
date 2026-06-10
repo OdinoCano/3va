@@ -149,4 +149,4 @@ v1.0.0 has a partial readline. v2.0.0 completes:
 
 ## 2.4 Compatibility Test Suite
 
-v2.0.0 will add a dedicated compatibility suite under `tests/node-compat/` that runs known-good Node.js snippets and asserts identical output. Each new module ships with at least 10 compatibility tests.
+Compatibility tests live in `crates/js/tests/` — see `pipeline.rs`, `framework_compat.rs`, `compat_sprint1.rs`, and `compat_fixes.rs`. Each new module ships with at least 10 compatibility tests.

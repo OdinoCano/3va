@@ -50,6 +50,12 @@
   </keywords>
 
   <releases>
+    <release version="2.0.0" date="2026-06-10">
+      <description>
+        <p>v2.0.0: performance profiling (--prof, .cpuprofile), Node.js compat improvements, worker_threads, cluster emulation, and REPL plugins.</p>
+      </description>
+      <url>https://github.com/OdinoCano/3va/releases/tag/v2.0.0</url>
+    </release>
     <release version="1.0.0" date="2026-06-01">
       <description>
         <p>Initial public release of 3va.</p>

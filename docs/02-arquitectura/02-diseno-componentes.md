@@ -122,8 +122,8 @@ Embeds QuickJS via `rquickjs`. Provides JavaScript/TypeScript execution with bui
 | `zlib` | `builtins/zlib.rs` (real compression via `flate2`) |
 | `child_process` | `builtins/child_process.rs` (real exec via `tokio`, requires `--allow-child-process`) |
 
-### 2.4.3 Node.js Compatibility Stubs
-`http`, `https`, `net`, `tls`, `http2` are registered as JS stubs so packages that import them don't throw at load time. `http`/`https` use `__fetchAsync` for client requests; `net`, `tls`, and `http2` return no-op emitters (server-side TCP is not yet implemented).
+### 2.4.3 Node.js Compatibility Layer
+`http`, `https`, `net`, `tls`, `http2` are all registered so packages that import them don't throw at load time. `http`/`https` use `__fetchAsync` for client requests. `net` and `tls` are Rust-backed: `Socket` wraps `TcpStream` (plain) or `TlsStream` (`native-tls`); `net.createServer()` binds a real TCP port (`builtins/tcp.rs`, requires `--allow-net`). `http2` client is backed by `__fetchAsync`; no real HTTP/2 framing server-side.
 
 ---
 

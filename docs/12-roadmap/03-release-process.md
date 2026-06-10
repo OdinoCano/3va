@@ -62,7 +62,7 @@ git tag v1.0.0
 ## 3.6 Changelog
 
 ```markdown
-# Changelog v1.0.0 (2027-03-15)
+# Changelog v1.0.0 (2026-06-04)
 
 ## Breaking
 - Removed deprecated `3va.crypto` API

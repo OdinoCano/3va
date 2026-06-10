@@ -30,4 +30,4 @@ v2.0.0 is a **compatible** major release with respect to v1.0.0. All scripts and
 
 ---
 
-*Document identifier: 3VA-SPEC-2027-002 · Classification: Public*
+*Document identifier: 3VA-SPEC-2026-002 · Classification: Public*
