@@ -73,12 +73,15 @@ jobs:
     needs: collect-hashes
     runs-on: ubuntu-latest
     environment: npm
+    permissions:
+      id-token: write  # required for OIDC trusted publishing
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Patch SHA256 hashes and version into install.js
         env:
@@ -98,11 +101,9 @@ jobs:
           sed -i "s/SHA256_WINDOWS_X64/${WINDOWS_X64}/"   install.js
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VER_BARE}\"/" package.json
 
-      - name: Publish
+      - name: Publish (trusted publishing — no token needed)
         working-directory: dist/npm
-        run: npm publish --access public
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
 
   # ── Update Formula/ and bucket/ in this repo ─────────────────────────────────
   update-homebrew-and-scoop:
