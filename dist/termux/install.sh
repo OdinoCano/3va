@@ -1,17 +1,12 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # 3va installer for Termux (Android aarch64)
-# Usage: curl -fsSL https://raw.githubusercontent.com/OdinoCano/3va/main/dist/termux/install.sh | bash
+# Usage: bash <(curl -fsSL https://github.com/OdinoCano/3va/releases/latest/download/termux-install.sh)
 
 set -euo pipefail
 
-VERSION="2.0.0"
 REPO="OdinoCano/3va"
-ARCHIVE="3va-v${VERSION}-aarch64-linux-android.tar.gz"
-URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ARCHIVE}"
-SHA256_URL="${URL}.sha256"
 BIN_DIR="${PREFIX}/bin"
 
-# Termux uses /data/data/com.termux/files/usr as prefix — $PREFIX is set by Termux.
 if [ -z "${PREFIX:-}" ]; then
   echo "ERROR: \$PREFIX is not set. Run this script inside Termux." >&2
   exit 1
@@ -23,6 +18,18 @@ if [ "$arch" != "aarch64" ]; then
   echo "       For other architectures, build from source: cargo install vvva_cli" >&2
   exit 1
 fi
+
+echo "[3va] Fetching latest release version..."
+VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": "v\(.*\)".*/\1/')
+if [ -z "$VERSION" ]; then
+  echo "ERROR: Could not determine latest version from GitHub API." >&2
+  exit 1
+fi
+echo "[3va] Latest version: v${VERSION}"
+
+ARCHIVE="3va-v${VERSION}-aarch64-linux-android.tar.gz"
+URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ARCHIVE}"
+SHA256_URL="${URL}.sha256"
 
 echo "[3va] Downloading v${VERSION} for aarch64-linux-android..."
 TMP=$(mktemp -d)
