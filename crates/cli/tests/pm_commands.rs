@@ -16,6 +16,22 @@ fn write_index(dir: &Path) {
     fs::write(dir.join("index.js"), "module.exports = {};").unwrap();
 }
 
+/// Create a directory symlink cross-platform. On Windows symlink creation
+/// requires Developer Mode or admin rights; returns `false` so callers can
+/// skip the test gracefully instead of failing.
+fn make_symlink(src: &Path, dst: &Path) -> bool {
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(src, dst).is_ok();
+    #[cfg(windows)]
+    return std::os::windows::fs::symlink_dir(src, dst).is_ok();
+}
+
+/// Remove a symlink regardless of platform: on Windows a directory symlink
+/// must be removed with `remove_dir`, not `remove_file`.
+fn remove_symlink(path: &Path) {
+    let _ = fs::remove_file(path).or_else(|_| fs::remove_dir(path));
+}
+
 // ── pm_pack ───────────────────────────────────────────────────────────────────
 
 #[test]
@@ -148,8 +164,10 @@ fn link_creates_global_symlink() {
 
     // Simulate pm_link(None) behavior directly
     let link_path = link_base.join("my-lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&pkg_dir, &link_path).unwrap();
+    if !make_symlink(&pkg_dir, &link_path) {
+        eprintln!("skipping: symlink creation unavailable (Windows without Developer Mode)");
+        return;
+    }
 
     assert!(link_path.is_symlink());
     assert!(link_path.join("package.json").exists());
@@ -165,16 +183,17 @@ fn link_into_node_modules_creates_symlink() {
 
     // Register globally
     fs::create_dir_all(&global_dir).unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&lib_dir, global_dir.join("my-lib")).unwrap();
+    if !make_symlink(&lib_dir, &global_dir.join("my-lib")) {
+        eprintln!("skipping: symlink creation unavailable (Windows without Developer Mode)");
+        return;
+    }
 
     // Link into consumer node_modules
     let consumer = tmp.path().join("my-app");
     let nm = consumer.join("node_modules");
     fs::create_dir_all(&nm).unwrap();
     let target = nm.join("my-lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(global_dir.join("my-lib"), &target).unwrap();
+    assert!(make_symlink(&global_dir.join("my-lib"), &target));
 
     assert!(target.is_symlink());
     assert!(target.join("package.json").exists());
@@ -189,11 +208,13 @@ fn unlink_removes_global_symlink() {
     fs::create_dir_all(&global_dir).unwrap();
 
     let link_path = global_dir.join("my-lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&lib_dir, &link_path).unwrap();
+    if !make_symlink(&lib_dir, &link_path) {
+        eprintln!("skipping: symlink creation unavailable (Windows without Developer Mode)");
+        return;
+    }
     assert!(link_path.is_symlink());
 
-    fs::remove_file(&link_path).unwrap();
+    remove_symlink(&link_path);
     assert!(!link_path.exists());
 }
 

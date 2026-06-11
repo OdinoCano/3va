@@ -2,7 +2,6 @@
 
 pub mod coverage;
 pub mod framework;
-pub mod matchers;
 pub mod runner;
 pub mod security;
 
@@ -10,7 +9,6 @@ pub use coverage::{generate_coverage_report, print_coverage_report, CoverageRepo
 pub use framework::{
     describe, expect, it, run_all_tests, test, Expect, TestResult, TestState, TestStatus,
 };
-pub use matchers::{MatcherResult, Matchers};
 pub use runner::{ReportFormat, TestConfig, TestReporter, TestRunner};
 
 use std::path::PathBuf;

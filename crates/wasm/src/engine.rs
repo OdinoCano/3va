@@ -48,8 +48,26 @@ impl WasmEngine {
         if self.permissions.check(&Capability::EnvAccess) {
             builder.inherit_env();
         } else {
+            // On Windows env var names are case-insensitive (the OS stores
+            // `Path` while scripts grant `PATH`), so match granted names
+            // case-insensitively there.
+            #[cfg(windows)]
+            let granted_upper: Vec<String> = self
+                .permissions
+                .list_granted()
+                .iter()
+                .filter_map(|c| match c {
+                    Capability::EnvVar(n) => Some(n.to_uppercase()),
+                    _ => None,
+                })
+                .collect();
             for (k, v) in std::env::vars() {
-                if self.permissions.check(&Capability::EnvVar(k.clone())) {
+                #[cfg(windows)]
+                let allowed = self.permissions.check(&Capability::EnvVar(k.clone()))
+                    || granted_upper.contains(&k.to_uppercase());
+                #[cfg(not(windows))]
+                let allowed = self.permissions.check(&Capability::EnvVar(k.clone()));
+                if allowed {
                     builder.env(&k, &v);
                 }
             }

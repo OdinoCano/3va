@@ -545,16 +545,16 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   - SPA fallback: unknown routes serve `public/index.html`.
   - Automatic rebuild with 300 ms debounce when detecting changes in `.js`, `.ts`, `.jsx`, `.tsx` files.
   - Built-in development page when `public/index.html` does not exist.
-- `3va audit --secrets` — Phase 3 audit: detection of hardcoded secrets in dependencies (AWS keys, GitHub tokens, PEM private keys, JWT tokens, Stripe keys and other common patterns) via `SecretsScanner`.
+- `3va audit --secrets` — Phase 3 audit: detection of hardcoded secrets in the project's source files (AWS keys, GitHub tokens, PEM private keys, JWT tokens, Stripe keys and other common patterns) via `SecretsScanner`.
 - `3va audit --json` — machine-readable output with `{ passed, phases: { malware, osv, secrets } }` structure; completely suppresses human-readable output.
 - `audit_packages_silent()` in `vvva_pm` — audit variant without console output, used internally in `--json` mode.
 - `3va sandbox` — full interactive REPL:
   - Multi-line support with balanced bracket detection (parentheses, brackets, braces).
-  - Session commands: `.help`, `.exit`, `.clear`, `.allow-read <path>`, `.allow-net <host>`, `.permissions`.
+  - Session commands: `.help`, `.clear`, `.allow-read=PATH`, `.allow-write=PATH`, `.allow-net=HOST`, `.allow-env`, `.permissions`; `exit`/`quit` to leave.
   - Node.js-style output formatting: objects as JSON, explicit `undefined` for statements.
   - TTY detection: in pipes and CI environments (stdin non-TTY), exits immediately without blocking.
 - `3va test --watch` — automatically re-runs the suite when detecting file changes.
-- `3va test --coverage` — line and branch coverage report upon test completion.
+- `3va test --coverage` — statement/line coverage report upon test completion.
 - `3va test --update-snapshots` / `-u` — overwrites existing snapshots with current values.
 - `3va bundle --split` — code splitting; `--minify` — minification; `--source-map` — source map generation.
 - Full ESM: `EsmResolver` and `EsmLoader` in `vvva_js::esm`; `import`/`export` support with relative paths, re-exports and TypeScript modules.

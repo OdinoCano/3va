@@ -183,7 +183,7 @@ Runs a 3-phase security audit (malware + CVE + secrets) on installed packages.
 **Options:**
 | Option | Description |
 |--------|-------------|
-| --deny | Exit with error code 9 if vulnerabilities are found |
+| --deny | Exit with a non-zero error code if CRITICAL/HIGH vulnerabilities are found |
 | --json | JSON-formatted output |
 | --secrets | Include secrets scan in output |
 | --update-cache | Force refresh of the OSV advisory cache |
@@ -205,11 +205,13 @@ Opens an interactive JavaScript REPL with isolated permissions.
 | Command | Description |
 |---------|-------------|
 | .help | Show available commands |
-| .exit / .quit | Exit the sandbox |
-| .clear | Clear the current buffer |
-| .allow-read | Grant read permission |
-| .allow-net | Grant network permission |
 | .permissions | Show current permissions |
+| .allow-read=PATH | Grant read permission |
+| .allow-write=PATH | Grant write permission |
+| .allow-net=HOST | Grant network permission |
+| .allow-env | Grant environment variable access |
+| .clear | Reset the JS context |
+| exit / quit / ^D | Exit the sandbox (no leading dot) |
 
 ### 1.3.14 Command: doctor
 Checks the environment and reports missing dependencies or misconfigurations.

@@ -87,27 +87,27 @@ winget install OdinoCano.3va
 
 ### Flatpak (Linux)
 
+Not yet on Flathub. Build locally from the manifest in this repo:
+
 ```bash
-flatpak install flathub com.github.OdinoCano.3va
+flatpak-builder --install --user build-dir dist/flatpak/com.github.OdinoCano.3va.yml
 ```
 
 ### Snap (Linux)
 
+Not yet in the Snap Store. Build locally from the manifest in this repo:
+
 ```bash
-snap install 3va
+snapcraft --use-lxd   # uses dist/snap/snapcraft.yaml
+sudo snap install ./3va_*.snap --dangerous
 ```
 
 ### Nix
 
-```nix
-# flake.nix — add to inputs and overlay
-pkgs.three-va
-```
-
-Or one-shot:
+The flake lives under `dist/nix/`:
 
 ```bash
-nix run github:OdinoCano/3va
+nix run "github:OdinoCano/3va?dir=dist/nix"
 ```
 
 ### Termux (Android)
@@ -182,7 +182,7 @@ Every capability is blocked by default. Permissions are granted per-invocation v
   --allow-ffi=./build/addon.node    # load native addon (NAPI)
 ```
 
-Omitting a flag means the capability is hard-blocked — not prompted at runtime, not configurable inside the script.
+Omitting a flag means the capability is blocked and cannot be enabled from inside the script. In an attended terminal (stderr is a TTY), the runtime asks interactively at the point of first access; in CI, pipes, or redirected output, ungranted capabilities are denied silently.
 
 Permission scopes can be widened to cover all values:
 
@@ -190,11 +190,18 @@ Permission scopes can be widened to cover all values:
 3va run app.ts --allow-read --allow-net  # unrestricted read + network
 ```
 
-Interactive permission prompts are enabled by default in `run`. The runtime asks at the point of first access if a needed permission is not granted.
+### Permission analysis commands
 
-### Package-level permission declarations (v1.5 roadmap)
+Two commands help derive the minimum permission set:
 
-Currently, permissions are CLI flags. The planned v1.5 model moves them into `package.json` under a `"3va"` key — a pattern already established by `"jest"`, `"eslint"`, and `"prettier"`. Node.js, Bun, pnpm, and Yarn ignore unknown keys, so there is no conflict.
+```bash
+3va permissions suggest          # static analysis of source files → suggested flags
+3va permissions learn app.ts     # run with all permissions, report which were used
+```
+
+### Package-level permission declarations (v2.1 roadmap)
+
+Currently, permissions are CLI flags. The planned v2.1 model moves them into `package.json` under a `"3va"` key — a pattern already established by `"jest"`, `"eslint"`, and `"prettier"`. Node.js, Bun, pnpm, and Yarn ignore unknown keys, so there is no conflict.
 
 The target schema:
 
@@ -222,18 +229,18 @@ The target schema:
 }
 ```
 
-The `3va permissions suggest` command (v1.5) will statically analyze the project and generate this section. `3va permissions learn` will run the app under syscall interception and produce the minimum set of permissions actually needed.
+`3va permissions suggest` (available today) will be extended to generate this section directly, and `3va permissions learn` to persist the observed permission set into it.
 
 ---
 
 ## Package Manager
 
 ```bash
-3va install axios                          # from npm
-3va install react@18                       # specific version
-3va install @std/path --allow-net=jsr.io   # from JSR
-3va reinstall                              # reinstall from lockfile
-3va update                                 # update to latest compatible versions
+3va install axios --allow-net=registry.npmjs.org      # from npm
+3va install react@18 --allow-net=registry.npmjs.org   # specific version
+3va install @std/path --allow-net=jsr.io              # from JSR
+3va reinstall axios --allow-net=registry.npmjs.org    # force-reinstall one package
+3va update --allow-net=registry.npmjs.org             # update to latest versions
 ```
 
 **Post-install scripts are never executed.** There are no exceptions. This is enforced at the package manager level, not as a flag.
@@ -262,7 +269,7 @@ Audit runs in three phases:
 
 1. **Malware scan** — static analysis of `node_modules` for known malicious patterns
 2. **OSV CVE scan** — queries `api.osv.dev` for known vulnerabilities; results cached 24 hours
-3. **Secrets detection** (opt-in via `--secrets`) — 20 patterns covering AWS keys, GitHub tokens, Stripe keys, private certificates, JWT secrets, database connection strings, and more
+3. **Secrets detection** (opt-in via `--secrets`) — 21 patterns covering AWS keys, GitHub tokens, Stripe keys, private certificates, JWT secrets, database connection strings, and more, scanned over the current project's source files
 
 ---
 
@@ -281,7 +288,7 @@ Built into the runtime. No pm2, no separate daemon process.
 3va delete api                                      # stop + remove logs
 ```
 
-Auto-restart on crash is enabled by default. The process manager state is local to the machine and survives reboots.
+Process metadata and logs live in `~/.3va/processes/`. If a managed process dies unexpectedly, `3va status` reports it as `error`; restart it with `3va restart <name>`. (Automatic restart on crash is on the roadmap.)
 
 ---
 
@@ -332,7 +339,7 @@ Supports `describe`, `test`, `expect`, all standard matchers, `toMatchSnapshot`,
 3va bundle src/index.ts --split   # code splitting
 ```
 
-Tree shaking, code splitting, minification, source maps, and watch mode.
+Tree shaking, code splitting, minification, and source maps. For automatic rebuilds on change, use `3va dev` (the dev server watches and rebuilds with a 300 ms debounce).
 
 ### Dev server with HMR
 
@@ -368,7 +375,7 @@ Opens a WebSocket CDP server. Connect via `chrome://inspect` or any DAP-compatib
 3va sandbox
 ```
 
-REPL with permission management. Inside the session: `.allow-read <path>`, `.allow-net <host>`, `.permissions` to list current grants.
+REPL with permission management. Inside the session: `.allow-read=PATH`, `.allow-write=PATH`, `.allow-net=HOST`, `.allow-env`, and `.permissions` to list current grants. Leave with `exit`, `quit`, or `^D`.
 
 ### Other commands
 
@@ -463,7 +470,7 @@ The JavaScript engine is QuickJS embedded via `rquickjs`. QuickJS is a small, em
 | Version | Target | Focus |
 |---------|--------|-------|
 | **2.0.0** | 2026-06-01 ✅ | Full runtime + PM + toolchain + Inspector + NAPI + WASM + PQ-TLS |
-| **2.1.0** | 2026 Q3 | `permissions suggest` (static analysis), `permissions learn` (syscall interception), package.json `"3va"` key, permission profiles for common frameworks |
+| **2.1.0** | 2026 Q3 | package.json `"3va"` permissions key (generated by the existing `permissions suggest`/`learn` commands), permission profiles for common frameworks |
 | **2.2.0** | 2027 | Node.js compat v2 (full dns record resolution, repl, wasi, trace_events, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting |
 | **3.0** | TBD | Post-quantum TLS in full production mode |
 

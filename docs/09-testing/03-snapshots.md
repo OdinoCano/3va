@@ -29,10 +29,14 @@ __snapshots__/
 
 ```javascript
 // __snapshots__/test.js.snap.json
-{ "<test name 1>": "<div>\n  <h1>Hello</h1>\n</div>" }
+{ "<suite prefix><test name>": "<div>\n  <h1>Hello</h1>\n</div>" }
 ```
 
-Snapshots are stored as **JSON** files. Each test name maps to its serialized value.
+Snapshots are stored as **JSON** files. The key is the `describe` suite prefix
+plus the test name, plus the optional hint passed to `toMatchSnapshot(hint)`
+(appended as `> <hint>`). Use distinct hints when calling `toMatchSnapshot()`
+more than once inside the same test, otherwise those entries collide on the
+same key.
 
 ## 3.5 Inline Snapshots
 

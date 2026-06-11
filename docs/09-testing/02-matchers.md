@@ -14,7 +14,8 @@ expect(value).not.toBe(unexpected);
 | Matcher | Description |
 |---------|-------------|
 | `.toBe(expected)` | Strict equality (`===`) |
-| `.toEqual(expected)` | Deep equality (compares structures recursively) |
+| `.toEqual(expected)` | Deep equality (via JSON serialization) |
+| `.toStrictEqual(expected)` | Alias of `.toEqual` (same JSON-based comparison) |
 
 ```javascript
 expect(2 + 2).toBe(4);
@@ -70,12 +71,14 @@ expect(4).toBeLessThanOrEqual(4);
 |---------|-------------|
 | `.toContain(item)` | Array includes the item, or string includes the substring |
 | `.toHaveLength(n)` | `value.length === n` |
+| `.toMatch(pattern)` | String matches a `RegExp` (or a string compiled to one) |
 
 ```javascript
 expect([1, 2, 3]).toContain(2);
 expect("hello world").toContain("world");
 expect([1, 2, 3]).toHaveLength(3);
 expect("abc").toHaveLength(3);
+expect("user-42").toMatch(/user-\d+/);
 ```
 
 ## 2.7 Exceptions
@@ -83,6 +86,7 @@ expect("abc").toHaveLength(3);
 | Matcher | Description |
 |---------|-------------|
 | `.toThrow()` | Function throws any error when invoked |
+| `.toThrow(msg)` | Function throws an error whose message contains `msg` |
 
 The value passed to `expect` must be a function; the matcher invokes it internally.
 
@@ -90,6 +94,10 @@ The value passed to `expect` must be a function; the matcher invokes it internal
 expect(() => {
   throw new Error("fail");
 }).toThrow();
+
+expect(() => {
+  throw new Error("invalid input");
+}).toThrow("invalid");
 
 expect(() => {
   return 42;
@@ -100,16 +108,33 @@ expect(() => {
 
 | Matcher | Description |
 |---------|-------------|
-| `.toMatchSnapshot()` | Creates or compares against a snapshot on disk |
+| `.toMatchSnapshot(hint?)` | Creates or compares against a snapshot on disk. The snapshot key is the suite prefix + test name (+ `hint`); pass distinct hints for multiple snapshots inside the same test. |
+| `.toMatchInlineSnapshot(expected?)` | Compares against an inline string. With no argument, prints the serialized value to the console (first-run helper). |
 
 The first run saves the serialized value. Subsequent runs fail if the value differs. Use `3va test --update-snapshots` to overwrite outdated snapshots.
 
 ```javascript
 test("user structure", () => {
   const user = { id: 1, name: "Ana", active: true };
-  expect(user).toMatchSnapshot();
+  expect(user).toMatchSnapshot("user-structure");
+});
+
+test("inline", () => {
+  expect("<div>value</div>").toMatchInlineSnapshot(`<div>value</div>`);
 });
 ```
+
+## 2.9 Lifecycle Hooks
+
+Not matchers, but part of the injected framework — scoped to the `describe`
+block where they are registered (root-level hooks apply to all tests):
+
+| Hook | When it runs |
+|------|--------------|
+| `beforeAll(fn)` | Once, before the first test of the scope |
+| `afterAll(fn)` | Once, after the last test of the scope |
+| `beforeEach(fn)` | Before every test of the scope |
+| `afterEach(fn)` | After every test of the scope |
 
 ---
 

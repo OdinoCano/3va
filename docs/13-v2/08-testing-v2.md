@@ -97,7 +97,9 @@ For CI/CD pipelines (e.g. GitHub Actions, GitLab CI), `3va test` supports struct
 3va test --reporter=dot
 ```
 
-Supported reporter formats:
-* `spec` (Default): Colored hierarchical outline.
-* `dot`: Minimalist single-character progression (`.`, `F`, `S`).
+Supported reporter formats (`--reporter`, default `terminal`):
+* `terminal` (default): Colored hierarchical outline.
+* `json`: Machine-readable JSON results.
 * `junit`: Standard XML format compatible with CI test dashboards.
+* `tap`: Test Anything Protocol output.
+* `dot`: Minimalist single-character progression (`.`, `F`, `S`).

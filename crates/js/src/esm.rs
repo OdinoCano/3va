@@ -84,7 +84,10 @@ pub fn resolve_esm(base: &str, specifier: &str) -> PathBuf {
     if specifier.starts_with("./") || specifier.starts_with("../") {
         let base_dir = Path::new(base).parent().unwrap_or(Path::new("."));
         resolve_relative(&base_dir.join(specifier))
-    } else if specifier.starts_with('/') {
+    } else if specifier.starts_with('/') || Path::new(specifier).is_absolute() {
+        // `Path::is_absolute` additionally catches Windows absolute paths
+        // (`C:/...`, `C:\...`, UNC) that would otherwise be misparsed as a
+        // bare specifier.
         resolve_relative(&PathBuf::from(specifier))
     } else {
         // Walk up from the importing file's directory, then fall back to cwd.

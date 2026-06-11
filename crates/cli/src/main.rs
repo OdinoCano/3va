@@ -2466,11 +2466,18 @@ async fn main() -> anyhow::Result<()> {
                 let results = vvva_test::run_tests(target_paths.clone(), Some(cfg)).await?;
 
                 let fmt = match reporter.as_str() {
+                    "terminal" => None,
                     "junit" => Some(vvva_test::ReportFormat::Junit),
                     "tap" => Some(vvva_test::ReportFormat::Tap),
                     "dot" => Some(vvva_test::ReportFormat::Dot),
                     "json" => Some(vvva_test::ReportFormat::Json),
-                    _ => None,
+                    _ => {
+                        eprintln!(
+                            "warning: unknown reporter '{}', falling back to 'terminal'",
+                            reporter
+                        );
+                        None
+                    }
                 };
                 if let Some(fmt) = fmt {
                     let output = vvva_test::TestReporter::new(fmt).report(&results);
@@ -3317,7 +3324,8 @@ fn pm_unlink(package: Option<&str>) -> anyhow::Result<()> {
             let cwd = std::env::current_dir()?;
             let nm_path = cwd.join("node_modules").join(pkg);
             if nm_path.is_symlink() {
-                std::fs::remove_file(&nm_path)?;
+                // On Windows a directory symlink must be removed with remove_dir.
+                std::fs::remove_file(&nm_path).or_else(|_| std::fs::remove_dir(&nm_path))?;
                 println!("  ✓ Removed node_modules/{} symlink", pkg);
             } else {
                 println!("  (no symlink found for {})", pkg);

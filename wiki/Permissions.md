@@ -48,9 +48,9 @@ Use broad permissions only when necessary. Prefer scoped permissions in producti
 Inside `3va sandbox`, permissions can be granted at runtime:
 
 ```
-> .allow-read /tmp
-> .allow-net api.example.com
-> .permissions
+3va> .allow-read=/tmp
+3va> .allow-net=api.example.com
+3va> .permissions
 ```
 
 ## Package manager permissions
