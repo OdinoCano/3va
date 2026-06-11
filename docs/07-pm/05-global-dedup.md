@@ -150,7 +150,7 @@ The global store is concerned only with storage, not with execution context.
 ```bash
 3va store prune
 # Removes store entries not referenced by any project's 3va-lock.json
-# on the machine (cross-project scan — planned v1.5)
+# on the machine (cross-project scan — planned for v2.1)
 ```
 
 ---

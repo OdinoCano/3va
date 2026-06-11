@@ -108,6 +108,7 @@
 ## Changelog
 
 - [CHANGELOG.md](CHANGELOG.md) — Version history (Keep a Changelog 1.0.0)
+- [changelog-2026-05-29.md](changelog-2026-05-29.md) — Pre-release technical-debt resolution (9 issues: CDP inspector, NAPI, PQ-TLS, fuzz CI, RUSTSEC-2023-0071)
 - [changelog-2026-06-01.md](changelog-2026-06-01.md) — Security/correctness fixes from code-review (10 findings)
 - [changelog-2026-06-03.md](changelog-2026-06-03.md) — Expo/React Native package support + ESM→CJS engine fixes (45/45 tests)
 - [changelog-2026-06-05.md](changelog-2026-06-05.md) — Firewall interno HTTP (`vvva_firewall`): Slowloris/RUDY/rate-limit/blocklist + 13 nuevos tests
@@ -118,7 +119,7 @@
 **Version:** 2.0.0
 **Date:** 2026-06-05
 **Classification:** Public
-**Status:** v1.0.0 Released · v2.0.0 Draft
+**Status:** v2.0.0 Released (2026-06-01)
 
 ---
 

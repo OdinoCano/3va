@@ -6,6 +6,9 @@ node_modules/
 .3va-cache/
 *.tgz
 
+# OSV audit cache created by vvva_pm tests
+crates/pm/.cache/
+
 # npm artifacts (use 3va-lock.json instead)
 package-lock.json
 yarn.lock

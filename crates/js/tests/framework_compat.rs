@@ -271,11 +271,15 @@ globalThis.__test_boot = JSON.stringify({
     let boot: serde_json::Value =
         serde_json::from_str(&boot_raw).expect("__test_boot should be valid JSON");
 
+    // `new URL('.', import.meta.url).pathname` yields a POSIX-style path; on
+    // Windows it keeps a leading slash before the drive letter (`/C:/...`),
+    // exactly like Node.js. Compare with normalized separators.
+    let expected_dir = dir.path().to_str().unwrap().replace('\\', "/");
     assert!(
         boot["dirname"]
             .as_str()
             .unwrap_or("")
-            .contains(dir.path().to_str().unwrap()),
+            .contains(&expected_dir),
         "dirname should match temp dir, got: {boot_raw}"
     );
     assert_eq!(boot["isSSR"], serde_json::Value::Bool(true));
@@ -285,9 +289,19 @@ globalThis.__test_boot = JSON.stringify({
         boot["joined"].as_str().unwrap_or("").contains("sub"),
         "path.join should work, got: {boot_raw}"
     );
+    // On Unix `.pathname` is a real fs path and must exist. On Windows it is
+    // `/C:/...`, which is not a valid fs path — Node's existsSync also returns
+    // false there (frameworks use fileURLToPath for real fs access).
+    #[cfg(unix)]
     assert_eq!(
         boot["dirExists"],
         serde_json::Value::Bool(true),
         "existsSync should return true, got: {boot_raw}"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        boot["dirExists"],
+        serde_json::Value::Bool(false),
+        "existsSync('/C:/...') should be false (Node-compatible), got: {boot_raw}"
     );
 }

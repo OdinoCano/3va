@@ -93,7 +93,7 @@ Wildcards suppress all prompts for an entire category:
 
 ### Disabling prompts entirely (strict mode)
 
-Pass `--no-prompt` (planned v1.5) or redirect stdin from `/dev/null` to force deny-only behavior in an attended terminal:
+Pass `--no-prompt` (planned for v2.1) or redirect stdin from `/dev/null` to force deny-only behavior in an attended terminal:
 
 ```bash
 3va run app.ts < /dev/null   # interactive = false; all ungranted → silent deny
@@ -123,7 +123,7 @@ cat audit.json  # shows every denied check with timestamp
 
 Granted and denied capabilities from prompts are scoped to the current process lifetime. They are not written to `3va-lock.json`, `package.json`, or any file. Each new invocation of `3va run` starts with only the capabilities provided via CLI flags.
 
-For persistent permission declarations, see the `package.json#3va.permissions` roadmap item (planned v1.5).
+For persistent permission declarations, see the `package.json#3va.permissions` roadmap item (planned for v2.1).
 
 ---
 

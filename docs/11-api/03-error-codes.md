@@ -1,8 +1,14 @@
 # 03 - ERROR CODES
 
-## 3.1 Error Codes
+> **Status: PLANNED — not implemented.** The structured `ERR_*` error-code system
+> described below is a design goal for a future version. As of v2.0.x the runtime
+> reports errors as plain `Error` objects with descriptive messages (e.g.
+> `PermissionError::FileReadDenied` surfaces as a thrown JS error with a
+> human-readable message), without machine-readable codes or `metadata`.
 
-3va uses structured error codes to facilitate debugging.
+## 3.1 Error Codes (planned)
+
+3va will use structured error codes to facilitate debugging.
 
 ## 3.2 Runtime Errors
 
@@ -56,7 +62,7 @@
 | ERR_INVALID_SIGNATURE | Invalid signature |
 | ERR_SECRETS_DETECTED | Secrets in code |
 
-## 3.8 Error Format
+## 3.8 Error Format (planned)
 
 ```javascript
 {
@@ -70,6 +76,20 @@
 }
 ```
 
+## 3.9 Current Behavior (v2.0.x)
+
+Today, errors surface as standard JS exceptions whose messages come from the
+Rust error types:
+
+| Area | Source type | Example message |
+|------|-------------|-----------------|
+| Permissions | `PermissionError` (`crates/permissions/src/enforcement.rs`) | `File read access denied for "/etc/passwd"` |
+| Modules | loader errors (`crates/js`) | `Cannot find module 'x'` |
+| Network | `fetch`/socket errors | `Network access denied: host 'evil.com'` |
+
+Match on the message text, not on a code, until this specification is
+implemented.
+
 ---
 
-*Error codes compliant with Node.js error system.*
+*Planned error codes follow the Node.js error system conventions.*

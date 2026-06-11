@@ -19,7 +19,9 @@ pub struct ProcessInfo {
 }
 
 fn processes_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".3va").join("processes")
 }
 
@@ -56,11 +58,16 @@ fn is_pid_alive(pid: u32) -> bool {
     #[cfg(not(unix))]
     {
         std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid)])
+            .args(["/FO", "CSV", "/NH", "/FI", &format!("PID eq {}", pid)])
             .output()
             .map(|o| {
                 let out = String::from_utf8_lossy(&o.stdout);
-                out.contains(&pid.to_string())
+                // CSV format: "image","pid","session","session#","mem"
+                // Exact match on the PID column (2nd quoted field)
+                out.split('"')
+                    .nth(3)
+                    .map(|s| s.trim() == pid.to_string())
+                    .unwrap_or(false)
             })
             .unwrap_or(false)
     }
@@ -120,7 +127,10 @@ pub fn start_process(
     ensure_dir()?;
 
     let log_file = log_path(name);
-    let log = fs::File::create(&log_file)?;
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)?;
 
     // Use 3va run to execute the entry file
     let bin = std::env::current_exe()?;
@@ -211,9 +221,16 @@ pub fn stop_process(name: &str) -> anyhow::Result<()> {
 
     #[cfg(not(unix))]
     {
+        // Try graceful shutdown first (WM_CLOSE), then force
         let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
+            .args(["/PID", &pid.to_string()])
             .status();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        if is_pid_alive(pid) {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .status();
+        }
     }
 
     let mut updated = info;
@@ -225,6 +242,7 @@ pub fn stop_process(name: &str) -> anyhow::Result<()> {
 /// Restart a managed process.
 pub fn restart_process(name: &str) -> anyhow::Result<ProcessInfo> {
     let info = load_process(name)?;
+    let restarts = info.restarts + 1;
     let cwd = info.cwd.clone();
     let entry = info.entry.clone();
     let args = info.args.clone();
@@ -232,8 +250,11 @@ pub fn restart_process(name: &str) -> anyhow::Result<ProcessInfo> {
     // Stop (ignore error if already stopped)
     let _ = stop_process(name);
 
-    // Start again
-    start_process(name, &entry, &cwd, &args)
+    // Start again (resets restarts to 0), then restore count
+    let mut result = start_process(name, &entry, &cwd, &args)?;
+    result.restarts = restarts;
+    save_process(&result)?;
+    Ok(result)
 }
 
 /// Get status of a managed process.

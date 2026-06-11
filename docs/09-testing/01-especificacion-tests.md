@@ -2,7 +2,7 @@
 
 ## 1.1 Test Runner
 
-3va's test runner executes tests written in JavaScript or TypeScript, injecting a Jest-compatible global API into each test file. Each file runs in its own isolated JS engine instance with read and write permissions limited to the file's directory.
+3va's test runner executes tests written in JavaScript or TypeScript, injecting a Jest-compatible global API into each test file. Each file runs in its own isolated JS engine instance with read and write permissions granted to the file's directory and the current working directory.
 
 ## 1.2 Usage
 
@@ -16,7 +16,7 @@
 # Watch mode: re-runs on file changes
 3va test --watch
 
-# Line and branch coverage report
+# Line coverage report (branch coverage is not tracked)
 3va test --coverage
 
 # Update existing snapshots on disk
@@ -70,8 +70,9 @@ The full list of implemented matchers is documented in `02-matchers.md`.
 
 The first time a test calls `.toMatchSnapshot()`, the serialized value is saved to disk. Subsequent runs compare against that saved value.
 
-- File location: `__snapshots__/<test-name>.snap.json` alongside the test file.
-- Format: Plain JSON with the structure `{ "test name": <serialized value>, ... }`.
+- File location: `__snapshots__/<test-file-name>.snap.json` alongside the test file (e.g. `__snapshots__/math.test.js.snap.json`).
+- Format: plain JSON. The key for each entry is the **`describe` suite prefix plus the test name**, plus the optional hint passed to `toMatchSnapshot(hint)` (appended as `> <hint>`).
+- Multiple `toMatchSnapshot()` calls inside the *same test* share the same key unless each passes a distinct hint (`expect(x).toMatchSnapshot("shape")`).
 - To update outdated snapshots: `3va test --update-snapshots`.
 
 ```javascript
@@ -84,14 +85,14 @@ test("object has the expected shape", () => {
 ## 1.7 Runner Behavior
 
 - Each test file runs in its own `JsEngine` instance with isolated `PermissionState`.
-- `FileRead` and `FileWrite` permissions are granted to the file's directory (needed for reading and writing snapshots).
+- `FileRead` and `FileWrite` permissions are granted to the test file's directory **and to the current working directory** (needed for reading sources under test and writing snapshots). Tests can therefore read and write anywhere under the project root.
 - Output reports `PASS` / `FAIL`, the suite name, the assertion message, and elapsed time.
 - Syntax errors in the test file are caught and reported as a failed test.
 - `run_directory(path)` discovers and recursively executes all test files in a directory.
 
 ## 1.8 Coverage
 
-The `--coverage` flag generates a **line** and **branch** coverage report. See `03-coverage.md` for details.
+The `--coverage` flag generates a **statement/line** coverage report (branch coverage is not tracked). See `03-coverage.md` for details.
 
 ---
 

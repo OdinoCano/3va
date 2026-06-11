@@ -36,7 +36,8 @@ Run a JavaScript or TypeScript file inside a sandboxed environment.
 | `--allow-child-process` | Allow spawning child processes |
 | `--allow-ffi[=<path>]` | Allow loading native `.node` addons (NAPI) |
 | `--inspect[=<host:port>]` | Enable Chrome DevTools Protocol debugger (default: `127.0.0.1:9229`) |
-| `--interactive` | Start an interactive session after running the file |
+| `--audit-log=<path>` | Write a JSON audit log of permission checks after execution |
+| `--audit-level=<level>` | `deny` (default): log only denied checks; `all`: log every check |
 | `--prof` | Enable CPU sampling profiler |
 | `--prof-out=<path>` | Output path for the CPU profile (default: `profile.cpuprofile`) |
 | `--prof-interval=<ms>` | Sampling interval in milliseconds (default: `10`) |
@@ -106,13 +107,21 @@ Analyze a `.cpuprofile` file and print a top-N function breakdown.
 
 Post-install scripts are **never** executed.
 
-### `3va reinstall`
+### `3va reinstall <package>[@version]`
 
-Reinstall all packages listed in the lockfile.
+Force-reinstall a single package, even if already installed.
 
-### `3va update`
+```bash
+3va reinstall axios --allow-net=registry.npmjs.org
+```
 
-Update installed packages to their latest compatible versions.
+### `3va update [packages...]`
+
+Update installed packages (all, or the ones listed) to their latest versions, preserving each package's original registry.
+
+```bash
+3va update --allow-net=registry.npmjs.org,jsr.io
+```
 
 ---
 
@@ -168,8 +177,8 @@ Audit installed packages in three phases:
 
 | Flag | Description |
 |------|-------------|
-| `--secrets` | Enable secrets detection |
-| `--deny` | Exit non-zero on CRITICAL or HIGH findings |
+| `--secrets` | Enable secrets detection (scans the current project's source files) |
+| `--deny` | Exit non-zero on CRITICAL or HIGH OSV vulnerabilities (secrets fail only on Critical) |
 | `--update-cache` | Bypass the 24-hour OSV cache |
 | `--json` | Machine-readable JSON output |
 
@@ -186,11 +195,13 @@ Start an interactive JavaScript REPL with a sandboxed environment.
 | REPL command | Description |
 |--------------|-------------|
 | `.help` | Show available commands |
-| `.exit` | Exit the REPL |
-| `.clear` | Clear the input buffer |
-| `.allow-read <path>` | Grant read permission |
-| `.allow-net <host>` | Grant network permission |
 | `.permissions` | List currently granted permissions |
+| `.allow-read=PATH` | Grant read permission |
+| `.allow-write=PATH` | Grant write permission |
+| `.allow-net=HOST` | Grant network permission |
+| `.allow-env` | Grant environment variable access |
+| `.clear` | Reset the JS context |
+| `exit` / `quit` / `^D` | Exit the REPL (no leading dot) |
 
 ---
 
@@ -211,6 +222,7 @@ Automatically detects Astro, Next.js, Nuxt, SvelteKit, Remix, Gatsby, SolidStart
 | `--host <H>` | Host address to bind |
 | `--open` | Open the browser on start |
 | `--public-dir <D>` | Static files directory (default: `public`) |
+| `--no-csp` | Disable the Content-Security-Policy header |
 
 ---
 

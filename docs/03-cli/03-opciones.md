@@ -85,12 +85,14 @@ Grants permission to spawn child processes.
 3va run app.ts --allow-child-process
 ```
 
-### `--allow-ffi`
+### `--allow-ffi[=PATH,...]`
 
-Grants permission to call native functions via FFI.
+Grants permission to load native libraries (NAPI/FFI). Omit the value to allow
+all paths, or restrict to specific libraries.
 
 ```bash
 3va run app.ts --allow-ffi
+3va run app.ts --allow-ffi=./build/addon.node
 ```
 
 ## 3.3 Bundle Options
@@ -118,6 +120,9 @@ Available in `3va test`:
 | `--watch` | `-w` | Watch mode — re-runs on file changes |
 | `--coverage` | | Statement-level coverage report |
 | `--update-snapshots` | `-u` | Update snapshots instead of failing |
+| `--concurrency <N>` | | Max concurrent test files (`0` = CPU count, default) |
+| `--reporter <fmt>` | | Output format: `terminal` (default) \| `json` \| `junit` \| `tap` \| `dot` |
+| `--reporter-file <path>` | | Write reporter output to a file instead of stdout |
 
 ```bash
 3va test --watch
@@ -136,6 +141,7 @@ Available in `3va dev`:
 | `--host` | `127.0.0.1` | Address to bind to |
 | `--open` | | Open browser on start |
 | `--public-dir` | `public/` | Static files directory |
+| `--no-csp` | | Disable the Content-Security-Policy header |
 
 ```bash
 3va dev --port 8080 --host 0.0.0.0 --open

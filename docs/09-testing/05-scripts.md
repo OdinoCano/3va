@@ -44,8 +44,8 @@ scripts/integration_tests.sh
 ║                         FINAL SUMMARY                        ║
 ╚════════════════════════════════════════════════════════════════╝
 
-  Total Tests:   58
-  Passed:        58
+  Total Tests:   <N>
+  Passed:        <N>
   Failed:        0
   Success Rate: 100.0%
 
@@ -151,21 +151,25 @@ jobs:
 
 ## 5.4 Specific Security Tests
 
-The project includes security tests in `tests/security/`:
+The project includes security tests in `crates/permissions/tests/security/`
+(declared as the `security` test target in `crates/permissions/Cargo.toml`):
 
 ```bash
 # Path traversal
-cargo test --test security path_traversal
+cargo test -p vvva_permissions --test security path_traversal
 
 # Sandbox escape
-cargo test --test security sandbox_escape
+cargo test -p vvva_permissions --test security sandbox_escape
 
 # Capability bypass
-cargo test --test security capability_bypass
+cargo test -p vvva_permissions --test security capability_bypass
 
-# DOS prevention
-cargo test --test security dos
+# Resource-access enforcement boundaries
+cargo test -p vvva_permissions --test security dos_prevention
 ```
+
+> Note: `dos_prevention.rs` covers enforcement boundaries (fs/env/audit);
+> memory/CPU limits belong to the JS runtime (`crates/js`) and are tested there.
 
 ---
 

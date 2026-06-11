@@ -115,14 +115,16 @@ const str = dec.decode(bytes);       // 'hello'
 ### Runtime namespace
 
 ```javascript
-// PLANNED — does not exist yet
-3va.version          // runtime version string
-3va.versions.node    // Node.js compatibility version
-3va.gc()             // trigger garbage collection hint
+// PLANNED — does not exist yet. Note: `3va` is not a valid JS identifier
+// (it starts with a digit), so the namespace would be exposed as `vvva`
+// (matching the crate prefix) or accessed via globalThis['3va'].
+vvva.version          // runtime version string
+vvva.versions.node    // Node.js compatibility version
+vvva.gc()             // trigger garbage collection hint
 
 // PLANNED — security introspection from JS
-3va.security.checkPermission('fs', 'read', '/path')
-3va.security.getAuditLog()
+vvva.security.checkPermission('fs', 'read', '/path')
+vvva.security.getAuditLog()
 ```
 
-*There is no `3va.*` or `Deno.*` global namespace today. These are planned for a future version.*
+*There is no `vvva.*`, `3va.*`, or `Deno.*` global namespace today. These are planned for a future version.*

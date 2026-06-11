@@ -25,11 +25,11 @@
 | Lockfile with `registry` field | ✅ | Source traceability per package; semver resolution |
 | Signature verification (SHA-256/SHA-512) | ✅ | `SignatureVerifier` |
 | Malware scanner | ✅ | Static analysis of `node_modules` |
-| Secrets scanner | ✅ | `SecretsScanner`; 16 patterns (AWS, GitHub, GitLab, Stripe, Slack, SendGrid, Twilio, private keys, JWT, npm tokens, passwords, API keys, DB connection strings) |
+| Secrets scanner | ✅ | `SecretsScanner`; 21 patterns (AWS, GitHub, GitLab, Stripe, Slack, SendGrid, Twilio, private keys, JWT, npm tokens, passwords, API keys, DB connection strings) |
 | OSV audit | ✅ | 3 phases (malware + CVE + secrets); 24 h cache; `--deny`/`--json`/`--secrets`/`--update-cache` flags |
 | Bundler | ✅ | Tree shaking, code splitting (`--split`), minification (`--minify`), source maps (`--source-map`), watch mode with real notifier |
 | Test runner | ✅ | `describe`/`test`/`expect`; complete matchers; snapshots (`toMatchSnapshot` + `--update-snapshots`); `--watch`; `--coverage`; snapshot file I/O |
-| Sandbox REPL | ✅ | Multi-line; `.help`/`.exit`/`.clear`/`.allow-read`/`.allow-net`/`.permissions`; TTY detection |
+| Sandbox REPL | ✅ | Multi-line; `.help`/`.clear`/`.allow-read=`/`.allow-write=`/`.allow-net=`/`.allow-env`/`.permissions`; `exit`/`quit` to leave; TTY detection |
 | Development server (`dev`) | ✅ | `--port`/`--host`/`--open`/`--public-dir`; HMR via SSE (`/__hmr`); HMR client injection; static files; SPA fallback; rebuild with 300 ms debounce |
 | CDP Inspector (`--inspect`) | ✅ | WebSocket CDP server; `debugger;` rewrite; pause via `block_in_place` + `Condvar`; Chrome DevTools / DAP compatible |
 | NAPI module loading (`--allow-ffi`) | ✅ | ~30 NAPI v8 functions; `.node` addons via `require()`; `napi_register_module_v1` ABI |
@@ -67,7 +67,7 @@
 | Lockfile with `registry` field and semver resolution | ✅ |
 | Signature verification (SHA-256/SHA-512) | ✅ |
 | Malware scanner (static analysis) | ✅ |
-| Secrets scanner (16 patterns) | ✅ |
+| Secrets scanner (21 patterns) | ✅ |
 | OSV audit 3 phases + 24 h cache | ✅ |
 | Audit logger | ✅ |
 | Post-install scripts disabled | ✅ |

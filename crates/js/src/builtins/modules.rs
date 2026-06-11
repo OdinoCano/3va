@@ -6015,7 +6015,10 @@ pub fn resolve_path_from(path: &str, basedir: Option<&str>) -> PathBuf {
 
     let raw = if path.starts_with("./") || path.starts_with("../") || path == "." || path == ".." {
         resolve_file_path(&base_dir.join(path))
-    } else if path.starts_with('/') {
+    } else if path.starts_with('/') || Path::new(path).is_absolute() {
+        // `Path::is_absolute` additionally catches Windows absolute paths
+        // (`C:/...`, `C:\...`, UNC) that would otherwise be misparsed as a
+        // bare specifier with package name "C:".
         resolve_file_path(&PathBuf::from(path))
     } else {
         // Bare specifier: may have a subpath like 'pkg/subpath' or '@scope/pkg/sub'

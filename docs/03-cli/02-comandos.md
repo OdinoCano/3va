@@ -29,11 +29,20 @@ Executes a JavaScript or TypeScript file in a sandboxed environment. Permissions
 | `--allow-read=<paths>` | `path,...` | Grants read permission. Comma-separate multiple paths. Omit value (`--allow-read=`) to allow all paths. |
 | `--allow-write=<paths>` | `path,...` | Grants write permission. Comma-separate multiple paths. Omit value to allow all paths. |
 | `--allow-net=<hosts>` | `string,...` | Grants network access. Comma-separate multiple hosts. Supports `*.domain.com` wildcards. Omit value to allow all hosts. |
-| `--allow-env` | `bool` | Allows access to environment variables via `process.env`. |
+| `--allow-env[=VARS]` | `string,...` | Allows access to environment variables via `process.env`. Omit value to expose all; `--allow-env=NODE_ENV,PATH` scopes access to the listed variables. |
 | `--allow-child-process` | `bool` | Allows spawning child processes via `child_process`. |
+| `--allow-ffi[=paths]` | `path,...` | Allows loading native libraries (NAPI/FFI). Omit value to allow all, or restrict to specific library paths. |
+| `--inspect[=HOST:PORT]` | `string` | Activates the Chrome DevTools Protocol (CDP) inspector (default `127.0.0.1:9229`). `debugger;` statements pause execution. |
 | `--audit-log=<path>` | `path` | Writes a JSON audit log of permission checks to the specified file after execution. |
 | `--audit-level=<level>` | `"deny"\|"all"` | `deny` (default): log only denied checks. `all`: log every check. |
-| `--interactive` | `bool` | Enables the interactive permission prompt at runtime. |
+| `--prof` | `bool` | Enables the CPU sampling profiler. |
+| `--prof-out=<path>` | `path` | Output path for the profile (default: `profile.cpuprofile`). |
+| `--prof-interval=<ms>` | `integer` | Sampling interval in milliseconds (default: 10). |
+| `--flamegraph=<path>` | `path` | Also emit a flamegraph SVG (requires `--prof`). |
+
+> There is no `--interactive` flag. Interactive permission prompts activate
+> automatically when stderr is a TTY; see
+> [06-permissions/05-interactive-prompts.md](../06-permissions/05-interactive-prompts.md).
 
 **`process.argv` layout:**
 ```
@@ -238,8 +247,8 @@ Runs the project's test suite.
 **Options:**
 | Option | Abbreviation | Description |
 |--------|-------------|-------------|
-| `--watch` | | Runs tests in watch mode: they are re-executed automatically when file changes are detected. |
-| `--coverage` | | Generates line and branch coverage report upon completion. |
+| `--watch` | `-w` | Runs tests in watch mode: they are re-executed automatically when file changes are detected. |
+| `--coverage` | | Generates statement/line coverage report upon completion (branch coverage is not tracked; see [09-testing/03-coverage.md](../09-testing/03-coverage.md)). |
 | `--update-snapshots` | `-u` | Overwrites existing snapshots with current values. |
 | `--concurrency` | | Maximum concurrent test files (`0` = CPU count, default `0`) |
 | `--reporter` | | Output format: `terminal` \| `json` \| `junit` \| `tap` \| `dot` (default: `terminal`) |
@@ -339,6 +348,7 @@ Starts the development server with hot module replacement (HMR) and static file 
 | `--host <H>` | `127.0.0.1` | Network address to bind to |
 | `--open` | | Opens the browser automatically on start |
 | `--public-dir <D>` | `public/` | Static files directory to serve |
+| `--no-csp` | | Disables the Content-Security-Policy header (enabled by default since v2.0.0) |
 
 **Framework detection:**
 
@@ -404,9 +414,9 @@ Audits installed dependencies in up to **three phases**. All three phases run in
 **Options:**
 | Option | Description |
 |--------|-------------|
-| `--deny` | Exits with a non-zero error code if any finding of **CRITICAL** or **HIGH** severity is detected. Recommended as a gate in CI/CD pipelines. |
+| `--deny` | Exits with a non-zero error code if any OSV vulnerability of **CRITICAL** or **HIGH** severity is detected. Recommended as a gate in CI/CD pipelines. (Secrets behave differently: only **Critical** secrets fail the audit, with or without `--deny`; High/Medium secrets produce a warning.) |
 | `--update-cache` | Ignores the local cache (TTL 24 h) and downloads fresh data from the OSV API. |
-| `--secrets` | Enables Phase 3: detection of hardcoded secrets in dependency code. |
+| `--secrets` | Enables Phase 3: detection of hardcoded secrets in the **current project's source files**. |
 | `--json` | Outputs machine-readable JSON instead of human-readable format. |
 
 **Audit phases:**
@@ -426,7 +436,8 @@ Scans extracted code in `node_modules/` for known malicious patterns:
 - Only `{ name, version, ecosystem }` is transmitted to OSV. No source code or file paths are sent.
 
 **Phase 3 — Secret detection (requires `--secrets`)**
-Scans dependencies for hardcoded secrets using `SecretsScanner`:
+Recursively scans the current working directory's source files for hardcoded
+secrets using `SecretsScanner`:
 - AWS keys (`AKIA...`)
 - GitHub tokens (`ghp_`, `ghs_`, `gho_`)
 - Private PEM keys (`-----BEGIN ... PRIVATE KEY-----`)
@@ -450,14 +461,18 @@ Severity is determined in this order: CVSS v3 vector → CVSS v2 score → `data
   "passed": true,
   "phases": {
     "malware": {
-      "findings": []
+      "clean": true
     },
     "osv": {
-      "packages_scanned": 12,
-      "vulnerable": 0,
+      "total_packages": 12,
+      "packages_with_vulns": 0,
+      "total_vulns": 0,
+      "critical": 0,
+      "high": 0,
       "findings": []
     },
     "secrets": {
+      "scanned": true,
       "findings": []
     }
   }
@@ -502,12 +517,17 @@ Opens an isolated JavaScript REPL in a sandbox.
 
 **Signature:**
 ```
-3va sandbox
+3va sandbox [--plugin <name|path>,...]
 ```
+
+**Options:**
+| Option | Description |
+|--------|-------------|
+| `--plugin <p>` | Loads a REPL plugin. Built-ins: `inspect`, `history`; or a `.js`/`.ts` file path. Comma-separate multiple plugins. |
 
 **Behavior:**
 - In TTY: opens the interactive REPL with multi-line support. The bracket matcher tracks parentheses, brackets, and braces to determine when an expression is complete.
-- In pipe / CI (non-TTY stdin): exits immediately without blocking the process.
+- In pipe / CI (non-TTY stdin): evaluates piped input, then exits without blocking the process.
 - Objects are displayed in Node.js-style JSON format.
 - Statements that produce `undefined` display it explicitly.
 
@@ -515,27 +535,29 @@ Opens an isolated JavaScript REPL in a sandbox.
 | Command | Description |
 |---------|-------------|
 | `.help` | Shows the list of available commands |
-| `.exit` | Exits the REPL |
-| `.clear` | Clears the current session context |
-| `.allow-read <path>` | Grants read permission to the specified path in the session |
-| `.allow-net <host>` | Grants network access to the specified host in the session |
 | `.permissions` | Lists all currently granted permissions in the session |
+| `.allow-read=PATH` | Grants read permission to the specified path in the session |
+| `.allow-write=PATH` | Grants write permission to the specified path in the session |
+| `.allow-net=HOST` | Grants network access to the specified host in the session |
+| `.allow-env` | Grants environment variable access in the session |
+| `.clear` | Resets the JS context (re-creates the engine) |
+| `exit` / `quit` / `^D` | Leaves the sandbox (no leading dot) |
 
 **Session example:**
 ```
 3va sandbox
-> 1 + 1
+3va> 1 + 1
 2
-> const obj = { a: 1, b: [2, 3] }
+3va> const obj = { a: 1, b: [2, 3] }
 undefined
-> obj
+3va> obj
 { "a": 1, "b": [2, 3] }
-> .allow-net api.example.com
-Granted: net → api.example.com
-> .permissions
-Granted permissions:
-  net: api.example.com
-> .exit
+3va> .allow-net=api.example.com
+  ✓ Network granted: api.example.com
+3va> .permissions
+  ✓ Network("api.example.com")
+3va> exit
+Leaving sandbox...
 ```
 
 ---
@@ -550,6 +572,52 @@ Checks the health of the runtime and system environment.
 ```
 
 Verifies the binary installation, environment configuration, lock files, and other system requirements. Useful for diagnosing installation or configuration issues.
+
+---
+
+### 2.7.4 `prof`
+
+Analyzes a `.cpuprofile` file produced by `3va run --prof` and prints the top hot functions or generates a flamegraph SVG.
+
+**Signature:**
+```
+3va prof <FILE> [--top <N>] [--format <text|flamegraph>] [--out <PATH>]
+```
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `FILE` | `path` (required) | Path to the `.cpuprofile` JSON file |
+| `--top <N>` | `integer` | Number of hottest functions to display (default: 20) |
+| `--format <fmt>` | `"text"\|"flamegraph"` | Output format: `text` (default) prints a ranked table; `flamegraph` writes an SVG file |
+| `--out <PATH>` | `path` | Output path for the flamegraph SVG (only used with `--format=flamegraph`, default: `flamegraph.svg`) |
+
+**Collecting a profile:**
+```bash
+# Record a profile while running a script
+3va run app.ts --prof --prof-out profile.cpuprofile --prof-interval 10
+```
+
+**Examples:**
+```bash
+# Print top 20 hot functions
+3va prof profile.cpuprofile
+
+# Print top 5 hot functions
+3va prof profile.cpuprofile --top 5
+
+# Generate flamegraph SVG
+3va prof profile.cpuprofile --format flamegraph --out flame.svg
+```
+
+**Sample output (`--format=text`):**
+```
+Self%  Function
+--------------------------------------------------
+ 34%  processRequest (server.ts:42)
+ 18%  parseJSON (utils.ts:11)
+  9%  validateSchema (middleware.ts:87)
+```
 
 ---
 
@@ -619,6 +687,10 @@ Stops a managed process gracefully (SIGTERM), then forcibly (SIGKILL) if it does
 3. Waits 1.5 seconds.
 4. If the process is still alive, sends `SIGKILL`.
 5. Updates the process status to `stopped`.
+
+> On Windows there is no SIGTERM equivalent; the runtime first attempts a
+> graceful `taskkill` (WM_CLOSE), waits 1.5 seconds, and forces termination
+> with `taskkill /F` if the process is still alive.
 
 **Examples:**
 ```bash
@@ -695,6 +767,9 @@ Displays the status of one or all managed processes. Status is colour-coded in t
   worker               574988   stopped  1          /opt/myapp/worker.js
 ```
 
+The `Restarts` column counts how many times the process has been restarted via
+`3va restart` since it was first started.
+
 ---
 
 ### 2.8.5 `logs`
@@ -710,7 +785,7 @@ Displays the log file of a managed process.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `NAME` | `string` (required) | Process name to view logs for |
-| `--lines <N>` / `-n` | `integer` | Number of lines to show from the tail (default: 50) |
+| `--lines <N>` / `-l` | `integer` | Number of lines to show from the tail (default: 50) |
 
 **Behavior:**
 1. Loads the process metadata to locate the log file at `~/.3va/processes/<name>.log`.
@@ -755,52 +830,6 @@ Stops (if running) and permanently removes a process from 3va's management, incl
 ```bash
 3va delete my-api
 3va delete worker
-```
-
----
-
-### 2.8.7 `prof`
-
-Analyzes a `.cpuprofile` file produced by `3va run --prof` and prints the top hot functions or generates a flamegraph SVG.
-
-**Signature:**
-```
-3va prof <FILE> [--top <N>] [--format <text|flamegraph>] [--out <PATH>]
-```
-
-**Parameters:**
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `FILE` | `path` (required) | Path to the `.cpuprofile` JSON file |
-| `--top <N>` | `integer` | Number of hottest functions to display (default: 20) |
-| `--format <fmt>` | `"text"\|"flamegraph"` | Output format: `text` (default) prints a ranked table; `flamegraph` writes an SVG file |
-| `--out <PATH>` | `path` | Output path for the flamegraph SVG (only used with `--format=flamegraph`, default: `flamegraph.svg`) |
-
-**Collecting a profile:**
-```bash
-# Record a profile while running a script
-3va run app.ts --prof --prof-out profile.cpuprofile --prof-interval 10
-```
-
-**Examples:**
-```bash
-# Print top 20 hot functions
-3va prof profile.cpuprofile
-
-# Print top 5 hot functions
-3va prof profile.cpuprofile --top 5
-
-# Generate flamegraph SVG
-3va prof profile.cpuprofile --format flamegraph --out flame.svg
-```
-
-**Sample output (`--format=text`):**
-```
-Self%  Function
---------------------------------------------------
- 34%  processRequest (server.ts:42)
- 18%  parseJSON (utils.ts:11)
-  9%  validateSchema (middleware.ts:87)
 ```
 
 ---
@@ -857,22 +886,38 @@ Displays workspace root, package count, and global content-store statistics.
 
 ### 2.9.4 `workspace run`
 
-Runs a script (defined in `package.json` `"scripts"`) in every workspace package that defines it.
+Runs a script (defined in `package.json` `"scripts"`) in every workspace package that defines it, in topological dependency order.
 
 **Signature:**
 ```
-3va workspace run <SCRIPT>
+3va workspace run <SCRIPT> [--affected] [--base <BRANCH>] [--parallel] [--concurrency <N>]
 ```
 
 **Parameters:**
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `SCRIPT` | `string` (required) | Script name as defined in each package's `"scripts"` field |
+| `--affected` | `bool` | Only run in packages affected since the base branch |
+| `--base <BRANCH>` | `string` | Base branch for affected detection (default: `main`) |
+| `--parallel` | `bool` | Run in parallel, ignoring topological ordering |
+| `--concurrency <N>` | `integer` | Max concurrent packages (default from config, or 4) |
 
 **Examples:**
 ```bash
 3va workspace run build
-3va workspace run test
+3va workspace run test --affected --base main
+3va workspace run lint --parallel --concurrency 8
+```
+
+---
+
+### 2.9.5 `workspace graph`
+
+Visualizes the workspace dependency graph.
+
+**Signature:**
+```
+3va workspace graph
 ```
 
 ---
@@ -942,11 +987,9 @@ Can be combined with any subcommand:
 
 ---
 
----
+## 2.12 Publishing Commands
 
-## 2.11 Publishing Commands
-
-### 2.11.1 `pack`
+### 2.12.1 `pack`
 
 Creates a tarball (`.tgz`) of the current package, respecting the `files` field in `package.json` and default excludes (`node_modules`, `.git`, `*.lock`, etc.).
 
@@ -981,7 +1024,7 @@ Creates a tarball (`.tgz`) of the current package, respecting the `files` field 
 
 ---
 
-### 2.11.2 `publish`
+### 2.12.2 `publish`
 
 Publishes the current package to a registry. Packs the package into a temporary tarball and uploads it via the npm CouchDB PUT API.
 
@@ -1013,7 +1056,7 @@ Publishes the current package to a registry. Packs the package into a temporary 
 
 ---
 
-### 2.11.3 `login`
+### 2.12.3 `login`
 
 Authenticates with a registry and saves the bearer token to `~/.npmrc`.
 
@@ -1037,7 +1080,7 @@ Authenticates with a registry and saves the bearer token to `~/.npmrc`.
 
 ---
 
-### 2.11.4 `logout`
+### 2.12.4 `logout`
 
 Removes the stored auth token for a registry from `~/.npmrc`.
 
@@ -1054,7 +1097,7 @@ Removes the stored auth token for a registry from `~/.npmrc`.
 
 ---
 
-### 2.11.5 `link`
+### 2.12.5 `link`
 
 Creates a symlink between a local package and `node_modules/`, enabling development of inter-dependent packages without publishing.
 
@@ -1078,7 +1121,7 @@ cd my-app && 3va link my-lib
 
 ---
 
-### 2.11.6 `unlink`
+### 2.12.6 `unlink`
 
 Removes a symlink created by `3va link`.
 
@@ -1099,7 +1142,7 @@ Removes a symlink created by `3va link`.
 
 ---
 
-### 2.11.7 `init`
+### 2.12.7 `init`
 
 Interactively creates a `package.json` in the current directory.
 
@@ -1123,7 +1166,7 @@ Interactively creates a `package.json` in the current directory.
 
 ---
 
-### 2.11.8 `why`
+### 2.12.8 `why`
 
 Explains why a package is installed by tracing direct and transitive dependency paths.
 

@@ -166,7 +166,8 @@ const TEST_FRAMEWORK_JS: &str = r#"
       base.toMatchSnapshot = function(hint) {
         var snapFile = _snapFile();
         var suitePrefix = __suites.length > 0 ? __suites.join(' > ') + ' > ' : '';
-        var key = suitePrefix + (hint || '');
+        var testName = __currentTestName ? __currentTestName.replace(suitePrefix, '') : '';
+        var key = suitePrefix + testName + (hint ? ' > ' + hint : '');
         var data = _snapLoad(snapFile);
         if (globalThis.__updateSnapshots || !(key in data)) {
           var serialized = typeof actual === 'string' ? actual : JSON.stringify(actual, null, 2);
@@ -267,9 +268,12 @@ const TEST_FRAMEWORK_JS: &str = r#"
           // ── test body ──────────────────────────────────────────────────────
           status = 'passed';
           error  = null;
+          globalThis.__currentTestName = t.name;
           try { t.fn(); } catch(e) {
             status = 'failed';
             error  = (e && e.message) ? e.message : String(e);
+          } finally {
+            globalThis.__currentTestName = null;
           }
         }
 
