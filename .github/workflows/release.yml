@@ -136,14 +136,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout repo (for Termux install script)
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
-
-      - name: Checkout repo (for Termux install script)
-        uses: actions/checkout@v4
 
       - name: Copy Termux install script
         run: cp dist/termux/install.sh release-assets/termux-install.sh
