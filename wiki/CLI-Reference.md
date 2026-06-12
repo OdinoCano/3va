@@ -2,6 +2,17 @@
 
 ## Global flags
 
+Global flags are placed immediately after `3va`, before the subcommand. Both `3va --flag cmd` and `3va cmd --flag` are accepted.
+
+### `--verbose` / `-v`
+
+Show runtime status messages (hidden by default when running scripts).
+
+```bash
+3va run app.ts          # only script output — no runtime noise
+3va -v run app.ts       # also shows: Running …, initialized, Execution finished
+```
+
 ### `--accessible`
 
 Enable accessible / screen reader / Braille mode. Must come immediately after `3va`, before the subcommand.
@@ -18,6 +29,20 @@ Enable accessible / screen reader / Braille mode. Must come immediately after `3
 
 ---
 
+## Command aliases
+
+| Full | Short |
+|------|-------|
+| `3va run` | `3va r` |
+| `3va install` | `3va i`, `3va add` |
+| `3va test` | `3va t`, `3va spec` |
+| `3va dev` | `3va d` |
+| `3va bundle` | `3va b` |
+| `3va workspace` | `3va ws` |
+| `3va sandbox` | `3va sh`, `3va shell` |
+
+---
+
 ## `3va run <file>`
 
 Run a JavaScript or TypeScript file inside a sandboxed environment.
@@ -27,26 +52,26 @@ Run a JavaScript or TypeScript file inside a sandboxed environment.
 3va run app.ts --allow-net=api.example.com --allow-read=/data --allow-env=HOME
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--allow-read[=<path>]` | Grant read access (optionally scoped to a path) |
-| `--allow-write[=<path>]` | Grant write access (optionally scoped to a path) |
-| `--allow-net[=<host>]` | Grant network access (optionally scoped to a host) |
-| `--allow-env[=<var>]` | Grant environment variable access (optionally scoped) |
-| `--allow-child-process` | Allow spawning child processes |
-| `--allow-ffi[=<path>]` | Allow loading native `.node` addons (NAPI) |
-| `--inspect[=<host:port>]` | Enable Chrome DevTools Protocol debugger (default: `127.0.0.1:9229`) |
-| `--audit-log=<path>` | Write a JSON audit log of permission checks after execution |
-| `--audit-level=<level>` | `deny` (default): log only denied checks; `all`: log every check |
-| `--prof` | Enable CPU sampling profiler |
-| `--prof-out=<path>` | Output path for the CPU profile (default: `profile.cpuprofile`) |
-| `--prof-interval=<ms>` | Sampling interval in milliseconds (default: `10`) |
-| `--flamegraph=<path>` | Also emit an Inferno-style SVG flamegraph |
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--allow-read[=<path>]` | | Grant read access (optionally scoped to a path) |
+| `--allow-write[=<path>]` | | Grant write access (optionally scoped to a path) |
+| `--allow-net[=<host>]` | | Grant network access (optionally scoped to a host) |
+| `--allow-env[=<var>]` | | Grant environment variable access (optionally scoped) |
+| `--allow-child-process` | | Allow spawning child processes |
+| `--allow-ffi[=<path>]` | | Allow loading native `.node` addons (NAPI) |
+| `--inspect[=<host:port>]` | `-I` | Enable Chrome DevTools Protocol debugger (default: `127.0.0.1:9229`) |
+| `--audit-log=<path>` | | Write a JSON audit log of permission checks after execution |
+| `--audit-level=<level>` | | `deny` (default): log only denied checks; `all`: log every check |
+| `--prof` | | Enable CPU sampling profiler |
+| `--prof-out=<path>` | | Output path for the CPU profile (default: `profile.cpuprofile`) |
+| `--prof-interval=<ms>` | | Sampling interval in milliseconds (default: `10`) |
+| `--flamegraph=<path>` | | Also emit an Inferno-style SVG flamegraph |
 
 ### Debugging with `--inspect`
 
 ```bash
-3va run app.ts --inspect
+3va run app.ts --inspect          # or: 3va run app.ts -I
 3va run app.ts --inspect=0.0.0.0:9230
 ```
 

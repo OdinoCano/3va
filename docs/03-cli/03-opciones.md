@@ -99,8 +99,8 @@ all paths, or restrict to specific libraries.
 
 Available in `3va bundle`:
 
-| Option | Abbreviation | Default | Description |
-|--------|-------------|---------|-------------|
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
 | `--output <PATH>` | `-o` | `dist/bundle.js` | Output file |
 | `--split` | | | Enable code splitting |
 | `--minify` | | | Minify output |
@@ -165,7 +165,23 @@ Available in `3va audit`:
 3va audit --update-cache --deny
 ```
 
-## 3.7 Global Option
+## 3.7 Global Options
+
+Global flags can be placed immediately after `3va`, before the subcommand.
+
+### `--verbose` / `-v`
+
+Show runtime status messages that are suppressed by default (`Running`, `initialized`, `Execution finished`, etc.).
+
+By default `3va run` only emits user script output. Status messages are hidden so that logs from the script are not mixed with runtime noise. Pass `--verbose` to restore them.
+
+```bash
+3va run app.ts                 # only script output
+3va -v run app.ts              # also shows runtime status
+3va --verbose run app.ts       # same
+```
+
+> This flag affects all subcommands that emit `INFO`-level tracing. Warnings and errors are always shown regardless of this flag.
 
 ### `--accessible`
 
@@ -176,6 +192,24 @@ Enables accessible mode: disables colors, animations, and special characters. Co
 3va --accessible test --coverage
 3va --accessible audit --deny
 ```
+
+## 3.8 Short flag reference
+
+All flags that have a single-letter alias, grouped by command:
+
+| Short | Long | Command |
+|-------|------|---------|
+| `-v` | `--verbose` | global |
+| `-I` | `--inspect[=HOST:PORT]` | `run` |
+| `-p` | `--port` | `dev` |
+| `-n` | `--name` | `start` |
+| `-l` | `--lines` | `logs` |
+| `-o` | `--output` | `bundle`, `pack` |
+| `-w` | `--watch` | `test` |
+| `-u` | `--update-snapshots` | `test` |
+| `-y` | `--yes` | `init` |
+
+> `--allow-*` flags intentionally have no short form — their verbosity makes granted permissions explicit at a glance.
 
 ---
 

@@ -4,6 +4,27 @@
 
 This document describes all available commands in the 3va CLI.
 
+### Quick aliases
+
+All main commands have short aliases for faster use:
+
+| Full command | Alias(es) |
+|---|---|
+| `3va run` | `3va r` |
+| `3va install` | `3va i`, `3va add` |
+| `3va test` | `3va t`, `3va spec` |
+| `3va dev` | `3va d` |
+| `3va bundle` | `3va b` |
+| `3va workspace` | `3va ws` |
+| `3va sandbox` | `3va sh`, `3va shell` |
+
+```bash
+3va r app.ts --allow-net=api.example.com
+3va i axios --allow-net=registry.npmjs.org
+3va t --watch
+3va d --port 8080
+```
+
 ---
 
 ## 2.2 Execution Commands
