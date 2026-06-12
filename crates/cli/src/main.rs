@@ -1400,6 +1400,10 @@ struct Cli {
     )]
     accessible: bool,
 
+    /// Show runtime status messages (Running, initialized, finished, etc.)
+    #[arg(global = true, long = "verbose", short = 'v')]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 
@@ -1484,6 +1488,7 @@ enum PermissionsAction {
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Run a JavaScript or TypeScript file
+    #[command(alias = "r")]
     Run {
         /// The file to run
         file: PathBuf,
@@ -1523,6 +1528,7 @@ enum Commands {
         /// The `debugger;` statement will pause execution.
         #[arg(
             long = "inspect",
+            short = 'I',
             num_args = 0..=1,
             require_equals = false,
             default_missing_value = "127.0.0.1:9229",
@@ -1565,6 +1571,7 @@ enum Commands {
         script_args: Vec<String>,
     },
     /// Install dependencies from 3va registry
+    #[command(aliases = ["i", "add"])]
     Install {
         /// Packages to install (e.g. axios axios@1.7.9 react react-dom).
         /// Omit to install from manifest; if a workspace config is present the
@@ -1577,6 +1584,7 @@ enum Commands {
         allow_net: Option<Vec<String>>,
     },
     /// Manage workspace (monorepo) packages
+    #[command(alias = "ws")]
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
@@ -1605,6 +1613,7 @@ enum Commands {
         allow_net: Option<Vec<String>>,
     },
     /// Development server with hot module replacement
+    #[command(alias = "d")]
     Dev {
         /// Port to listen on
         #[arg(long, short, default_value = "3000")]
@@ -1662,6 +1671,7 @@ enum Commands {
         name: String,
     },
     /// Bundle the application
+    #[command(alias = "b")]
     Bundle {
         /// The entry file to bundle
         input: String,
@@ -1679,6 +1689,7 @@ enum Commands {
         source_map: bool,
     },
     /// Run the test suite
+    #[command(aliases = ["t", "spec"])]
     Test {
         /// Files or directories to test
         paths: Vec<PathBuf>,
@@ -1747,6 +1758,7 @@ enum Commands {
     /// Check runtime health
     Doctor,
     /// Enter an isolated interactive sandbox
+    #[command(aliases = ["sh", "shell"])]
     Sandbox {
         /// Load a REPL plugin (built-in: inspect, history; or a .js/.ts file path)
         #[arg(long = "plugin", num_args = 0.., value_delimiter = ',')]
@@ -2032,9 +2044,14 @@ async fn main() -> anyhow::Result<()> {
 
     let is_accessible = accessibility::is_accessible_mode(cli.accessible);
 
-    // Initialize tracing with ANSI colors conditionally
+    // Status messages (info!) only appear with --verbose; errors/warnings always show.
+    let log_level = if cli.verbose {
+        Level::INFO
+    } else {
+        Level::WARN
+    };
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_max_level(log_level)
         .with_ansi(!is_accessible)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");

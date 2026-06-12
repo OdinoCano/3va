@@ -151,13 +151,13 @@ sudo cp target/release/3va /usr/local/bin/
 
 ```bash
 # Run a script (no permissions granted by default)
-3va run app.ts
+3va run app.ts        # or: 3va r app.ts
 
 # Grant specific capabilities
 3va run app.ts --allow-net=api.example.com --allow-read=./data
 
 # Install packages
-3va install express --allow-net=registry.npmjs.org
+3va install express --allow-net=registry.npmjs.org   # or: 3va i express …
 
 # Audit the dependency tree
 3va audit --secrets
@@ -165,6 +165,10 @@ sudo cp target/release/3va /usr/local/bin/
 # Start as a background daemon
 3va start app.js --name my-api
 ```
+
+> **Common aliases:** `r`=run · `i`/`add`=install · `t`/`spec`=test · `d`=dev · `b`=bundle · `ws`=workspace · `sh`/`shell`=sandbox
+>
+> **Output:** `3va run` only prints your script's own output. Pass `-v` / `--verbose` to also see runtime status messages.
 
 ---
 
