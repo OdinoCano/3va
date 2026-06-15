@@ -1,12 +1,12 @@
 {
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally. MIT license.",
   "homepage": "https://github.com/OdinoCano/3va",
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/OdinoCano/3va/releases/download/v2.0.2/3va-v2.0.2-x86_64-pc-windows-msvc.zip",
-      "hash": "2dfd1f8fa1144fe6877b8bfc9c30f2eb2a3c1213227b841c81a0d5899ac09fa1",
+      "url": "https://github.com/OdinoCano/3va/releases/download/v2.0.3/3va-v2.0.3-x86_64-pc-windows-msvc.zip",
+      "hash": "a194034263fd921d40633486a3bbe8f3e2222dc0fbc414e51bc7555a1acfadbd",
       "bin": "3va.exe"
     }
   },
