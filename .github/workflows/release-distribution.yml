@@ -81,9 +81,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          # No registry-url here: that flag injects NODE_AUTH_TOKEN into .npmrc
-          # which conflicts with OIDC trusted publishing. npm defaults to the
-          # public registry and uses the OIDC exchange when --provenance is set.
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Patch SHA256 hashes and version into install.js
         env:
@@ -96,6 +94,7 @@ jobs:
           VER="${{ env.VERSION }}"
           VER_BARE="${VER#v}"
           cd dist/npm
+          sed -i "s/INSTALL_VERSION/${VER_BARE}/"         install.js
           sed -i "s/SHA256_LINUX_X64/${LINUX_X64}/"       install.js
           sed -i "s/SHA256_LINUX_ARM64/${LINUX_ARM64}/"   install.js
           sed -i "s/SHA256_DARWIN_X64/${DARWIN_X64}/"     install.js
@@ -258,10 +257,14 @@ jobs:
         run: choco pack dist\chocolatey\3va.nuspec --out dist\chocolatey\
 
       - name: Push to Chocolatey
+        shell: pwsh
         run: |
-          choco push dist\chocolatey\3va.$($env:VERSION -replace '^v','').nupkg `
-            --source https://push.chocolatey.org/ `
-            --api-key $env:CHOCO_API_KEY
+          if (-not $env:CHOCO_API_KEY) {
+            Write-Error "CHOCO_API_KEY secret is not set in the 'chocolate' environment."
+            exit 1
+          }
+          $nupkg = "dist\chocolatey\3va.$($env:VERSION -replace '^v','').nupkg"
+          choco push $nupkg --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY
 
   # ── Submit winget PR ──────────────────────────────────────────────────────────
   submit-winget:
