@@ -390,6 +390,81 @@ REPL with permission management. Inside the session: `.allow-read=PATH`, `.allow
 
 ---
 
+## Environment Variables
+
+3va respects the following environment variables. Priority: CLI flags > environment variables > config file > built-in defaults.
+
+### `TOKIO_WORKER_THREADS`
+
+Number of async I/O worker threads (default: one per logical CPU). 3va uses Tokio's multi-threaded runtime; this variable controls its worker pool size.
+
+```bash
+TOKIO_WORKER_THREADS=2 3va run app.ts
+TOKIO_WORKER_THREADS=1 3va run server.js      # single-threaded mode
+```
+
+Documented in detail at [`docs/04-core/05-threading.md`](docs/04-core/05-threading.md).
+
+### `3VA_<SECTION>_<KEY>` (config overrides)
+
+Override any field from `3va.config.ts` at invocation time. Format: `3VA_<SECTION>_<KEY>` (uppercase, underscores for camelCase).
+
+| Variable | Overrides |
+|----------|-----------|
+| `3VA_DEV_PORT` | `config.dev.port` |
+| `3VA_DEV_HOST` | `config.dev.host` |
+| `3VA_DEV_PUBLIC_DIR` | `config.dev.public_dir` |
+| `3VA_DEV_OPEN` | `config.dev.open` |
+| `3VA_DEV_CSP` | `config.dev.csp.enabled` |
+| `3VA_TEST_COVERAGE` | `config.test.coverage` |
+| `3VA_TEST_WATCH` | `config.test.watch` |
+| `3VA_TEST_UPDATE_SNAPSHOTS` | `config.test.update_snapshots` |
+| `3VA_TEST_CONCURRENCY` | `config.test.concurrency` |
+| `3VA_AUDIT_DENY` | `config.audit.deny` |
+| `3VA_AUDIT_SECRETS` | `config.audit.secrets` |
+| `3VA_AUDIT_UPDATE_CACHE` | `config.audit.update_cache` |
+| `3VA_BUNDLE_OUT_DIR` | `config.bundle.out_dir` |
+| `3VA_BUNDLE_MINIFY` | `config.bundle.minify` |
+| `3VA_BUNDLE_SOURCE_MAP` | `config.bundle.source_map` |
+| `3VA_BUNDLE_SPLIT` | `config.bundle.split` |
+| `3VA_WORKSPACE_HOISTING` | `config.workspace.hoisting` |
+| `3VA_WORKSPACE_PARALLELISM` | `config.workspace.parallelism` |
+
+```bash
+3VA_DEV_PORT=8080 3va dev
+3VA_TEST_CONCURRENCY=8 3va test
+3VA_BUNDLE_MINIFY=true 3va bundle src/index.ts
+```
+
+### `3VA_ALLOW_SCRIPTS`
+
+:warning: **Security — handle with care.** By default, 3va **never** executes npm lifecycle scripts (preinstall, install, postinstall). This is a security guarantee, not a configurable policy. Set `3VA_ALLOW_SCRIPTS=1` to re-enable them:
+
+```bash
+3VA_ALLOW_SCRIPTS=1 3va install express --allow-net=registry.npmjs.org
+```
+
+Only set this for trusted packages and registries.
+
+### `_3VA_STORE`
+
+Relocate the global content-addressable package store (default: `~/.3va/store/`). Useful in containers, CI, or when `$HOME` is ephemeral:
+
+```bash
+export _3VA_STORE=/mnt/cache/3va-store
+3va install axios --allow-net=registry.npmjs.org
+```
+
+### `NO_COLOR`
+
+Disable ANSI color output (per [no-color.org](https://no-color.org)). Equivalent to `--accessible` for output formatting; screen-reader and Braille display safe.
+
+```bash
+NO_COLOR=1 3va run app.ts
+```
+
+---
+
 ## Post-Quantum Cryptography
 
 The `vvva_crypto` crate implements ML-KEM-768 (key encapsulation) and ML-DSA-65 (signatures), both exposed to JS via `require('crypto').pq`:

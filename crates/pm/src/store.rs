@@ -25,6 +25,13 @@ impl Clone for ContentStore {
 
 impl ContentStore {
     pub fn global() -> Self {
+        if let Ok(custom) = std::env::var("_3VA_STORE")
+            && !custom.is_empty()
+        {
+            return Self {
+                root: PathBuf::from(custom),
+            };
+        }
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_else(|_| ".".to_string());

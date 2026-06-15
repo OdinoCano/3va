@@ -117,11 +117,35 @@ To prevent arbitrary code execution attacks (e.g. from malicious repositories or
 
 ## 5.5 Environment Variable Overrides
 
-Config file values can be overridden with environment variables using the pattern `3VA_<SECTION>_<KEY>` (uppercase, underscores):
+Config file values can be overridden with environment variables using the pattern `3VA_<SECTION>_<KEY>` (uppercase, underscores for camelCase):
+
+| Variable | Overrides | Type |
+|----------|-----------|------|
+| `3VA_DEV_PORT` | `config.dev.port` | `u16` |
+| `3VA_DEV_HOST` | `config.dev.host` | string |
+| `3VA_DEV_PUBLIC_DIR` | `config.dev.public_dir` | string |
+| `3VA_DEV_OPEN` | `config.dev.open` | bool |
+| `3VA_DEV_CSP` | `config.dev.csp.enabled` | bool |
+| `3VA_TEST_COVERAGE` | `config.test.coverage` | bool |
+| `3VA_TEST_WATCH` | `config.test.watch` | bool |
+| `3VA_TEST_UPDATE_SNAPSHOTS` | `config.test.update_snapshots` | bool |
+| `3VA_TEST_CONCURRENCY` | `config.test.concurrency` | `usize` |
+| `3VA_AUDIT_DENY` | `config.audit.deny` | bool |
+| `3VA_AUDIT_SECRETS` | `config.audit.secrets` | bool |
+| `3VA_AUDIT_UPDATE_CACHE` | `config.audit.update_cache` | bool |
+| `3VA_BUNDLE_OUT_DIR` | `config.bundle.out_dir` | string |
+| `3VA_BUNDLE_MINIFY` | `config.bundle.minify` | bool |
+| `3VA_BUNDLE_SOURCE_MAP` | `config.bundle.source_map` | bool |
+| `3VA_BUNDLE_SPLIT` | `config.bundle.split` | bool |
+| `3VA_WORKSPACE_HOISTING` | `config.workspace.hoisting` | bool |
+| `3VA_WORKSPACE_PARALLELISM` | `config.workspace.parallelism` | `usize` |
+
+Bool values accept: `1`, `true`, `yes`, `on` (case-insensitive).
 
 ```bash
 3VA_DEV_PORT=8080 3va dev          # overrides config.dev.port
-3VA_TEST_COVERAGE=true 3va test    # overrides config.test.coverage
+3VA_TEST_CONCURRENCY=8 3va test    # overrides config.test.concurrency
+3VA_BUNDLE_MINIFY=true 3va bundle  # overrides config.bundle.minify
 ```
 
 Priority: CLI flags > environment variables > config file > built-in defaults.
