@@ -33,12 +33,11 @@ pub type WsPool = Arc<Mutex<HashMap<u32, WsConn>>>;
 ///
 /// ## Example
 ///
-/// ```rust,ignore
+/// ```
 /// use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 /// use vvva_js::builtins::websocket::{WsPool, drain_ws_pool};
 ///
 /// let pool: WsPool = Arc::new(Mutex::new(HashMap::new()));
-/// // … populate pool with tungstenite connections …
 /// drain_ws_pool(&pool, Duration::from_secs(30));
 /// assert!(pool.lock().unwrap().is_empty());
 /// ```
