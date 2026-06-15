@@ -3,6 +3,10 @@
   "version": "PLATFORM_VERSION",
   "description": "macOS arm64 (Apple Silicon) binary for 3va — the secure-by-default JS/TS runtime",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OdinoCano/3va.git"
+  },
   "os": ["darwin"],
   "cpu": ["arm64"],
   "files": ["bin/"]
