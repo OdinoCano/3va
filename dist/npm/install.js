@@ -21,38 +21,38 @@ const crypto = require('crypto');
 const os     = require('os');
 const { execFileSync } = require('child_process');
 
-const VERSION   = '2.0.0';
+const VERSION   = 'INSTALL_VERSION';
 const REPO      = 'OdinoCano/3va';
 const BASE_URL  = `https://github.com/${REPO}/releases/download/v${VERSION}`;
 const BIN_DIR   = path.join(__dirname, 'bin');
 
 // Maps [process.platform][process.arch] → { archive, sha256 }
-// SHA256 values must be updated on each release via the release workflow.
+// Placeholders below are replaced by the release workflow before npm publish.
 const ASSETS = {
   linux: {
     x64: {
       archive: `3va-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz`,
-      sha256:  'ddfd46aee3b0b86d448c7fa5e94ae902b28acfb707089db17a53720e2521f27f',
+      sha256:  'SHA256_LINUX_X64',
     },
     arm64: {
       archive: `3va-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz`,
-      sha256:  '1d825a34203ed2d9d16bbdea7daa74644a5b29bb0df63602b00bb1801b968f6d',
+      sha256:  'SHA256_LINUX_ARM64',
     },
   },
   darwin: {
     x64: {
       archive: `3va-v${VERSION}-x86_64-apple-darwin.tar.gz`,
-      sha256:  '8241b8615cb7802e6740c035cc081400e33d17dc812846623d092ce9c25ff3ed',
+      sha256:  'SHA256_DARWIN_X64',
     },
     arm64: {
       archive: `3va-v${VERSION}-aarch64-apple-darwin.tar.gz`,
-      sha256:  'af0f3deb5187e551fab84062d53d86d8618ab126dc2f7a47215c5addc6b82241',
+      sha256:  'SHA256_DARWIN_ARM64',
     },
   },
   win32: {
     x64: {
       archive: `3va-v${VERSION}-x86_64-pc-windows-msvc.zip`,
-      sha256:  '68a61a89459547f090c39a761677fe4580bb73a55ee15c8699874bda8c2bc9b9',
+      sha256:  'SHA256_WINDOWS_X64',
     },
   },
 };
