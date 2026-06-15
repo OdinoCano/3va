@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: npm
     permissions:
-      id-token: write  # required for OIDC trusted publishing
+      id-token: write  # for provenance attestations
     steps:
       - uses: actions/checkout@v4
 
@@ -102,12 +102,12 @@ jobs:
           sed -i "s/SHA256_WINDOWS_X64/${WINDOWS_X64}/"   install.js
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VER_BARE}\"/" package.json
 
-      - name: Publish (trusted publishing — no token needed)
+      - name: Publish
         working-directory: dist/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VER_BARE="${VERSION#v}"
-          echo "--- npm version ---"
-          npm --version
           echo "--- checking if @edge_166/3va@${VER_BARE} already exists ---"
           if npm view "@edge_166/3va@${VER_BARE}" version 2>/dev/null | grep -qF "${VER_BARE}"; then
             echo "Version ${VER_BARE} already published — skipping."
