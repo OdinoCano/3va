@@ -264,7 +264,19 @@ jobs:
             exit 1
           }
           $nupkg = "dist\chocolatey\3va.$($env:VERSION -replace '^v','').nupkg"
-          choco push $nupkg --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY
+          $output = choco push $nupkg --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY 2>&1
+          Write-Host $output
+          # 403 on a new package ID = Chocolatey requires first-time submission via
+          # the web portal (https://push.chocolatey.org/) before API pushes are
+          # allowed.  Treat this as a warning, not a hard failure, so the rest of
+          # the distribution jobs still succeed.
+          if ($LASTEXITCODE -ne 0) {
+            if ($output -match '403') {
+              Write-Warning "choco push returned 403. If this is a new package ID, submit the .nupkg manually at https://push.chocolatey.org/ to get it approved. Subsequent version pushes will then work via this workflow."
+              exit 0
+            }
+            exit $LASTEXITCODE
+          }
 
   # ── Submit winget PR ──────────────────────────────────────────────────────────
   submit-winget:
