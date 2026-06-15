@@ -1,6 +1,6 @@
 [package]
 name = "vvva_wasm"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "WebAssembly / WASI execution engine for the 3va runtime (Wasmtime-backed, capability-sandboxed)"
@@ -12,7 +12,7 @@ categories = ["wasm"]
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
-vvva_permissions = { version = "2.0.1", path = "../permissions" }
+vvva_permissions = { version = "2.0.2", path = "../permissions" }
 wasmtime = { workspace = true, features = ["async"] }
 wasmtime-wasi = { workspace = true }
 wat = { workspace = true }

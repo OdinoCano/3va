@@ -627,6 +627,91 @@ pub async fn reinstall_package(name: &str, allow_net: Option<&[String]>) -> anyh
     install_with_transitive(name, true, allow_net, &root, true).await
 }
 
+pub fn remove_package(name: &str) -> anyhow::Result<()> {
+    let root = std::env::current_dir()?;
+    let pkg_name = name
+        .split('@')
+        .next()
+        .unwrap_or(name)
+        .trim_start_matches('@')
+        .to_string();
+    let pkg_name_full = if name.starts_with('@') {
+        // scoped package like @scope/pkg
+        let parts: Vec<&str> = name.trim_start_matches('@').splitn(2, '/').collect();
+        if parts.len() == 2 {
+            format!(
+                "@{}",
+                parts[0..2].join("/").split('@').next().unwrap_or(name)
+            )
+        } else {
+            pkg_name
+        }
+    } else {
+        pkg_name
+    };
+
+    // Remove from node_modules
+    let nm_path = root.join("node_modules").join(&pkg_name_full);
+    if nm_path.exists() {
+        std::fs::remove_dir_all(&nm_path).map_err(|e| {
+            anyhow::anyhow!("Failed to remove node_modules/{}: {}", pkg_name_full, e)
+        })?;
+    } else {
+        anyhow::bail!(
+            "Package '{}' is not installed in node_modules.",
+            pkg_name_full
+        );
+    }
+
+    // Remove from package.json
+    let pkg_json_path = root.join("package.json");
+    if pkg_json_path.exists() {
+        let content = std::fs::read_to_string(&pkg_json_path)?;
+        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
+            let mut modified = false;
+            for field in &[
+                "dependencies",
+                "devDependencies",
+                "peerDependencies",
+                "optionalDependencies",
+            ] {
+                if let Some(obj) = json[field].as_object_mut()
+                    && obj.remove(&pkg_name_full).is_some()
+                {
+                    modified = true;
+                }
+            }
+            if modified {
+                let updated = serde_json::to_string_pretty(&json)?;
+                std::fs::write(&pkg_json_path, updated + "\n")?;
+            }
+        }
+    }
+
+    // Remove from lockfile
+    let lock_path = root.join("3va-lock.json");
+    if lock_path.exists()
+        && let Ok(content) = std::fs::read_to_string(&lock_path)
+        && let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        if let Some(deps) = json["dependencies"].as_object_mut() {
+            let keys_to_remove: Vec<String> = deps
+                .keys()
+                .filter(|k| k.starts_with(&pkg_name_full))
+                .cloned()
+                .collect();
+            for k in keys_to_remove {
+                deps.remove(&k);
+            }
+        }
+        let updated = serde_json::to_string_pretty(&json)?;
+        let _ = std::fs::write(&lock_path, updated + "\n");
+    }
+
+    println!("  ✓ Removed package '{}'", pkg_name_full);
+    Ok(())
+}
+
 /// Install all `dependencies` listed in `project_root/package.json`.
 /// This is what `3va install` (no args, no workspace) does.
 ///

@@ -2,7 +2,7 @@ class ThreeVa < Formula
   desc "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally."
   homepage "https://github.com/OdinoCano/3va"
   license "MIT"
-  version "2.0.0"
+  version "2.0.2"
 
   on_macos do
     on_intel do

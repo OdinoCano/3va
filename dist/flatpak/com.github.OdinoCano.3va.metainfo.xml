@@ -50,7 +50,7 @@
   </keywords>
 
   <releases>
-    <release version="2.0.0" date="2026-06-10">
+    <release version="2.0.2" date="2026-06-10">
       <description>
         <p>v2.0.0: performance profiling (--prof, .cpuprofile), Node.js compat improvements, worker_threads, cluster emulation, and REPL plugins.</p>
       </description>
