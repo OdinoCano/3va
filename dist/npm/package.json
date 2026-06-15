@@ -1,6 +1,6 @@
 {
   "name": "@edge_166/3va",
-  "version": "2.0.0",
+  "version": "2.0.2",
   "description": "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally. MIT license.",
   "keywords": [
     "javascript",
