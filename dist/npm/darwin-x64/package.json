@@ -1,0 +1,9 @@
+{
+  "name": "@edge_166/3va-darwin-x64",
+  "version": "PLATFORM_VERSION",
+  "description": "macOS x64 binary for 3va — the secure-by-default JS/TS runtime",
+  "license": "MIT",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bin/"]
+}

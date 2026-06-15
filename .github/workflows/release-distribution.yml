@@ -83,38 +83,79 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Patch SHA256 hashes and version into install.js
+      - name: Download release binaries
         env:
-          LINUX_X64:    ${{ needs.collect-hashes.outputs.linux_x64 }}
-          LINUX_ARM64:  ${{ needs.collect-hashes.outputs.linux_arm64 }}
-          DARWIN_X64:   ${{ needs.collect-hashes.outputs.darwin_x64 }}
-          DARWIN_ARM64: ${{ needs.collect-hashes.outputs.darwin_arm64 }}
-          WINDOWS_X64:  ${{ needs.collect-hashes.outputs.windows_x64 }}
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ env.VERSION }}
         run: |
-          VER="${{ env.VERSION }}"
-          VER_BARE="${VER#v}"
-          cd dist/npm
-          sed -i "s/INSTALL_VERSION/${VER_BARE}/"         install.js
-          sed -i "s/SHA256_LINUX_X64/${LINUX_X64}/"       install.js
-          sed -i "s/SHA256_LINUX_ARM64/${LINUX_ARM64}/"   install.js
-          sed -i "s/SHA256_DARWIN_X64/${DARWIN_X64}/"     install.js
-          sed -i "s/SHA256_DARWIN_ARM64/${DARWIN_ARM64}/" install.js
-          sed -i "s/SHA256_WINDOWS_X64/${WINDOWS_X64}/"   install.js
-          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VER_BARE}\"/" package.json
+          gh release download "$VER" \
+            --repo OdinoCano/3va \
+            --pattern "3va-${VER}-x86_64-unknown-linux-gnu.tar.gz" \
+            --pattern "3va-${VER}-aarch64-unknown-linux-gnu.tar.gz" \
+            --pattern "3va-${VER}-x86_64-apple-darwin.tar.gz" \
+            --pattern "3va-${VER}-aarch64-apple-darwin.tar.gz" \
+            --pattern "3va-${VER}-x86_64-pc-windows-msvc.zip" \
+            --dir binaries/
 
-      - name: Publish
-        working-directory: dist/npm
+      - name: Stage platform packages
+        env:
+          VER: ${{ env.VERSION }}
+        run: |
+          VER_BARE="${VER#v}"
+
+          stage_tar() {
+            local platform="$1" archive="$2"
+            local dir="dist/npm/${platform}/bin"
+            mkdir -p "$dir"
+            tar xzf "binaries/${archive}" -C "$dir" 3va
+            chmod +x "${dir}/3va"
+            sed -i "s/PLATFORM_VERSION/${VER_BARE}/g" "dist/npm/${platform}/package.json"
+          }
+
+          stage_zip() {
+            local platform="$1" archive="$2"
+            local dir="dist/npm/${platform}/bin"
+            mkdir -p "$dir"
+            unzip "binaries/${archive}" 3va.exe -d "$dir"
+            sed -i "s/PLATFORM_VERSION/${VER_BARE}/g" "dist/npm/${platform}/package.json"
+          }
+
+          stage_tar linux-x64    "3va-${VER}-x86_64-unknown-linux-gnu.tar.gz"
+          stage_tar linux-arm64  "3va-${VER}-aarch64-unknown-linux-gnu.tar.gz"
+          stage_tar darwin-x64   "3va-${VER}-x86_64-apple-darwin.tar.gz"
+          stage_tar darwin-arm64 "3va-${VER}-aarch64-apple-darwin.tar.gz"
+          stage_zip win32-x64    "3va-${VER}-x86_64-pc-windows-msvc.zip"
+
+          sed -i "s/PLATFORM_VERSION/${VER_BARE}/g" dist/npm/hub/package.json
+
+      - name: Publish platform packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VER: ${{ env.VERSION }}
         run: |
-          VER_BARE="${VERSION#v}"
-          echo "--- checking if @edge_166/3va@${VER_BARE} already exists ---"
+          VER_BARE="${VER#v}"
+          for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+            PKG_NAME="@edge_166/3va-${platform}"
+            echo "--- checking ${PKG_NAME}@${VER_BARE} ---"
+            if npm view "${PKG_NAME}@${VER_BARE}" version 2>/dev/null | grep -qF "${VER_BARE}"; then
+              echo "${PKG_NAME}@${VER_BARE} already published — skipping."
+            else
+              npm publish "dist/npm/${platform}" --access public --provenance
+            fi
+          done
+
+      - name: Publish hub package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VER: ${{ env.VERSION }}
+        run: |
+          VER_BARE="${VER#v}"
+          echo "--- checking @edge_166/3va@${VER_BARE} ---"
           if npm view "@edge_166/3va@${VER_BARE}" version 2>/dev/null | grep -qF "${VER_BARE}"; then
-            echo "Version ${VER_BARE} already published — skipping."
-            exit 0
+            echo "@edge_166/3va@${VER_BARE} already published — skipping."
+          else
+            npm publish dist/npm/hub --access public --provenance
           fi
-          echo "--- publishing @edge_166/3va@${VER_BARE} ---"
-          npm publish --access public --provenance
 
   # ── Update Formula/ and bucket/ in this repo ─────────────────────────────────
   update-homebrew-and-scoop:

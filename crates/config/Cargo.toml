@@ -1,6 +1,6 @@
 [package]
 name = "vvva_config"
-version = "2.0.2"
+version = "2.0.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Project configuration schema and loader for the 3va JavaScript runtime (3va.config.toml / .json)"

@@ -1,6 +1,6 @@
 {
   "name": "@edge_166/3va",
-  "version": "2.0.2",
+  "version": "PLATFORM_VERSION",
   "description": "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally. MIT license.",
   "keywords": [
     "javascript",
@@ -25,23 +25,17 @@
   "bin": {
     "3va": "./bin/3va"
   },
-  "scripts": {
-    "postinstall": "node install.js"
-  },
   "files": [
-    "bin/",
-    "install.js"
+    "bin/"
   ],
   "engines": {
     "node": ">=18.0.0"
   },
-  "os": [
-    "linux",
-    "darwin",
-    "win32"
-  ],
-  "cpu": [
-    "x64",
-    "arm64"
-  ]
+  "optionalDependencies": {
+    "@edge_166/3va-linux-x64":    "PLATFORM_VERSION",
+    "@edge_166/3va-linux-arm64":  "PLATFORM_VERSION",
+    "@edge_166/3va-darwin-x64":   "PLATFORM_VERSION",
+    "@edge_166/3va-darwin-arm64": "PLATFORM_VERSION",
+    "@edge_166/3va-win32-x64":    "PLATFORM_VERSION"
+  }
 }

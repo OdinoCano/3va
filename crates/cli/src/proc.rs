@@ -188,6 +188,15 @@ pub fn start_process(
 }
 
 /// Stop a managed process by name.
+///
+/// Sends SIGTERM (Unix) or `taskkill /PID` (Windows) and then **polls** every
+/// 200 ms until either the process exits or 30 s have elapsed.  Only then is
+/// SIGKILL (Unix) / `taskkill /F` (Windows) sent.
+///
+/// The polling approach — rather than a fixed 1.5 s sleep — means a process
+/// that drains its WebSocket connections and exits in under a second will not
+/// incur unnecessary latency, while long-lived drains (e.g. 1000 clients × 500 ms
+/// jitter) are still given time to complete gracefully.
 pub fn stop_process(name: &str) -> anyhow::Result<()> {
     let info = load_process(name)?;
     let pid = info.pid;
@@ -204,14 +213,19 @@ pub fn stop_process(name: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Try graceful shutdown (SIGTERM), then force (SIGKILL)
+    // Try graceful shutdown (SIGTERM), poll for exit, then force-kill if needed.
+    // Polling instead of a fixed sleep lets a fast-exiting process skip the wait
+    // while still giving slow drainers up to 30 s before SIGKILL.
     #[cfg(unix)]
     {
         unsafe {
             libc::kill(pid as i32, libc::SIGTERM);
         }
-        // Wait a bit for graceful shutdown
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let poll = std::time::Duration::from_millis(200);
+        while is_pid_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(poll);
+        }
         if is_pid_alive(pid) {
             unsafe {
                 libc::kill(pid as i32, libc::SIGKILL);
@@ -221,11 +235,14 @@ pub fn stop_process(name: &str) -> anyhow::Result<()> {
 
     #[cfg(not(unix))]
     {
-        // Try graceful shutdown first (WM_CLOSE), then force
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string()])
             .status();
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let poll = std::time::Duration::from_millis(200);
+        while is_pid_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(poll);
+        }
         if is_pid_alive(pid) {
             let _ = std::process::Command::new("taskkill")
                 .args(["/PID", &pid.to_string(), "/F"])
@@ -337,4 +354,80 @@ pub fn delete_process(name: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_pid_alive ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_pid_alive_true_for_self() {
+        let pid = std::process::id();
+        assert!(is_pid_alive(pid), "the current process should be alive");
+    }
+
+    #[test]
+    fn is_pid_alive_false_for_zero() {
+        assert!(
+            !is_pid_alive(0),
+            "PID 0 is never a valid user-space process"
+        );
+    }
+
+    /// Spawn a no-op child, wait for it to exit (reaping the zombie), then verify
+    /// `is_pid_alive` returns `false`.  This exercises the kernel path that
+    /// `stop_process` relies on to exit its polling loop early.
+    #[cfg(unix)]
+    #[test]
+    fn is_pid_alive_false_after_child_exits() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap(); // reaps the zombie
+        assert!(!is_pid_alive(pid), "PID {pid} should be dead after wait()");
+    }
+
+    // ── polling loop timing ───────────────────────────────────────────────────
+
+    /// Verify that `stop_process` returns quickly when the target is already dead
+    /// at the time of the call (the "already dead" early-return path, not the poll
+    /// loop).  This is a regression guard against re-introducing a fixed sleep.
+    #[cfg(unix)]
+    #[test]
+    fn stop_process_returns_fast_when_pid_already_gone() {
+        use std::time::Instant;
+
+        // Build a ProcessInfo referencing a reaped PID and write it to disk.
+        ensure_dir().unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+
+        let info = ProcessInfo {
+            name: "__test_dead__".to_string(),
+            entry: std::path::PathBuf::from("/dev/null"),
+            pid,
+            cwd: std::path::PathBuf::from("/tmp"),
+            log_path: std::path::PathBuf::from("/tmp/__test_dead__.log"),
+            status: "running".to_string(),
+            started_at: 0,
+            restarts: 0,
+            args: vec![],
+        };
+        save_process(&info).unwrap();
+
+        let t = Instant::now();
+        let _ = stop_process("__test_dead__");
+        let elapsed = t.elapsed();
+
+        // Should return well under 1 s — there is no reason to wait for a dead PID.
+        assert!(
+            elapsed.as_millis() < 500,
+            "stop_process took {}ms for a dead PID — fixed sleep may have been reintroduced",
+            elapsed.as_millis()
+        );
+    }
 }
