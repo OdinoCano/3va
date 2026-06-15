@@ -1,6 +1,6 @@
 [package]
 name = "vvva_crypto"
-version = "2.0.2"
+version = "2.0.3"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Post-quantum cryptography (ML-KEM-768, ML-DSA-65), hybrid TLS, and Node.js-compatible crypto for the 3va runtime"

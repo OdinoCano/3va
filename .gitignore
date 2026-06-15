@@ -13,6 +13,13 @@ crates/pm/.cache/
 package-lock.json
 yarn.lock
 
+# Platform binaries are downloaded by CI — never committed
+dist/npm/linux-x64/bin/
+dist/npm/linux-arm64/bin/
+dist/npm/darwin-x64/bin/
+dist/npm/darwin-arm64/bin/
+dist/npm/win32-x64/bin/
+
 # Editor / tooling
 .claude/
 .kiro

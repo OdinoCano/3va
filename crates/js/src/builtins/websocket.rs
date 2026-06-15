@@ -8,6 +8,68 @@ use vvva_permissions::{Capability, PermissionState};
 
 type WsConn = TungsteniteWs<MaybeTlsStream<TcpStream>>;
 
+/// Shared pool of active outgoing WebSocket connections keyed by numeric ID.
+///
+/// The pool is created by [`inject_websocket`] and held by [`JsEngine`] so the engine
+/// can drain it gracefully on shutdown via [`drain_ws_pool`].
+pub type WsPool = Arc<Mutex<HashMap<u32, WsConn>>>;
+
+/// Gracefully close every connection in `pool` and block until all are gone or
+/// `max_wait` elapses.
+///
+/// ## Algorithm
+///
+/// For each open connection the function:
+/// 1. Sleeps a random **jitter** of 100–500 ms (bounded by remaining budget) so that
+///    remote peers restart in a staggered pattern — avoiding a thundering-herd
+///    reconnect storm against the upstream service.
+/// 2. Sends a `Close(1001 Going Away)` frame with reason `"Server shutting down"`.
+/// 3. Flushes the underlying TCP stream so the frame is delivered even if the kernel
+///    buffer has not been flushed yet.
+/// 4. Removes the entry from the pool.
+///
+/// If `max_wait` runs out before every connection is processed, the remaining entries
+/// are force-removed from the pool (the TCP stack will send a RST on drop).
+///
+/// ## Example
+///
+/// ```rust,ignore
+/// use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
+/// use vvva_js::builtins::websocket::{WsPool, drain_ws_pool};
+///
+/// let pool: WsPool = Arc::new(Mutex::new(HashMap::new()));
+/// // … populate pool with tungstenite connections …
+/// drain_ws_pool(&pool, Duration::from_secs(30));
+/// assert!(pool.lock().unwrap().is_empty());
+/// ```
+pub fn drain_ws_pool(pool: &WsPool, max_wait: std::time::Duration) {
+    use rand::Rng;
+    let deadline = std::time::Instant::now() + max_wait;
+    let mut rng = rand::thread_rng();
+
+    let ids: Vec<u32> = pool.lock().unwrap().keys().copied().collect();
+    for id in ids {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline - now;
+        let jitter = std::time::Duration::from_millis(rng.gen_range(100..=500));
+        std::thread::sleep(jitter.min(remaining));
+
+        let mut guard = pool.lock().unwrap();
+        if let Some(ws) = guard.get_mut(&id) {
+            let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
+                code: tungstenite::protocol::frame::coding::CloseCode::Away,
+                reason: "Server shutting down".into(),
+            }));
+            let _ = ws.flush();
+        }
+        guard.remove(&id);
+    }
+    pool.lock().unwrap().clear();
+}
+
 fn js_err<'js>(ctx: &Ctx<'js>, msg: String) -> rquickjs::Error {
     let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
     match ctx.eval::<rquickjs::Value, _>(format!("new Error(\"{}\")", escaped).as_str()) {
@@ -28,10 +90,9 @@ fn host_from_url(url: &str) -> Option<String> {
     }
 }
 
-pub fn inject_websocket(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
+pub fn inject_websocket(ctx: &Ctx, permissions: Arc<PermissionState>, pool: WsPool) -> Result<()> {
     let globals = ctx.globals();
 
-    let pool: Arc<Mutex<HashMap<u32, WsConn>>> = Arc::new(Mutex::new(HashMap::new()));
     let next_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
 
     // __wsConnect(url) -> id | throws

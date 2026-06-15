@@ -28,6 +28,7 @@ pub fn inject_all(
     permissions: Arc<PermissionState>,
     timer_manager: Arc<TimerManager>,
     firewall: Option<Arc<Firewall>>,
+    ws_pool: websocket::WsPool,
 ) -> rquickjs::Result<()> {
     console::inject_console(ctx)?;
     timers::inject_timers(ctx, timer_manager)?;
@@ -85,7 +86,7 @@ pub fn inject_all(
     tcp::inject_tcp(ctx, permissions.clone())?;
     http_server::inject_http_server(ctx, permissions.clone(), firewall)?;
     modules::inject_require(ctx, permissions.clone())?;
-    websocket::inject_websocket(ctx, permissions.clone())?;
+    websocket::inject_websocket(ctx, permissions.clone(), ws_pool)?;
     // These run after inject_require so they can overwrite the placeholder stubs
     zlib::inject_zlib(ctx)?;
     child_process::inject_child_process(ctx, permissions.clone())?;

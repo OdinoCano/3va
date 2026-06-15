@@ -1,0 +1,36 @@
+#!/usr/bin/env node
+'use strict';
+
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+const PKGS = {
+  'linux-x64':    '@edge_166/3va-linux-x64',
+  'linux-arm64':  '@edge_166/3va-linux-arm64',
+  'darwin-x64':   '@edge_166/3va-darwin-x64',
+  'darwin-arm64': '@edge_166/3va-darwin-arm64',
+  'win32-x64':    '@edge_166/3va-win32-x64',
+};
+
+const key = `${process.platform}-${process.arch}`;
+const pkg = PKGS[key];
+
+if (!pkg) {
+  process.stderr.write(`[3va] Unsupported platform: ${key}\n`);
+  process.exit(1);
+}
+
+let pkgRoot;
+try {
+  pkgRoot = path.dirname(require.resolve(`${pkg}/package.json`));
+} catch {
+  process.stderr.write(
+    `[3va] Platform package ${pkg} is not installed.\n` +
+    `      Try: npm install ${pkg}\n`
+  );
+  process.exit(1);
+}
+
+const bin = path.join(pkgRoot, 'bin', process.platform === 'win32' ? '3va.exe' : '3va');
+const result = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit' });
+process.exit(result.status ?? 1);

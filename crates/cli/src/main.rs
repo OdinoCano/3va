@@ -923,6 +923,11 @@ async fn run_dev_server(
         }
     });
 
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    let draining = Arc::new(AtomicBool::new(false));
+    let active_conns = Arc::new(AtomicU32::new(0));
+
     let addr = format!("{}:{}", host, port);
     let listener = TcpListener::bind(&addr).await?;
     let url = format!("http://{}:{}", host, port);
@@ -937,16 +942,46 @@ async fn run_dev_server(
     loop {
         tokio::select! {
             result = listener.accept() => {
-                let (mut stream, _) = result?;
+                let (mut stream, peer) = result?;
+
+                // Reject new connections immediately once draining is set.
+                if draining.load(Ordering::Relaxed) {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ).await;
+                    continue;
+                }
+
+                active_conns.fetch_add(1, Ordering::Relaxed);
                 let tx_conn = tx.clone();
                 let pub_dir = public_dir.clone();
                 let out_path = output.clone();
+                let drain_flag = draining.clone();
+                let conn_counter = active_conns.clone();
+                let _ = peer;
                 tokio::spawn(async move {
-                    let _ = handle_dev_connection(&mut stream, tx_conn, pub_dir, out_path, csp_enabled).await;
+                    let _ = handle_dev_connection(
+                        &mut stream, tx_conn, pub_dir, out_path, csp_enabled, drain_flag,
+                    ).await;
+                    conn_counter.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             _ = signal::ctrl_c() => {
-                println!("\n[dev] Shutting down.");
+                println!("\n[dev] Draining connections (up to 30s)…");
+                draining.store(true, Ordering::Relaxed);
+
+                // Wait until all in-flight handlers finish or 30 s elapses.
+                let drain_deadline = tokio::time::Instant::now()
+                    + std::time::Duration::from_secs(30);
+                while active_conns.load(Ordering::Relaxed) > 0 {
+                    if tokio::time::Instant::now() >= drain_deadline {
+                        println!("[dev] Drain timeout — forcing shutdown.");
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                println!("[dev] Shutdown complete.");
                 break;
             }
         }
@@ -999,6 +1034,7 @@ async fn handle_dev_connection(
     public_dir: PathBuf,
     bundle_path: PathBuf,
     csp_enabled: bool,
+    draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1020,6 +1056,43 @@ async fn handle_dev_connection(
     }
 
     let path = parts[1].split('?').next().unwrap_or("/");
+
+    // Health / status endpoints for load-balancer integration.
+    if path == "/health" || path == "/_3va/status" {
+        use std::sync::atomic::Ordering;
+        use tokio::io::AsyncWriteExt;
+        let is_draining = draining.load(Ordering::Relaxed);
+        let (status_line, body) = if path == "/health" {
+            if is_draining {
+                (
+                    "HTTP/1.1 503 Service Unavailable",
+                    r#"{"status":"draining"}"#,
+                )
+            } else {
+                ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#)
+            }
+        } else {
+            // /_3va/status — always 200, draining flag in body
+            let s = if is_draining { "draining" } else { "ok" };
+            let body = format!(
+                r#"{{"status":"{}","version":"{}"}}"#,
+                s,
+                env!("CARGO_PKG_VERSION")
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).await?;
+            return Ok(());
+        };
+        let response = format!(
+            "{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            status_line, body.len(), body
+        );
+        stream.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
 
     // SSE endpoint for HMR
     if path == "/__hmr" {
@@ -2205,7 +2278,25 @@ async fn main() -> anyhow::Result<()> {
                     inspect_addr,
                 )
                 .await?;
-                engine.eval_file_with_args(file, script_args).await?;
+
+                // Run the script; on Ctrl+C or SIGTERM drain open WebSocket connections
+                // with jitter before exiting so remote peers reconnect staggered.
+                #[cfg(unix)]
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+                #[cfg(unix)]
+                tokio::select! {
+                    result = engine.eval_file_with_args(file, script_args) => { result?; }
+                    _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
+                    _ = sigterm.recv() => { engine.drain_ws_connections().await; }
+                }
+
+                #[cfg(not(unix))]
+                tokio::select! {
+                    result = engine.eval_file_with_args(file, script_args) => { result?; }
+                    _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
+                }
             }
 
             info!("Execution finished.");
@@ -4345,5 +4436,121 @@ mod tests {
             text.contains("<h1>App</h1>"),
             "debe incluir el HTML original"
         );
+    }
+
+    // ── Dev server: health / status endpoints ─────────────────────────────────
+
+    /// Helper: spin up a temporary `handle_dev_connection` server, send one HTTP
+    /// request and return the raw response bytes.
+    async fn request_dev_server(
+        path: &str,
+        draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::broadcast;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, _rx) = broadcast::channel::<BuildEvent>(16);
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = handle_dev_connection(
+                &mut stream,
+                tx,
+                PathBuf::from("."),
+                PathBuf::from("bundle.js"),
+                false,
+                draining,
+            )
+            .await;
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        let (mut read_half, _write_half) = client.split();
+        let mut buf = vec![0u8; 4096];
+        let n = read_half.read(&mut buf).await.unwrap();
+        server.await.unwrap();
+
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_200_when_healthy() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let draining = Arc::new(AtomicBool::new(false));
+        let resp = request_dev_server("/health", draining).await;
+
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
+        assert!(
+            resp.contains(r#""status":"ok""#),
+            "body debe contener status:ok — got: {resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_503_when_draining() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let draining = Arc::new(AtomicBool::new(false));
+        draining.store(true, Ordering::Relaxed);
+        let resp = request_dev_server("/health", draining).await;
+
+        assert!(
+            resp.starts_with("HTTP/1.1 503"),
+            "debe ser 503 durante drain — got: {resp}"
+        );
+        assert!(
+            resp.contains(r#""status":"draining""#),
+            "body debe contener status:draining — got: {resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_endpoint_always_returns_200_with_json() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        for is_draining in [false, true] {
+            let draining = Arc::new(AtomicBool::new(false));
+            draining.store(is_draining, Ordering::Relaxed);
+            let resp = request_dev_server("/_3va/status", draining).await;
+
+            assert!(
+                resp.starts_with("HTTP/1.1 200 OK"),
+                "/_3va/status debe ser siempre 200 — draining={is_draining}, got: {resp}"
+            );
+            assert!(
+                resp.contains("application/json"),
+                "debe tener Content-Type JSON — got: {resp}"
+            );
+            let expected_status = if is_draining { "draining" } else { "ok" };
+            assert!(
+                resp.contains(&format!(r#""status":"{expected_status}""#)),
+                "body incorrecto — got: {resp}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn health_and_status_include_connection_close_header() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        for path in ["/health", "/_3va/status"] {
+            let draining = Arc::new(AtomicBool::new(false));
+            let resp = request_dev_server(path, draining).await;
+            assert!(
+                resp.contains("Connection: close"),
+                "{path} debe emitir Connection: close — got: {resp}"
+            );
+        }
     }
 }

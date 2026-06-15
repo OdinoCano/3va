@@ -78,6 +78,7 @@ pub struct JsEngine {
     runtime_core: Mutex<Runtime>,
     inspector: Option<Arc<inspector::InspectorState>>,
     profiler: Option<Profiler>,
+    ws_pool: builtins::websocket::WsPool,
 }
 
 impl JsEngine {
@@ -150,6 +151,9 @@ impl JsEngine {
         // Allocate the profiler state so we can share it with the JS push callback.
         let profiler = prof_interval_ms.map(|_| Profiler::new());
 
+        let ws_pool: builtins::websocket::WsPool =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
         {
             let perms = permissions.clone();
             let tm = timer_manager.clone();
@@ -157,6 +161,7 @@ impl JsEngine {
             let prof_js = prof_interval_ms.map(profiler::profiler_js);
             let prof_handle = profiler.clone();
             let fw = firewall;
+            let pool = ws_pool.clone();
             context
                 .with(move |ctx: rquickjs::Ctx| {
                     // Install async context hook FIRST — must be wired before any
@@ -166,7 +171,7 @@ impl JsEngine {
                         unsafe { rquickjs_sys::JS_GetRuntime(rt_ptr) } as *mut std::ffi::c_void;
                     unsafe { async_context::install(&ctx, rt_ptr) }?;
 
-                    builtins::inject_all(&ctx, perms, tm, fw)?;
+                    builtins::inject_all(&ctx, perms, tm, fw, pool)?;
 
                     // Inject __3va_debugger__ if inspector is active.
                     if let Some(state) = insp {
@@ -211,7 +216,27 @@ impl JsEngine {
             runtime_core,
             inspector,
             profiler,
+            ws_pool,
         })
+    }
+
+    /// Gracefully close every outgoing WebSocket connection the JS script has opened.
+    ///
+    /// Iterates the internal [`WsPool`](builtins::websocket::WsPool), sending a
+    /// `Close(1001 Going Away)` frame to each peer with a random 100–500 ms jitter
+    /// between sends.  The jitter staggers client reconnections so they don't all
+    /// hammer the upstream service at the same instant.
+    ///
+    /// Blocks (via `spawn_blocking`) until all connections are closed or 30 s have
+    /// elapsed, whichever comes first.  Call this in a SIGTERM / Ctrl-C handler
+    /// before the process exits.
+    pub async fn drain_ws_connections(&self) {
+        let pool = self.ws_pool.clone();
+        tokio::task::spawn_blocking(move || {
+            builtins::websocket::drain_ws_pool(&pool, std::time::Duration::from_secs(30));
+        })
+        .await
+        .ok();
     }
 
     pub async fn eval(&self, code: &str) -> anyhow::Result<()> {
