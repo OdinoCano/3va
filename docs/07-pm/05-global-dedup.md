@@ -165,6 +165,8 @@ export _3VA_STORE=/mnt/cache/3va-store
 # Extracts to /mnt/cache/3va-store/registry.npmjs.org/axios@1.7.2/
 ```
 
+Also available as `_3VA_STORE` — see [Environment Variables](../README.md#environment-variables) in the README.
+
 ---
 
-*Implemented in `crates/pm/src/store.rs` — `ContentStore`.*
+*Implemented in `crates/pm/src/store.rs` — `ContentStore.global()`.*

@@ -26,6 +26,7 @@
 - [02-modulo-system.md](04-core/02-modulo-system.md) - System modules
 - [03-globals.md](04-core/03-globals.md) - Global objects
 - [04-process.md](04-core/04-process.md) - Process management
+- [05-threading.md](04-core/05-threading.md) - Threading and concurrency model (Tokio worker pool, TOKIO_WORKER_THREADS, --concurrency)
 
 ## Volume 5: JavaScript Engine
 
