@@ -9,15 +9,13 @@
 //!   - Throws an error with `message == "EAGAIN"` when no data is ready.
 //!   - Throws an error with `message == "EOF"` when the peer has closed.
 
+use native_tls::TlsStream;
+use rquickjs::function::Async;
+use rquickjs::{Ctx, Function, Result, function::Rest};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use native_tls::TlsStream;
-use rquickjs::function::Async;
-use rquickjs::{Ctx, Function, Result, function::Rest};
 use vvva_crypto;
 use vvva_permissions::{Capability, PermissionState};
 
@@ -285,30 +283,18 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         )?;
     }
 
-    // __tcpSetTimeout(id, ms) — sets read/write timeout (0 = non-blocking)
+    // __tcpSetTimeout(id, ms) — no-op: sockets must stay non-blocking so the
+    // JS event loop poll (_startPoll) doesn't block Tokio. Socket-level timeouts
+    // are handled at the JS layer via setTimeout() in Socket.prototype.setTimeout.
     {
-        let pool = pool.clone();
+        let _pool = pool.clone();
         ctx.globals().set(
             "__tcpSetTimeout",
             Function::new(
                 ctx.clone(),
-                move |ctx: Ctx<'_>, id: u32, ms: u32| -> Result<()> {
-                    let guard = pool.lock().unwrap();
-                    let conn = guard.get(&id).ok_or_else(|| {
-                        js_err(&ctx, format!("tcpSetTimeout: unknown socket {}", id))
-                    })?;
-                    let timeout = if ms == 0 {
-                        None
-                    } else {
-                        Some(Duration::from_millis(ms as u64))
-                    };
-                    let raw = match conn {
-                        TcpConn::Plain(s) => s as &TcpStream,
-                        TcpConn::Tls(s) => s.get_ref(),
-                    };
-                    // Switch to blocking with timeout (overrides non-blocking mode).
-                    raw.set_nonblocking(false).ok();
-                    raw.set_read_timeout(timeout).ok();
+                move |_ctx: Ctx<'_>, _id: u32, _ms: u32| -> Result<()> {
+                    // Intentionally no-op: switching to blocking mode would cause
+                    // __tcpRead to block the Tokio thread and freeze all JS timers.
                     Ok(())
                 },
             ),

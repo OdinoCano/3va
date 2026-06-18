@@ -63,6 +63,10 @@ impl Registry {
         // Strip path component and port — keep only hostname
         let h = h.split('/').next().unwrap_or(h);
         let h = h.split(':').next().unwrap_or(h);
+        // Empty host means --allow-net= (allow all) → default to npm registry
+        if h.is_empty() {
+            return Registry::Npm;
+        }
         // Exact-match or public-suffix match against known registries.
         // Using .contains() would let "evil.npmjs.org.attacker.com" match — use eq or suffix.
         if h == "jsr.io" || h.ends_with(".jsr.io") || h == "npm.jsr.io" {
@@ -830,8 +834,8 @@ async fn install_with_transitive(
     use tokio::task::JoinSet;
 
     // ── Determine registry ────────────────────────────────────────────────────
-    let allowed_host = match allow_net.and_then(|hosts| hosts.first()) {
-        Some(h) => h.clone(),
+    // allow_net=None → permission denied; allow_net=Some([]) → allow all (--allow-net=)
+    let allowed_host = match allow_net {
         None => {
             let (pkg_name, _) = parse_package_spec(root_spec)?;
             eprintln!();
@@ -846,6 +850,7 @@ async fn install_with_transitive(
             );
             anyhow::bail!("Network access denied: --allow-net not specified");
         }
+        Some(hosts) => hosts.first().map(|s| s.as_str()).unwrap_or("").to_string(),
     };
     let registry = Registry::from_allowed_host(&allowed_host);
     let base_url = registry.base_url().to_string();
