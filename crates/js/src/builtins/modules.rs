@@ -16,12 +16,76 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     ctx.eval::<(), _>(
         r#"
         globalThis.__requireCache = {};
+        globalThis.__fallbackModules = {};
         globalThis.module = { exports: {} };
         globalThis.exports = globalThis.module.exports;
         globalThis.__filename = '';
         globalThis.__dirname = '';
         // React Native globals
         globalThis.__DEV__ = false;
+
+        // ponytail: minimal Intl shim — QuickJS lacks Intl but has Date.toLocaleString.
+        // Covers Intl.DateTimeFormat (used by @nestjs/common logger) and stubs the rest.
+        // Upgrade to full ICU if locale-specific formatting becomes a real requirement.
+        if (typeof Intl === 'undefined') {
+            globalThis.Intl = {};
+        }
+        if (typeof Intl.DateTimeFormat !== 'function') {
+            Intl.DateTimeFormat = function DateTimeFormat(locale, options) {
+                if (!(this instanceof DateTimeFormat)) return new DateTimeFormat(locale, options);
+                this._locale = locale;
+                this._options = options || {};
+            };
+            Intl.DateTimeFormat.prototype.format = function(date) {
+                return (date instanceof Date ? date : new Date(date)).toLocaleString();
+            };
+            Intl.DateTimeFormat.prototype.formatToParts = function(date) { return []; };
+            Intl.DateTimeFormat.prototype.resolvedOptions = function() {
+                return Object.assign({ locale: this._locale || 'en-US', calendar: 'gregory', numberingSystem: 'latn', timeZone: 'UTC' }, this._options);
+            };
+            Intl.DateTimeFormat.supportedLocalesOf = function() { return []; };
+        }
+        if (typeof Intl.NumberFormat !== 'function') {
+            Intl.NumberFormat = function NumberFormat(locale, options) {
+                if (!(this instanceof NumberFormat)) return new NumberFormat(locale, options);
+                this._locale = locale; this._options = options || {};
+            };
+            Intl.NumberFormat.prototype.format = function(n) { return String(n); };
+            Intl.NumberFormat.prototype.formatToParts = function(n) { return []; };
+            Intl.NumberFormat.prototype.resolvedOptions = function() { return { locale: this._locale || 'en-US' }; };
+            Intl.NumberFormat.supportedLocalesOf = function() { return []; };
+        }
+        if (typeof Intl.Collator !== 'function') {
+            Intl.Collator = function Collator(locale, options) {
+                if (!(this instanceof Collator)) return new Collator(locale, options);
+            };
+            Intl.Collator.prototype.compare = function(a, b) { return a < b ? -1 : a > b ? 1 : 0; };
+            Intl.Collator.prototype.resolvedOptions = function() { return { locale: 'en-US' }; };
+            Intl.Collator.supportedLocalesOf = function() { return []; };
+        }
+        if (typeof Intl.getCanonicalLocales !== 'function') {
+            Intl.getCanonicalLocales = function(locales) {
+                return Array.isArray(locales) ? locales : (locales ? [locales] : []);
+            };
+        }
+        if (typeof Intl.supportedValuesOf !== 'function') {
+            Intl.supportedValuesOf = function() { return []; };
+        }
+
+        // ES2024: ArrayBuffer.prototype.resizable — always false in QuickJS
+        if (typeof ArrayBuffer !== 'undefined' && !('resizable' in ArrayBuffer.prototype)) {
+            Object.defineProperty(ArrayBuffer.prototype, 'resizable', {
+                get: function() { return false; },
+                enumerable: false, configurable: true
+            });
+        }
+        // ES2024: SharedArrayBuffer.prototype.growable — always false in QuickJS
+        if (typeof SharedArrayBuffer !== 'undefined' && !('growable' in SharedArrayBuffer.prototype)) {
+            Object.defineProperty(SharedArrayBuffer.prototype, 'growable', {
+                get: function() { return false; },
+                enumerable: false, configurable: true
+            });
+        }
     "#,
     )?;
 
@@ -74,6 +138,11 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 || path_str.ends_with(".cts")
             {
                 crate::transpiler::transpile(&source)
+            } else if path_str.ends_with(".cjs")
+                || path_str.ends_with(".json")
+                || path_str.contains("@exodus/bytes")
+            {
+                source
             } else {
                 crate::transpiler::transpile_js(&source)
             };
@@ -85,14 +154,25 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
     // Native __resolvePath(path, basedir?) -> String
     // basedir is used as the base for relative imports (e.g. require('./lib/foo') inside a package).
-    let resolve_fn = Function::new(ctx.clone(), |args: Rest<String>| -> String {
-        let mut it = args.0.into_iter();
-        let path_str = it.next().unwrap_or_default();
-        let basedir = it.next(); // optional second arg
-        resolve_path_from(&path_str, basedir.as_deref())
-            .to_string_lossy()
-            .to_string()
-    })?;
+    // Throws proper Node.js errors (ERR_PACKAGE_PATH_NOT_EXPORTED, MODULE_NOT_FOUND).
+    let resolve_fn = Function::new(
+        ctx.clone(),
+        move |ctx: rquickjs::Ctx<'_>, args: Rest<String>| -> Result<String> {
+            let mut it = args.0.into_iter();
+            let path_str = it.next().unwrap_or_default();
+            let basedir = it.next();
+            match resolve_path_from(&path_str, basedir.as_deref()) {
+                Ok(p) => Ok(p.to_string_lossy().to_string()),
+                Err(msg) => {
+                    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
+                    let err_val = ctx
+                        .eval::<rquickjs::Value, _>(format!("new Error(\"{}\")", escaped).as_str())
+                        .map_err(|_| rquickjs::Error::new_from_js("resolve", "error"))?;
+                    Err(ctx.throw(err_val))
+                }
+            }
+        },
+    )?;
     globals.set("__resolvePath", resolve_fn)?;
 
     // Native __dnsLookup(hostname) -> Promise<string>
@@ -287,7 +367,19 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 },
                 types: { isRegExp: function(v) { return v instanceof RegExp; }, isDate: function(v) { return v instanceof Date; } },
                 TextEncoder: globalThis.TextEncoder,
-                TextDecoder: globalThis.TextDecoder
+                TextDecoder: globalThis.TextDecoder,
+                debuglog: function(section) {
+                    var enabled = typeof process !== 'undefined' && process.env
+                        && (process.env.NODE_DEBUG || '').split(',').indexOf(section) !== -1;
+                    if (enabled) {
+                        return function() {
+                            var args = Array.prototype.slice.call(arguments);
+                            args.unshift(section.toUpperCase() + ':');
+                            process.stderr.write(args.join(' ') + '\n');
+                        };
+                    }
+                    return function() {};
+                }
             };
             globalThis.__requireCache['util'] = util;
 
@@ -1380,7 +1472,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                                 if (typeof host === 'function') { cb = host; host = '0.0.0.0'; }
                                 if (typeof port === 'function') { cb = port; port = 0; host = '0.0.0.0'; }
                                 host = host || '0.0.0.0';
-                                port = port || 0;
+                                port = parseInt(port, 10) || 0;
                                 server._host = host;
                                 server._port = port;
                                 try {
@@ -1409,6 +1501,15 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                             off: function(ev, fn) {
                                 if (server._listeners[ev]) server._listeners[ev] = server._listeners[ev].filter(function(f) { return f !== fn; });
                                 return server;
+                            },
+                            removeListener: function(ev, fn) { return server.off(ev, fn); },
+                            removeAllListeners: function(ev) {
+                                if (ev !== undefined) { server._listeners[ev] = []; }
+                                else { server._listeners = {}; }
+                                return server;
+                            },
+                            listeners: function(ev) {
+                                return (server._listeners[ev] || []).slice();
                             },
                             emit: function(ev) {
                                 var args = Array.prototype.slice.call(arguments, 1);
@@ -1632,7 +1733,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                         self.bytesRead += chunk.length;
                         var data = self._encoding
                             ? new TextDecoder(self._encoding).decode(new Uint8Array(chunk))
-                            : new Uint8Array(chunk);
+                            : (typeof Buffer !== 'undefined' ? Buffer.from(chunk) : new Uint8Array(chunk));
                         self.emit('data', data);
                         // More data may be waiting — schedule immediately
                         self._pollTimer = setTimeout(poll, 0);
@@ -1772,7 +1873,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                             if (typeof host === 'function') { cb = host; host = '0.0.0.0'; }
                             if (typeof port === 'function') { cb = port; port = 0; host = '0.0.0.0'; }
                             host = host || '0.0.0.0';
-                            port = port || 0;
+                            port = parseInt(port, 10) || 0;
                             server._host = host;
                             server._port = port;
                             try {
@@ -1796,6 +1897,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                         on: function(ev, fn) { server._listeners[ev] = server._listeners[ev] || []; server._listeners[ev].push(fn); return server; },
                         once: function(ev, fn) { function w() { fn.apply(this, arguments); server.off(ev, w); } return server.on(ev, w); },
                         off: function(ev, fn) { if (server._listeners[ev]) server._listeners[ev] = server._listeners[ev].filter(function(f){return f!==fn;}); return server; },
+                        removeListener: function(ev, fn) { return server.off(ev, fn); },
+                        removeAllListeners: function(ev) { if (ev !== undefined) { server._listeners[ev] = []; } else { server._listeners = {}; } return server; },
+                        listeners: function(ev) { return (server._listeners[ev] || []).slice(); },
                         emit: function(ev) { var args = Array.prototype.slice.call(arguments,1); (server._listeners[ev]||[]).forEach(function(fn){fn.apply(server,args);}); }
                     };
 
@@ -1898,13 +2002,14 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             }
 
             // ── agent-base / https-proxy-agent (proxy stubs, not supported in sandbox) ──
+            // Stored in __fallbackModules so real node_modules modules are preferred.
             function AgentBase() {}
             AgentBase.prototype.addRequest = function() {};
-            globalThis.__requireCache['agent-base'] = { Agent: AgentBase };
+            globalThis.__fallbackModules['agent-base'] = { Agent: AgentBase };
             var HttpsProxyAgentStub = function(opts) { AgentBase.call(this); this.proxy = opts; };
             util.inherits(HttpsProxyAgentStub, AgentBase);
             HttpsProxyAgentStub.prototype.callback = function(req, opts) { return opts; };
-            globalThis.__requireCache['https-proxy-agent'] = { HttpsProxyAgent: HttpsProxyAgentStub };
+            globalThis.__fallbackModules['https-proxy-agent'] = { HttpsProxyAgent: HttpsProxyAgentStub };
 
             // ── http2 — client backed by __fetchAsync ─────────────────────────────
             var HTTP2_CONSTANTS = {
@@ -2037,7 +2142,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                         if (typeof host === 'function') { cb = host; host = '0.0.0.0'; }
                         if (typeof port === 'function') { cb = port; port = 0; host = '0.0.0.0'; }
                         host = host || '0.0.0.0';
-                        port = port || 0;
+                        port = parseInt(port, 10) || 0;
                         server._host = host;
                         server._port = port;
                         try {
@@ -2261,12 +2366,56 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 globalThis.__requireCache['node:cluster'] = clusterMod;
             }());
 
-            // ── debug (common logging utility) ───────────────────────────────────
-            globalThis.__requireCache['debug'] = function(ns) { return function() {}; };
-            globalThis.__requireCache['ms'] = function(val) { return typeof val === 'string' ? 0 : val; };
+            // ── debug / ms (common logging utility) ────────────────────────────
+            // ── uuid ─────────────────────────────────────────────────────────────
+            // uuid v14 is ESM-only; older versions lack v4 or are CJS.
+            // Fallback uses crypto.randomUUID() (available in 3va runtime).
+            globalThis.__fallbackModules['uuid'] = {
+                v4: function() {
+                    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+                        return crypto.randomUUID();
+                    }
+                    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                        var r = Math.random() * 16 | 0;
+                        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+                    });
+                },
+                v1: function() { throw new Error('uuid.v1 not supported in 3va'); },
+                v3: function() { throw new Error('uuid.v3 not supported in 3va'); },
+                v5: function() { throw new Error('uuid.v5 not supported in 3va'); },
+                NIL: '00000000-0000-0000-0000-000000000000',
+                validate: function(s) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s); },
+                version: function(s) { return parseInt(s[14], 16); },
+                parse: function(s) { return s.replace(/-/g,'').match(/.{2}/g).map(function(b){return parseInt(b,16);}); },
+                stringify: function(arr) { var h='0123456789abcdef',r=''; for(var i=0;i<16;i++){r+=h[arr[i]>>4]+h[arr[i]&15];if(i===3||i===5||i===7||i===9)r+='-';}return r; },
+            };
+
+            // ── whatwg-url ────────────────────────────────────────────────────────
+            // whatwg-url v16 depends on @exodus/bytes (ESM-only). Use native URL.
+            (function() {
+                var _URL = globalThis.URL;
+                var _USP = globalThis.URLSearchParams;
+                globalThis.__fallbackModules['whatwg-url'] = {
+                    URL: _URL,
+                    URLSearchParams: _USP,
+                    parseURL: function(u, base) { try { return new _URL(u, base); } catch(e) { return null; } },
+                    basicURLParse: function(u, base) { try { return new _URL(u, base); } catch(e) { return null; } },
+                    serializeURL: function(u) { return u ? u.href : ''; },
+                    serializeURLOrigin: function(u) { return u ? u.origin : 'null'; },
+                    setTheUsername: function(u, v) { u.username = v; },
+                    setThePassword: function(u, v) { u.password = v; },
+                    cannotHaveAUsernamePasswordPort: function(u) { return !u || u.host === '' || u.scheme === 'file'; },
+                };
+            })();
+
+            // Stored in __fallbackModules so the real module from node_modules is
+            // preferred. The stub lacks .default, .debug, etc., which breaks
+            // socket.io / engine.io that rely on them.
+            globalThis.__fallbackModules['debug'] = function(ns) { return function() {}; };
+            globalThis.__fallbackModules['ms'] = function(val) { return typeof val === 'string' ? 0 : val; };
 
             // ── proxy-from-env ───────────────────────────────────────────────────
-            globalThis.__requireCache['proxy-from-env'] = { getProxyForUrl: function() { return null; } };
+            globalThis.__fallbackModules['proxy-from-env'] = { getProxyForUrl: function() { return null; } };
 
             // ── tr46 (Unicode IDNA) ───────────────────────────────────────────────
             // QuickJS cannot parse tr46's large supplementary-plane Unicode regexes.
@@ -2288,7 +2437,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
               function toUnicode(domain, options) {
                 return { domain: domain, error: false };
               }
-              globalThis.__requireCache['tr46'] = { toASCII: toASCII, toUnicode: toUnicode };
+              globalThis.__fallbackModules['tr46'] = { toASCII: toASCII, toUnicode: toUnicode };
             })();
 
             // ── AbortSignal ───────────────────────────────────────────────────────
@@ -3186,6 +3335,35 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 var line = lines[i];
                 var trimmed = line.trim();
 
+                // import { ... } from '...' (multi-line: collect until closing brace found)
+                if (/^import\s*\{/.test(trimmed) && !/\}/.test(trimmed.replace(/^import\s*\{\s*/, ''))) {
+                    var _importLines = [trimmed];
+                    i++;
+                    while (i < lines.length) {
+                        var _nextImportLine = lines[i].trim();
+                        _importLines.push(_nextImportLine);
+                        if (/\}\s*from\s+['"][^'"]+['"]/.test(_nextImportLine)) break;
+                        if (/\}\s*;?\s*$/.test(_nextImportLine)) break;
+                        i++;
+                    }
+                    var _fullImport = _importLines.join(' ');
+                    // Try import { a, b } from 'specifier'
+                    var _imRe = _fullImport.match(/^import\s*\{\s*([^}]+)\s*\}\s*from\s+['"]([^'"]+)['"]\s*;?$/);
+                    if (_imRe) {
+                        var _named = _imRe[1].split(',').map(function(s) {
+                            s = s.trim();
+                            if (!s) return '';
+                            var parts = s.split(/\s+as\s+/);
+                            if (parts.length === 2) return parts[0].trim() + ': ' + parts[1].trim();
+                            return s;
+                        }).filter(function(s) { return s; }).join(', ');
+                        out.push('var {' + _named + '} = require(' + JSON.stringify(_imRe[2]) + ');');
+                        i++; continue;
+                    }
+                    // If nothing matched, just join as-is
+                    out.push(_importLines.join('\n'));
+                    i++; continue;
+                }
                 // import 'specifier'  (side-effect import)
                 var m;
                 if ((m = trimmed.match(/^import\s+['"]([^'"]+)['"]\s*;?$/))) {
@@ -3231,6 +3409,48 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     deferredExports.push('try{var __ed=module.exports;if(__ed!==null&&__ed!==undefined){__ed.default=__ed;module.exports=__ed;}}catch(__e){}');
                     i++; continue;
                 }
+                // export { ... } from '...' (multi-line: collect until closing brace found)
+                if (/^export\s*\{/.test(trimmed) && !/\}/.test(trimmed.replace(/^export\s*\{\s*/, ''))) {
+                    var _exportLines = [trimmed];
+                    i++;
+                    while (i < lines.length) {
+                        var _nextLine = lines[i].trim();
+                        _exportLines.push(_nextLine);
+                        if (/\}.*from\s+['"][^'"]+['"]/.test(_nextLine)) break;
+                        if (/\}\s*;?\s*$/.test(_nextLine)) break;
+                        i++;
+                    }
+                    var _fullExport = _exportLines.join(' ');
+                    // Try to match re-export: export { a, b } from 'specifier'
+                    var _re = _fullExport.match(/^export\s*\{\s*([^}]+)\s*\}\s*from\s+['"]([^'"]+)['"]\s*;?$/);
+                    if (_re) {
+                        out.push(';(function(){var __re = require(' + JSON.stringify(_re[2]) + ');');
+                        _re[1].split(',').forEach(function(s) {
+                            s = s.trim();
+                            if (!s) return;
+                            var parts = s.split(/\s+as\s+/);
+                            var local = parts[0].trim(), exported = (parts[1] || parts[0]).trim();
+                            out.push('module.exports.' + exported + ' = __re.' + local + ';');
+                        });
+                        out.push('})();');
+                        i++; continue;
+                    }
+                    // Fallback: export { a, b }
+                    var _re2 = _fullExport.match(/^export\s*\{\s*([^}]+)\s*\}\s*;?$/);
+                    if (_re2) {
+                        _re2[1].split(',').forEach(function(s) {
+                            s = s.trim();
+                            if (!s) return;
+                            var parts = s.split(/\s+as\s+/);
+                            var local = parts[0].trim(), exported = (parts[1] || parts[0]).trim();
+                            out.push('module.exports.' + exported + ' = ' + local + ';');
+                        });
+                        i++; continue;
+                    }
+                    // If nothing matched, just join as-is (likely a syntax error, but don't make it worse)
+                    out.push(_exportLines.join('\n'));
+                    i++; continue;
+                }
                 // export {}  (empty export, OXC emits this to mark a file as ESM — no-op)
                 if (/^export\s*\{\s*\}\s*(from\s+['"][^'"]+['"]\s*)?;?$/.test(trimmed)) {
                     i++; continue;
@@ -3247,7 +3467,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 }
                 // export { a, b } from 'specifier'  (re-export)
                 if ((m = trimmed.match(/^export\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]\s*;?$/))) {
-                    out.push('(function(){var __re = require(' + JSON.stringify(m[2]) + ');');
+                    out.push(';(function(){var __re = require(' + JSON.stringify(m[2]) + ');');
                     m[1].split(',').forEach(function(s) {
                         s = s.trim();
                         var parts = s.split(/\s+as\s+/);
@@ -3259,7 +3479,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 }
                 // export * from 'specifier'
                 if ((m = trimmed.match(/^export\s+\*\s+from\s+['"]([^'"]+)['"]\s*;?$/))) {
-                    out.push('(function(){var __re=require(' + JSON.stringify(m[1]) + ');for(var __k in __re){if(__k!=="default")module.exports[__k]=__re[__k];}})();');
+                    out.push(';(function(){var __re=require(' + JSON.stringify(m[1]) + ');for(var __k in __re){if(__k!=="default")module.exports[__k]=__re[__k];}})();');
                     i++; continue;
                 }
                 // export const/let/var { a, b } = X  (destructured object export)
@@ -3299,11 +3519,14 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     out.push(decl);
                     // Defer the export when:
                     //  - function/class: hoisted but body must complete first
-                    //  - var/let without initializer (export var X;): the value is
+                    //  - const/let: TDZ — variable may not be initialized until
+                    //    the full expression (possibly multi-line IIFE) completes
+                    //  - var without initializer (export var X;): the value is
                     //    populated by a later IIFE (TypeScript enum pattern), so
                     //    exporting immediately would capture 'undefined'.
                     var hasInitializer = decl.indexOf('=') >= 0;
-                    if (kind === 'function' || kind === 'class' || kind.indexOf('async') >= 0 || !hasInitializer) {
+                    if (kind === 'function' || kind === 'class' || kind.indexOf('async') >= 0
+                        || kind === 'const' || kind === 'let' || !hasInitializer) {
                         deferredExports.push('module.exports.' + exportName + ' = ' + exportName + ';');
                     } else {
                         out.push('module.exports.' + exportName + ' = ' + exportName + ';');
@@ -3325,7 +3548,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             // Replace dynamic import() with __importAsync() so QuickJS doesn't
             // try to use the ES module loader (which isn't configured).
             var result = out.join('\n');
-            result = result.replace(/\bimport\s*\(/g, '__importAsync(');
+            if (result.indexOf('import(') >= 0) {
+                result = result.replace(/\bimport\s*\(/g, '__importAsync(');
+            }
             return result;
         };
     "#)?;
@@ -3356,8 +3581,19 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 return globalThis.__requireCache[path];
             }
 
-            // Resolve relative to the currently-executing file's directory
-            var resolvedPath = __resolvePath(path, globalThis.__dirname);
+            // Resolve relative to the currently-executing file's directory.
+            // Wrap in try/catch so fallback stubs are reachable when the
+            // package is simply not installed (resolve throws before readFile).
+            var resolvedPath;
+            try {
+                resolvedPath = __resolvePath(path, globalThis.__dirname);
+            } catch (resolveErr) {
+                if (globalThis.__fallbackModules !== undefined
+                    && globalThis.__fallbackModules[path] !== undefined) {
+                    return globalThis.__fallbackModules[path];
+                }
+                throw resolveErr;
+            }
 
             // Check cache by resolved path
             if (globalThis.__requireCache[resolvedPath] !== undefined) {
@@ -3365,7 +3601,19 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             }
 
             // Read and (if needed) transpile the file (path is already absolute)
-            var source = __readFile(resolvedPath);
+            var source;
+            try {
+                source = __readFile(resolvedPath);
+            } catch (readErr) {
+                // Package resolved but file missing — still check fallback stubs
+                if (globalThis.__fallbackModules !== undefined
+                    && globalThis.__fallbackModules[path] !== undefined) {
+                    var fb = globalThis.__fallbackModules[path];
+                    globalThis.__requireCache[resolvedPath] = fb;
+                    return fb;
+                }
+                throw readErr;
+            }
 
             // Compute dirname — handle both / (Unix) and \ (Windows) separators
             var dirname = resolvedPath.replace(/[\/\\][^\/\\]*$/, '') || '.';
@@ -3378,6 +3626,17 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 result = JSON.parse(source);
                 globalThis.__requireCache[resolvedPath] = result;
                 return result;
+            }
+
+            // ESM-only files (.mjs) cannot be loaded via require().
+            // ponytail: checks extension only; "type":"module" .js files still slip through.
+            // Full fix needs package.json walk — add when a real package triggers it.
+            if (resolvedPath.endsWith('.mjs')) {
+                throw Object.assign(
+                    new Error('ERR_REQUIRE_ESM: require() of ES Module ' + resolvedPath
+                        + ' not supported. Use dynamic import() instead.'),
+                    { code: 'ERR_REQUIRE_ESM' }
+                );
             }
 
             // Native NAPI addons (.node files): delegate to Rust __napiRequire
@@ -3417,10 +3676,14 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     try { return globalThis.require(path); }
                     finally { globalThis.__dirname = saved; }
                 }
-                mr.resolve = function(path) { return __resolvePath(path, capturedDir); };
+                mr.resolve = function(path, options) {
+                    var base = options && options.paths && options.paths[0] ? options.paths[0] : capturedDir;
+                    return __resolvePath(path, base);
+                };
+                mr.resolve.paths = globalThis.require.resolve.paths;
                 mr.cache = globalThis.__requireCache;
                 mr.extensions = globalThis.require && globalThis.require.extensions || {};
-                mr.main = undefined;
+                mr.main = globalThis.require.main;
                 return mr;
             })(_capturedDirname);
 
@@ -3441,7 +3704,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             var _metaPreamble =
                 'var __vvva_meta_url__=(function(){' +
                   'try{return require("url").pathToFileURL(__filename).href;}' +
-                  'catch(e){return "file:///"+__filename.replace(/\\\\/g,"/");}' +
+                  'catch(e){return "file:///"+__filename;}' +
                 '})();' +
                 // Use globalThis.process to avoid QuickJS TDZ errors when a module
                 // declares `const process = require("process")` in its body —
@@ -3457,13 +3720,24 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 'function __vvva_meta_resolve__(s){return require.resolve(s);}' +
                 'function __vvva_meta_glob__(){return {};}';
 
-            var wrapper = '(function(exports, module, require, __filename, __dirname) {\n' +
+            var wrapper = 'var module=globalThis.module,exports=globalThis.exports,' +
+                'require=moduleRequire,' +
+                '__filename=globalThis.__filename,__dirname=globalThis.__dirname;\n' +
                 _metaPreamble + '\n' +
-                source +
-                '\n})(globalThis.exports, globalThis.module, moduleRequire, globalThis.__filename, globalThis.__dirname);';
-            eval(wrapper);
+                source;
+            try { eval(wrapper); }
+            catch (e) {
+                var _eMsg = (typeof e === 'object' && e !== null) ? (e.message || String(e)) : String(e);
+                throw new Error('[3va:' + resolvedPath + '] ' + _eMsg);
+            }
 
             result = globalThis.module.exports;
+
+            // Error location tracking (only on non-frozen objects, non-enumerable to avoid
+            // breaking Object.values/keys/entries on the exports object)
+            if (result && typeof result === 'object' && Object.isExtensible(result) && result.__vvva_module_path === undefined) {
+                Object.defineProperty(result, '__vvva_module_path', { value: resolvedPath, enumerable: false, writable: true, configurable: true });
+            }
 
             // Backward-compat wrap: some packages compiled with TypeScript emit
             //   Object.defineProperty(exports, "__esModule", { value: true });
@@ -3494,6 +3768,96 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
         // Node.js require.extensions — used by packages to register hooks for custom file types
         globalThis.require.extensions = {};
+        globalThis.require.resolve = function(path, options) {
+            var basedir = options && options.paths && options.paths[0] ? options.paths[0] : globalThis.__dirname;
+            return __resolvePath(path, basedir);
+        };
+        globalThis.require.resolve.paths = function(name) {
+            // Return standard node_modules search paths
+            var dir = globalThis.__dirname || process.cwd();
+            var paths = [];
+            while (true) {
+                paths.push(dir + '/node_modules');
+                var parent = dir.replace(/\/[^\/]+$/, '');
+                if (parent === dir) break;
+                dir = parent;
+            }
+            return paths;
+        };
+        globalThis.require.cache = globalThis.__requireCache;
+        globalThis.require.main = undefined;
+
+        // ── ES2024+ polyfills (missing in QuickJS ES2023) ──────────────────────
+        // Array.prototype group methods (ES2024)
+        if (typeof Object.groupBy !== 'function') {
+            Object.groupBy = function(items, cb) {
+                var result = {};
+                for (var i = 0; i < items.length; i++) {
+                    var key = cb(items[i], i);
+                    if (!result[key]) result[key] = [];
+                    result[key].push(items[i]);
+                }
+                return result;
+            };
+        }
+        if (typeof Map.groupBy !== 'function') {
+            Map.groupBy = function(items, cb) {
+                var result = new Map();
+                for (var i = 0; i < items.length; i++) {
+                    var key = cb(items[i], i);
+                    if (!result.has(key)) result.set(key, []);
+                    result.get(key).push(items[i]);
+                }
+                return result;
+            };
+        }
+
+        // Promise.withResolvers (ES2024)
+        if (typeof Promise.withResolvers !== 'function') {
+            Promise.withResolvers = function() {
+                var a, b;
+                var p = new Promise(function(resolve, reject) { a = resolve; b = reject; });
+                return { promise: p, resolve: a, reject: b };
+            };
+        }
+
+        // Array.prototype.toSorted, toReversed, toSpliced, with (ES2023 — some QuickJS builds miss these)
+        if (typeof Array.prototype.toSorted !== 'function') {
+            Array.prototype.toSorted = function(compareFn) {
+                var copy = this.slice();
+                copy.sort(compareFn);
+                return copy;
+            };
+        }
+        if (typeof Array.prototype.toReversed !== 'function') {
+            Array.prototype.toReversed = function() {
+                var copy = this.slice();
+                copy.reverse();
+                return copy;
+            };
+        }
+        if (typeof Array.prototype.toSpliced !== 'function') {
+            Array.prototype.toSpliced = function(start, deleteCount) {
+                var args = Array.prototype.slice.call(arguments);
+                var copy = this.slice();
+                copy.splice.apply(copy, args);
+                return copy;
+            };
+        }
+        if (typeof Array.prototype.with !== 'function') {
+            Array.prototype.with = function(index, value) {
+                var copy = this.slice();
+                copy[index] = value;
+                return copy;
+            };
+        }
+
+        // RegExp.escape (ES2025)
+        if (typeof RegExp.escape !== 'function') {
+            RegExp.escape = function(str) {
+                return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            };
+        }
     "#)?;
 
     inject_missing_node_modules(ctx)?;
@@ -5589,6 +5953,11 @@ if (typeof globalThis.Platform === 'undefined') {
         return _origRequire(path);
     };
     globalThis.require.assetMap = assetMap;
+    // Copy over resolve/cache/main/extensions from original require
+    if (_origRequire.resolve) globalThis.require.resolve = _origRequire.resolve;
+    if (_origRequire.cache) globalThis.require.cache = _origRequire.cache;
+    if (_origRequire.main !== undefined) globalThis.require.main = _origRequire.main;
+    if (_origRequire.extensions) globalThis.require.extensions = _origRequire.extensions;
 
     // Also patch __resolvePath for ESM compatibility
     globalThis.__resolvePath = function(path, basedir) {
@@ -5984,7 +6353,7 @@ if (typeof globalThis.Platform === 'undefined') {
 /// e.g. "es-errors/eval" → ("es-errors", Some("eval"))
 ///      "@scope/pkg"      → ("@scope/pkg", None)
 ///      "@scope/pkg/sub"  → ("@scope/pkg", Some("sub"))
-fn split_bare_specifier(spec: &str) -> (&str, Option<&str>) {
+pub fn split_bare_specifier(spec: &str) -> (&str, Option<&str>) {
     if spec.starts_with('@') {
         // Scoped: first slash separates scope/name; second slash starts subpath
         if let Some(slash1) = spec.find('/') {
@@ -6002,8 +6371,113 @@ fn split_bare_specifier(spec: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Resolve an exports field value to a file path.
+/// Handles:
+/// - String: "./dist/index.js" → pkg_dir/dist/index.js
+/// - Object (conditions): {"require":"./cjs/","import":"./esm/","default":"./dist/"}
+/// - Array: ["./a.js", "./b.js"] — try each in order
+/// - null: explicitly blocked (returns None)
+///
+/// `is_esm` controls condition priority per Node.js spec:
+/// - CJS require(): "require" wins over "import"
+/// - ESM import:   "import" wins over "require"
+pub fn resolve_exports_value(
+    val: &serde_json::Value,
+    pkg_dir: &Path,
+    is_esm: bool,
+) -> Option<PathBuf> {
+    match val {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => {
+            let p = pkg_dir.join(s.trim_start_matches("./"));
+            let resolved = resolve_file_path(&p);
+            if resolved.is_file() {
+                Some(resolved)
+            } else {
+                Some(p)
+            }
+        }
+        serde_json::Value::Object(_) => {
+            let conditions: &[&str] = if is_esm {
+                &["import", "node", "default", "require", "module"]
+            } else {
+                &["require", "node", "default", "import", "module"]
+            };
+            for key in conditions {
+                if let Some(child) = val.get(*key)
+                    && let Some(path) = resolve_exports_value(child, pkg_dir, is_esm)
+                {
+                    return Some(path);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if let Some(path) = resolve_exports_value(item, pkg_dir, is_esm) {
+                    return Some(path);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Try to match a subpath against pattern keys in the exports field.
+/// Pattern keys contain `*` wildcards, e.g. "./features/*.js": "./src/features/*.js"
+pub fn resolve_exports_pattern(
+    exports: &serde_json::Map<String, serde_json::Value>,
+    export_key: &str,
+    pkg_dir: &Path,
+) -> Option<Option<PathBuf>> {
+    for (pattern, target) in exports {
+        if !pattern.contains('*') {
+            continue;
+        }
+        // Split pattern and export_key on *
+        let parts: Vec<&str> = pattern.split('*').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let (prefix, suffix) = (parts[0], parts[1]);
+        if export_key.starts_with(prefix) && export_key.ends_with(suffix) {
+            let mid = &export_key[prefix.len()..export_key.len() - suffix.len()];
+            // Replace * in target with the matched portion
+            let target_str = target.as_str()?;
+            let replaced = target_str.replace('*', mid);
+            let p = pkg_dir.join(replaced.trim_start_matches("./"));
+            let resolved = resolve_file_path(&p);
+            let result = if resolved.is_file() { resolved } else { p };
+            return Some(Some(result));
+        }
+    }
+    None
+}
+
 /// Resolve a module path relative to `basedir` (or CWD if None).
-pub fn resolve_path_from(path: &str, basedir: Option<&str>) -> PathBuf {
+/// Returns Err with a Node.js-compatible error message when the path cannot be resolved.
+pub fn resolve_path_from(
+    path: &str,
+    basedir: Option<&str>,
+) -> std::result::Result<PathBuf, String> {
+    resolve_path_from_inner(path, basedir, false)
+}
+
+/// Same as `resolve_path_from` but uses ESM condition priority in exports fields
+/// ("import" wins over "require"). Call this from the ESM loader.
+pub fn resolve_path_from_esm(
+    path: &str,
+    basedir: Option<&str>,
+) -> std::result::Result<PathBuf, String> {
+    resolve_path_from_inner(path, basedir, true)
+}
+
+fn resolve_path_from_inner(
+    path: &str,
+    basedir: Option<&str>,
+    is_esm: bool,
+) -> std::result::Result<PathBuf, String> {
     // Strip jsr: specifier prefix — treat as a scoped package in node_modules/
     let path = path.strip_prefix("jsr:").unwrap_or(path);
 
@@ -6014,22 +6488,22 @@ pub fn resolve_path_from(path: &str, basedir: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| cwd.clone());
 
     let raw = if path.starts_with("./") || path.starts_with("../") || path == "." || path == ".." {
-        resolve_file_path(&base_dir.join(path))
+        Ok(resolve_file_path(&base_dir.join(path)))
     } else if path.starts_with('/') || Path::new(path).is_absolute() {
         // `Path::is_absolute` additionally catches Windows absolute paths
         // (`C:/...`, `C:\...`, UNC) that would otherwise be misparsed as a
         // bare specifier with package name "C:".
-        resolve_file_path(&PathBuf::from(path))
+        Ok(resolve_file_path(&PathBuf::from(path)))
     } else {
         // Bare specifier: may have a subpath like 'pkg/subpath' or '@scope/pkg/sub'
         let (pkg_name, subpath) = split_bare_specifier(path);
-        resolve_node_module_from(&base_dir, &cwd, pkg_name, subpath)
-    };
+        resolve_node_module_from(&base_dir, &cwd, pkg_name, subpath, is_esm)
+    }?;
 
     // Normalize to remove redundant `.` and `..` components so that the same
     // file always gets the same cache key regardless of how __dirname accumulated
     // extra `/.` segments during nested require() calls.
-    normalize_path(&raw)
+    Ok(normalize_path(&raw))
 }
 
 /// Canonicalize a resolved module path so that the same file always gets the
@@ -6050,7 +6524,7 @@ fn normalize_path(p: &Path) -> PathBuf {
 }
 
 /// Convenience wrapper using CWD as the base.
-pub fn resolve_path(path: &str) -> PathBuf {
+pub fn resolve_path(path: &str) -> std::result::Result<PathBuf, String> {
     resolve_path_from(path, None)
 }
 
@@ -6061,7 +6535,7 @@ fn resolve_file_path(base: &Path) -> PathBuf {
     }
     // If the path is a directory with a package.json, resolve its entry point
     if base.is_dir() && base.join("package.json").is_file() {
-        let entry = resolve_node_module_entry(base);
+        let entry = resolve_node_module_entry(base, false);
         if entry.is_file() {
             return entry;
         }
@@ -6096,18 +6570,20 @@ fn resolve_file_path(base: &Path) -> PathBuf {
 }
 
 /// Walk up from `start` toward `root` looking for node_modules/<name>.
-/// If `subpath` is Some, resolve that file within the package dir instead of using the entry point.
+/// If `subpath` is Some, resolve that file within the package dir, checking
+/// the exports field when present.
 fn resolve_node_module_from(
     start: &Path,
     root: &Path,
     name: &str,
     subpath: Option<&str>,
-) -> PathBuf {
+    is_esm: bool,
+) -> std::result::Result<PathBuf, String> {
     let mut dir = start.to_path_buf();
     loop {
         let pkg_dir = dir.join("node_modules").join(name);
         if pkg_dir.is_dir() {
-            return resolve_in_pkg_dir(&pkg_dir, subpath);
+            return resolve_in_pkg_dir(&pkg_dir, subpath, is_esm);
         }
         if dir == *root || !dir.pop() {
             break;
@@ -6115,15 +6591,64 @@ fn resolve_node_module_from(
     }
     // Final fallback: root/node_modules/<name>
     let pkg_dir = root.join("node_modules").join(name);
-    resolve_in_pkg_dir(&pkg_dir, subpath)
+    resolve_in_pkg_dir(&pkg_dir, subpath, is_esm)
 }
 
-fn resolve_in_pkg_dir(pkg_dir: &Path, subpath: Option<&str>) -> PathBuf {
+fn resolve_in_pkg_dir(
+    pkg_dir: &Path,
+    subpath: Option<&str>,
+    is_esm: bool,
+) -> std::result::Result<PathBuf, String> {
+    // Read package.json if it exists
+    let pkg_json_content = std::fs::read_to_string(pkg_dir.join("package.json")).ok();
+    let pkg_json =
+        pkg_json_content.and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
+
     if let Some(sub) = subpath {
-        let p = pkg_dir.join(sub);
-        // Check browser field mapping (common in React Native / bundler ecosystem)
-        let pkg_json_path = pkg_dir.join("package.json");
-        if let Ok(content) = std::fs::read_to_string(&pkg_json_path)
+        if let Some(ref json) = pkg_json
+            && let Some(exports) = json.get("exports")
+        {
+            // Normalize: "./subpath" if bare "subpath"
+            let export_key = if sub.starts_with("./") {
+                sub.to_string()
+            } else {
+                format!("./{}", sub)
+            };
+
+            // Try exact match first
+            if let Some(val) = exports.get(&export_key)
+                && let Some(path) = resolve_exports_value(val, pkg_dir, is_esm)
+            {
+                return Ok(path);
+            }
+
+            // Check for null value → explicitly blocked
+            if exports.get(&export_key).is_some_and(|v| v.is_null()) {
+                return Err(format!(
+                    "ERR_PACKAGE_PATH_NOT_EXPORTED: Package \"{}\" contains \"{}\" in its exports but it is null",
+                    pkg_dir.display(),
+                    export_key
+                ));
+            }
+
+            // Try pattern match against keys containing '*'
+            if exports.is_object()
+                && let Some(Some(result)) =
+                    resolve_exports_pattern(exports.as_object().unwrap(), &export_key, pkg_dir)
+            {
+                return Ok(result);
+            }
+
+            // Exports field exists → no fallthrough to main/file resolution
+            return Err(format!(
+                "ERR_PACKAGE_PATH_NOT_EXPORTED: Package \"{}\" does not define an exports entry for \"{}\"",
+                pkg_dir.display(),
+                export_key
+            ));
+        }
+
+        // No exports field — check browser field mapping
+        if let Ok(content) = std::fs::read_to_string(pkg_dir.join("package.json"))
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
             && let Some(browser) = json.get("browser").and_then(|b| b.as_object())
         {
@@ -6138,58 +6663,38 @@ fn resolve_in_pkg_dir(pkg_dir: &Path, subpath: Option<&str>) -> PathBuf {
                         let rp = pkg_dir.join(replacement.trim_start_matches("./"));
                         let resolved = resolve_file_path(&rp);
                         if resolved.is_file() {
-                            return resolved;
+                            return Ok(resolved);
                         }
                     }
                     break;
                 }
             }
         }
-        // First try resolving as a file (with extension probing)
+
+        // No exports field — try file resolution
+        let p = pkg_dir.join(sub);
         let resolved = resolve_file_path(&p);
         if resolved.is_file() {
-            return resolved;
+            return Ok(resolved);
         }
         // If the path is a directory, look for its package.json entry point
         // (common for packages like @swc/helpers/_/_interop_require_default/)
         if p.is_dir() {
-            let entry = resolve_node_module_entry(&p);
+            let entry = resolve_node_module_entry(&p, is_esm);
             if entry.is_file() {
-                return entry;
+                return Ok(entry);
             }
         }
-        p
+        Ok(p)
     } else {
-        let resolved = resolve_node_module_entry(pkg_dir);
-        if resolved.is_file() {
-            return resolved;
-        }
-        pkg_dir.to_path_buf()
-    }
-}
-
-/// Extract the CJS-compatible path from a package exports value.
-/// Walks nested objects preferring "require" and "default" conditions.
-/// Falls back to "import"/"module" so ESM-only packages still resolve via CJS require().
-fn exports_cjs_path(val: &serde_json::Value) -> Option<&str> {
-    match val {
-        serde_json::Value::String(s) => Some(s.as_str()),
-        serde_json::Value::Object(_) => {
-            for key in &["require", "node", "default", "import", "module"] {
-                if let Some(child) = val.get(key)
-                    && let Some(path) = exports_cjs_path(child)
-                {
-                    return Some(path);
-                }
-            }
-            None
-        }
-        _ => None,
+        // No subpath — resolve entry point
+        Ok(resolve_node_module_entry(pkg_dir, is_esm))
     }
 }
 
 /// Given an already-located package directory, find its entry point.
-fn resolve_node_module_entry(pkg_dir: &Path) -> PathBuf {
+/// `is_esm` selects export condition priority (import > require for ESM).
+fn resolve_node_module_entry(pkg_dir: &Path, is_esm: bool) -> PathBuf {
     let pkg_json_path = pkg_dir.join("package.json");
     if let Ok(content) = std::fs::read_to_string(&pkg_json_path)
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
@@ -6205,24 +6710,18 @@ fn resolve_node_module_entry(pkg_dir: &Path) -> PathBuf {
             }
             // Standard form: exports["."] is the entry condition map
             if let Some(exp_dot) = exports.get(".")
-                && let Some(path_str) = exports_cjs_path(exp_dot)
+                && let Some(p) = resolve_exports_value(exp_dot, pkg_dir, is_esm)
+                && p.is_file()
             {
-                let p = pkg_dir.join(path_str.trim_start_matches("./"));
-                let resolved = resolve_file_path(&p);
-                if resolved.is_file() {
-                    return resolved;
-                }
+                return p;
             }
             // Shorthand form: exports itself IS the condition map (no "." key)
             if exports.is_object()
                 && !exports.as_object().is_some_and(|m| m.contains_key("."))
-                && let Some(path_str) = exports_cjs_path(exports)
+                && let Some(p) = resolve_exports_value(exports, pkg_dir, is_esm)
+                && p.is_file()
             {
-                let p = pkg_dir.join(path_str.trim_start_matches("./"));
-                let resolved = resolve_file_path(&p);
-                if resolved.is_file() {
-                    return resolved;
-                }
+                return p;
             }
         }
         // react-native field: platform-specific entry point override
@@ -6264,4 +6763,85 @@ fn resolve_node_module_entry(pkg_dir: &Path) -> PathBuf {
         return idx_ts;
     }
     pkg_dir.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_exports_value;
+    use serde_json::json;
+    use std::path::Path;
+
+    // ── Bug 2: resolve_exports_value condition priority ───────────────────────
+
+    #[test]
+    fn cjs_mode_prefers_require_over_import() {
+        let val = json!({ "require": "./cjs.js", "import": "./esm.js" });
+        let p = resolve_exports_value(&val, Path::new("/pkg"), false).unwrap();
+        assert!(p.to_string_lossy().ends_with("cjs.js"), "got {:?}", p);
+    }
+
+    #[test]
+    fn esm_mode_prefers_import_over_require() {
+        let val = json!({ "require": "./cjs.js", "import": "./esm.js" });
+        let p = resolve_exports_value(&val, Path::new("/pkg"), true).unwrap();
+        assert!(p.to_string_lossy().ends_with("esm.js"), "got {:?}", p);
+    }
+
+    #[test]
+    fn null_export_returns_none_in_both_modes() {
+        let val = serde_json::Value::Null;
+        assert!(resolve_exports_value(&val, Path::new("/pkg"), false).is_none());
+        assert!(resolve_exports_value(&val, Path::new("/pkg"), true).is_none());
+    }
+
+    #[test]
+    fn string_export_resolves_in_both_modes() {
+        let val = json!("./dist/index.js");
+        let cjs = resolve_exports_value(&val, Path::new("/pkg"), false).unwrap();
+        let esm = resolve_exports_value(&val, Path::new("/pkg"), true).unwrap();
+        assert_eq!(cjs, esm);
+        assert!(cjs.to_string_lossy().ends_with("index.js"));
+    }
+
+    #[test]
+    fn fallback_array_tries_in_order() {
+        // Array: first non-null string wins regardless of mode.
+        let val = json!(["./a.js", "./b.js"]);
+        let p = resolve_exports_value(&val, Path::new("/pkg"), false).unwrap();
+        assert!(p.to_string_lossy().ends_with("a.js"), "got {:?}", p);
+    }
+
+    #[test]
+    fn default_condition_used_when_no_specific_match() {
+        let val = json!({ "default": "./fallback.js" });
+        let cjs = resolve_exports_value(&val, Path::new("/pkg"), false).unwrap();
+        let esm = resolve_exports_value(&val, Path::new("/pkg"), true).unwrap();
+        assert!(cjs.to_string_lossy().ends_with("fallback.js"));
+        assert!(esm.to_string_lossy().ends_with("fallback.js"));
+    }
+
+    #[test]
+    fn node_condition_beats_default_in_both_modes() {
+        let val = json!({ "node": "./node.js", "default": "./default.js" });
+        let cjs = resolve_exports_value(&val, Path::new("/pkg"), false).unwrap();
+        let esm = resolve_exports_value(&val, Path::new("/pkg"), true).unwrap();
+        assert!(
+            cjs.to_string_lossy().ends_with("node.js"),
+            "cjs got {:?}",
+            cjs
+        );
+        assert!(
+            esm.to_string_lossy().ends_with("node.js"),
+            "esm got {:?}",
+            esm
+        );
+    }
+
+    #[test]
+    fn nested_conditions_resolved_recursively() {
+        // "import" → { "node": "./esm-node.js" } — should resolve the nested object.
+        let val = json!({ "import": { "node": "./esm-node.js" }, "require": "./cjs.js" });
+        let p = resolve_exports_value(&val, Path::new("/pkg"), true).unwrap();
+        assert!(p.to_string_lossy().ends_with("esm-node.js"), "got {:?}", p);
+    }
 }

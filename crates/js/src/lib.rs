@@ -373,7 +373,12 @@ impl JsEngine {
                        globalThis.__vvva_meta_glob__ = function() {{ return {{}}; }};\
                      if (globalThis.process && Array.isArray(globalThis.process.argv) \
                      && globalThis.process.argv.length < 2) \
-                     {{ globalThis.process.argv.push('{f}'); }}",
+                     {{ globalThis.process.argv.push('{f}'); }}\
+                     if (typeof globalThis.require !== 'undefined') \
+                       globalThis.require.main = {{ \
+                         id: '.', filename: '{f}', loaded: true, \
+                         exports: {{}}, parent: null, children: [], paths: [] \
+                       }};",
                     f = f, d = d, u = u,
                 );
                 ctx.eval::<(), _>(setup.as_str())
@@ -403,7 +408,10 @@ impl JsEngine {
         // Track whether idle() had pending async work (e.g. HTTP server accept loop).
         // When true the loop keeps running even if no JS timers are pending, so that
         // server-side async tasks can complete (and schedule new timers via callbacks).
-        let mut has_pending_async = false;
+        // Start as true so the loop always runs at least one iteration — JS Promises
+        // created during synchronous module evaluation (e.g. unawaited bootstrap())
+        // are not tracked as pending Rust tasks but still need idle() to drain them.
+        let mut has_pending_async = true;
 
         while (self.timer_manager.has_pending()
             || self.runtime_core.lock().unwrap().pending_task_count() > 0

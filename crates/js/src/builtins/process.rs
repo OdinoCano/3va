@@ -551,19 +551,26 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         })?,
     )?;
 
-    // cwd(): return the process working directory
-    let cwd_str = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-        .to_string_lossy()
-        .to_string();
-    let cwd_str_clone = cwd_str.clone();
+    // cwd(): return the process working directory (dynamic, reflects chdir)
     process.set(
         "cwd",
-        Function::new(ctx.clone(), move || cwd_str_clone.clone())?,
+        Function::new(ctx.clone(), || {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+                .to_string_lossy()
+                .to_string()
+        })?,
     )?;
 
-    // chdir(): no-op stub — sandboxed runtime doesn't change working dir
-    process.set("chdir", Function::new(ctx.clone(), |_: Rest<String>| {})?)?;
+    // chdir(): actually change the working directory
+    process.set(
+        "chdir",
+        Function::new(ctx.clone(), |path: String| -> rquickjs::Result<()> {
+            std::env::set_current_dir(&path).map_err(|e| {
+                rquickjs::Error::new_from_js_message("chdir", "string", &format!("ENOENT: {e}"))
+            })
+        })?,
+    )?;
 
     // Native write helpers for stdout/stderr (used by JS Writable streams)
     globals.set(
@@ -653,12 +660,23 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             };
             process.hrtime.bigint = function() { return BigInt(Date.now()) * BigInt(1000000); };
 
-            // nextTick: drained by __drainNextTick() called from the Rust event loop
-            // BEFORE Promise microtasks, matching Node.js semantics.
+            // nextTick: use Promise.resolve().then() so callbacks run as microtasks,
+            // BEFORE timers and I/O — matching Node.js semantics.
+            // A sentinel setTimeout(noop, 0) keeps the event loop alive while nextTick
+            // callbacks are pending (since microtasks alone don't satisfy has_pending()).
             var _nextTickQueue = [];
+            var _nextTickKeepalive = false;
             process.nextTick = function(cb) {
                 if (typeof cb !== 'function') throw new TypeError('callback is not a function');
-                _nextTickQueue.push({ fn: cb, args: Array.prototype.slice.call(arguments, 1) });
+                var args = Array.prototype.slice.call(arguments, 1);
+                _nextTickQueue.push({ fn: cb, args: args });
+                if (!_nextTickKeepalive) {
+                    _nextTickKeepalive = true;
+                    // keepalive timer so the event loop doesn't exit before microtasks drain
+                    var tid = setTimeout(function() { _nextTickKeepalive = false; }, 0);
+                }
+                // Schedule drain as a microtask (runs before timers and I/O)
+                Promise.resolve().then(function() { globalThis.__drainNextTick(); });
             };
             globalThis.__drainNextTick = function() {
                 if (_nextTickQueue.length === 0) return;
@@ -666,34 +684,34 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 for (var i = 0; i < queue.length; i++) {
                     try { queue[i].fn.apply(null, queue[i].args); } catch(e) {}
                 }
-                // Drain any nested nextTick calls made during the drain
                 if (_nextTickQueue.length > 0) globalThis.__drainNextTick();
             };
 
-            // setImmediate / clearImmediate — real queue drained by __drainImmediate
-            // in the Rust event loop, NOT via setTimeout(0).
-            // Unconditionally override any previous timer-based setImmediate.
-            var _immediateQueue = [];
+            // setImmediate / clearImmediate — backed by setTimeout(fn, 0) so the
+            // timer manager tracks it and the event loop continues to run.
+            var _immediateMap = {};
             var _immediateId = 0;
             globalThis.setImmediate = function(cb) {
                 if (typeof cb !== 'function') throw new TypeError('callback is not a function');
                 var args = Array.prototype.slice.call(arguments, 1);
                 var id = ++_immediateId;
-                _immediateQueue.push({ id: id, fn: cb, args: args });
+                var timerId = setTimeout(function() {
+                    if (_immediateMap[id]) {
+                        delete _immediateMap[id];
+                        cb.apply(null, args);
+                    }
+                }, 0);
+                _immediateMap[id] = timerId;
                 return id;
             };
             globalThis.clearImmediate = function(id) {
-                _immediateQueue = _immediateQueue.filter(function(item) { return item.id !== id; });
-            };
-            globalThis.__drainImmediate = function() {
-                if (_immediateQueue.length === 0) return;
-                var queue = _immediateQueue.splice(0);
-                for (var i = 0; i < queue.length; i++) {
-                    try { queue[i].fn.apply(null, queue[i].args); } catch(e) {}
+                if (_immediateMap[id]) {
+                    clearTimeout(_immediateMap[id]);
+                    delete _immediateMap[id];
                 }
-                // Drain any nested setImmediate calls
-                if (_immediateQueue.length > 0) globalThis.__drainImmediate();
             };
+            // Keep drain stubs for backward compat (Rust event loop calls these)
+            globalThis.__drainImmediate = function() {};
 
             // EventEmitter-style signal handling on process
             var _sigListeners = {};
@@ -832,6 +850,10 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 if (mod && typeof mod === 'object') {
                     mod.exports = exports || {};
                 }
+            };
+            // process.getBuiltinModule — Node 22+ API to load built-in modules
+            process.getBuiltinModule = function(name) {
+                try { return globalThis.require(name); } catch(e) { return undefined; }
             };
         }());"#,
     )?;

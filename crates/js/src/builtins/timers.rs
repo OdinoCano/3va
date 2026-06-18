@@ -189,11 +189,12 @@ pub fn inject_timers(ctx: &Ctx, manager: Arc<TimerManager>) -> Result<()> {
             globalThis.__timerNextId = (globalThis.__timerNextId || 0) + 1;
             var id = globalThis.__timerNextId;
             globalThis.__timerCallbacks[id] = fn;
-            __nativeSetTimeout(id, ms || 0);
+            __nativeSetTimeout(id, Math.floor(+ms) || 0);
             return id;
         };
 
         globalThis.clearTimeout = function(id) {
+            if (id == null) return;
             delete globalThis.__timerCallbacks[id];
             __nativeClearTimer(id);
         };
@@ -201,7 +202,7 @@ pub fn inject_timers(ctx: &Ctx, manager: Arc<TimerManager>) -> Result<()> {
         globalThis.setInterval = function(fn, ms) {
             globalThis.__timerNextId = (globalThis.__timerNextId || 0) + 1;
             var id = globalThis.__timerNextId;
-            var intervalMs = ms || 0;
+            var intervalMs = Math.floor(+ms) || 0;
             var wrapper = function() {
                 fn();
                 // Re-register callback for next interval tick
@@ -213,6 +214,7 @@ pub fn inject_timers(ctx: &Ctx, manager: Arc<TimerManager>) -> Result<()> {
         };
 
         globalThis.clearInterval = function(id) {
+            if (id == null) return;
             delete globalThis.__timerCallbacks[id];
             __nativeClearTimer(id);
         };

@@ -56,6 +56,10 @@ name = "http_server"
 path = "tests/http_server.rs"
 
 [[test]]
+name = "module_resolution_fixes"
+path = "tests/module_resolution_fixes.rs"
+
+[[test]]
 name = "framework_compat"
 path = "tests/framework_compat.rs"
 
