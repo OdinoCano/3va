@@ -5945,7 +5945,15 @@ if (typeof globalThis.Platform === 'undefined') {
     var _origRequire = globalThis.require;
     globalThis.require = function(path) {
         var dirname = globalThis.__dirname || '.';
-        var resolvedPath = origResolve(path, dirname);
+        var resolvedPath;
+        try {
+            resolvedPath = origResolve(path, dirname);
+        } catch (e) {
+            // Resolver may fail for bare specifiers like 'zlib' or 'child_process'
+            // that are actually built-in modules in the require cache.
+            // Fall back to the original require, which checks the cache first.
+            return _origRequire(path);
+        }
 
         if (isAssetExt(resolvedPath)) {
             var id = assetMap[resolvedPath];
