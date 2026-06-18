@@ -441,6 +441,9 @@ fn do_aes_gcm_encrypt(
     if key.len() != key_len {
         anyhow::bail!("AES-GCM key must be {} bytes, got {}", key_len, key.len());
     }
+    if iv.len() != 12 {
+        anyhow::bail!("AES-GCM IV must be 12 bytes, got {}", iv.len());
+    }
     let nonce = Nonce::from_slice(&iv);
     let payload = Payload {
         msg: &plaintext,
@@ -473,6 +476,9 @@ fn do_aes_gcm_decrypt(
 ) -> anyhow::Result<Vec<u8>> {
     if key.len() != key_len {
         anyhow::bail!("AES-GCM key must be {} bytes, got {}", key_len, key.len());
+    }
+    if iv.len() != 12 {
+        anyhow::bail!("AES-GCM IV must be 12 bytes, got {}", iv.len());
     }
     let nonce = Nonce::from_slice(&iv);
     let payload = Payload {
@@ -1101,61 +1107,61 @@ pub fn inject_crypto(ctx: &Ctx) -> Result<()> {
         },
 
         // ── Key objects ──────────────────────────────────────────────────────
-        // createPrivateKey / createPublicKey / createSecretKey return KeyObject-like
-        // objects. These wrap a PEM/Buffer/string and expose .type, .asymmetricKeyType,
-        // and .export(). The asymmetricKeyType is inferred from the PEM header:
-        //   RSA: "rsa"   EC P-256/P-384: "ec"   symmetric: "secret"
+        // KeyObject class — needed so `instanceof KeyObject` works for jsonwebtoken
+        // and other libraries that guard against raw string/buffer secrets.
+        KeyObject: (function() {
+            function KeyObject(type, props) {
+                this.type = type;
+                for (var k in props) if (props.hasOwnProperty(k)) this[k] = props[k];
+            }
+            KeyObject.prototype.toString = function() { return this._pem || '[KeyObject]'; };
+            return KeyObject;
+        })(),
 
         createPrivateKey: function(key) {
-            var pem = typeof key === 'string' ? key : (key && key.key ? key.key : (key && typeof key.toString === 'function' ? key.toString() : String(key)));
+            var pem = typeof key === 'string' ? key : (key && key.key ? key.key : (key instanceof Uint8Array ? new TextDecoder().decode(key) : (key && typeof key.toString === 'function' ? key.toString() : String(key))));
+            if (pem.indexOf('-----BEGIN') === -1) throw new Error('Invalid key: must be PEM-encoded');
             var kt = pem.indexOf('EC PRIVATE') !== -1 ? 'ec' : 'rsa';
-            // Detect EC curve from PEM OID heuristics
             var curve = pem.indexOf('P-384') !== -1 || pem.indexOf('secp384r1') !== -1 ? 'P-384' : 'P-256';
-            return {
-                type: 'private', asymmetricKeyType: kt, _pem: pem, _curve: curve,
-                export: function(opts) {
-                    if (!opts || opts.format === 'pem') return pem;
-                    // DER export: strip PEM armor and decode base64
-                    var b64 = pem.replace(/-----[^-]+-----/g,'').replace(/\s/g,'');
-                    var bin = atob(b64), bytes = new Uint8Array(bin.length);
-                    for (var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
-                    return bytes;
-                },
-                toString: function() { return pem; }
+            var obj = new crypto.KeyObject('private', { asymmetricKeyType: kt, _pem: pem, _curve: curve });
+            obj.export = function(opts) {
+                if (!opts || opts.format === 'pem') return pem;
+                var b64 = pem.replace(/-----[^-]+-----/g,'').replace(/\s/g,'');
+                var bin = atob(b64), bytes = new Uint8Array(bin.length);
+                for (var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+                return bytes;
             };
+            return obj;
         },
 
         createPublicKey: function(key) {
             var pem;
-            if (typeof key === 'string') {
-                pem = key;
-            } else if (key && key.type === 'private') {
-                // extracting public from private is complex without native; return stub
+            if (key && key.type === 'private') {
                 pem = key._pem;
+            } else if (typeof key === 'string') {
+                pem = key;
             } else {
                 pem = key && typeof key.toString === 'function' ? key.toString() : String(key);
             }
+            if (pem.indexOf('-----BEGIN') === -1) throw new Error('Invalid key: must be PEM-encoded');
             var kt = pem.indexOf('EC') !== -1 || pem.indexOf('BEGIN PUBLIC KEY') !== -1 ? 'rsa' : 'rsa';
             var curve = pem.indexOf('P-384') !== -1 || pem.indexOf('secp384r1') !== -1 ? 'P-384' : 'P-256';
-            return {
-                type: 'public', asymmetricKeyType: kt, _pem: pem, _curve: curve,
-                export: function(opts) {
-                    if (!opts || opts.format === 'pem') return pem;
-                    var b64 = pem.replace(/-----[^-]+-----/g,'').replace(/\s/g,'');
-                    var bin = atob(b64), bytes = new Uint8Array(bin.length);
-                    for (var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
-                    return bytes;
-                },
-                toString: function() { return pem; }
+            var obj = new crypto.KeyObject('public', { asymmetricKeyType: kt, _pem: pem, _curve: curve });
+            obj.export = function(opts) {
+                if (!opts || opts.format === 'pem') return pem;
+                var b64 = pem.replace(/-----[^-]+-----/g,'').replace(/\s/g,'');
+                var bin = atob(b64), bytes = new Uint8Array(bin.length);
+                for (var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+                return bytes;
             };
+            return obj;
         },
 
         createSecretKey: function(key, encoding) {
             var bytes = key instanceof Uint8Array ? key : toBytes(key);
-            return {
-                type: 'secret', symmetricKeySize: bytes.length, _raw: bytes,
-                export: function() { return new Uint8Array(bytes); }
-            };
+            var obj = new crypto.KeyObject('secret', { symmetricKeySize: bytes.length, _raw: bytes });
+            obj.export = function() { return new Uint8Array(bytes); };
+            return obj;
         },
 
         // ── Sign / Verify — RSA PKCS1v15 + ECDSA ────────────────────────────
