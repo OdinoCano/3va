@@ -3558,7 +3558,15 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
     // JS-level require() implementation
     // This avoids rquickjs Value<'js> lifetime issues by keeping all evaluation in JS.
     ctx.eval::<(), _>(r#"
-        globalThis.require = function(path) {
+        // Save a private ref so moduleRequire can bypass third-party polyfills
+        // that overwrite globalThis.require (e.g. Metro/React Native asset loader).
+        var __vvva_require;
+
+        globalThis.require = __vvva_require = function(path) {
+            // Defensive: if __vvva_require was somehow clobbered, re-bind.
+            if (__vvva_require !== globalThis.require) {
+                globalThis.require = __vvva_require;
+            }
             // Strip node: prefix for built-in module resolution
             if (path.indexOf('node:') === 0) {
                 var bare = path.slice(5);
@@ -3595,9 +3603,12 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 throw resolveErr;
             }
 
-            // Check cache by resolved path
+            // Check cache by resolved path.
+            // If the cached value is a module wrapper, return its live `.exports`.
             if (globalThis.__requireCache[resolvedPath] !== undefined) {
-                return globalThis.__requireCache[resolvedPath];
+                var _cached = globalThis.__requireCache[resolvedPath];
+                if (_cached && _cached.__vvva_cjs_module) return _cached.exports;
+                return _cached;
             }
 
             // Read and (if needed) transpile the file (path is already absolute)
@@ -3660,10 +3671,17 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__filename = filename;
             globalThis.__dirname = dirname;
 
-            // Pre-cache the (initially empty) exports object so circular requires
-            // get the partial object instead of triggering infinite re-execution.
-            // Node.js does the same thing.
-            globalThis.__requireCache[resolvedPath] = globalThis.module.exports;
+            // Pre-cache a module wrapper with a live getter so circular requires
+            // see the current module.exports even after reassignment.
+            // Mongoose error classes rely on this: `class Foo extends require('./')`
+            // must get the class, not the initial `{}`.
+            (function(_mod) {
+                globalThis.__requireCache[resolvedPath] = {
+                    __vvva_cjs_module: true,
+                    get exports() { return _mod.exports; },
+                    set exports(v) { _mod.exports = v; }
+                };
+            })(globalThis.module);
 
             // Create a module-scoped require that captures this module's dirname.
             // This is critical for lazy getters and callbacks that call require()
@@ -3673,7 +3691,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 function mr(path) {
                     var saved = globalThis.__dirname;
                     globalThis.__dirname = capturedDir;
-                    try { return globalThis.require(path); }
+                    try { return __vvva_require(path); }
                     finally { globalThis.__dirname = saved; }
                 }
                 mr.resolve = function(path, options) {
@@ -3760,8 +3778,8 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.__filename = savedFilename;
             globalThis.__dirname = savedDirname;
 
-            // Cache the result
-            globalThis.__requireCache[resolvedPath] = result;
+            // The module wrapper is already in the cache with a live getter.
+            // No need to re-wrap — the getter already returns the current exports.
 
             return result;
         };
@@ -6506,21 +6524,26 @@ fn resolve_path_from_inner(
     Ok(normalize_path(&raw))
 }
 
-/// Canonicalize a resolved module path so that the same file always gets the
-/// same cache key, even when `__dirname` has accumulated redundant `/.`
-/// segments during nested require() calls.
-///
-/// Only applies to paths that actually exist as files — for unresolved/error
-/// paths (directories, missing files) we return the path unchanged so that
-/// the caller fails with a clear ENOENT rather than silently resolving a
-/// `../../..` sequence to an existing directory and then failing with EISDIR.
+/// Normalize a resolved module path by collapsing `.` and `..` components
+/// WITHOUT following symlinks (matching Node.js behaviour: symlinks in
+/// node_modules are kept as-is so that package deduplication / hoisting works
+/// correctly — resolving them would make every package see its own nested
+/// copy of shared deps instead of the hoisted top-level copy).
 fn normalize_path(p: &Path) -> PathBuf {
-    if p.is_file()
-        && let Ok(canon) = std::fs::canonicalize(p)
-    {
-        return canon;
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
     }
-    p.to_path_buf()
+    // If the file doesn't exist we still return the normalized path so the
+    // caller can emit a clear ENOENT rather than silently succeeding.
+    out
 }
 
 /// Convenience wrapper using CWD as the base.
@@ -6580,10 +6603,16 @@ fn resolve_node_module_from(
     is_esm: bool,
 ) -> std::result::Result<PathBuf, String> {
     let mut dir = start.to_path_buf();
+    let mut visited = std::collections::HashSet::new();
     loop {
         let pkg_dir = dir.join("node_modules").join(name);
-        if pkg_dir.is_dir() {
-            return resolve_in_pkg_dir(&pkg_dir, subpath, is_esm);
+        if pkg_dir.is_dir() && visited.insert(pkg_dir.clone()) {
+            match resolve_in_pkg_dir(&pkg_dir, subpath, is_esm) {
+                Ok(p) if p.is_file() => return Ok(p),
+                // Empty/broken package directory — skip it and continue walking up.
+                // Prevents EISDIR errors from stale nested node_modules dirs.
+                _ => {}
+            }
         }
         if dir == *root || !dir.pop() {
             break;
@@ -6591,7 +6620,14 @@ fn resolve_node_module_from(
     }
     // Final fallback: root/node_modules/<name>
     let pkg_dir = root.join("node_modules").join(name);
-    resolve_in_pkg_dir(&pkg_dir, subpath, is_esm)
+    match resolve_in_pkg_dir(&pkg_dir, subpath, is_esm) {
+        Ok(p) if p.is_file() => Ok(p),
+        Ok(_) => Err(format!(
+            "ENOENT: Package directory '{}' exists but has no valid entry file",
+            pkg_dir.display()
+        )),
+        Err(e) => Err(e),
+    }
 }
 
 fn resolve_in_pkg_dir(
