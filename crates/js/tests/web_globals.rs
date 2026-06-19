@@ -1,5 +1,6 @@
 // Tests for Web API globals injected in crates/js/src/builtins/modules.rs:
-// AbortController/AbortSignal, Blob/File, FormData, ReadableStream/WritableStream/TransformStream.
+// AbortController/AbortSignal, Blob/File, FormData, ReadableStream/WritableStream/TransformStream,
+// sessionStorage, localStorage, URLPattern, EventSource.
 //
 // Run: cargo test -p vvva_js --test web_globals
 
