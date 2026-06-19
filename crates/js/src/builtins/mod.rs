@@ -3,6 +3,7 @@ pub mod child_process;
 pub mod console;
 pub mod crypto;
 pub mod dgram;
+pub mod event_source;
 pub mod fetch;
 pub mod ffi;
 pub mod fs;
@@ -10,6 +11,7 @@ pub mod http_server;
 pub mod modules;
 pub mod napi;
 pub mod process;
+pub mod sqlite;
 pub mod tcp;
 pub mod timers;
 pub mod websocket;
@@ -97,5 +99,7 @@ pub fn inject_all(
     worker_threads::inject_worker_threads_native(ctx, permissions.clone())?;
     // dgram (UDP) — after inject_require so it populates __requireCache['dgram'].
     dgram::inject_dgram(ctx, permissions)?;
+    sqlite::inject_sqlite(ctx)?;
+    event_source::inject_event_source(ctx)?;
     Ok(())
 }

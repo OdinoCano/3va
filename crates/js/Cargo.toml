@@ -123,6 +123,7 @@ vvva_firewall = { version = "2.0.3", path = "../firewall" }
 vvva_permissions = { version = "2.0.3", path = "../permissions" }
 hex = "0.4"
 base64.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
 tungstenite.workspace = true
@@ -141,6 +142,7 @@ p384 = { workspace = true }
 md-5 = { workspace = true }
 notify = { workspace = true }
 inferno = { workspace = true }
+rusqlite = { workspace = true }
 
 libloading = "0.8"
 libffi = "3.2"
