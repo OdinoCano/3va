@@ -1,6 +1,6 @@
 [package]
 name = "vvva_js"
-version = "2.0.3"
+version = "2.0.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "QuickJS-based JavaScript/TypeScript engine for the 3va runtime — ESM, TypeScript, async/await, NAPI, CDP inspector, profiler"
@@ -13,7 +13,7 @@ categories = ["api-bindings"]
 tempfile.workspace = true
 tungstenite = { workspace = true }
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
-vvva_firewall = { version = "2.0.3", path = "../firewall" }
+vvva_firewall = { version = "2.0.4", path = "../firewall" }
 
 [[test]]
 name = "fs_watch"
@@ -111,6 +111,10 @@ path = "tests/compat_priority.rs"
 name = "web_compat"
 path = "tests/web_compat.rs"
 
+[[test]]
+name = "sqlite_module"
+path = "tests/sqlite_module.rs"
+
 [dependencies]
 rquickjs.workspace = true
 rquickjs-sys = { version = "0.6.4", package = "vvva-rquickjs-sys", path = "../../vendor/rquickjs-sys" }
@@ -121,10 +125,10 @@ hmac = { workspace = true }
 rand = { workspace = true }
 pbkdf2 = { workspace = true }
 scrypt = { workspace = true }
-vvva_core = { version = "2.0.3", path = "../core" }
-vvva_crypto = { version = "2.0.3", path = "../crypto" }
-vvva_firewall = { version = "2.0.3", path = "../firewall" }
-vvva_permissions = { version = "2.0.3", path = "../permissions" }
+vvva_core = { version = "2.0.4", path = "../core" }
+vvva_crypto = { version = "2.0.4", path = "../crypto" }
+vvva_firewall = { version = "2.0.4", path = "../firewall" }
+vvva_permissions = { version = "2.0.4", path = "../permissions" }
 hex = "0.4"
 base64.workspace = true
 serde.workspace = true

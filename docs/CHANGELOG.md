@@ -5,6 +5,58 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [2.0.4] — 2026-06-19
+
+### Added
+
+- **`localStorage` / `sessionStorage`** — Web Storage API globals. `sessionStorage` is in-memory only.
+  `localStorage` is backed by `~/.local/share/3va/localStorage.json` (persisted across runs, path
+  overridable via `3VA_LOCALSTORAGE_PATH`). Both follow the standard `getItem`/`setItem`/`removeItem`/
+  `clear`/`key`/`length` API. (`crates/js/src/builtins/modules.rs`, `crates/js/src/builtins/process.rs`)
+
+- **`URLPattern`** — Web URL Pattern API global. Supports `:param` named groups, `*` wildcards, and
+  `{optional}?` segments. `test(url)` returns boolean; `exec(url)` returns matched groups per URL
+  component. Accepts full URL strings, relative pathnames, and `URLPatternInit` objects.
+  (`crates/js/src/builtins/modules.rs`)
+
+- **`EventSource` (Server-Sent Events)** — Real SSE client backed by a Rust background thread.
+  Connects to any HTTP SSE endpoint, dispatches `message`, `open`, `error`, and custom event types.
+  Supports `onmessage`, `onerror`, `onopen`, `addEventListener`, and `close()`.
+  (`crates/js/src/builtins/event_source.rs`)
+
+- **`node:sqlite`** — Built-in SQLite via `rusqlite` (SQLite compiled into the binary, no system
+  dependency). `new DatabaseSync(path)` opens a connection; `db.exec(sql)`, `db.prepare(sql)` →
+  `StatementSync` with `.run(params)`, `.get(params)`, `.all(params)`. Matches Node 22.5+ API.
+  (`crates/js/src/builtins/sqlite.rs`)
+
+- **`3va watch <file>`** — New CLI command. Runs a file and restarts it on source changes using the
+  `notify` crate. Accepts `--allow-read/net/write/env` and `--delay` (debounce ms, default 300).
+  (`crates/cli/src/main.rs`)
+
+- **`fs.cp()` / `fs.cpSync()`** — Recursive directory copy. (`crates/js/src/builtins/fs.rs`)
+
+- **`EventEmitter.once` / `EventEmitter.on` static** — Node 11.13+/12.16+ static helpers:
+  `EventEmitter.once(emitter, event)` → Promise; `EventEmitter.on(emitter, event)` → AsyncIterator.
+
+- **`http.globalAgent` / `https.globalAgent`** — Stub matching Node.js API shape.
+
+- **`process.resourceUsage()`** — Returns `userCPUTime`, `systemCPUTime`, `maxRSS`, and counters.
+
+- **Real brotli compression** — `zlib.brotliCompress/Decompress` now use the `brotli` crate instead
+  of the previous gzip alias.
+
+### Fixed
+
+- **`URLPattern` matching** — Three bugs corrected: non-specified URL parts defaulted to `/^$/`
+  (never matched) instead of `*`; relative strings in `exec()` threw instead of matching pathname;
+  full-URL string `init` was parsed as pathname-only. Functional test suite added and registered.
+
+### Dependencies
+
+- `brotli = "7"`, `rusqlite = { version = "0.32", features = ["bundled"] }` added to workspace.
+
+---
+
 ## [2.0.3] — 2026-06-19
 
 ### Added
