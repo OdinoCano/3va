@@ -1,3 +1,4 @@
+use brotli::enc::BrotliEncoderParams;
 use flate2::Compression;
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
@@ -41,6 +42,18 @@ fn raw_deflate_decompress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     let mut dec = DeflateDecoder::new(&data[..]);
     let mut out = Vec::new();
     dec.read_to_end(&mut out)?;
+    Ok(out)
+}
+
+fn brotli_compress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    brotli::BrotliCompress(&mut &data[..], &mut out, &BrotliEncoderParams::default())?;
+    Ok(out)
+}
+
+fn brotli_decompress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    brotli::BrotliDecompress(&mut &data[..], &mut out)?;
     Ok(out)
 }
 
@@ -93,6 +106,11 @@ pub fn inject_zlib(ctx: &Ctx) -> Result<()> {
     inject_sync_fn(ctx, "__zlibRawDeflateSync", raw_deflate_compress)?;
     inject_sync_fn(ctx, "__zlibRawInflateSync", raw_deflate_decompress)?;
 
+    inject_async_fn!(ctx, "__zlibBrotliCompress", brotli_compress);
+    inject_async_fn!(ctx, "__zlibBrotliDecompress", brotli_decompress);
+    inject_sync_fn(ctx, "__zlibBrotliCompressSync", brotli_compress)?;
+    inject_sync_fn(ctx, "__zlibBrotliDecompressSync", brotli_decompress)?;
+
     // JS wrapper: replaces the stub in modules.rs
     ctx.eval::<(), _>(
         r#"
@@ -138,10 +156,10 @@ pub fn inject_zlib(ctx: &Ctx) -> Result<()> {
                 inflateSync:    function(buf) { return Buffer.from(__zlibInflateSync(Array.from(bufToUint8(buf)))); },
                 deflateRawSync: function(buf) { return Buffer.from(__zlibRawDeflateSync(Array.from(bufToUint8(buf)))); },
                 inflateRawSync: function(buf) { return Buffer.from(__zlibRawInflateSync(Array.from(bufToUint8(buf)))); },
-                brotliCompress:     makeCallback(__zlibGzip, 'brotliCompress'),
-                brotliDecompress:   makeCallback(__zlibGunzip, 'brotliDecompress'),
-                brotliCompressSync: function(buf) { return Buffer.from(__zlibGzipSync(Array.from(bufToUint8(buf)))); },
-                brotliDecompressSync: function(buf) { return Buffer.from(__zlibGunzipSync(Array.from(bufToUint8(buf)))); },
+                brotliCompress:     makeCallback(__zlibBrotliCompress, 'brotliCompress'),
+                brotliDecompress:   makeCallback(__zlibBrotliDecompress, 'brotliDecompress'),
+                brotliCompressSync: function(buf) { return Buffer.from(__zlibBrotliCompressSync(Array.from(bufToUint8(buf)))); },
+                brotliDecompressSync: function(buf) { return Buffer.from(__zlibBrotliDecompressSync(Array.from(bufToUint8(buf)))); },
 
                 createGzip:    function(opts) { return zlib._makeTransform(__zlibGzip,      __zlibGunzip,      opts); },
                 createGunzip:  function(opts) { return zlib._makeTransform(__zlibGunzip,    __zlibGzip,        opts); },

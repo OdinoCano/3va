@@ -51,11 +51,80 @@ async fn zlib_gzip_gunzip_roundtrip() {
                 globalThis.__result = s;
             });
         });
-        "#,
+    "#,
         "__result",
     )
     .await;
     assert_eq!(r, "Hello");
+}
+
+// ── brotliCompress / brotliDecompress ─────────────────────────────────────────
+
+#[tokio::test]
+async fn zlib_brotli_roundtrip() {
+    let e = engine().await;
+    let r = eval_async(
+        &e,
+        r#"
+        var z = require('zlib');
+        globalThis.__result = undefined;
+        var input = [66, 114, 111, 116, 108, 105]; // "Brotli"
+        z.brotliCompress(input, function(err, compressed) {
+            if (err) { globalThis.__result = 'compress_err:' + err; return; }
+            z.brotliDecompress(Array.from(compressed), function(err2, out) {
+                if (err2) { globalThis.__result = 'decompress_err:' + err2; return; }
+                var s = '';
+                for (var i = 0; i < out.length; i++) s += String.fromCharCode(out[i]);
+                globalThis.__result = s;
+            });
+        });
+        "#,
+        "__result",
+    )
+    .await;
+    assert_eq!(r, "Brotli");
+}
+
+#[tokio::test]
+async fn zlib_brotli_produces_different_output_than_gzip() {
+    let e = engine().await;
+    let r = eval_async(
+        &e,
+        r#"
+        var z = require('zlib');
+        globalThis.__result = undefined;
+        var input = new Array(50).fill(65); // 50 repeated bytes
+        z.brotliCompress(input, function(err, br) {
+            if (err) { globalThis.__result = 'brotli_err'; return; }
+            z.gzip(input, function(err2, gz) {
+                if (err2) { globalThis.__result = 'gzip_err'; return; }
+                globalThis.__result = String(br.length !== gz.length);
+            });
+        });
+        "#,
+        "__result",
+    )
+    .await;
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn zlib_brotli_sync_roundtrip() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var z = require('zlib');
+            var input = new Uint8Array([104, 101, 108, 108, 111]); // "hello"
+            var compressed = z.brotliCompressSync(input);
+            var output = z.brotliDecompressSync(compressed);
+            var ok = output.length === 5 && output[0] === 104;
+            String(ok)
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true");
 }
 
 #[tokio::test]

@@ -5,6 +5,33 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [2.0.3] — 2026-06-19
+
+### Added
+
+- **`fs.cpSync` / `fs.cp` recursive copy** — new `__fsCpSync` native function backs recursive directory copy.
+  `fs.cpSync(src, dest)` and `fs.cp(src, dest, cb)` now support copying both files and directories
+  recursively. Permission checks for read (`src`) and write (`dest`) are enforced. (`crates/js/src/builtins/fs.rs`)
+
+- **`EventEmitter.once` / `EventEmitter.on` static helpers** — `EventEmitter.once(emitter, event)` returns
+  a `Promise` that resolves with the arguments of the next emission. `EventEmitter.on(emitter, event)` returns
+  an `AsyncIterator` for streaming events — matching Node.js 12.16+ API. (`crates/js/src/builtins/modules.rs`)
+
+- **`http.globalAgent` / `https.globalAgent`** — exposed as `{ maxSockets: Infinity, maxFreeSockets: 256, keepAlive: false }`
+  stub, matching Node.js API shape. (`crates/js/src/builtins/modules.rs`)
+
+- **`process.resourceUsage()`** — returns a Node.js-compatible object with `userCPUTime`, `systemCPUTime`,
+  `maxRSS`, and remaining system resource counters derived from `process.cpuUsage()` and `process.memoryUsage()`.
+  (`crates/js/src/builtins/process.rs`)
+
+- **Real brotli compression** — `zlib.brotliCompress` / `zlib.brotliDecompress` (async) and
+  `zlib.brotliCompressSync` / `zlib.brotliDecompressSync` (sync) now use actual brotli via the
+  `brotli 7` crate instead of the previous gzip fallback. (`crates/js/src/builtins/zlib.rs`, `Cargo.toml`)
+
+### Changed
+
+- `brotli` crate added as workspace dependency (`brotli = "7"`).
+
 ## [2.0.0] — 2026-06-04
 
 ### Added

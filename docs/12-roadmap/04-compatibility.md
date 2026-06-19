@@ -22,7 +22,7 @@
 | `path` | 99% | `relative`, `normalize`, `posix`, `win32` correctos; falta `matchesGlob` real |
 | `os` | 99% | `hostname`, `totalmem`, `freemem`, `uptime`, `cpus()` con model/speed/times reales, `networkInterfaces()` vía inotify/`ip addr` |
 | `util` | 95% | `util.types` con 30+ métodos; faltan `parseArgs`, `styleText` |
-| `zlib` | 95% | Async callbacks + sync + Transform streams reales; brotli usa gzip como fallback |
+| `zlib` | 98% | Async callbacks + sync + Transform streams reales; brotli real vía crate `brotli 7` |
 | `child_process` | 95% | `exec`/`spawn`/`execSync`/`spawnSync` reales; stdin piping vía `stdin.write()`/`stdin.end()` y `spawnSync({input})` |
 
 ## 4.3 Compatibility Flags
