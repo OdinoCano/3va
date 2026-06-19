@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write   # create GitHub releases and upload assets
+  id-token: write   # needed for OIDC/keyless signing and SLSA provenance
 
 env:
   CARGO_TERM_COLOR: always
@@ -83,17 +84,18 @@ jobs:
         with:
           tool: cross
 
+      # NOTE: --locked ensures reproducible builds by using Cargo.lock as committed.
       - name: Build (Android NDK)
         if: matrix.ndk
-        run: cargo ndk --target ${{ matrix.target }} --platform ${{ matrix.ndk_api }} -- build --release --bin 3va
+        run: cargo ndk --target ${{ matrix.target }} --platform ${{ matrix.ndk_api }} -- build --release --locked --bin 3va
 
       - name: Build (cross, aarch64-linux)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} --bin 3va
+        run: cross build --release --locked --target ${{ matrix.target }} --bin 3va
 
       - name: Build (native / macOS cross)
         if: ${{ !matrix.cross && !matrix.ndk }}
-        run: cargo build --release --target ${{ matrix.target }} --bin 3va
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin 3va
 
       - name: Package binary (Unix)
         if: runner.os != 'Windows'
@@ -128,13 +130,93 @@ jobs:
             ${{ env.ARCHIVE }}.sha256
           retention-days: 1
 
-  # ── Create GitHub Release ─────────────────────────────────────────────────────
-  github-release:
-    name: GitHub Release
+  # ── SLSA Level 2 Provenance ─────────────────────────────────────────────────
+  provenance:
+    name: SLSA Provenance
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      id-token: grant
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          merge-multiple: true
+
+      - name: Generate provenance (SLSA Level 2)
+        uses: slsa-framework/slsa-github-generator/.github/workflows/generic_generator@v2
+        with:
+          base64-subjects: "${{ needs.build.outputs.provenance }}"
+          # NOTE: This uses the generic generator for non-Go projects.
+          # For full SLSA Level 3, a native Rust builder would be required.
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          ACTIONS_ID_TOKEN_REQUEST_AUDIENCE: ${{ env.ACTIONS_ID_TOKEN_REQUEST_AUDIENCE }}
+
+      - name: Upload provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance
+          path: |
+            *.intoto.jsonl
+            *.sig
+          retention-days: 5
+
+  # ── Sign binaries with cosign (keyless OIDC) ────────────────────────────────
+  sign:
+    name: Sign binaries
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          merge-multiple: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign binaries (keyless via OIDC)
+        shell: bash
+        run: |
+          for ARCHIVE in binaries/*.tar.gz binaries/*.zip; do
+            if [ -f "$ARCHIVE" ]; then
+              cosign sign-blob --yes --recursive=true "ghsaproj+$(ACTIONS_ID_TOKEN_REQUEST_AUDIENCE)" "@$ARCHIVE"
+            fi
+          done
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          ACTIONS_ID_TOKEN_REQUEST_AUDIENCE: ${{ env.ACTIONS_ID_TOKEN_REQUEST_AUDIENCE }}
+
+      - name: Upload signatures
+        uses: actions/upload-artifact@v4
+        with:
+          name: signatures
+          path: |
+            *.sig
+          retention-days: 5
+
+  # ── Create GitHub Release ─────────────────────────────────────────────────────
+  github-release:
+    name: GitHub Release
+    needs: [build, provenance, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repo (for Termux install script)
         uses: actions/checkout@v4

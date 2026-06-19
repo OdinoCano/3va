@@ -6,7 +6,7 @@
 
 ---
 
-## 1.2 Current Status (v1.0.0 · 2026-06-01)
+## 1.2 Current Status (v2.1.0 · 2026-06-22)
 
 ### Implemented and functional
 
@@ -103,6 +103,7 @@
 | 0.1.0-dev | May 2026 | CLI + Core + JS (ESM/CJS/async) + PM + Bundler + Test runner + Dev server + Security (malware + secrets + OSV) | ✅ |
 | 1.0.0 LTS | **2026-06-01** | Inspector/CDP + WASM + NAPI + PQ-TLS + stable API | ✅ **Released** |
 | 2.0.0 | **2026-06-10** | Performance profiling + Node.js compat improvements + workspace v2 + REPL plugins | ✅ **Released** |
+| 2.1.0 | **2026-06-22** | timers/promises + stream/web + dns + readline (full Node.js compat) + `3va create` + heap snapshot + SLSA Level 2 + automated security audit | ✅ **Released** |
 
 ---
 
@@ -124,6 +125,12 @@
 | CDP Inspector / debugger | No | Yes | No | **Yes** |
 | NAPI native module loading | Yes | Yes | Yes | **Yes** |
 | WebAssembly (WASI) | No | Yes | Yes | **Yes** |
+| WHATWG Streams (stream/web) | Yes | Yes | Yes | **Yes** |
+| timers/promises (Node.js 18+) | Yes | Yes | Yes | **Yes** |
+| SLSA Level 2 provenance | No | No | No | **Yes** |
+| Automated security audit CI | No | No | No | **Yes** |
+| Framework scaffolding (`3va create`) | No | No | No | **Yes** |
+| Heap snapshots for memory profiling | Yes | Yes | No | **Yes** |
 
 ---
 

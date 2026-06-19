@@ -2515,6 +2515,17 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.AbortSignal = AbortSignal;
             globalThis.AbortController = AbortController;
 
+            // ── DOMException ──────────────────────────────────────────────────────
+            function DOMException(message, name) {
+                this.message = message || '';
+                this.name = name || 'Error';
+                this.code = 0;
+            }
+            DOMException.prototype = Object.create(Error.prototype);
+            DOMException.prototype.constructor = DOMException;
+            DOMException.prototype.toString = function() { return this.name + ': ' + this.message; };
+            globalThis.DOMException = DOMException;
+
             // ── Blob / File ───────────────────────────────────────────────────────
             function Blob(parts, options) {
                 parts = parts || [];
@@ -2648,9 +2659,24 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                         chunks._ctrl = c;
                     }});
                 }
-                var s1 = { getReader: function() { return { read: function() { return new Promise(function(r) { if (chunks1.length) r({ value: chunks1.shift(), done: false }); else if (closed) r({ value: undefined, done: true }); else waiters1.push(r); }); }, releaseLock: function() {} }; } };
-                var s2 = { getReader: function() { return { read: function() { return new Promise(function(r) { if (chunks2.length) r({ value: chunks2.shift(), done: false }); else if (closed) r({ value: undefined, done: true }); else waiters2.push(r); }); }, releaseLock: function() {} }; } };
-                return [s1, s2];
+                var makeTeeStream = function(chunks, waiters) {
+                    return new ReadableStream({
+                        start: function(c) { this._ctrl = c; },
+                        pull: function(c) {
+                            var self = this;
+                            if (chunks.length) { c.enqueue(chunks.shift()); }
+                            else if (closed) { c.close(); }
+                            else {
+                                waiters.push(function(v) { c.enqueue(v.value); });
+                            }
+                        },
+                        cancel: function() { closed = true; waiters.forEach(function(r) { r({ value: undefined, done: true }); }); waiters = []; }
+                    });
+                };
+                return [makeTeeStream(chunks1, waiters1), makeTeeStream(chunks2, waiters2)];
+            };
+            ReadableStream.prototype[Symbol.asyncIterator] = function() {
+                return this.getReader();
             };
 
             function WritableStream(underlyingSink, strategy) {
@@ -4384,9 +4410,16 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
             this.input = options.input;
             this.output = options.output;
             this.terminal = options.terminal || false;
+            this.completer = options.completer;
         }
         this.line = '';
         this._closed = false;
+        this._paused = false;
+        this._lineBuffer = [];
+        this._reader = null;
+        if (this.input && typeof this.input.getReader === 'function') {
+            this._reader = this.input.getReader();
+        }
     }
     if (EventEmitter) {
         Interface.prototype = Object.create(EventEmitter.prototype);
@@ -4394,26 +4427,99 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
     }
 
     Interface.prototype.setPrompt = function(prompt) { this._prompt = prompt; return this; };
-    Interface.prototype.prompt = function(preserveCursor) { if (this.output) this.output.write && this.output.write(this._prompt || ''); };
+    Interface.prototype.getPrompt = function() { return this._prompt || ''; };
+    Interface.prototype.prompt = function(preserveCursor) {
+        if (this.output && this.output.write && !this._paused) {
+            this.output.write(this._prompt || '');
+        }
+    };
     Interface.prototype.question = function(query, options, cb) {
+        var self = this;
         if (typeof options === 'function') { cb = options; options = {}; }
         if (this.output && this.output.write) this.output.write(query);
-        if (cb) setTimeout(function() { cb(''); }, 0);
-        return Promise.resolve('');
+        return new Promise(function(resolve, reject) {
+            function onLine(line) {
+                self.removeListener('line', onLine);
+                if (options && options.signal) {
+                    options.signal.removeEventListener('abort', onAbort);
+                }
+                resolve(line);
+            }
+            function onAbort() {
+                self.removeListener('line', onLine);
+                reject(new DOMException('The operation was aborted.', 'AbortError'));
+            }
+            self.on('line', onLine);
+            if (options && options.signal) {
+                options.signal.addEventListener('abort', onAbort, { once: true });
+            }
+        });
+    };
+    Interface.prototype._readFromInput = function() {
+        var self = this;
+        if (!this._reader || this._closed || this._paused) return;
+        this._reader.read().then(function(result) {
+            if (result.done || self._closed) return;
+            var value = result.value;
+            if (value instanceof Uint8Array) {
+                value = new TextDecoder().decode(value);
+            }
+            for (var i = 0; i < value.length; i++) {
+                var char = value[i];
+                if (char === '\n') {
+                    var line = self._lineBuffer.join('');
+                    self._lineBuffer = [];
+                    self.line = line;
+                    self.emit('line', line);
+                } else if (char === '\r') {
+                } else if (char === '\x03') {
+                    self.emit('SIGINT');
+                } else {
+                    self._lineBuffer.push(char);
+                }
+            }
+            self._readFromInput();
+        }).catch(function(e) {
+            self.emit('error', e);
+        });
     };
     Interface.prototype.close = function() {
         this._closed = true;
+        if (this._reader) {
+            this._reader.cancel().catch(function() {});
+            this._reader = null;
+        }
         this.emit('close');
     };
-    Interface.prototype.pause = function() { this.emit('pause'); return this; };
-    Interface.prototype.resume = function() { this.emit('resume'); return this; };
-    Interface.prototype.write = function(data, key) {};
+    Interface.prototype.pause = function() {
+        this._paused = true;
+        this.emit('pause');
+        return this;
+    };
+    Interface.prototype.resume = function() {
+        this._paused = false;
+        this.emit('resume');
+        this._readFromInput();
+        return this;
+    };
+    Interface.prototype.write = function(data, key) {
+        if (this.output && this.output.write) {
+            this.output.write(data);
+        }
+    };
     Interface.prototype[Symbol.asyncIterator] = function() {
         var self = this;
         return {
             next: function() {
                 if (self._closed) return Promise.resolve({ value: undefined, done: true });
-                return Promise.resolve({ value: '', done: true });
+                return new Promise(function(resolve) {
+                    function onLine(line) {
+                        self.removeListener('line', onLine);
+                        resolve({ value: line, done: false });
+                    }
+                    self.on('line', onLine);
+                    if (!self._paused) self._readFromInput();
+                });
             },
             return: function() {
                 self.close();
@@ -4432,6 +4538,14 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
     function moveCursor(stream, dx, dy, cb) { if (cb) cb(); return true; }
     function emitKeypressEvents(stream) {}
 
+    var readlinePromises = {
+        createInterface: createInterface,
+        question: function(query, options) {
+            var iface = createInterface({ input: globalThis.process && globalThis.process.stdin, output: globalThis.process && globalThis.process.stdout });
+            return iface.question(query, options);
+        }
+    };
+
     var readline = {
         Interface: Interface,
         createInterface: createInterface,
@@ -4440,15 +4554,13 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
         cursorTo: cursorTo,
         moveCursor: moveCursor,
         emitKeypressEvents: emitKeypressEvents,
-        promises: {
-            createInterface: createInterface
-        }
+        promises: readlinePromises
     };
 
     globalThis.__requireCache['readline'] = readline;
     globalThis.__requireCache['node:readline'] = readline;
-    globalThis.__requireCache['readline/promises'] = readline.promises;
-    globalThis.__requireCache['node:readline/promises'] = readline.promises;
+    globalThis.__requireCache['readline/promises'] = readlinePromises;
+    globalThis.__requireCache['node:readline/promises'] = readlinePromises;
 }());
 
 // ── diagnostics_channel ───────────────────────────────────────────────────────
