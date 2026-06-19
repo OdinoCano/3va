@@ -6510,32 +6510,29 @@ if (typeof globalThis.Platform === 'undefined') {
 (function() {
     if (typeof globalThis.URLPattern !== 'undefined') return;
 
+    var PARTS = ['protocol', 'username', 'password', 'hostname', 'port', 'pathname', 'search', 'hash'];
+
     function compilePattern(pattern) {
-        // Convert URL pattern syntax to a regex and extract named groups.
-        // Handles: literals, :name params, * wildcards, {optional}?
         var groups = [];
-        var re = pattern.replace(/[.+^${}()|[\]\\]/g, function(c) {
-            // Escape regex metacharacters except those we handle
-            return (c === '{' || c === '}') ? c : '\\' + c;
-        });
-        // Named groups :param
+        // Step 1: escape regex metacharacters, but leave { } alone for the optional-group step.
+        var re = pattern.replace(/[.+^$()|[\]\\]/g, '\\$&');
+        // Step 2: named segments  :param  → capture group
         re = re.replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, function(_, name) {
             groups.push(name);
-            return '([^/]+)';
+            return '([^/?#]+)';
         });
-        // Wildcard *
+        // Step 3: wildcard *  → greedy capture (named '*' so we can skip it in groups)
         re = re.replace(/\*/g, function() {
             groups.push('*');
             return '(.*)';
         });
-        // {optional}? blocks
+        // Step 4: {optional}?  and  {group}
         re = re.replace(/\{([^}]*)\}\?/g, '(?:$1)?');
         re = re.replace(/\{([^}]*)\}/g, '(?:$1)');
         return { regex: new RegExp('^' + re + '$'), groups: groups };
     }
 
     function matchPart(compiled, value) {
-        if (!compiled) return { matched: true, groups: {} };
         if (value === undefined || value === null) value = '';
         var m = compiled.regex.exec(String(value));
         if (!m) return null;
@@ -6544,19 +6541,36 @@ if (typeof globalThis.Platform === 'undefined') {
         return { matched: true, groups: gs };
     }
 
-    var PARTS = ['protocol', 'username', 'password', 'hostname', 'port', 'pathname', 'search', 'hash'];
+    function urlToParts(url) {
+        return {
+            protocol: url.protocol.replace(/:$/, ''),
+            username: url.username || '',
+            password: url.password || '',
+            hostname: url.hostname || '',
+            port:     url.port     || '',
+            pathname: url.pathname || '/',
+            search:   (url.search || '').replace(/^\?/, ''),
+            hash:     (url.hash   || '').replace(/^#/,  '')
+        };
+    }
 
     function URLPattern(init, baseURL) {
-        if (typeof init === 'string') init = { pathname: init };
+        if (typeof init === 'string') {
+            // Full URL string → parse all parts; relative string → pathname only.
+            try {
+                var parsed = baseURL ? new URL(init, baseURL) : new URL(init);
+                init = urlToParts(parsed);
+            } catch(e) {
+                init = { pathname: init };
+            }
+        }
         init = init || {};
-        var base = null;
-        try { base = new URL(baseURL || 'http://x'); } catch(e) {}
         this._compiled = {};
         var self = this;
         PARTS.forEach(function(p) {
-            var val = init[p] !== undefined ? init[p] : (p === 'pathname' ? '*' : (base ? '' : '*'));
-            self[p] = val || '*';
-            self._compiled[p] = val !== undefined ? compilePattern(val) : null;
+            var val = init[p] !== undefined ? String(init[p]) : '*';
+            self[p] = val;
+            self._compiled[p] = compilePattern(val);
         });
     }
 
@@ -6566,22 +6580,34 @@ if (typeof globalThis.Platform === 'undefined') {
 
     URLPattern.prototype.exec = function(input) {
         if (!input) return null;
-        var url;
-        try {
-            url = (typeof input === 'string') ? new URL(input) : input;
-        } catch(e) { return null; }
+        var parts;
+        if (typeof input === 'string') {
+            try {
+                parts = urlToParts(new URL(input));
+            } catch(e) {
+                // Relative string: treat as pathname, leave other parts empty
+                // (empty string matches '*' patterns but not literal ones)
+                parts = { protocol:'', username:'', password:'', hostname:'', port:'', pathname: input, search:'', hash:'' };
+            }
+        } else {
+            // URLPatternInit object
+            parts = {
+                protocol: (input.protocol || '').replace(/:$/, ''),
+                username: input.username || '',
+                password: input.password || '',
+                hostname: input.hostname || '',
+                port:     input.port     || '',
+                pathname: input.pathname || '',
+                search:   (input.search  || '').replace(/^\?/, ''),
+                hash:     (input.hash    || '').replace(/^#/,  '')
+            };
+        }
         var result = { inputs: [input], groups: {} };
-        var self = this;
         for (var i = 0; i < PARTS.length; i++) {
             var p = PARTS[i];
-            var partVal = p === 'pathname' ? url.pathname
-                : p === 'protocol' ? url.protocol.replace(/:$/, '')
-                : p === 'search' ? url.search.replace(/^\?/, '')
-                : p === 'hash' ? url.hash.replace(/^#/, '')
-                : url[p] || '';
-            var m = matchPart(self._compiled[p], partVal);
+            var m = matchPart(this._compiled[p], parts[p]);
             if (!m) return null;
-            result[p] = { input: partVal, groups: m.groups };
+            result[p] = { input: parts[p], groups: m.groups };
             Object.assign(result.groups, m.groups);
         }
         return result;
