@@ -137,13 +137,13 @@ v1.0.0 has a partial readline. v2.0.0 completes:
 
 ## 2.3 Improved Modules
 
-| Module | v1.0.0 gap | v2.0.0 fix |
-|--------|-----------|-----------|
-| `events` | Missing `EventEmitter.once` / `EventEmitter.on` static helpers (Node 16+) | Added |
-| `path` | Missing `path.toNamespacedPath` (Windows no-op on POSIX) | Added no-op |
-| `os` | `os.cpus()` returns placeholder objects (`model: 'Unknown', speed: 0`) | Returns real CPU info via `sysinfo` crate |
-| `fs` | `fs.cp` (recursive copy, Node 16+) missing | Implemented |
-| `http` | `http.globalAgent` not exposed | Exposed as `{ maxSockets: Infinity }` stub |
+| Module | v1.0.0 gap | v2.0.0 fix | Actual status |
+|--------|-----------|-----------|--------------|
+| `events` | Missing `EventEmitter.once` / `EventEmitter.on` static helpers (Node 16+) | Added | ✅ Implemented in v2.0.3 |
+| `path` | Missing `path.toNamespacedPath` (Windows no-op on POSIX) | Added no-op | ✅ Implemented |
+| `os` | `os.cpus()` returns placeholder objects (`model: 'Unknown', speed: 0`) | Returns real CPU info via `sysinfo` crate | ⚠️ Uses `/proc/cpuinfo` directly (no `sysinfo` crate) |
+| `fs` | `fs.cp` (recursive copy, Node 16+) missing | Implemented | ✅ Implemented in v2.0.3 |
+| `http` | `http.globalAgent` not exposed | Exposed as `{ maxSockets: Infinity }` stub | ✅ Implemented in v2.0.3 |
 
 ---
 

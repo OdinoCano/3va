@@ -36,6 +36,7 @@ tempfile = "3.8"
 ureq = { version = "2", features = ["json"] }
 tungstenite = { version = "0.24", features = ["native-tls"] }
 flate2 = "1.0"
+brotli = "7"
 tar = "0.4"
 wasmtime = "36.0"
 wasmtime-wasi = "36.0"

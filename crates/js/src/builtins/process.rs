@@ -786,6 +786,19 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             var _startMs = Date.now();
             process.uptime = function() { return (Date.now() - _startMs) / 1000; };
 
+            // process.resourceUsage() — Node 12.6+ getrusage()-style object
+            process.resourceUsage = function() {
+                var cpu = process.cpuUsage();
+                var mem = process.memoryUsage();
+                return {
+                    userCPUTime: cpu.user, systemCPUTime: cpu.system,
+                    maxRSS: Math.floor(mem.rss / 1024),
+                    sharedMemorySize: 0, unsharedDataSize: 0, unsharedStackSize: 0,
+                    minorPageFault: 0, majorPageFault: 0, swappedOut: 0,
+                    fsRead: 0, fsWrite: 0, voluntaryContextSwitches: 0, involuntaryContextSwitches: 0
+                };
+            };
+
             // process.title
             if (!process.title) process.title = 'node';
 

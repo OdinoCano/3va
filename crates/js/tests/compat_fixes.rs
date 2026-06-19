@@ -7,6 +7,9 @@
 //   - util.parseArgs
 //   - reflect-metadata polyfill
 //   - child_process.execSync / spawnSync
+//   - EventEmitter.once / EventEmitter.on static helpers  (v2.0.3)
+//   - http.globalAgent                                   (v2.0.3)
+//   - process.resourceUsage()                            (v2.0.3)
 //
 // Run: cargo test -p vvva_js --test compat_fixes
 
@@ -600,4 +603,119 @@ async fn spawn_sync_requires_permission() {
         .await
         .unwrap();
     assert_eq!(r, "threw");
+}
+
+// ── EventEmitter.once static helper ───────────────────────────────────────────
+
+#[tokio::test]
+async fn event_emitter_once_static_promise() {
+    let e = engine().await;
+    let r = eval_async_result(
+        &e,
+        r#"
+        globalThis.__result = undefined;
+        var EventEmitter = require('events');
+        var ee = new EventEmitter();
+        EventEmitter.once(ee, 'done').then(function(args) {
+            globalThis.__result = (args[0] === 42 && args[1] === 'ok') ? 'true' : 'false';
+        });
+        ee.emit('done', 42, 'ok');
+        "#,
+        "__result",
+    )
+    .await;
+    assert_eq!(r, "true");
+}
+
+#[tokio::test]
+async fn event_emitter_once_error_rejection() {
+    let e = engine().await;
+    let r = eval_async_result(
+        &e,
+        r#"
+        globalThis.__result = undefined;
+        var EventEmitter = require('events');
+        var ee = new EventEmitter();
+        EventEmitter.once(ee, 'fail').then(function() {
+            globalThis.__result = 'resolved';
+        }).catch(function() {
+            globalThis.__result = 'rejected';
+        });
+        ee.emit('fail');
+        "#,
+        "__result",
+    )
+    .await;
+    assert_eq!(r, "resolved");
+}
+
+#[tokio::test]
+async fn event_emitter_on_async_iterator() {
+    let e = engine().await;
+    // Emit into buffer first, then read via iter.next()
+    let r = eval_async_result(
+        &e,
+        r#"
+        globalThis.__result = undefined;
+        var EventEmitter = require('events');
+        var ee = new EventEmitter();
+        var iter = EventEmitter.on(ee, 'tick');
+        ee.emit('tick', 'a');
+        ee.emit('tick', 'b');
+        iter.next().then(function(v) { globalThis.__result = v.value[0]; });
+        "#,
+        "__result",
+    )
+    .await;
+    assert_eq!(r, "a");
+}
+
+// ── http.globalAgent ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn http_global_agent_exposed() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var http = require('http');
+            var https = require('https');
+            [typeof http.globalAgent, typeof https.globalAgent, http.globalAgent.maxSockets].join(',')
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "object,object,Infinity");
+}
+
+// ── process.resourceUsage() ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn process_resource_usage_shape() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var ru = process.resourceUsage();
+            [typeof ru.userCPUTime, typeof ru.systemCPUTime, typeof ru.maxRSS].join(',')
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "number,number,number");
+}
+
+#[tokio::test]
+async fn process_resource_usage_values_positive() {
+    let e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var ru = process.resourceUsage();
+            [ru.userCPUTime >= 0, ru.systemCPUTime >= 0, ru.maxRSS > 0].join(',')
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true,true,true");
 }

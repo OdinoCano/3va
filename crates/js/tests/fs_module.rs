@@ -644,3 +644,78 @@ async fn fs_opendir_iterates_entries() {
         .unwrap();
     assert_eq!(r, "a.txt,b.txt");
 }
+
+// ── cpSync ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn fs_cp_sync_file() {
+    let dir = TempDir::new().unwrap();
+    let e = engine_rw(&dir).await;
+    let src = path_str(&dir, "src.txt");
+    let dst = path_str(&dir, "dst.txt");
+
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            var fs = require('fs');
+            fs.writeFileSync('{src}', 'copied');
+            fs.cpSync('{src}', '{dst}');
+            fs.readFileSync('{dst}', 'utf8')
+            "#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "copied");
+}
+
+#[tokio::test]
+async fn fs_cp_sync_directory_recursive() {
+    let dir = TempDir::new().unwrap();
+    let e = engine_rw(&dir).await;
+    let src_dir = path_str(&dir, "mydir");
+    let dst_dir = path_str(&dir, "copydir");
+
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            var fs = require('fs');
+            fs.mkdirSync('{src_dir}');
+            fs.writeFileSync('{src_dir}/a.txt', 'file_a');
+            fs.writeFileSync('{src_dir}/b.txt', 'file_b');
+            fs.cpSync('{src_dir}', '{dst_dir}');
+            var files = fs.readdirSync('{dst_dir}').sort().join(',');
+            var contentA = fs.readFileSync('{dst_dir}/a.txt', 'utf8');
+            var contentB = fs.readFileSync('{dst_dir}/b.txt', 'utf8');
+            files + '|' + contentA + '|' + contentB
+            "#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "a.txt,b.txt|file_a|file_b");
+}
+
+#[tokio::test]
+async fn fs_cp_async_file() {
+    let dir = TempDir::new().unwrap();
+    let e = engine_rw(&dir).await;
+    let src = path_str(&dir, "async_src.txt");
+    let dst = path_str(&dir, "async_dst.txt");
+    std::fs::write(&src, "async_copy").unwrap();
+
+    let r = eval_async(
+        &e,
+        &format!(
+            r#"
+            var fs = require('fs');
+            globalThis.__result = undefined;
+            fs.cp('{src}', '{dst}', function(err) {{
+                if (err) {{ globalThis.__result = 'err:' + err; return; }}
+                globalThis.__result = fs.readFileSync('{dst}', 'utf8');
+            }});
+            "#,
+        ),
+        "__result",
+    )
+    .await;
+    assert_eq!(r, "async_copy");
+}

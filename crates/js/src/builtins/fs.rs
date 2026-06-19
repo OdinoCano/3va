@@ -666,6 +666,48 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         )?,
     )?;
 
+    // ── __fsCpSync(src, dest) — recursive copy (Node 16+ fs.cp) ─────────────
+    let perms = permissions.clone();
+    globals.set(
+        "__fsCpSync",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
+                let mut it = args.0.into_iter();
+                let src_str = it
+                    .next()
+                    .ok_or_else(|| js_err(&ctx, "__fsCpSync() requires src, dest".into()))?;
+                let dest_str = it
+                    .next()
+                    .ok_or_else(|| js_err(&ctx, "__fsCpSync() requires dest path".into()))?;
+                let src = PathBuf::from(&src_str);
+                let dest = PathBuf::from(&dest_str);
+                if !perms.check(&Capability::FileRead(src.clone())) {
+                    return Err(perm_err(&ctx, "read", &src));
+                }
+                if !perms.check(&Capability::FileWrite(dest.clone())) {
+                    return Err(perm_err(&ctx, "write", &dest));
+                }
+                fn copy_all(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
+                    if src.is_dir() {
+                        std::fs::create_dir_all(dst)?;
+                        for entry in std::fs::read_dir(src)? {
+                            let entry = entry?;
+                            copy_all(&entry.path(), &dst.join(entry.file_name()))?;
+                        }
+                    } else {
+                        if let Some(parent) = dst.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::copy(src, dst)?;
+                    }
+                    Ok(())
+                }
+                copy_all(&src, &dest).map_err(|e| js_err(&ctx, format!("ENOENT: {e}")))
+            },
+        )?,
+    )?;
+
     // ── __fsCopyFileSync(src, dest) ───────────────────────────────────────────
     let perms = permissions.clone();
     globals.set(
@@ -1033,6 +1075,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             unlinkSync: function(p) { return __fsUnlinkSync(p); },
             renameSync: function(f, t) { return __fsRenameSync(f, t); },
             copyFileSync: function(s, d) { return __fsCopyFileSync(s, d); },
+            cpSync: function(s, d, _opts) { return __fsCpSync(s, d); },
             chmodSync: function(p, m) { return __fsChmodSync(p, String(m)); },
             symlinkSync: function(target, p) { return __fsSymlinkSync(target, p); },
             statSync: function(p) { return parseStat(__fsStatSync(p, 'true')); },
@@ -1079,6 +1122,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             unlink:      wrapAsync(function(p) { return __fsUnlinkSync(p); }),
             rename:      wrapAsync(function(f, t) { return __fsRenameSync(f, t); }),
             copyFile:    wrapAsync(function(s, d) { return __fsCopyFileSync(s, d); }),
+            cp:          wrapAsync(function(s, d) { return __fsCpSync(s, d); }),
             chmod:       wrapAsync(function(p, m) { return __fsChmodSync(p, String(m)); }),
             symlink:     wrapAsync(function(target, p) { return __fsSymlinkSync(target, p); }),
             stat:        wrapAsync(function(p) { return parseStat(__fsStatSync(p, 'true')); }),

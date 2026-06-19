@@ -129,6 +129,7 @@ tungstenite.workspace = true
 tokio.workspace = true
 url.workspace = true
 flate2.workspace = true
+brotli.workspace = true
 aes-gcm = { workspace = true }
 aes = { workspace = true }
 cbc = { workspace = true }

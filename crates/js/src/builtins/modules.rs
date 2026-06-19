@@ -444,6 +444,31 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             EventEmitter.getMaxListeners = function() { return EventEmitter.defaultMaxListeners; };
             EventEmitter.listenerCount = function(emitter, ev) { return emitter.listenerCount(ev); };
             EventEmitter.EventEmitter = EventEmitter;
+            // Static EventEmitter.once(emitter, event) → Promise  (Node 11.13+)
+            EventEmitter.once = function(emitter, ev) {
+                return new Promise(function(resolve, reject) {
+                    function onErr(e) { emitter.removeListener(ev, onEvt); reject(e); }
+                    function onEvt() { emitter.removeListener('error', onErr); resolve(Array.prototype.slice.call(arguments)); }
+                    emitter.once(ev, onEvt);
+                    if (ev !== 'error') emitter.once('error', onErr);
+                });
+            };
+            // Static EventEmitter.on(emitter, event) → AsyncIterator  (Node 12.16+)
+            EventEmitter.on = function(emitter, ev) {
+                var buf = [], waiting = null;
+                emitter.on(ev, function() {
+                    var args = Array.prototype.slice.call(arguments);
+                    if (waiting) { var r = waiting; waiting = null; r({ value: args, done: false }); }
+                    else buf.push(args);
+                });
+                return {
+                    next: function() {
+                        if (buf.length) return Promise.resolve({ value: buf.shift(), done: false });
+                        return new Promise(function(res) { waiting = res; });
+                    },
+                    return: function() { return Promise.resolve({ value: undefined, done: true }); },
+                };
+            };
             globalThis.__requireCache['events'] = EventEmitter;
 
             // ── stream ────────────────────────────────────────────────────────────
@@ -1581,6 +1606,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             var httpMod = makeHttpModule('http:');
             var httpsMod = makeHttpModule('https:');
+            var _globalAgent = { maxSockets: Infinity, maxFreeSockets: 256, keepAlive: false };
+            httpMod.globalAgent = _globalAgent;
+            httpsMod.globalAgent = _globalAgent;
             globalThis.__requireCache['http'] = httpMod;
             globalThis.__requireCache['https'] = httpsMod;
             globalThis.__requireCache['node:http'] = httpMod;
