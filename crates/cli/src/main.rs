@@ -1713,6 +1713,28 @@ enum Commands {
     },
 
     // ── Development ───────────────────────────────────────────────────────────
+    /// Run a file and restart it when the file or its directory changes
+    #[command(alias = "w")]
+    Watch {
+        /// The file to run
+        file: PathBuf,
+        /// Allow read access
+        #[arg(long = "allow-read", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_read: Option<Vec<String>>,
+        /// Allow network access
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_net: Option<Vec<String>>,
+        /// Allow write access
+        #[arg(long = "allow-write", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_write: Option<Vec<String>>,
+        /// Allow env access
+        #[arg(long = "allow-env", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_env: Option<Vec<String>>,
+        /// Debounce delay in milliseconds (default: 300)
+        #[arg(long = "delay", default_value_t = 300u64)]
+        delay: u64,
+    },
+
     /// Development server with hot module replacement
     #[command(alias = "d")]
     Dev {
@@ -2835,6 +2857,85 @@ async fn main() -> anyhow::Result<()> {
             }
             if any_failed {
                 std::process::exit(1);
+            }
+        }
+        Commands::Watch {
+            file,
+            allow_read,
+            allow_net,
+            allow_write,
+            allow_env,
+            delay,
+        } => {
+            use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+
+            let exe = std::env::current_exe()?;
+            let watch_dir = file
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf();
+            let file_abs = file.canonicalize().unwrap_or(file.clone());
+
+            // Build base args for the child `3va run <file>` invocation
+            let mut base_args: Vec<String> =
+                vec!["run".to_string(), file_abs.to_string_lossy().to_string()];
+            if let Some(paths) = &allow_read {
+                if paths.is_empty() {
+                    base_args.push("--allow-read=".to_string());
+                } else {
+                    base_args.push(format!("--allow-read={}", paths.join(",")));
+                }
+            }
+            if let Some(hosts) = &allow_net {
+                if hosts.is_empty() {
+                    base_args.push("--allow-net=".to_string());
+                } else {
+                    base_args.push(format!("--allow-net={}", hosts.join(",")));
+                }
+            }
+            if let Some(paths) = &allow_write {
+                if paths.is_empty() {
+                    base_args.push("--allow-write=".to_string());
+                } else {
+                    base_args.push(format!("--allow-write={}", paths.join(",")));
+                }
+            }
+            if let Some(vars) = &allow_env {
+                if vars.is_empty() {
+                    base_args.push("--allow-env=".to_string());
+                } else {
+                    base_args.push(format!("--allow-env={}", vars.join(",")));
+                }
+            }
+
+            let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
+            let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
+            watcher.watch(&watch_dir, RecursiveMode::Recursive)?;
+
+            let spawn_child = |args: &[String]| -> std::process::Child {
+                std::process::Command::new(&exe)
+                    .args(args)
+                    .spawn()
+                    .expect("failed to spawn 3va run")
+            };
+
+            println!("[watch] watching {:?}", watch_dir);
+            let mut child = spawn_child(&base_args);
+            let mut last_event = std::time::Instant::now();
+            let debounce = std::time::Duration::from_millis(*delay);
+
+            for event in rx {
+                if event.is_err() {
+                    continue;
+                }
+                if last_event.elapsed() < debounce {
+                    continue;
+                }
+                last_event = std::time::Instant::now();
+                println!("[watch] change detected — restarting...");
+                let _ = child.kill();
+                let _ = child.wait();
+                child = spawn_child(&base_args);
             }
         }
         Commands::Busybeaver => {

@@ -871,5 +871,38 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         }());"#,
     )?;
 
+    // localStorage backing — reads/writes ~/.local/share/3va/localStorage.json
+    // No permission gate: this is the user's own browser-like data store.
+    let globals = ctx.globals();
+    globals.set(
+        "__localStorageRead",
+        Function::new(ctx.clone(), || -> String {
+            let p = ls_path();
+            std::fs::read_to_string(&p).unwrap_or_else(|_| "{}".to_string())
+        })?,
+    )?;
+    globals.set(
+        "__localStorageSave",
+        Function::new(ctx.clone(), |json: String| {
+            let p = ls_path();
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&p, json.as_bytes());
+        })?,
+    )?;
+
     Ok(())
+}
+
+fn ls_path() -> std::path::PathBuf {
+    std::env::var("3VA_LOCALSTORAGE_PATH")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".local/share/3va/localStorage.json"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/3va-localStorage.json"))
 }

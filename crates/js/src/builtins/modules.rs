@@ -6346,30 +6346,99 @@ if (typeof globalThis.Platform === 'undefined') {
     globalThis.BroadcastChannel = BroadcastChannel;
 }());
 
-// ── EventSource ───────────────────────────────────────────────────────────────
-// SSE is not natively supported; stub prevents import crashes.
+// ── EventSource (Server-Sent Events) ─────────────────────────────────────────
+// Real SSE over HTTP via __eventSourceOpen / __eventSourcePoll / __eventSourceClose
 (function() {
-    if (typeof globalThis.EventSource !== 'undefined') return;
+    if (typeof globalThis.__eventSourceOpen !== 'function') {
+        // Rust primitives not available yet — keep the closed stub
+        if (typeof globalThis.EventSource !== 'undefined') return;
+        function EventSource(url, opts) {
+            this.url = String(url); this.readyState = 2;
+            this.onopen = null; this.onmessage = null; this.onerror = null;
+        }
+        EventSource.CONNECTING = 0; EventSource.OPEN = 1; EventSource.CLOSED = 2;
+        EventSource.prototype.close = function() { this.readyState = 2; };
+        EventSource.prototype.addEventListener = function(t, fn) { this['on'+t] = fn; };
+        EventSource.prototype.removeEventListener = function() {};
+        EventSource.prototype.dispatchEvent = function() { return true; };
+        globalThis.EventSource = EventSource;
+        return;
+    }
 
     function EventSource(url, opts) {
         this.url = String(url);
-        this.readyState = 2; // CLOSED — no SSE support
+        this.readyState = 0; // CONNECTING
         this.withCredentials = !!(opts && opts.withCredentials);
-        this.onopen = null;
-        this.onmessage = null;
-        this.onerror = null;
+        this.onopen = null; this.onmessage = null; this.onerror = null;
+        this._listeners = {};
+        this._id = null;
+
+        var self = this;
+        // Open the SSE connection in the Rust backend
+        Promise.resolve().then(function() {
+            try {
+                self._id = __eventSourceOpen(self.url);
+                self.readyState = 1; // OPEN
+                if (typeof self.onopen === 'function') self.onopen({ type: 'open' });
+                self._dispatchTo('open', { type: 'open' });
+                self._poll();
+            } catch(e) {
+                self.readyState = 2;
+                if (typeof self.onerror === 'function') self.onerror({ type: 'error', message: String(e) });
+            }
+        });
     }
     EventSource.CONNECTING = 0;
     EventSource.OPEN = 1;
     EventSource.CLOSED = 2;
-    EventSource.prototype.close = function() { this.readyState = 2; };
-    EventSource.prototype.addEventListener = function(type, fn) {
-        if (type === 'open') this.onopen = fn;
-        else if (type === 'message') this.onmessage = fn;
-        else if (type === 'error') this.onerror = fn;
+
+    EventSource.prototype._dispatchTo = function(type, evt) {
+        var listeners = this._listeners[type] || [];
+        for (var i = 0; i < listeners.length; i++) listeners[i](evt);
     };
-    EventSource.prototype.removeEventListener = function() {};
-    EventSource.prototype.dispatchEvent = function() { return true; };
+
+    EventSource.prototype._poll = function() {
+        if (this.readyState !== 1 || this._id === null) return;
+        var self = this;
+        // Poll for pending events (non-blocking, returns JSON array of {type,data,lastEventId} or null)
+        Promise.resolve(__eventSourcePoll(self._id)).then(function(raw) {
+            if (!raw || self.readyState !== 1) return;
+            var events;
+            try { events = JSON.parse(raw); } catch(e) { events = []; }
+            for (var i = 0; i < events.length; i++) {
+                var ev = events[i];
+                var msg = { type: ev.type || 'message', data: ev.data || '', lastEventId: ev.lastEventId || '' };
+                if (ev.type === 'message' || !ev.type) {
+                    if (typeof self.onmessage === 'function') self.onmessage(msg);
+                }
+                self._dispatchTo(msg.type, msg);
+            }
+            // schedule next poll
+            setTimeout(function() { self._poll(); }, 0);
+        }).catch(function(e) {
+            self.readyState = 2;
+            if (typeof self.onerror === 'function') self.onerror({ type: 'error', message: String(e) });
+        });
+    };
+
+    EventSource.prototype.close = function() {
+        this.readyState = 2;
+        if (this._id !== null) {
+            try { __eventSourceClose(this._id); } catch(e) {}
+            this._id = null;
+        }
+    };
+
+    EventSource.prototype.addEventListener = function(type, fn) {
+        if (!this._listeners[type]) this._listeners[type] = [];
+        this._listeners[type].push(fn);
+    };
+    EventSource.prototype.removeEventListener = function(type, fn) {
+        if (this._listeners[type]) this._listeners[type] = this._listeners[type].filter(function(f) { return f !== fn; });
+    };
+    EventSource.prototype.dispatchEvent = function(evt) {
+        this._dispatchTo(evt.type, evt); return true;
+    };
 
     globalThis.EventSource = EventSource;
 }());
@@ -6397,6 +6466,128 @@ if (typeof globalThis.Platform === 'undefined') {
         watchPosition: function(ok, err) { if (err) err({ code: 2, message: 'Geolocation not supported' }); return 0; },
         clearWatch: function() {}
     };
+}());
+
+// ── sessionStorage / localStorage ────────────────────────────────────────────
+(function() {
+    if (typeof globalThis.sessionStorage !== 'undefined') return;
+
+    // sessionStorage — in-memory, no persistence
+    var _ss = Object.create(null);
+    globalThis.sessionStorage = {
+        getItem: function(k) { k = String(k); return Object.prototype.hasOwnProperty.call(_ss, k) ? _ss[k] : null; },
+        setItem: function(k, v) { _ss[String(k)] = String(v); },
+        removeItem: function(k) { delete _ss[String(k)]; },
+        clear: function() { _ss = Object.create(null); },
+        key: function(n) { return Object.keys(_ss)[n] || null; },
+        get length() { return Object.keys(_ss).length; }
+    };
+
+    // localStorage — backed by __localStorageRead / __localStorageSave Rust fns
+    // Falls back to in-memory if those are not available (no write permission)
+    var _ls = null;
+    function _lsLoad() {
+        if (_ls !== null) return;
+        try {
+            var raw = (typeof __localStorageRead === 'function') ? __localStorageRead() : null;
+            _ls = (raw && raw !== '{}') ? JSON.parse(raw) : Object.create(null);
+        } catch(e) { _ls = Object.create(null); }
+    }
+    function _lsSave() {
+        try { if (typeof __localStorageSave === 'function') __localStorageSave(JSON.stringify(_ls)); } catch(e) {}
+    }
+    globalThis.localStorage = {
+        getItem: function(k) { _lsLoad(); k = String(k); return Object.prototype.hasOwnProperty.call(_ls, k) ? _ls[k] : null; },
+        setItem: function(k, v) { _lsLoad(); _ls[String(k)] = String(v); _lsSave(); },
+        removeItem: function(k) { _lsLoad(); delete _ls[String(k)]; _lsSave(); },
+        clear: function() { _lsLoad(); _ls = Object.create(null); _lsSave(); },
+        key: function(n) { _lsLoad(); return Object.keys(_ls)[n] || null; },
+        get length() { _lsLoad(); return Object.keys(_ls).length; }
+    };
+}());
+
+// ── URLPattern ────────────────────────────────────────────────────────────────
+(function() {
+    if (typeof globalThis.URLPattern !== 'undefined') return;
+
+    function compilePattern(pattern) {
+        // Convert URL pattern syntax to a regex and extract named groups.
+        // Handles: literals, :name params, * wildcards, {optional}?
+        var groups = [];
+        var re = pattern.replace(/[.+^${}()|[\]\\]/g, function(c) {
+            // Escape regex metacharacters except those we handle
+            return (c === '{' || c === '}') ? c : '\\' + c;
+        });
+        // Named groups :param
+        re = re.replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, function(_, name) {
+            groups.push(name);
+            return '([^/]+)';
+        });
+        // Wildcard *
+        re = re.replace(/\*/g, function() {
+            groups.push('*');
+            return '(.*)';
+        });
+        // {optional}? blocks
+        re = re.replace(/\{([^}]*)\}\?/g, '(?:$1)?');
+        re = re.replace(/\{([^}]*)\}/g, '(?:$1)');
+        return { regex: new RegExp('^' + re + '$'), groups: groups };
+    }
+
+    function matchPart(compiled, value) {
+        if (!compiled) return { matched: true, groups: {} };
+        if (value === undefined || value === null) value = '';
+        var m = compiled.regex.exec(String(value));
+        if (!m) return null;
+        var gs = {};
+        compiled.groups.forEach(function(g, i) { if (g !== '*') gs[g] = m[i + 1]; });
+        return { matched: true, groups: gs };
+    }
+
+    var PARTS = ['protocol', 'username', 'password', 'hostname', 'port', 'pathname', 'search', 'hash'];
+
+    function URLPattern(init, baseURL) {
+        if (typeof init === 'string') init = { pathname: init };
+        init = init || {};
+        var base = null;
+        try { base = new URL(baseURL || 'http://x'); } catch(e) {}
+        this._compiled = {};
+        var self = this;
+        PARTS.forEach(function(p) {
+            var val = init[p] !== undefined ? init[p] : (p === 'pathname' ? '*' : (base ? '' : '*'));
+            self[p] = val || '*';
+            self._compiled[p] = val !== undefined ? compilePattern(val) : null;
+        });
+    }
+
+    URLPattern.prototype.test = function(input) {
+        return this.exec(input) !== null;
+    };
+
+    URLPattern.prototype.exec = function(input) {
+        if (!input) return null;
+        var url;
+        try {
+            url = (typeof input === 'string') ? new URL(input) : input;
+        } catch(e) { return null; }
+        var result = { inputs: [input], groups: {} };
+        var self = this;
+        for (var i = 0; i < PARTS.length; i++) {
+            var p = PARTS[i];
+            var partVal = p === 'pathname' ? url.pathname
+                : p === 'protocol' ? url.protocol.replace(/:$/, '')
+                : p === 'search' ? url.search.replace(/^\?/, '')
+                : p === 'hash' ? url.hash.replace(/^#/, '')
+                : url[p] || '';
+            var m = matchPart(self._compiled[p], partVal);
+            if (!m) return null;
+            result[p] = { input: partVal, groups: m.groups };
+            Object.assign(result.groups, m.groups);
+        }
+        return result;
+    };
+
+    globalThis.URLPattern = URLPattern;
 }());
     "#)?;
 
