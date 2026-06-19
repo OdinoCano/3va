@@ -107,6 +107,10 @@ path = "tests/async_hooks_module.rs"
 name = "compat_priority"
 path = "tests/compat_priority.rs"
 
+[[test]]
+name = "web_compat"
+path = "tests/web_compat.rs"
+
 [dependencies]
 rquickjs.workspace = true
 rquickjs-sys = { version = "0.6.4", package = "vvva-rquickjs-sys", path = "../../vendor/rquickjs-sys" }
