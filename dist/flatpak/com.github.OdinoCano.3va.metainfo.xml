@@ -50,6 +50,12 @@
   </keywords>
 
   <releases>
+    <release version="2.1.0" date="2026-06-22">
+      <description>
+        <p>v2.1.0: timers/promises, stream/web, dns, readline (full Node.js compat), 3va create scaffolding, heap snapshot, SLSA Level 2 provenance, automated security audit.</p>
+      </description>
+      <url>https://github.com/OdinoCano/3va/releases/tag/v2.1.0</url>
+    </release>
     <release version="2.0.2" date="2026-06-10">
       <description>
         <p>v2.0.0: performance profiling (--prof, .cpuprofile), Node.js compat improvements, worker_threads, cluster emulation, and REPL plugins.</p>

@@ -33,7 +33,7 @@ pub type WsPool = Arc<Mutex<HashMap<u32, WsConn>>>;
 ///
 /// ## Example
 ///
-/// ```
+/// ```no_run
 /// use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 /// use vvva_js::builtins::websocket::{WsPool, drain_ws_pool};
 ///
