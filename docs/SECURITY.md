@@ -337,7 +337,7 @@ Never publish if any of these fail:
 ## Accepted Risk Register
 
 Advisories ignorados en `deny.toml` con justificación documentada.
-**Deben revisarse antes de cualquier release 1.0.**
+Cada entrada incluye el path de código afectado y las condiciones que invalidarían la aceptación.
 
 ### RUSTSEC-2023-0071 — Marvin Attack (RSA timing side-channel)
 
@@ -347,26 +347,34 @@ Advisories ignorados en `deny.toml` con justificación documentada.
 | Crate        | `rsa`                                          |
 | CVE          | CVE-2023-49092                                 |
 | CVSS         | 5.9 (Medium)                                   |
-| Estado       | **Aceptado — no hay fix upstream disponible**  |
+| Estado       | **Aceptado — path vulnerable no alcanzable en 3va** |
 
-**Qué es:** El path de decryption PKCS#1 v1.5 del crate `rsa` es vulnerable al
-Marvin Attack: un oracle de timing que permite a un atacante que puede medir
-la latencia de muchas operaciones de decryption recuperar texto plano sin la
-clave privada.
+**Qué es:** El path de `RsaPrivateKey::decrypt()` con PKCS#1 v1.5 del crate `rsa 0.9`
+es vulnerable al Marvin Attack: un oracle de timing que permite a un atacante medir la
+latencia de operaciones de decryption para recuperar texto plano sin la clave privada.
 
-**Por qué el riesgo es aceptable en 3va:** 3va es una **herramienta de línea
-de comandos**. Las operaciones RSA (keygen, signing, verification) corren
-localmente con las claves propias del usuario. No hay servidor exponiendo un
-oracle de decryption a callers remotos. El ataque requiere:
-1. Acceso de red a un servicio vivo que realice decryption RSA-PKCS1.
-2. Capacidad de enviar muchos ciphertexts especialmente fabricados y medir
-   tiempos de respuesta con precisión sub-milisegundo.
+**Por qué no aplica a 3va:** 3va usa `rsa` **únicamente** para:
+- `crypto.generateKeyPair('rsa')` → `RsaPrivateKey::new()` (generación, no vulnerable)
+- `crypto.createSign('RSA-SHA*')` → `pkcs1v15::SigningKey::sign()` (firma, no vulnerable)
+- `crypto.createVerify('RSA-SHA*')` → `pkcs1v15::VerifyingKey::verify()` (verificación, no vulnerable)
 
-Ninguna condición se cumple en el modelo de amenaza de 3va.
+`RsaPrivateKey::decrypt()` **nunca se llama** en el código de 3va. El path vulnerable
+es inalcanzable. No existe ni la API JS `crypto.privateDecrypt()` expuesta al usuario.
+
+El ataque además requiere:
+1. Un servicio en red que ejecute decryption RSA-PKCS1 y devuelva respuestas medibles.
+2. Capacidad de enviar miles de ciphertexts fabricados midiendo latencia sub-milisegundo.
+
+Ninguna condición se cumple — la condición 1 es estructuralmente imposible en 3va.
+
+**Estado del fix upstream:** `rsa 0.10.0-rc.18` contiene el fix pero es una RC que
+requiere `digest 0.11` y `rand_core 0.10`. El ecosistema RustCrypto no tiene aún
+versiones estables de `sha2`/`sha1` para `digest 0.11`. Migrar cuando `rsa 0.10`
+estable se publique.
 
 **Invalidadores — si alguno ocurre, esta aceptación debe revocarse:**
-- 3va añade un modo servidor que expone TLS/RSA decryption por red.
-- `rsa` publica un parche; en ese caso actualizar de inmediato.
+- 3va expone `crypto.privateDecrypt()` u otro path de decryption RSA-PKCS1 por red.
+- `rsa 0.10` estable se publica — en ese momento migrar de inmediato.
 
 **Referencias:**
 - https://rustsec.org/advisories/RUSTSEC-2023-0071.html
