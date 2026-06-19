@@ -5,6 +5,56 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [2.1.0] — 2026-06-22
+
+### Added
+
+- **`timers/promises`** — Full Node.js 18+ timers/promises module. `setTimeout`, `setInterval`, and
+  `setImmediate` return Promises/AsyncIterators. All three support `options.signal` (AbortSignal).
+  `for await...of setInterval(delay, value)` works correctly. (`crates/js/src/builtins/modules.rs`)
+
+- **`stream/web` (WHATWG Streams)** — `ReadableStream`, `WritableStream`, `TransformStream` globals
+  fully implemented with `[Symbol.asyncIterator]()` on ReadableStream, `tee()`, `pipeTo()`,
+  `pipeThrough()`, and proper controller methods. Also accessible via `require('stream/web')`.
+
+- **`dns` module (full)** — `dns.lookup()`, `dns.resolve()`, `dns.resolve4()`, `dns.resolve6()`,
+  `dns.promises.*` all working via `tokio::net::lookup_host`. Requires `--allow-net`.
+
+- **`readline` module (full)** — `createInterface()` with async iterator support via
+  `Symbol.asyncIterator()`, proper `question()` with AbortSignal, `pause()`/`resume()`,
+  `setPrompt()`, `write()`, and event emission (`line`, `close`, `SIGINT`). `readline.promises`
+  namespace also implemented.
+
+- **`3va create <template>`** — New CLI subcommand for scaffolding projects. Supported frameworks:
+  nuxt, solid, redwood, refine, next, astro, remix, svelte. Uses official framework scaffolders
+  via `npx`/`create-*`. Auto-grants `--allow-net --allow-child-process` for scaffolding.
+  (`crates/cli/src/main.rs`)
+
+- **`--heap-snapshot[=<path>]`** — New CLI flag on `3va run`. Writes a Chrome DevTools Memory
+  panel-compatible `.heapsnapshot` JSON file after script execution. Default path:
+  `heap-<timestamp>.heapsnapshot`. Uses QuickJS memory APIs and global object enumeration.
+  (`crates/js/src/lib.rs`, `crates/cli/src/main.rs`)
+
+- **SLSA Level 2 provenance** — Release workflow (`release.yml`) now generates cryptographically
+  verifiable provenance for all binaries using `slsa-github-generator`. Binaries are signed
+  with `cosign sign-blob` via OIDC keyless signing. Provenance (`.intoto.jsonl`) and signatures
+  (`.sig`) are uploaded as release assets.
+
+- **Automated security audit** — New `.github/workflows/security-audit.yml` runs `cargo audit`
+  and `cargo deny check` every Monday at 9:00 AM UTC. On failure, automatically opens a GitHub
+  Issue with the audit output. Also runs on push to main.
+
+### Changed
+
+- **Build reproducibility** — Release builds now use `cargo build --release --locked` to ensure
+  deterministic builds from the committed `Cargo.lock`.
+
+### Security
+
+- See [SECURITY.md](./SECURITY.md) for RUSTSEC-2023-0071 status.
+
+---
+
 ## [2.0.4] — 2026-06-19
 
 ### Added

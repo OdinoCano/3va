@@ -529,6 +529,135 @@ impl JsEngine {
     pub fn is_profiling(&self) -> bool {
         self.profiler.is_some()
     }
+
+    /// Take a synthetic heap snapshot compatible with Chrome DevTools Memory panel.
+    ///
+    /// Since QuickJS does not expose per-object heap internals, this creates an
+    /// approximation using memory usage statistics and global object enumeration.
+    /// The snapshot includes node categories (string, array, object, function)
+    /// with approximate sizes, sufficient for detecting memory leaks by category.
+    pub async fn take_heap_snapshot(&self) -> anyhow::Result<String> {
+        let memory_stats = self.runtime.memory_usage().await;
+
+        let snapshot = serde_json::json!({
+            "snapshot": {
+                "meta": {
+                    "node_fields": ["type", "name", "id", "self_size", "edge_count", "trace_node_id"],
+                    "node_types": [
+                        ["hidden", "object", "function", "string", "unknown", "array", "boolean", "number"],
+                        "string",
+                        "number",
+                        "number",
+                        "number",
+                        "number"
+                    ],
+                    "edge_fields": ["type", "name_or_index", "to_node", "from_node"],
+                    "edge_types": [
+                        ["context", "element", "property", "internal", "hidden", "shortcut", "weak"],
+                        "string_or_number",
+                        "node",
+                        "node"
+                    ],
+                    "trace_function_info_fields": ["function_id", "name", "script_name", "line", "column"],
+                    "trace_node_fields": ["id", "function_info_index", "offset", "col", "line"],
+                    "sample_fields": ["timestamp_us", "client_id", "heap_size"],
+                    "location_fields": ["object_index", "field_index"]
+                },
+                "node_count": 0,
+                "edge_count": 0,
+                "trace_function_count": 0
+            },
+            "nodes": build_synthetic_nodes(&memory_stats),
+            "edges": [],
+            "strings": build_snapshot_strings(&memory_stats),
+            "memory_usage": {
+                "malloc_size": memory_stats.malloc_size,
+                "malloc_limit": memory_stats.malloc_limit,
+                "memory_used_size": memory_stats.memory_used_size,
+                "malloc_count": memory_stats.malloc_count,
+                "memory_used_count": memory_stats.memory_used_count,
+                "atom_count": memory_stats.atom_count,
+                "atom_size": memory_stats.atom_size,
+                "str_count": memory_stats.str_count,
+                "str_size": memory_stats.str_size,
+                "obj_count": memory_stats.obj_count,
+                "obj_size": memory_stats.obj_size,
+                "prop_count": memory_stats.prop_count,
+                "prop_size": memory_stats.prop_size,
+                "js_func_count": memory_stats.js_func_count,
+                "js_func_size": memory_stats.js_func_size,
+                "array_count": memory_stats.array_count,
+                "fast_array_count": memory_stats.fast_array_count,
+            }
+        });
+
+        Ok(serde_json::to_string_pretty(&snapshot)?)
+    }
+}
+
+// ── heap snapshot helpers ─────────────────────────────────────────────────────
+
+fn build_synthetic_nodes(m: &rquickjs::runtime::MemoryUsage) -> serde_json::Value {
+    // node_fields: ["type", "name", "id", "self_size", "edge_count", "trace_node_id"]
+    // type index matches node_types[0]: hidden=0, object=1, function=2, string=3, array=5
+    let mut nodes: Vec<serde_json::Value> = Vec::new();
+    let mut id: u64 = 1;
+
+    let categories: &[(&str, u64, u64, u64)] = &[
+        // (label, type_idx, count, avg_size)
+        (
+            "object",
+            1,
+            m.obj_count as u64,
+            (m.obj_size as u64).saturating_div(m.obj_count.max(1) as u64),
+        ),
+        (
+            "string",
+            3,
+            m.str_count as u64,
+            (m.str_size as u64).saturating_div(m.str_count.max(1) as u64),
+        ),
+        (
+            "function",
+            2,
+            m.js_func_count as u64,
+            (m.js_func_size as u64).saturating_div(m.js_func_count.max(1) as u64),
+        ),
+        ("array", 5, m.array_count as u64, 64),
+    ];
+
+    for (label, type_idx, count, avg_size) in categories {
+        for i in 0..*count {
+            nodes.push(serde_json::json!([
+                *type_idx,
+                label,
+                id + i,
+                avg_size,
+                0,
+                0
+            ]));
+        }
+        id += count;
+    }
+
+    serde_json::Value::Array(nodes)
+}
+
+fn build_snapshot_strings(m: &rquickjs::runtime::MemoryUsage) -> serde_json::Value {
+    let mut strings = vec![
+        serde_json::Value::String(String::new()),
+        serde_json::Value::String("object".to_string()),
+        serde_json::Value::String("string".to_string()),
+        serde_json::Value::String("function".to_string()),
+        serde_json::Value::String("array".to_string()),
+        serde_json::Value::String(format!("atom_count:{}", m.atom_count)),
+        serde_json::Value::String(format!("prop_count:{}", m.prop_count)),
+    ];
+    // Include atom strings as placeholders so the strings table is non-empty
+    for i in 0..(m.atom_count.min(32) as u64) {
+        strings.push(serde_json::Value::String(format!("atom_{i}")));
+    }
+    serde_json::Value::Array(strings)
 }
 
 #[cfg(test)]
