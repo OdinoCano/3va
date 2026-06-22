@@ -130,45 +130,45 @@ jobs:
             ${{ env.ARCHIVE }}.sha256
           retention-days: 1
 
-  # ── SLSA Level 2 Provenance ─────────────────────────────────────────────────
-  provenance:
-    name: SLSA Provenance
+  # ── Collect hashes for SLSA provenance ───────────────────────────────────────
+  hash:
+    name: Collect artifact hashes
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Compute base64 SHA-256 subjects
+        id: hash
+        shell: bash
+        run: |
+          cd artifacts
+          HASHES=$(sha256sum *.tar.gz *.zip 2>/dev/null | base64 -w0)
+          echo "hashes=${HASHES}" >> "$GITHUB_OUTPUT"
+
+  # ── SLSA Level 2 Provenance ───────────────────────────────────────────────────
+  # Reusable workflow — must be referenced at the job level (jobs.<id>.uses),
+  # not inside steps. See: https://github.com/slsa-framework/slsa-github-generator
+  provenance:
+    name: SLSA Provenance
+    needs: hash
     permissions:
       actions: read
       contents: write
       id-token: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.hash.outputs.hashes }}"
+      upload-assets: false   # we upload in github-release job
 
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all binaries
-        uses: actions/download-artifact@v4
-        with:
-          path: binaries
-          merge-multiple: true
-
-      - name: Generate provenance (SLSA Level 2)
-        uses: slsa-framework/slsa-github-generator/.github/workflows/generic_generator@v2
-        with:
-          base64-subjects: "${{ needs.build.outputs.provenance }}"
-          # NOTE: This uses the generic generator for non-Go projects.
-          # For full SLSA Level 3, a native Rust builder would be required.
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-          ACTIONS_ID_TOKEN_REQUEST_AUDIENCE: ${{ env.ACTIONS_ID_TOKEN_REQUEST_AUDIENCE }}
-
-      - name: Upload provenance
-        uses: actions/upload-artifact@v4
-        with:
-          name: provenance
-          path: |
-            *.intoto.jsonl
-            *.sig
-          retention-days: 5
-
-  # ── Sign binaries with cosign (keyless OIDC) ────────────────────────────────
+  # ── Sign binaries with cosign (keyless OIDC) ─────────────────────────────────
   sign:
     name: Sign binaries
     needs: build
@@ -178,8 +178,6 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
-
       - name: Download all binaries
         uses: actions/download-artifact@v4
         with:
@@ -192,21 +190,18 @@ jobs:
       - name: Sign binaries (keyless via OIDC)
         shell: bash
         run: |
-          for ARCHIVE in binaries/*.tar.gz binaries/*.zip; do
-            if [ -f "$ARCHIVE" ]; then
-              cosign sign-blob --yes --recursive=true "ghsaproj+$(ACTIONS_ID_TOKEN_REQUEST_AUDIENCE)" "@$ARCHIVE"
-            fi
+          cd binaries
+          for ARCHIVE in *.tar.gz *.zip; do
+            [ -f "$ARCHIVE" ] || continue
+            cosign sign-blob --yes "$ARCHIVE" \
+              --bundle "${ARCHIVE}.bundle"
           done
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-          ACTIONS_ID_TOKEN_REQUEST_AUDIENCE: ${{ env.ACTIONS_ID_TOKEN_REQUEST_AUDIENCE }}
 
       - name: Upload signatures
         uses: actions/upload-artifact@v4
         with:
           name: signatures
-          path: |
-            *.sig
+          path: binaries/*.bundle
           retention-days: 5
 
   # ── Create GitHub Release ─────────────────────────────────────────────────────
