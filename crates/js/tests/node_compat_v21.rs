@@ -205,6 +205,11 @@ async fn dns_resolve4_callback_form() {
 }
 
 // ── readline ─────────────────────────────────────────────────────────────────
+// NOTE: These tests verify API shape only. The readline implementation is a stub
+// with no real stdin backing — question() returns '' unless input provides a
+// getReader() method. Behavioral tests require a mock stdin. See:
+// - docs/11-guidelines/01-ai-coding-guidelines.md §2.3 (partial stubs table)
+// - crates/js/src/builtins/modules.rs (readline section, ~line 4403)
 
 #[tokio::test]
 async fn readline_module_loads() {

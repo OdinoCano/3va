@@ -13,17 +13,32 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   `setImmediate` return Promises/AsyncIterators. All three support `options.signal` (AbortSignal).
   `for await...of setInterval(delay, value)` works correctly. (`crates/js/src/builtins/modules.rs`)
 
-- **`stream/web` (WHATWG Streams)** — `ReadableStream`, `WritableStream`, `TransformStream` globals
-  fully implemented with `[Symbol.asyncIterator]()` on ReadableStream, `tee()`, `pipeTo()`,
-  `pipeThrough()`, and proper controller methods. Also accessible via `require('stream/web')`.
+- **`stream/web` (WHATWG Streams)** — `ReadableStream`, `WritableStream`, and `TransformStream`
+  globals (from v1.0.0) now also accessible via `require('stream/web')` subpath, consistent with
+  Node.js 16+ API. `[Symbol.asyncIterator]()`, `tee()`, `pipeTo()`, `pipeThrough()` all available.
 
 - **`dns` module (full)** — `dns.lookup()`, `dns.resolve()`, `dns.resolve4()`, `dns.resolve6()`,
   `dns.promises.*` all working via `tokio::net::lookup_host`. Requires `--allow-net`.
 
-- **`readline` module (full)** — `createInterface()` with async iterator support via
-  `Symbol.asyncIterator()`, proper `question()` with AbortSignal, `pause()`/`resume()`,
-  `setPrompt()`, `write()`, and event emission (`line`, `close`, `SIGINT`). `readline.promises`
-  namespace also implemented.
+- **Network protocol modules** — New built-in modules for IRC, FTP, POP3, MQTT, SSH/SFTP, and WebRTC:
+  - `irc` — IRC client with connection pooling, nick/user registration, JOIN/PART/QUIT, PRIVMSG
+  - `ftp` — FTP client with PASV data connections, authentication, file operations (GET/PUT/LIST)
+  - `pop3` — POP3 client with connection pooling, authentication, RETR/DELE/LIST operations
+  - `mqtt` — MQTT 3.1.1 client with QoS 0/1 support, subscribe/publish, connection pooling
+  - `ssh` — SSH2/SFTP client with keypair support, SFTP operations (read/write/stat/mkdir/rmdir)
+  - `webrtc` — WebRTC peer connection and data channels (RTCPeerConnection, RTCDataChannel)
+  All modules use deny-by-default `Capability::Network(host)` permissions. (`crates/js/src/builtins/`)
+
+- **`readline` module** — `createInterface()`, `Symbol.asyncIterator()`, `question()`,
+  `pause()`/`resume()`, `setPrompt()`, `write()`, and `line`/`close`/`SIGINT` events.
+  `readline.promises` namespace also implemented. **Note:** no real stdin backing;
+  `question()` resolves with empty string unless input provides a `getReader()` method
+  ( WHATWG Stream interface). See `docs/11-guidelines/01-ai-coding-guidelines.md` §2.3.
+
+- **`package.json#3va.permissions`** — New manifest field for declaring required permissions in
+  `package.json`. Supports `Capability::Network(host)` with `grant`/`deny`/`prompt`. Enables
+  `--package-json` flag on `permissions suggest`/`learn`. Added `ThreeVaConfig` and
+  `PackagePermissionScope` types. (`crates/pm/src/manifest.rs`, `crates/cli/src/main.rs`)
 
 - **`3va create <template>`** — New CLI subcommand for scaffolding projects. Supported frameworks:
   nuxt, solid, redwood, refine, next, astro, remix, svelte. Uses official framework scaffolders
@@ -48,6 +63,8 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 - **Build reproducibility** — Release builds now use `cargo build --release --locked` to ensure
   deterministic builds from the committed `Cargo.lock`.
+
+- **`process.version` / `process.versions['3va']`** — Bumped to `2.1.0`.
 
 ### Security
 

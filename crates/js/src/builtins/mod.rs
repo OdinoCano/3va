@@ -7,13 +7,21 @@ pub mod event_source;
 pub mod fetch;
 pub mod ffi;
 pub mod fs;
+pub mod ftp;
+pub mod grpc;
 pub mod http_server;
+pub mod imap;
+pub mod irc;
 pub mod modules;
+pub mod mqtt;
 pub mod napi;
+pub mod pop3;
 pub mod process;
 pub mod sqlite;
+pub mod ssh;
 pub mod tcp;
 pub mod timers;
+pub mod webrtc;
 pub mod websocket;
 pub mod worker_threads;
 pub mod zlib;
@@ -35,9 +43,6 @@ pub fn inject_all(
     console::inject_console(ctx)?;
     timers::inject_timers(ctx, timer_manager)?;
 
-    // atob / btoa polyfills — must be injected before buffer.rs, crypto.rs, and
-    // any user code that calls Buffer.from(str, 'base64') or WebCrypto JWK imports.
-    // QuickJS does not expose these as globals by default.
     ctx.eval::<(), _>(
         r#"
     (function() {
@@ -81,25 +86,29 @@ pub fn inject_all(
 
     buffer::inject_buffer(ctx)?;
     process::inject_process(ctx, permissions.clone())?;
-    // Node.js packages expect `global` and `globalThis` to be the same object.
     ctx.eval::<(), _>("globalThis.global = globalThis; globalThis.GLOBAL = globalThis;")?;
     fetch::inject_fetch(ctx, permissions.clone())?;
     fs::inject_fs(ctx, permissions.clone())?;
     tcp::inject_tcp(ctx, permissions.clone())?;
+    grpc::inject_grpc(ctx, permissions.clone())?;
     http_server::inject_http_server(ctx, permissions.clone(), firewall)?;
     modules::inject_require(ctx, permissions.clone())?;
     websocket::inject_websocket(ctx, permissions.clone(), ws_pool)?;
-    // These run after inject_require so they can overwrite the placeholder stubs
     zlib::inject_zlib(ctx)?;
     child_process::inject_child_process(ctx, permissions.clone())?;
     crypto::inject_crypto(ctx)?;
     ffi::inject_ffi(ctx, permissions.clone())?;
     napi::inject_napi(ctx, permissions.clone())?;
-    // Must run after inject_require so the worker_threads stub is already loaded.
     worker_threads::inject_worker_threads_native(ctx, permissions.clone())?;
-    // dgram (UDP) — after inject_require so it populates __requireCache['dgram'].
-    dgram::inject_dgram(ctx, permissions)?;
+    dgram::inject_dgram(ctx, permissions.clone())?;
     sqlite::inject_sqlite(ctx)?;
     event_source::inject_event_source(ctx)?;
+    imap::inject_imap(ctx, permissions.clone())?;
+    irc::inject_irc(ctx, permissions.clone())?;
+    ftp::inject_ftp(ctx, permissions.clone())?;
+    pop3::inject_pop3(ctx, permissions.clone())?;
+    mqtt::inject_mqtt(ctx, permissions.clone())?;
+    ssh::inject_ssh(ctx, permissions.clone())?;
+    webrtc::inject_webrtc(ctx, permissions.clone())?;
     Ok(())
 }

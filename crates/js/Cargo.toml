@@ -115,6 +115,10 @@ path = "tests/web_compat.rs"
 name = "sqlite_module"
 path = "tests/sqlite_module.rs"
 
+[[test]]
+name = "imap_module"
+path = "tests/imap_module.rs"
+
 [dependencies]
 rquickjs.workspace = true
 rquickjs-sys = { version = "0.6.4", package = "vvva-rquickjs-sys", path = "../../vendor/rquickjs-sys" }
@@ -151,6 +155,9 @@ md-5 = { workspace = true }
 notify = { workspace = true }
 inferno = { workspace = true }
 rusqlite = { workspace = true }
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+http = "1"
 
 libloading = "0.8"
 libffi = "3.2"
