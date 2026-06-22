@@ -72,6 +72,29 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [2.1.1] — 2026-06-22
+
+### Fixed
+
+- **Clippy warnings** — Resolved `dead_code`, `await_holding_lock`, and `manual_strip` lints
+  across builtin modules:
+  - `grpc.rs`: Changed `rx` from `std::sync::Mutex` to `tokio::sync::Mutex` to fix
+    `await_holding_lock` lint during `recv().await`
+  - `imap.rs`: Added `#[allow(dead_code)]` on unused `Logout` variant and `send_command` method;
+    fixed `manual_strip` to use `strip_prefix()`
+  - `irc.rs`, `mqtt.rs`, `ssh.rs`, `webrtc.rs`: Added `#[allow(dead_code)]` on unused struct fields
+  - Test files: Added `#[allow(dead_code)]` on `engine_with_net` helper functions
+
+### Changed
+
+- **`process.version` / `process.versions['3va']`** — Bumped to `2.1.1`.
+
+### Security
+
+- See [SECURITY.md](./SECURITY.md) for RUSTSEC-2023-0071 status.
+
+---
+
 ## [2.0.4] — 2026-06-19
 
 ### Added

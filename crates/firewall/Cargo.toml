@@ -1,6 +1,6 @@
 [package]
 name = "vvva_firewall"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "HTTP firewall for the 3va runtime — rate limiting, token bucket, Slowloris/RUDY protection, IP auto-blocking"

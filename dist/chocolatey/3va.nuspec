@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>3va</id>
-    <version>2.1.0</version>
+    <version>2.1.1</version>
     <title>3va</title>
     <authors>OdinoCano</authors>
     <projectUrl>https://github.com/OdinoCano/3va</projectUrl>
@@ -27,7 +27,7 @@ Key properties:
 Install with: choco install 3va
 Run: 3va --help
     </description>
-    <releaseNotes>https://github.com/OdinoCano/3va/releases/tag/v2.1.0</releaseNotes>
+    <releaseNotes>https://github.com/OdinoCano/3va/releases/tag/v2.1.1</releaseNotes>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />
