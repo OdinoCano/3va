@@ -138,7 +138,7 @@ jobs:
     permissions:
       actions: read
       contents: write
-      id-token: grant
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
