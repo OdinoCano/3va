@@ -2,27 +2,27 @@ class ThreeVa < Formula
   desc "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally."
   homepage "https://github.com/OdinoCano/3va"
   license "MIT"
-  version "2.0.4"
+  version "2.1.0"
 
   on_macos do
     on_intel do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.0.4/3va-v2.0.4-x86_64-apple-darwin.tar.gz"
-      sha256 "7fb344c533e099485ff39395e19b8a16ce1c8d1a70f89b38952e4b30d6aa5c6a"
+      url "https://github.com/OdinoCano/3va/releases/download/v2.1.0/3va-v2.1.0-x86_64-apple-darwin.tar.gz"
+      sha256 "c5890a9d45d23a55b920384c3bd7169a477c3326229acbbc01b33a695f89b227"
     end
     on_arm do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.0.4/3va-v2.0.4-aarch64-apple-darwin.tar.gz"
-      sha256 "75c971c0697986adaf484b783eac6a5d337daec87c5cfac73830e2f05ef96a28"
+      url "https://github.com/OdinoCano/3va/releases/download/v2.1.0/3va-v2.1.0-aarch64-apple-darwin.tar.gz"
+      sha256 "d977de6f21af3fa9d014190f047b4e5f7050b49fb8d2906a41618eb02d25f233"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.0.4/3va-v2.0.4-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "5e9e02743d81da6a00b22eea396d1610a33d1bc27372b5aa972d3834994e708b"
+      url "https://github.com/OdinoCano/3va/releases/download/v2.1.0/3va-v2.1.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "9cf0d553a5881a6c64b8863b9df96ced8892a9e451b3c9932e03bb1f885e4373"
     end
     on_arm do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.0.4/3va-v2.0.4-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "5a31a8f0737177a33ccda4df5408fc539af4cb99687f6733996b3d5be75a0df8"
+      url "https://github.com/OdinoCano/3va/releases/download/v2.1.0/3va-v2.1.0-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "5d2db6768e39dfeb5301cd1b641355edb50753f4b64e0afd7c40aa530dc9a4b8"
     end
   end
 
