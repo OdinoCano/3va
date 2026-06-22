@@ -1,6 +1,6 @@
 name: 3va
 base: core24
-version: '2.1.0'
+version: '2.1.1'
 summary: Secure-by-default JavaScript and TypeScript runtime.
 description: |
   3va is a JavaScript and TypeScript runtime built on QuickJS with
@@ -31,7 +31,7 @@ parts:
   3va:
     plugin: rust
     source: https://github.com/OdinoCano/3va.git
-    source-tag: v2.1.0
+    source-tag: v2.1.1
     source-type: git
     rust-features:
       - []
