@@ -6,23 +6,23 @@ class ThreeVa < Formula
 
   on_macos do
     on_intel do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.1.1/3va-v2.1.1-x86_64-apple-darwin.tar.gz"
-      sha256 "c5890a9d45d23a55b920384c3bd7169a477c3326229acbbc01b33a695f89b227"
+      url "https://github.com/OdinoCano/3va/releases/download/2.1.1/3va-2.1.1-x86_64-apple-darwin.tar.gz"
+      sha256 "dc6fbee7a6be71d76ed279c86d05b6a1dcd663707ff95c4eead46c5998367918"
     end
     on_arm do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.1.1/3va-v2.1.1-aarch64-apple-darwin.tar.gz"
-      sha256 "d977de6f21af3fa9d014190f047b4e5f7050b49fb8d2906a41618eb02d25f233"
+      url "https://github.com/OdinoCano/3va/releases/download/2.1.1/3va-2.1.1-aarch64-apple-darwin.tar.gz"
+      sha256 "cd8b142ecee12a6496a35fae02ac4d01e697a18a70c2a655ab987afe2415d6e1"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.1.1/3va-v2.1.1-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "9cf0d553a5881a6c64b8863b9df96ced8892a9e451b3c9932e03bb1f885e4373"
+      url "https://github.com/OdinoCano/3va/releases/download/2.1.1/3va-2.1.1-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "d775a9878c421bd61366a9865f5d205f32357ad6f49cc339a4e6c2f5aa4c8d0b"
     end
     on_arm do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.1.1/3va-v2.1.1-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "5d2db6768e39dfeb5301cd1b641355edb50753f4b64e0afd7c40aa530dc9a4b8"
+      url "https://github.com/OdinoCano/3va/releases/download/2.1.1/3va-2.1.1-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "7d88fdeceddb2cf892c4fcc21f99d2f7bce572805c28b78c0f353762e937cded"
     end
   end
 
