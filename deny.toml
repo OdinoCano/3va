@@ -40,7 +40,25 @@ confidence-threshold = 0.8
 multiple-versions = "warn"
 deny = []
 skip = [
-    { name = "bitflags", version = "1" },
+    { name = "bitflags",      version = "1" },
+    # RustCrypto ecosystem split: rsa 0.9 uses digest 0.10 / der 0.7 / const-oid 0.9;
+    # ml-kem / ml-dsa use the newer digest 0.11 / der 0.8 / const-oid 0.10 series.
+    # Both trees are needed until rsa 0.10 stable is released.
+    { name = "block-buffer",  version = "0.10" },
+    { name = "const-oid",     version = "0.9" },
+    { name = "crypto-common", version = "0.1" },
+    { name = "der",           version = "0.7" },
+    { name = "digest",        version = "0.10" },
+    # cpufeatures: 0.2 from sha2/aes, 0.3 from ml-kem
+    { name = "cpufeatures",   version = "0.2" },
+    # core-foundation: 0.9 from native-tls, 0.10 from newer macOS deps
+    { name = "core-foundation", version = "0.9" },
+    # getrandom: 0.2 from rand 0.8, 0.3 from ml-kem, 0.4 from crypto-bigint (rsa 0.10 rc path)
+    { name = "getrandom",     version = "0.2" },
+    { name = "getrandom",     version = "0.3" },
+    # hashbrown: multiple versions pulled by different hashmap-heavy crates
+    { name = "hashbrown",     version = "0.14" },
+    { name = "hashbrown",     version = "0.15" },
 ]
 skip-tree = []
 
