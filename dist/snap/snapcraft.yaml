@@ -11,6 +11,12 @@ description: |
   execution — is denied by default and must be explicitly granted per script.
   Post-install scripts are blocked unconditionally.
   Built-in process supervisor; no pm2 required. MIT licensed.
+title: vvva-cli
+license: MIT
+contact: https://github.com/OdinoCano/3va/issues
+issues: https://github.com/OdinoCano/3va/issues
+source-code: https://github.com/OdinoCano/3va
+website: https://github.com/OdinoCano/3va
 
 grade: stable
 confinement: strict
@@ -29,13 +35,7 @@ apps:
 
 parts:
   3va:
-    plugin: rust
-    source: https://github.com/OdinoCano/3va.git
-    source-tag: v2.1.1
-    source-type: git
-    build-packages:
-      - pkg-config
-      - libssl-dev
-    override-build: |
-      cargo build --release --locked --bin 3va
-      install -Dm755 target/release/3va $SNAPCRAFT_PART_INSTALL/bin/3va
+    plugin: dump
+    source: ../../target/release/
+    organize:
+      3va: bin/3va
