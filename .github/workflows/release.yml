@@ -60,10 +60,12 @@ jobs:
       - name: Create swap space (avoid OOM on resource-constrained runners)
         if: runner.os == 'Linux'
         run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          if [ ! -f /swapfile ]; then
+            sudo fallocate -l 8G /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          fi
           echo "Swap enabled: $(free -h | grep Swap)"
 
       - uses: dtolnay/rust-toolchain@stable
