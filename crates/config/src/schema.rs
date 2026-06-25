@@ -56,6 +56,10 @@ pub struct FirewallConfig {
     /// Maximum body size in bytes (0 = runtime default of 100 MB).
     #[serde(rename = "maxBodyBytes")]
     pub max_body_bytes: u32,
+    /// Minimum body receive rate in bytes per second. Connections slower than
+    /// this are dropped (RUDY mitigation). 0 = disabled.
+    #[serde(rename = "minBodyRateBps")]
+    pub min_body_rate_bps: u32,
 }
 
 impl Default for FirewallConfig {
@@ -73,6 +77,7 @@ impl Default for FirewallConfig {
             max_header_count: 100,
             max_header_bytes: 16_384,
             max_body_bytes: 0,
+            min_body_rate_bps: 100,
         }
     }
 }

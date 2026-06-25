@@ -33,6 +33,7 @@
 //!     blockDurationSecs: 300,
 //!     headerTimeoutMs: 10_000,
 //!     bodyTimeoutMs: 30_000,
+//!     minBodyRateBps: 100,
 //!   }
 //! }
 //! ```
@@ -85,6 +86,10 @@ pub struct FirewallConfig {
 
     /// Maximum body size in bytes (0 = use the http_server 100 MB cap).
     pub max_body_bytes: u32,
+
+    /// Minimum body receive rate in bytes per second. Connections dripping
+    /// body data slower than this are dropped (RUDY mitigation). 0 = disabled.
+    pub min_body_rate_bps: u32,
 }
 
 impl Default for FirewallConfig {
@@ -102,6 +107,7 @@ impl Default for FirewallConfig {
             max_header_count: 100,
             max_header_bytes: 16_384,
             max_body_bytes: 0,
+            min_body_rate_bps: 100,
         }
     }
 }
@@ -626,5 +632,35 @@ mod tests {
         fw.on_disconnect(a);
         fw.on_disconnect(a);
         assert!(fw.check_connection(a).is_allowed());
+    }
+
+    #[test]
+    fn min_body_rate_bps_default_is_nonzero() {
+        let cfg = FirewallConfig::default();
+        assert!(
+            cfg.min_body_rate_bps > 0,
+            "default must enforce a minimum rate"
+        );
+    }
+
+    #[test]
+    fn min_body_rate_bps_zero_disables_check() {
+        let cfg = FirewallConfig {
+            min_body_rate_bps: 0,
+            ..FirewallConfig::default()
+        };
+        assert_eq!(cfg.min_body_rate_bps, 0);
+    }
+
+    #[test]
+    fn min_body_rate_bps_custom_value_preserved() {
+        let cfg = FirewallConfig {
+            min_body_rate_bps: 512,
+            ..FirewallConfig::default()
+        };
+        assert_eq!(cfg.min_body_rate_bps, 512);
+        // Verify it clones correctly (used when passing config to Firewall::new).
+        let cloned = cfg.clone();
+        assert_eq!(cloned.min_body_rate_bps, 512);
     }
 }

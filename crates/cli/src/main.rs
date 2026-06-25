@@ -2271,6 +2271,7 @@ async fn main() -> anyhow::Result<()> {
                             max_header_count: fc.max_header_count,
                             max_header_bytes: fc.max_header_bytes,
                             max_body_bytes: fc.max_body_bytes,
+                            min_body_rate_bps: fc.min_body_rate_bps,
                         }
                     })
                     .unwrap_or_default();
