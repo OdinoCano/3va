@@ -88,8 +88,14 @@ winget install OdinoCano.3va
 ### Snap (Linux)
 
 ```bash
+snap install vvva-cli
+```
+
+Build locally from source (for testing):
+
+```bash
 snapcraft --use-lxd   # uses dist/snap/snapcraft.yaml
-sudo snap install ./3va_*.snap --dangerous
+sudo snap install ./vvva-cli_*.snap --dangerous
 ```
 
 ### Nix

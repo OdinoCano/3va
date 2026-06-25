@@ -1,4 +1,4 @@
-name: 3va
+name: vvva-cli
 base: core24
 version: '2.1.1'
 summary: Secure-by-default JavaScript and TypeScript runtime.
