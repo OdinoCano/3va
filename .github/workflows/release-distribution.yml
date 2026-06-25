@@ -37,6 +37,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VER="${{ env.VERSION }}"
+          [[ "$VER" != v* ]] && VER="v${VER}"
           # gh release download uses the API — no CDN propagation delay.
           # Retry up to 5 times (30 s apart) in case the release was just created.
           for i in 1 2 3 4 5; do
@@ -87,6 +88,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VER: ${{ env.VERSION }}
         run: |
+          [[ "$VER" != v* ]] && VER="v${VER}"
           gh release download "$VER" \
             --repo OdinoCano/3va \
             --pattern "3va-${VER}-x86_64-unknown-linux-gnu.tar.gz" \
