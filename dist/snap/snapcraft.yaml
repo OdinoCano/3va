@@ -33,11 +33,9 @@ parts:
     source: https://github.com/OdinoCano/3va.git
     source-tag: v2.1.1
     source-type: git
-    rust-features:
-      - []
     build-packages:
       - pkg-config
       - libssl-dev
     override-build: |
-      cargo build --release --bin 3va
+      cargo build --release --locked --bin 3va
       install -Dm755 target/release/3va $SNAPCRAFT_PART_INSTALL/bin/3va

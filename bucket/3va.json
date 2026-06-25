@@ -5,8 +5,8 @@
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/OdinoCano/3va/releases/download/2.1.1/3va-2.1.1-x86_64-pc-windows-msvc.zip",
-      "hash": "f26dba2f7b8f741439e9bbabe92a87c03a4ee3c955f6a307c37ab3e3953da6ec",
+      "url": "https://github.com/OdinoCano/3va/releases/download/v2.1.1/3va-v2.1.1-x86_64-pc-windows-msvc.zip",
+      "hash": "68a61a89459547f090c39a761677fe4580bb73a55ee15c8699874bda8c2bc9b9",
       "bin": "3va.exe"
     }
   },
