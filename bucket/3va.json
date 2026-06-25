@@ -12,7 +12,7 @@
   },
   "checkver": {
     "github": "https://github.com/OdinoCano/3va",
-    "regex": "v([\d.]+)"
+    "regex": "v([\\d.]+)"
   },
   "autoupdate": {
     "architecture": {

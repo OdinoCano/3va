@@ -51,6 +51,13 @@ cobertura.xml
 mutants.out/
 mutants.out.old/
 
+# Snap build artifacts
+dist/snap/.craft/
+dist/snap/parts/
+dist/snap/prime/
+dist/snap/stage/
+dist/snap/*.snap
+
 # Security — estos archivos SÍ van al repo
 # .semgrep/   → reglas de seguridad, deben commitearse
 # .cargo-husky/ → hooks source, debe commitearse
