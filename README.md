@@ -60,12 +60,6 @@ The JavaScript ecosystem has a supply chain security problem. Post-install scrip
 npm install -g @edge_166/3va
 ```
 
-### Homebrew (macOS and Linux)
-
-```bash
-brew install OdinoCano/3va/3va
-```
-
 ### Scoop (Windows)
 
 ```bash
