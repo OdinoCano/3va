@@ -1,8 +1,9 @@
 //! HTTP/1.1 server backend for `http.createServer()`.
 //!
 //! Security hardening (v2.1):
-//!   - Header read timeout  → Slowloris protection
-//!   - Body read timeout    → RUDY protection
+//!   - Header read timeout      → Slowloris protection
+//!   - Body read timeout        → RUDY protection (total deadline)
+//!   - Min body receive rate    → RUDY protection (drip rate)
 //!   - Max header count + total header bytes
 //!   - Per-IP token-bucket rate limiting (vvva_firewall)
 //!   - Auto-block IPs that exceed violation threshold
@@ -18,6 +19,7 @@ use rquickjs::function::Async;
 use rquickjs::{Ctx, Function, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::TcpListener;
+use tokio::time::Instant;
 
 use vvva_firewall::{Firewall, FirewallDecision};
 use vvva_permissions::{Capability, PermissionState};
@@ -79,6 +81,7 @@ fn parse_extra_headers(headers_json: &str) -> Vec<(String, String)> {
 
 // ── Request parser ─────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 struct ParsedRequest {
     method: String,
     path: String,
@@ -94,6 +97,7 @@ async fn parse_request(
     max_header_count: usize,
     max_header_bytes: usize,
     max_body_bytes: usize,
+    min_body_rate_bps: u32,
 ) -> std::result::Result<ParsedRequest, String> {
     let mut reader = BufReader::new(stream);
 
@@ -155,13 +159,46 @@ async fn parse_request(
         }
     }
 
-    // Body — timeout protects against RUDY (slow body drip).
+    // Body — two-layer RUDY defense:
+    //   1. Total deadline (body_timeout) — connection dies if body never finishes.
+    //   2. Minimum rate (min_body_rate_bps) — connection dies if drip rate is too slow,
+    //      even when data arrives just fast enough to beat the total deadline.
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        tokio::time::timeout(body_timeout, reader.read_exact(&mut body))
-            .await
-            .map_err(|_| "timeout: body not received in time (RUDY?)")?
-            .map_err(|e| e.to_string())?;
+        let deadline = Instant::now() + body_timeout;
+        let mut received: usize = 0;
+        let body_start = Instant::now();
+
+        while received < content_length {
+            if Instant::now() >= deadline {
+                return Err("timeout: body deadline exceeded (RUDY?)".into());
+            }
+            // Read one chunk with a 1-second window so we can check rate frequently.
+            let remaining_deadline = deadline.saturating_duration_since(Instant::now());
+            let chunk_timeout = remaining_deadline.min(std::time::Duration::from_secs(1));
+            let n = tokio::time::timeout(chunk_timeout, reader.read(&mut body[received..]))
+                .await
+                .map_err(|_| "timeout: body stalled (RUDY?)")?
+                .map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("connection closed before body complete".into());
+            }
+            received += n;
+
+            // Rate check: after a short grace window, enforce minimum bytes/sec.
+            if min_body_rate_bps > 0 {
+                let elapsed = body_start.elapsed().as_secs_f64();
+                if elapsed > 2.0 {
+                    let rate = received as f64 / elapsed;
+                    if rate < min_body_rate_bps as f64 {
+                        return Err(format!(
+                            "body rate too low ({:.0} B/s < {} B/s min): RUDY?",
+                            rate, min_body_rate_bps
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     let std_stream = reader.into_inner().into_std().map_err(|e| e.to_string())?;
@@ -294,7 +331,7 @@ pub fn inject_http_server(
                         }
 
                         // ── Parser limits from firewall config ────────────
-                        let (hdr_timeout, body_timeout, max_hdr_count, max_hdr_bytes, max_body) =
+                        let (hdr_timeout, body_timeout, max_hdr_count, max_hdr_bytes, max_body, min_body_rate) =
                             if let Some(firewall) = fw.as_ref().as_ref() {
                                 let c = &firewall.config;
                                 (
@@ -303,18 +340,19 @@ pub fn inject_http_server(
                                     c.max_header_count as usize,
                                     c.max_header_bytes as usize,
                                     c.max_body_bytes as usize,
+                                    c.min_body_rate_bps,
                                 )
                             } else {
                                 (
                                     std::time::Duration::from_secs(10),
                                     std::time::Duration::from_secs(30),
-                                    100, 16_384, 0,
+                                    100, 16_384, 0, 100,
                                 )
                             };
 
                         let parsed = parse_request(
                             stream, hdr_timeout, body_timeout,
-                            max_hdr_count, max_hdr_bytes, max_body,
+                            max_hdr_count, max_hdr_bytes, max_body, min_body_rate,
                         ).await;
 
                         let parsed = match parsed {
@@ -495,4 +533,134 @@ pub fn inject_http_server(
     }
 
     Ok(())
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    // Bind a local listener, return (listener, client_stream).
+    async fn loopback_pair() -> (TcpListener, tokio::net::TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        (listener, client)
+    }
+
+    #[tokio::test]
+    async fn normal_post_body_accepted() {
+        let (listener, mut client) = loopback_pair().await;
+        let body = b"hello=world";
+        let req = format!(
+            "POST /test HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        tokio::spawn(async move {
+            client.write_all(req.as_bytes()).await.unwrap();
+            client.write_all(body).await.unwrap();
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let result = parse_request(
+            server_stream,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            100,
+            16_384,
+            0,
+            0,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().body, body);
+    }
+
+    #[tokio::test]
+    async fn rudy_slow_drip_rejected_by_rate_check() {
+        let (listener, mut client) = loopback_pair().await;
+        // Declare 200 bytes but drip 1 byte every ~500ms → ~2 B/s, below 50 B/s min.
+        let req = "POST /slow HTTP/1.1\r\nContent-Length: 200\r\n\r\n";
+        tokio::spawn(async move {
+            client.write_all(req.as_bytes()).await.unwrap();
+            for _ in 0..200u8 {
+                client.write_all(b"x").await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let result = parse_request(
+            server_stream,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30), // long deadline — rate check must fire first
+            100,
+            16_384,
+            0,
+            50, // min 50 B/s
+        )
+        .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("rate too low") || msg.contains("stalled") || msg.contains("RUDY"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn body_total_deadline_fires_when_rate_check_disabled() {
+        let (listener, mut client) = loopback_pair().await;
+        // Declare 1000 bytes but never send them.
+        let req = "POST /hang HTTP/1.1\r\nContent-Length: 1000\r\n\r\n";
+        tokio::spawn(async move {
+            client.write_all(req.as_bytes()).await.unwrap();
+            // no body bytes sent
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let result = parse_request(
+            server_stream,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(200), // short deadline
+            100,
+            16_384,
+            0,
+            0, // rate check disabled
+        )
+        .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("timeout") || msg.contains("stalled") || msg.contains("deadline"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_request_no_body_accepted() {
+        let (listener, mut client) = loopback_pair().await;
+        tokio::spawn(async move {
+            client
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let result = parse_request(
+            server_stream,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            100,
+            16_384,
+            0,
+            100,
+        )
+        .await;
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.method, "GET");
+        assert!(parsed.body.is_empty());
+    }
 }
