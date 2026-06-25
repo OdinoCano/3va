@@ -81,8 +81,6 @@ DIST_FILES=(
     "Formula/3va.rb"
     "dist/cargo-wrapper/three-va/Cargo.toml"
     "dist/chocolatey/3va.nuspec"
-    "dist/flatpak/com.github.OdinoCano.3va.metainfo.xml"
-    "dist/flatpak/com.github.OdinoCano.3va.yml"
     "dist/homebrew/Formula/3va.rb"
     "dist/nix/default.nix"
     "dist/nix/flake.nix"

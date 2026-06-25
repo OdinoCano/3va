@@ -85,17 +85,7 @@ choco install 3va
 winget install OdinoCano.3va
 ```
 
-### Flatpak (Linux)
-
-Not yet on Flathub. Build locally from the manifest in this repo:
-
-```bash
-flatpak-builder --install --user build-dir dist/flatpak/com.github.OdinoCano.3va.yml
-```
-
 ### Snap (Linux)
-
-Not yet in the Snap Store. Build locally from the manifest in this repo:
 
 ```bash
 snapcraft --use-lxd   # uses dist/snap/snapcraft.yaml
