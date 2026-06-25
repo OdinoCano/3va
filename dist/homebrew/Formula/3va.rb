@@ -1,33 +1,17 @@
 class ThreeVa < Formula
-  desc "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally."
+  desc "Secure-by-default JavaScript and TypeScript runtime"
   homepage "https://github.com/OdinoCano/3va"
+  url "https://github.com/OdinoCano/3va/archive/refs/tags/v2.1.1.tar.gz"
+  sha256 "f70ba3a621bfe1c069a5c4e6977ad8b28afeef2090208f90cfaec86c321594ec"
   license "MIT"
-  version "2.1.1"
 
-  on_macos do
-    on_intel do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.1.1/3va-v2.1.1-x86_64-apple-darwin.tar.gz"
-      sha256 "8241b8615cb7802e6740c035cc081400e33d17dc812846623d092ce9c25ff3ed"
-    end
-    on_arm do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.1.1/3va-v2.1.1-aarch64-apple-darwin.tar.gz"
-      sha256 "af0f3deb5187e551fab84062d53d86d8618ab126dc2f7a47215c5addc6b82241"
-    end
-  end
+  depends_on "pkgconf" => :build
+  depends_on "rust" => :build
 
-  on_linux do
-    on_intel do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.1.1/3va-v2.1.1-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "ddfd46aee3b0b86d448c7fa5e94ae902b28acfb707089db17a53720e2521f27f"
-    end
-    on_arm do
-      url "https://github.com/OdinoCano/3va/releases/download/v2.1.1/3va-v2.1.1-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "1d825a34203ed2d9d16bbdea7daa74644a5b29bb0df63602b00bb1801b968f6d"
-    end
-  end
+  uses_from_macos "zlib"
 
   def install
-    bin.install "3va"
+    system "cargo", "install", *std_cargo_args(path: "crates/cli")
   end
 
   test do
