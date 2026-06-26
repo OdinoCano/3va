@@ -48,14 +48,13 @@ jobs:
             echo "Attempt $i failed, retrying in 30s…"
             sleep 30
           done
-          # Flatten to named files for the next step.
-          VER="${{ env.VERSION }}"
+          # VER already has v-prefix — do NOT reset it here.
           cp "hashes/3va-${VER}-x86_64-unknown-linux-gnu.tar.gz.sha256"    linux_x64.sha256
           cp "hashes/3va-${VER}-aarch64-unknown-linux-gnu.tar.gz.sha256"   linux_arm64.sha256
           cp "hashes/3va-${VER}-x86_64-apple-darwin.tar.gz.sha256"         darwin_x64.sha256
           cp "hashes/3va-${VER}-aarch64-apple-darwin.tar.gz.sha256"        darwin_arm64.sha256
-          cp "hashes/3va-${VER}-x86_64-pc-windows-msvc.zip.sha256"              windows_x64.sha256
-          cp "hashes/3va-${VER}-aarch64-linux-android.tar.gz.sha256"         android_arm64.sha256
+          cp "hashes/3va-${VER}-x86_64-pc-windows-msvc.zip.sha256"         windows_x64.sha256
+          cp "hashes/3va-${VER}-aarch64-linux-android.tar.gz.sha256"       android_arm64.sha256
 
       - name: Parse hashes
         id: hashes
@@ -102,6 +101,7 @@ jobs:
         env:
           VER: ${{ env.VERSION }}
         run: |
+          [[ "$VER" != v* ]] && VER="v${VER}"
           VER_BARE="${VER#v}"
 
           stage_tar() {
@@ -177,6 +177,7 @@ jobs:
           DARWIN_ARM64: ${{ needs.collect-hashes.outputs.darwin_arm64 }}
           VER: ${{ env.VERSION }}
         run: |
+          [[ "$VER" != v* ]] && VER="v${VER}"
           VER_BARE="${VER#v}"
           cat > Formula/3va.rb <<FORMULA
           class ThreeVa < Formula
@@ -222,6 +223,7 @@ jobs:
           WINDOWS_X64: ${{ needs.collect-hashes.outputs.windows_x64 }}
           VER: ${{ env.VERSION }}
         run: |
+          [[ "$VER" != v* ]] && VER="v${VER}"
           VER_BARE="${VER#v}"
           cat > bucket/3va.json <<JSON
           {
@@ -280,6 +282,7 @@ jobs:
           VER: ${{ env.VERSION }}
         shell: pwsh
         run: |
+          if (-not $env:VER.StartsWith('v')) { $env:VER = "v$($env:VER)" }
           $VER_BARE = $env:VER -replace '^v', ''
 
           # Bump version in .nuspec
@@ -343,6 +346,7 @@ jobs:
           WINDOWS_X64: ${{ needs.collect-hashes.outputs.windows_x64 }}
         shell: pwsh
         run: |
+          if (-not $env:VER.StartsWith('v')) { $env:VER = "v$($env:VER)" }
           $VER_BARE  = $env:VER -replace '^v', ''
           $URL       = "https://github.com/OdinoCano/3va/releases/download/$env:VER/3va-$env:VER-x86_64-pc-windows-msvc.zip"
           $SrcDir    = "dist\winget\manifests\o\OdinoCano\3va\2.0.0"
