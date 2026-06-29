@@ -1,9 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
 $packageName = '3va'
-$version     = '2.1.1'
+$version     = '2.1.2'
 $url64       = "https://github.com/OdinoCano/3va/releases/download/v$version/3va-v$version-x86_64-pc-windows-msvc.zip"
-$checksum64  = '68a61a89459547f090c39a761677fe4580bb73a55ee15c8699874bda8c2bc9b9'
+$checksum64  = '30aa420c2e12635122432d0591c22e26f1c136c40eb05754f1607c3f90e7dff0'
 
 $toolsDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $zipPath  = Join-Path $toolsDir '3va.zip'

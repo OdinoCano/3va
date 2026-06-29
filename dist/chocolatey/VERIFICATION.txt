@@ -3,7 +3,7 @@ Verification is intended to assist the Chocolatey moderators and community
 in verifying that this package's contents are trustworthy.
 
 Package: 3va
-Version: 2.0.0
+Version: 2.1.2
 
 The binary distributed by this package is built by the upstream CI pipeline
 (GitHub Actions) from the source code at:
@@ -12,18 +12,18 @@ The binary distributed by this package is built by the upstream CI pipeline
 
 The canonical download location is the GitHub Release page:
 
-  https://github.com/OdinoCano/3va/releases/tag/v2.0.0
+  https://github.com/OdinoCano/3va/releases/tag/v2.1.2
 
-File: 3va-v2.0.0-x86_64-pc-windows-msvc.zip
+File: 3va-v2.1.2-x86_64-pc-windows-msvc.zip
 
-1. Visit https://github.com/OdinoCano/3va/releases/download/v2.0.0/3va-v2.0.0-x86_64-pc-windows-msvc.zip
+1. Visit https://github.com/OdinoCano/3va/releases/download/v2.1.2/3va-v2.1.2-x86_64-pc-windows-msvc.zip
 2. Download the file.
 3. Verify SHA256:
-     PowerShell: (Get-FileHash '.\3va-v2.0.0-x86_64-pc-windows-msvc.zip' -Algorithm SHA256).Hash
-   Expected:    68a61a89459547f090c39a761677fe4580bb73a55ee15c8699874bda8c2bc9b9
+     PowerShell: (Get-FileHash '.\3va-v2.1.2-x86_64-pc-windows-msvc.zip' -Algorithm SHA256).Hash
+   Expected:    30aa420c2e12635122432d0591c22e26f1c136c40eb05754f1607c3f90e7dff0
 
 The SHA256 is also published alongside each release asset as
-  3va-v2.0.0-x86_64-pc-windows-msvc.zip.sha256
+  3va-v2.1.2-x86_64-pc-windows-msvc.zip.sha256
 at the same GitHub Releases URL.
 
 License: MIT
