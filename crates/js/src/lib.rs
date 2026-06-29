@@ -383,9 +383,18 @@ impl JsEngine {
                 );
                 ctx.eval::<(), _>(setup.as_str())
                     .map_err(|e| catch_js(&ctx, e))?;
-                ctx.eval::<rquickjs::Value, _>(code.as_str())
-                    .map(|_| ())
-                    .map_err(|e| catch_js(&ctx, e))
+
+                if transpiler::has_top_level_await(code.as_str()) {
+                    let _ = ctx
+                        .eval_promise(code.as_str())
+                        .map_err(|e| catch_js(&ctx, e))?;
+                } else {
+                    ctx.eval::<rquickjs::Value, _>(code.as_str())
+                        .map(|_| ())
+                        .map_err(|e| catch_js(&ctx, e))?;
+                }
+
+                Ok(())
             })
             .await?;
 

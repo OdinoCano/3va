@@ -1468,8 +1468,8 @@ fn build_permissions(
 
 #[derive(Parser)]
 #[command(name = "3va")]
-#[command(author = "Satoshi")]
-#[command(version = "2.0.2")]
+#[command(author = "OdinoCano")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Modern, secure-by-default, WASM-first JS/TS runtime", long_about = None)]
 struct Cli {
     /// Activa el modo de accesibilidad para lectores Braille/Screen readers (desactiva color y animaciones)
