@@ -3,13 +3,14 @@
   <metadata>
     <id>3va</id>
     <version>2.1.2</version>
-    <title>3va</title>
+    <title>3va JavaScript Runtime</title>
     <authors>OdinoCano</authors>
+    <owners>OdinoCano</owners>
     <projectUrl>https://github.com/OdinoCano/3va</projectUrl>
+    <packageSourceUrl>https://github.com/OdinoCano/3va/tree/main/dist/chocolatey</packageSourceUrl>
     <iconUrl>https://raw.githubusercontent.com/OdinoCano/3va/main/docs/logo.png</iconUrl>
     <licenseUrl>https://github.com/OdinoCano/3va/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <projectSourceUrl>https://github.com/OdinoCano/3va</projectSourceUrl>
     <docsUrl>https://github.com/OdinoCano/3va/wiki</docsUrl>
     <bugTrackerUrl>https://github.com/OdinoCano/3va/issues</bugTrackerUrl>
     <tags>javascript typescript runtime sandbox security cli developer-tools</tags>
