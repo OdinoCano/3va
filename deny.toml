@@ -30,9 +30,7 @@ allow = [
     "0BSD",
     "Unicode-3.0",
     "CC0-1.0",
-    "MPL-2.0",
     "Unlicense",
-    "OpenSSL",
     "CDLA-Permissive-2.0",
     # inferno (flamegraph generator) uses CDDL-1.0 — copyleft scoped to
     # file-level modifications, comparable to MPL-2.0 already allowed above.
@@ -63,6 +61,11 @@ skip = [
     # hashbrown: multiple versions pulled by different hashmap-heavy crates
     { name = "hashbrown",     version = "0.14" },
     { name = "hashbrown",     version = "0.15" },
+    # windows-sys: 0.48 from mio 0.8 (notify), 0.52 from cap-std, 0.60/0.61 from wasmtime
+    { name = "windows-sys",   version = "0.48" },
+    { name = "windows-sys",   version = "0.52" },
+    # winnow: 0.5 from toml_edit 0.19 (rquickjs-macro via proc-macro-crate), 0.7 from toml 0.8
+    { name = "winnow",        version = "0.5" },
 ]
 skip-tree = []
 

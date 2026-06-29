@@ -6,6 +6,87 @@ use vvva_permissions::{Capability, PermissionState};
 use crate::builtins::modules;
 use crate::transpiler;
 
+// ── Built-in module interception ──────────────────────────────────────────────
+
+/// Bare names of all Node.js-compatible built-in modules the CJS shim implements.
+/// Must stay in sync with `NodeModule.builtinModules` in modules.rs.
+const BUILTIN_NAMES: &[&str] = &[
+    "assert",
+    "buffer",
+    "child_process",
+    "crypto",
+    "events",
+    "fs",
+    "http",
+    "https",
+    "module",
+    "net",
+    "os",
+    "path",
+    "perf_hooks",
+    "process",
+    "querystring",
+    "sqlite",
+    "stream",
+    "string_decoder",
+    "tls",
+    "url",
+    "util",
+    "zlib",
+];
+
+/// Return true for any name that the CJS require shim handles natively.
+fn is_builtin(name: &str) -> bool {
+    let bare = name.strip_prefix("node:").unwrap_or(name);
+    BUILTIN_NAMES.contains(&bare)
+}
+
+/// Build a synthetic ESM wrapper around the CJS require shim for `name`.
+///
+/// Reads the module's exported property names at load time and emits explicit
+/// `export const k = __m.k` bindings so named imports (`import { createHash }
+/// from 'node:crypto'`) resolve correctly in QuickJS's static module system.
+fn builtin_esm_source(ctx: &Ctx, name: &str) -> rquickjs::Result<String> {
+    let bare = name.strip_prefix("node:").unwrap_or(name);
+
+    // Invoke require() to get the live CJS exports object.
+    let get_keys = format!(
+        "(function(){{var m=globalThis.require({:?});return Object.getOwnPropertyNames(m||{{}});}})();",
+        bare
+    );
+    let keys_val = ctx.eval::<rquickjs::Value, _>(get_keys.as_str())?;
+
+    let mut named = Vec::new();
+    if let Some(arr) = keys_val.as_array() {
+        for i in 0..arr.len() {
+            if let Ok(k) = arr.get::<String>(i) {
+                // Only emit valid identifiers; skip "default" (reserved) and internal keys.
+                if k != "default"
+                    && !k.is_empty()
+                    && k.chars().enumerate().all(|(i, c)| {
+                        if i == 0 {
+                            c.is_ascii_alphabetic() || c == '_' || c == '$'
+                        } else {
+                            c.is_ascii_alphanumeric() || c == '_' || c == '$'
+                        }
+                    })
+                {
+                    named.push(k);
+                }
+            }
+        }
+    }
+
+    let mut src = format!(
+        "const __m = globalThis.require({:?});\nexport default __m;\n",
+        bare
+    );
+    for k in &named {
+        src.push_str(&format!("export const {k} = __m.{k};\n"));
+    }
+    Ok(src)
+}
+
 // ── Resolver ─────────────────────────────────────────────────────────────────
 
 /// Resolves ESM import specifiers to canonical absolute file paths.
@@ -18,6 +99,11 @@ impl Resolver for EsmResolver {
         base: &str,
         name: &str,
     ) -> rquickjs::Result<String> {
+        // Built-ins are served by the CJS shim — pass through unchanged so the
+        // loader can intercept them without attempting a filesystem lookup.
+        if is_builtin(name) {
+            return Ok(name.to_string());
+        }
         let resolved = resolve_esm(base, name);
         let canonical = resolved.canonicalize().unwrap_or(resolved);
         Ok(canonical.to_string_lossy().to_string())
@@ -80,10 +166,6 @@ fn source_is_esm(code: &str, path: &str) -> bool {
         {
             return true;
         }
-        // First non-comment, non-empty line that isn't an import/export
-        // → CJS. Stop scanning to avoid false positives from inline imports
-        // inside function bodies.
-        break;
     }
     false
 }
@@ -135,18 +217,25 @@ fn wrap_cjs_for_esm(source: &str, filename: &str, dirname: &str) -> String {
             name, name
         ));
     }
+    // ponytail: closure binds __dirname so relative require('./lib/x') resolves
+    // from this module's directory, not from globalThis.__dirname (the entry file).
     format!(
         r#"const __module = {{ exports: {{}} }};
 const __exports = __module.exports;
-const __require = globalThis.require;
-const __filename = {:?};
-const __dirname = {:?};
+const __require = (function(dir) {{
+    var r = function(id) {{ return globalThis.__vvva_require_from(id, dir); }};
+    r.resolve = function(id) {{ return globalThis.__vvva_require_resolve_from(id, dir); }};
+    r.cache = globalThis.__requireCache;
+    return r;
+}})({1:?});
+const __filename = {0:?};
+const __dirname = {1:?};
 (function(exports, module, require, __filename, __dirname) {{
-{}
+{2}
 }})(__exports, __module, __require, __filename, __dirname);
 const __cjsExports__ = __module.exports;
 export default __cjsExports__;
-{}"#,
+{3}"#,
         filename, dirname, source, export_stmts
     )
 }
@@ -160,6 +249,12 @@ pub struct EsmLoader {
 
 impl Loader for EsmLoader {
     fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Module<'js>> {
+        // Intercept built-ins before hitting the filesystem.
+        if is_builtin(name) {
+            let src = builtin_esm_source(ctx, name)?;
+            return Module::declare(ctx.clone(), name, src);
+        }
+
         let path = Path::new(name);
 
         if !self

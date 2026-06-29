@@ -47,6 +47,7 @@ Executes a JavaScript or TypeScript file in a sandboxed environment. Permissions
 **Options:**
 | Option | Type | Description |
 |--------|------|-------------|
+| `--port <N>` / `-p <N>` | `u16` | Port to listen on. Sets `PORT` env var so the script can read `process.env.PORT`. Can also be set via `3va.config.ts` (`run.port`) or env var `3VA_RUN_PORT`. |
 | `--allow-read=<paths>` | `path,...` | Grants read permission. Comma-separate multiple paths. Omit value (`--allow-read=`) to allow all paths. |
 | `--allow-write=<paths>` | `path,...` | Grants write permission. Comma-separate multiple paths. Omit value to allow all paths. |
 | `--allow-net=<hosts>` | `string,...` | Grants network access. Comma-separate multiple hosts. Supports `*.domain.com` wildcards. Omit value to allow all hosts. |
@@ -107,6 +108,10 @@ process.argv[2+]  →  arguments passed after --
 # Pass arguments to the script
 3va run server.ts -- --port 3000 --dev
 # process.argv → ['3va', '/abs/server.ts', '--port', '3000', '--dev']
+
+# Run with a specific port (sets process.env.PORT)
+3va run server.ts --port 8080
+3va run server.ts -p 8080
 
 # JSX file
 3va run component.jsx --allow-read=/src
@@ -662,6 +667,7 @@ Starts an entry file as a managed background process (daemon). The process runs 
 |-----------|------|-------------|
 | `ENTRY` | `path` (required) | Entry file (`.js`, `.ts`, `.jsx`, `.tsx`) to execute |
 | `--name <NAME>` / `-n` | `string` | Custom process name (default: derived from the entry filename stem) |
+| `--port <N>` / `-p <N>` | `u16` | Port to listen on. Sets `PORT` env var for the managed process. |
 | `ARGS` | `string...` | Arguments forwarded to the script. Must appear after `--`. |
 
 **Behavior:**
@@ -678,6 +684,10 @@ Starts an entry file as a managed background process (daemon). The process runs 
 
 # Start with a custom name
 3va start --name my-api server.js
+
+# Start on a specific port (sets process.env.PORT)
+3va start --port 8080 server.js
+3va start -p 8080 server.js
 
 # Start with arguments forwarded to the script
 3va start --name worker worker.js -- --queue emails --concurrency 5

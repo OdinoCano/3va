@@ -1564,6 +1564,11 @@ enum Commands {
         /// The file to run
         file: PathBuf,
 
+        /// Port to listen on (sets the PORT env var for the script).
+        /// Equivalent to `PORT=<port>` before the command.
+        #[arg(long, short)]
+        port: Option<u16>,
+
         /// Allow read access to specified paths. Use --allow-read= (no value) to allow all paths.
         /// Separate multiple paths with commas: --allow-read=/a,/b
         #[arg(long = "allow-read", num_args = 0.., require_equals = true, value_delimiter = ',')]
@@ -1805,6 +1810,10 @@ enum Commands {
         /// Name to identify the process (default: derived from entry filename)
         #[arg(long, short)]
         name: Option<String>,
+        /// Port to listen on (sets the PORT env var for the managed process).
+        /// Equivalent to `--port <port>` in the underlying `3va run`.
+        #[arg(long, short)]
+        port: Option<u16>,
         /// Entry file to run
         entry: PathBuf,
         /// Arguments passed to the entry script
@@ -2207,6 +2216,7 @@ async fn main() -> anyhow::Result<()> {
     match &cli.command {
         Commands::Run {
             file,
+            port,
             allow_read,
             allow_net,
             allow_write,
@@ -2223,6 +2233,21 @@ async fn main() -> anyhow::Result<()> {
             heap_snapshot,
             script_args,
         } => {
+            // Resolve port: CLI flag > config file > env (set PORT so scripts see it)
+            let effective_port = port.or_else(|| {
+                ProjectConfig::discover(
+                    file.parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or(std::env::current_dir().unwrap_or_default()),
+                )
+                .ok()
+                .flatten()
+                .and_then(|c| c.run.port)
+            });
+            if let Some(p) = effective_port {
+                std::env::set_var("PORT", p.to_string());
+            }
+
             info!("Running {:?} (Sandboxed)", file);
             let mut permissions = build_permissions(
                 allow_read.as_deref(),
@@ -2805,7 +2830,12 @@ async fn main() -> anyhow::Result<()> {
                 permissions_learn(file, script_args).await?;
             }
         },
-        Commands::Start { name, entry, args } => {
+        Commands::Start {
+            name,
+            port,
+            entry,
+            args,
+        } => {
             let cwd = std::env::current_dir()?;
             let process_name = match name {
                 Some(n) => n.clone(),
@@ -2814,7 +2844,7 @@ async fn main() -> anyhow::Result<()> {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "app".to_string()),
             };
-            let info = proc::start_process(&process_name, entry, &cwd, args)?;
+            let info = proc::start_process(&process_name, entry, &cwd, args, *port)?;
             println!();
             println!("  ✓ Started process '{}' (PID {})", info.name, info.pid);
             println!("    Logs: {}", info.log_path.display());

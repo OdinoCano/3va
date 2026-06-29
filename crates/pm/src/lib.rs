@@ -249,13 +249,13 @@ async fn lookup_npm_compat(
 
 /// Fetch only the metadata for a specific version using the abbreviated endpoint.
 /// Much faster than downloading the full packument (all versions).
-/// Returns RegistryInfo with the deps embedded in version_meta via a side-channel field.
+/// Returns RegistryInfo and transitive dep specs (name, version-range).
 async fn lookup_npm_version(
     client: &reqwest::Client,
     base_url: &str,
     pkg_name: &str,
     version: &str,
-) -> anyhow::Result<(RegistryInfo, Vec<String>)> {
+) -> anyhow::Result<(RegistryInfo, Vec<(String, String)>)> {
     let url = format!("{}/{}/{}", base_url, pkg_name, version);
     let resp = client
         .get(&url)
@@ -284,13 +284,12 @@ async fn lookup_npm_version(
     let mut version_meta = HashMap::new();
     version_meta.insert(resolved_ver.clone(), VersionMeta { tarball, integrity });
 
-    // Collect transitive deps directly from the registry response — no disk read needed
-    let mut dep_specs: Vec<String> = Vec::new();
+    // Collect transitive dep specs (name + version range) from the registry response.
+    let mut dep_specs: Vec<(String, String)> = Vec::new();
     if let Some(deps) = meta["dependencies"].as_object() {
         for (dep_name, dep_ver) in deps {
             if let Some(dv) = dep_ver.as_str() {
-                dep_specs.push(dep_name.clone());
-                let _ = dv; // version range stored separately if needed
+                dep_specs.push((dep_name.clone(), dv.to_string()));
             }
         }
     }
@@ -307,7 +306,7 @@ async fn lookup_npm_compat_with_deps(
     client: &reqwest::Client,
     base_url: &str,
     pkg_name: &str,
-) -> anyhow::Result<(RegistryInfo, Vec<String>)> {
+) -> anyhow::Result<(RegistryInfo, Vec<(String, String)>)> {
     let info = lookup_npm_compat(client, base_url, pkg_name).await?;
     // For the full packument we don't know which version was picked yet,
     // return empty deps — they'll be read after extract.
@@ -329,12 +328,12 @@ async fn lookup_jsr(client: &reqwest::Client, pkg_name: &str) -> anyhow::Result<
         .map_err(|e| anyhow::anyhow!("Package '{}' not found on jsr.io: {}", pkg_name, e))
 }
 
-/// Lookup JSR and return (RegistryInfo, dep_names) for parallel BFS.
+/// Lookup JSR and return (RegistryInfo, dep_specs) for parallel BFS.
 async fn lookup_jsr_with_deps(
     client: &reqwest::Client,
     pkg_name: &str,
     version: &str,
-) -> anyhow::Result<(RegistryInfo, Vec<String>)> {
+) -> anyhow::Result<(RegistryInfo, Vec<(String, String)>)> {
     if !pkg_name.starts_with('@') || !pkg_name.contains('/') {
         anyhow::bail!(
             "JSR only supports scoped packages (e.g. @scope/name). '{}' is not a valid JSR package name",
@@ -360,6 +359,21 @@ async fn lookup_registry(registry: &Registry, pkg_name: &str) -> anyhow::Result<
 }
 
 // ── Version utilities ─────────────────────────────────────────────────────────
+
+/// Pick the highest version in `versions` that satisfies `range_str`.
+/// Falls back to `latest` tag, then to the last element, then "latest".
+fn select_best_version(versions: &[String], range_str: &str, latest: Option<&str>) -> String {
+    let range = SemverRange::parse(range_str).unwrap_or(SemverRange::Any);
+    versions
+        .iter()
+        .filter_map(|v| Semver::parse(v).map(|sv| (sv, v.as_str())))
+        .filter(|(sv, _)| range.matches(sv))
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, v)| v.to_string())
+        .or_else(|| latest.map(|s| s.to_string()))
+        .or_else(|| versions.last().cloned())
+        .unwrap_or_else(|| "latest".to_string())
+}
 
 fn parse_semver_tuple(v: &str) -> Option<(u64, u64, u64)> {
     let clean = v
@@ -823,6 +837,8 @@ pub async fn install_from_manifest(
 ///
 /// `update_manifest`: when true the package.json and lockfile in
 /// `project_root` are updated.  Pass false for transitive deps.
+type PackageFetchResult = anyhow::Result<(String, String, RegistryInfo, Vec<(String, String)>)>;
+
 async fn install_with_transitive(
     root_spec: &str,
     force: bool,
@@ -925,9 +941,12 @@ async fn install_with_transitive(
                         });
                     }
                     if let Some(deps) = val["dependencies"].as_object() {
-                        for (dep_name, _) in deps {
+                        for (dep_name, dep_ver) in deps {
                             if !visited.contains(dep_name.as_str()) {
-                                current_wave.push((dep_name.clone(), None));
+                                current_wave.push((
+                                    dep_name.clone(),
+                                    dep_ver.as_str().map(|s| s.to_string()),
+                                ));
                             }
                         }
                     }
@@ -937,7 +956,7 @@ async fn install_with_transitive(
         }
 
         // Fetch metadata for this wave concurrently
-        let mut set: JoinSet<anyhow::Result<(String, RegistryInfo, Vec<String>)>> = JoinSet::new();
+        let mut set: JoinSet<PackageFetchResult> = JoinSet::new();
         for (pkg_name, requested_ver) in needs_fetch {
             let client = client.clone();
             let base = base_url.clone();
@@ -952,42 +971,46 @@ async fn install_with_transitive(
                         lookup_npm_version(&client, &base, &pkg_name, version_to_fetch).await?
                     }
                 };
-                Ok((pkg_name, info, deps))
+                Ok((pkg_name, version_to_fetch.to_string(), info, deps))
             });
         }
 
-        let mut next_wave_set: HashSet<String> = HashSet::new();
+        // name → version_range: dedup within wave while preserving the requested range.
+        let mut next_wave_deps: HashMap<String, String> = HashMap::new();
         while let Some(result) = set.join_next().await {
             match result {
-                Ok(Ok((pkg_name, info, dep_names))) => {
-                    let ver = info
-                        .versions
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "latest".to_string());
+                Ok(Ok((pkg_name, version_to_fetch, info, dep_specs))) => {
+                    // Pick the highest version satisfying the requested range.
+                    let ver = select_best_version(
+                        &info.versions,
+                        &version_to_fetch,
+                        info.latest.as_deref(),
+                    );
                     if let Some(meta) = info.version_meta.get(&ver) {
                         resolved.insert(
                             pkg_name.clone(),
                             (ver.clone(), meta.tarball.clone(), meta.integrity.clone()),
                         );
                     }
-                    // Use deps from registry response (no disk read needed)
-                    for dep_name in dep_names {
+                    // Propagate transitive dep specs (name + version range).
+                    for (dep_name, dep_range) in dep_specs {
                         if !visited.contains(dep_name.as_str()) {
-                            next_wave_set.insert(dep_name);
+                            next_wave_deps.entry(dep_name).or_insert(dep_range);
                         }
                     }
                     // Also check disk in case the package was already extracted
-                    // (covers the fallback full-packument path)
+                    // (covers the fallback full-packument path where dep_specs is empty).
                     let dest = project_root.join("node_modules").join(&pkg_name);
                     if dest.join("package.json").exists()
                         && let Ok(content) = std::fs::read_to_string(dest.join("package.json"))
                         && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
                         && let Some(deps) = val["dependencies"].as_object()
                     {
-                        for dep_name in deps.keys() {
+                        for (dep_name, dep_ver) in deps {
                             if !visited.contains(dep_name.as_str()) {
-                                next_wave_set.insert(dep_name.clone());
+                                next_wave_deps
+                                    .entry(dep_name.clone())
+                                    .or_insert_with(|| dep_ver.as_str().unwrap_or("*").to_string());
                             }
                         }
                     }
@@ -1000,8 +1023,8 @@ async fn install_with_transitive(
                 }
             }
         }
-        for dep in next_wave_set {
-            current_wave.push((dep, None));
+        for (dep, range) in next_wave_deps {
+            current_wave.push((dep, Some(range)));
         }
     }
 

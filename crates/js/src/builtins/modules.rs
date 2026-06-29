@@ -1233,13 +1233,15 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 }
                 util.inherits(IncomingMessage, Readable);
                 IncomingMessage.prototype._read = function(size) {
+                    // Guard: once ended, don't push null again (prevents double 'end' event
+                    // when _read() is called multiple times, e.g. from both the resume
+                    // setTimeout and an explicit read()).
+                    if (this._readableState.ended) return;
                     if (!this._consumed && this._body !== '') {
                         this._consumed = true;
                         this.push(this._body);
                     }
-                    if (this._consumed || this._body === '') {
-                        this.push(null);
-                    }
+                    this.push(null);
                 };
                 IncomingMessage.prototype.setEncoding = function(enc) { this._encoding = enc; return this; };
                 IncomingMessage.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
@@ -1584,18 +1586,10 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
                             var res = new ServerResponse(req);
                             res._connId = connId;
-
-                            // Emit body events asynchronously so 'data' listeners registered
-                            // during the handler call receive the body. This matches Node.js
-                            // behavior where the body flows after the handler sets up listeners.
-                            // Set _consumed = true to prevent _read() from pushing again.
-                            setTimeout(function() {
-                                if (req._body) {
-                                    req._consumed = true;
-                                    req.push(req._body);
-                                }
-                                req.push(null);
-                            }, 0);
+                            // Expose socket on res so Express/middleware can check res.socket.writable
+                            // and res.connection without TypeError.
+                            res.socket = socket;
+                            res.connection = socket;
 
                             try {
                                 var _handlerResult = handler(req, res);
@@ -3935,6 +3929,22 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         };
         globalThis.require.cache = globalThis.__requireCache;
         globalThis.require.main = undefined;
+
+        // Per-module require helpers used by the ESM CJS wrapper (wrap_cjs_for_esm).
+        // Saves/restores __dirname so relative paths resolve from the caller's directory
+        // rather than from globalThis.__dirname (which is the entry file's directory).
+        globalThis.__vvva_require_from = function(id, fromDir) {
+            var saved = globalThis.__dirname;
+            globalThis.__dirname = fromDir;
+            try { return globalThis.require(id); }
+            finally { globalThis.__dirname = saved; }
+        };
+        globalThis.__vvva_require_resolve_from = function(id, fromDir) {
+            var saved = globalThis.__dirname;
+            globalThis.__dirname = fromDir;
+            try { return globalThis.require.resolve(id); }
+            finally { globalThis.__dirname = saved; }
+        };
 
         // ── ES2024+ polyfills (missing in QuickJS ES2023) ──────────────────────
         // Array.prototype group methods (ES2024)

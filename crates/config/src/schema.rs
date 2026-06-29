@@ -90,6 +90,8 @@ pub struct RunConfig {
     pub permissions: RunPermissions,
     /// Default `--inspect` address when the flag is passed without a value.
     pub inspect: Option<String>,
+    /// Default port for `--port` (sets PORT env var).
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

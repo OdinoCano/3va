@@ -303,7 +303,6 @@ impl JsEngine {
         let source = std::fs::read_to_string(path)?;
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let is_jsx_ext = matches!(ext, "tsx" | "jsx");
         let transpiled = match ext {
             "tsx" | "jsx" => transpiler::transpile_jsx(&source),
             "ts" | "mts" | "cts" => transpiler::transpile(&source),
@@ -338,16 +337,12 @@ impl JsEngine {
 
         let is_esm = is_esm_source(&code);
 
-        // When the entry file is ESM (has import/export), convert to CJS via OXC so
-        // all `import` statements become `require()` calls handled by the existing shim.
-        // transpile_to_cjs also rewrites import.meta.* → __vvva_meta_* stubs.
-        // Non-ESM files may still contain import.meta (e.g. CJS bundles from frameworks),
-        // so we always run the import.meta replacer regardless.
-        let code = if is_esm {
-            transpiler::transpile_to_cjs(&code, is_jsx_ext)
-        } else {
-            transpiler::replace_import_meta(&code)
-        };
+        // For ESM entry files: keep ESM syntax and use Module::evaluate so QuickJS's
+        // native module system handles the import graph. This is the only way TLA in an
+        // imported module (e.g. `db.js`) propagates correctly — converting to CJS turns
+        // `import` into synchronous `require()`, which returns before the TLA resolves.
+        // For non-ESM: rewrite import.meta.* stubs only (no structural change needed).
+        let code = transpiler::replace_import_meta(&code);
 
         self.context
             .with(|ctx| -> anyhow::Result<()> {
@@ -384,7 +379,31 @@ impl JsEngine {
                 ctx.eval::<(), _>(setup.as_str())
                     .map_err(|e| catch_js(&ctx, e))?;
 
-                if transpiler::has_top_level_await(code.as_str()) {
+                if is_esm {
+                    // Native ESM evaluation: Module::evaluate returns a Promise that
+                    // resolves only after the full import graph (including any TLA) settles.
+                    // run_event_loop() below drives it to completion.
+                    let promise = rquickjs::Module::evaluate(
+                        ctx.clone(),
+                        filename.as_str(),
+                        code.as_str(),
+                    )
+                    .map_err(|e| catch_js(&ctx, e))?;
+
+                    // PromiseFuture<'js> is !Send (Rc inside), so we can't await it in
+                    // async_with!. Instead, stash the promise in globalThis so JS can attach
+                    // a .catch() handler, then re-throw after run_event_loop() if it rejected.
+                    ctx.eval::<(), _>("delete globalThis.__vvva_esm_err__")
+                        .map_err(|e| catch_js(&ctx, e))?;
+                    ctx.globals()
+                        .set("__vvva_esm_p__", promise)
+                        .map_err(|e| catch_js(&ctx, e))?;
+                    ctx.eval::<(), _>(
+                        "globalThis.__vvva_esm_p__.catch(function(e){globalThis.__vvva_esm_err__=e});\
+                         delete globalThis.__vvva_esm_p__",
+                    )
+                    .map_err(|e| catch_js(&ctx, e))?;
+                } else if transpiler::has_top_level_await(code.as_str()) {
                     let _ = ctx
                         .eval_promise(code.as_str())
                         .map_err(|e| catch_js(&ctx, e))?;
@@ -402,7 +421,28 @@ impl JsEngine {
         // Note: do NOT call runtime.idle() here — it blocks on pending server-side
         // async tasks (e.g. __httpAcceptAsync) before timers have a chance to fire,
         // causing a deadlock. run_event_loop handles idle() internally.
-        self.run_event_loop().await
+        self.run_event_loop().await?;
+
+        // Re-throw any ESM module rejection that settled asynchronously (TLA failures,
+        // failed dynamic imports inside TLA, etc.).  The .catch() handler set above
+        // stores the rejection reason in globalThis.__vvva_esm_err__; re-throw it here
+        // now that the microtask queue has been fully drained.
+        if is_esm {
+            self.context
+                .with(|ctx| -> anyhow::Result<()> {
+                    ctx.eval::<(), _>(
+                        "if(typeof globalThis.__vvva_esm_err__!=='undefined'){\
+                           var _e=globalThis.__vvva_esm_err__;\
+                           delete globalThis.__vvva_esm_err__;\
+                           throw _e\
+                         }",
+                    )
+                    .map_err(|e| catch_js(&ctx, e))
+                })
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// Run the integrated event loop:
@@ -704,6 +744,93 @@ mod tests {
             result.is_ok(),
             "TS transpiled code should eval: {:?}",
             result
+        );
+    }
+
+    /// ESM static import of a Node.js built-in module must work for both the
+    /// `node:` prefixed form and the bare specifier form.
+    #[tokio::test]
+    async fn esm_import_builtin_modules() {
+        let dir = std::env::temp_dir().join("3va_builtin_esm_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // node: prefix form
+        std::fs::write(
+            dir.join("use_node_prefix.js"),
+            b"import { createHash } from 'node:crypto';\n\
+              import { join } from 'node:path';\n\
+              globalThis.__builtin_result = typeof createHash + ',' + typeof join;\n",
+        )
+        .unwrap();
+
+        // bare specifier form
+        std::fs::write(
+            dir.join("use_bare.js"),
+            b"import { createHash } from 'crypto';\n\
+              import { join } from 'path';\n\
+              globalThis.__bare_result = typeof createHash + ',' + typeof join;\n",
+        )
+        .unwrap();
+
+        let perms = Arc::new(vvva_permissions::PermissionState::new());
+        perms.grant(vvva_permissions::Capability::FileRead(dir.clone()));
+        let engine = JsEngine::new(perms).await.unwrap();
+
+        engine
+            .eval_file(&dir.join("use_node_prefix.js"))
+            .await
+            .unwrap();
+        let r = engine
+            .eval_to_string("globalThis.__builtin_result || 'missing'")
+            .await
+            .unwrap();
+        assert_eq!(
+            r, "function,function",
+            "node: prefix imports failed: got '{r}'"
+        );
+
+        engine.eval_file(&dir.join("use_bare.js")).await.unwrap();
+        let r = engine
+            .eval_to_string("globalThis.__bare_result || 'missing'")
+            .await
+            .unwrap();
+        assert_eq!(
+            r, "function,function",
+            "bare specifier imports failed: got '{r}'"
+        );
+    }
+
+    /// Static import must block on top-level await in the imported module.
+    /// Regression: transpile_to_cjs turned `import` into synchronous `require()`,
+    /// which returned before the TLA resolved — leaving exports as `undefined`.
+    #[tokio::test]
+    async fn static_import_waits_for_tla_in_imported_module() {
+        let dir = std::env::temp_dir().join("3va_tla_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join("db.js"),
+            b"const data = await new Promise(r => setTimeout(() => r({ fn: () => 42 }), 10));\nexport const fn_ = data.fn;\n",
+        ).unwrap();
+
+        std::fs::write(
+            dir.join("main.js"),
+            b"import { fn_ } from './db.js';\nglobalThis.__tla_result = typeof fn_;\n",
+        )
+        .unwrap();
+
+        let perms = Arc::new(vvva_permissions::PermissionState::new());
+        perms.grant(vvva_permissions::Capability::FileRead(dir.clone()));
+        let engine = JsEngine::new(perms).await.unwrap();
+        engine.eval_file(&dir.join("main.js")).await.unwrap();
+
+        let result = engine
+            .eval_to_string("globalThis.__tla_result || 'missing'")
+            .await
+            .unwrap();
+        assert_eq!(
+            result, "function",
+            "static import did not await TLA: got '{result}'"
         );
     }
 }
@@ -1042,6 +1169,54 @@ mod builtin_tests {
         assert_eq!(
             result, "got_error",
             "non-zero exit should pass error to callback"
+        );
+    }
+
+    /// req.on('data', cb) must receive the body exactly once and 'end' must fire
+    /// exactly once. Regression: HashMap timer ordering caused the body push
+    /// setTimeout and the Readable resume setTimeout to race, resulting in either
+    /// missing events or duplicate data/end emissions.
+    #[tokio::test]
+    async fn http_request_body_stream_fires_data_and_end_once() {
+        let dir = std::env::temp_dir().join("3va_http_stream_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("stream_test.js"),
+            br#"
+var http = require('http');
+var dataCount = 0;
+var endCount = 0;
+var receivedBody = '';
+
+var im = new http.IncomingMessage(null);
+im._body = 'hello';
+
+// Register listeners first (mirrors what HTTP handlers do)
+im.on('data', function(chunk) { dataCount++; receivedBody += String(chunk); });
+im.on('end', function() { endCount++; });
+
+// Let the setTimeout(0) from on('data') fire via the event loop,
+// then check results -- both timers (resume from on('data') and any
+// other pending timer) must fire in FIFO order.
+setTimeout(function() {
+    globalThis.__stream_result = dataCount + ':' + endCount + ':' + receivedBody;
+}, 20);
+"#,
+        )
+        .unwrap();
+
+        let perms = Arc::new(vvva_permissions::PermissionState::new());
+        perms.grant(vvva_permissions::Capability::FileRead(dir.clone()));
+        let e = JsEngine::new(perms).await.unwrap();
+        e.eval_file(&dir.join("stream_test.js")).await.unwrap();
+
+        let result = e
+            .eval_to_string("globalThis.__stream_result || 'missing'")
+            .await
+            .unwrap();
+        assert_eq!(
+            result, "1:1:hello",
+            "expected data=1 end=1 body=hello, got '{result}'"
         );
     }
 

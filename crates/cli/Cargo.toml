@@ -1,6 +1,6 @@
 [package]
 name = "vvva_cli"
-version = "2.1.1"
+version = "2.1.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "3va — secure-by-default JavaScript/TypeScript runtime built on QuickJS with post-quantum crypto and capability-based sandboxing"
@@ -23,15 +23,15 @@ notify = "6.1"
 serde_json.workspace = true
 serde.workspace = true
 libc = "0.2"
-vvva_core = { version = "2.1.1", path = "../core" }
-vvva_config = { version = "2.1.1", path = "../config" }
-vvva_firewall = { version = "2.1.1", path = "../firewall" }
-vvva_pm = { version = "2.1.1", path = "../pm" }
-vvva_js = { version = "2.1.1", path = "../js" }
-vvva_permissions = { version = "2.1.1", path = "../permissions" }
-vvva_bundler = { version = "2.1.1", path = "../bundler" }
-vvva_test = { version = "2.1.1", path = "../test" }
-vvva_wasm = { version = "2.1.1", path = "../wasm" }
+vvva_core = { version = "2.1.2", path = "../core" }
+vvva_config = { version = "2.1.2", path = "../config" }
+vvva_firewall = { version = "2.1.2", path = "../firewall" }
+vvva_pm = { version = "2.1.2", path = "../pm" }
+vvva_js = { version = "2.1.2", path = "../js" }
+vvva_permissions = { version = "2.1.2", path = "../permissions" }
+vvva_bundler = { version = "2.1.2", path = "../bundler" }
+vvva_test = { version = "2.1.2", path = "../test" }
+vvva_wasm = { version = "2.1.2", path = "../wasm" }
 tempfile.workspace = true
 ureq.workspace = true
 base64.workspace = true
