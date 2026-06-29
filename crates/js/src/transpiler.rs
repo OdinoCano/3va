@@ -483,7 +483,39 @@ pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
     // OXC 0.132 does not convert static `import`/`export` declarations to
     // `require()`/`module.exports` (the CJS plugin is marked TODO in their source).
     // Apply our own Rust-level converter as a second pass.
-    static_esm_to_cjs(&out)
+    let out = static_esm_to_cjs(&out);
+    // Dynamic import() calls are not converted by static_esm_to_cjs (they are
+    // expressions, not declarations). Rewrite them to __importAsync() so the
+    // CJS require() shim handles resolution instead of the QuickJS ESM loader.
+    if out.contains("import(") {
+        let mut result = String::with_capacity(out.len());
+        let bytes = out.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            if bytes[i] == b'i' && i + 7 <= len && &bytes[i..i + 6] == b"import" {
+                let before_ok = i == 0
+                    || !(bytes[i - 1].is_ascii_alphanumeric()
+                        || bytes[i - 1] == b'_'
+                        || bytes[i - 1] == b'$');
+                let after_idx = i + 6;
+                let mut j = after_idx;
+                while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                    j += 1;
+                }
+                if before_ok && j < len && bytes[j] == b'(' {
+                    result.push_str("__importAsync");
+                    i = j;
+                    continue;
+                }
+            }
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        result
+    } else {
+        out
+    }
 }
 
 /// Convert static ESM `import`/`export` declarations to CommonJS equivalents.
@@ -1178,6 +1210,96 @@ pub fn looks_like_jsx(source: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// Heuristic: detect top-level `await` in JavaScript source.
+///
+/// Scans for the `await` keyword outside of block-bodied function scopes by
+/// tracking brace depth.  Returns `true` when `await` appears at brace depth 0
+/// (top level) or depth 1 (inside a class body but outside any method — rare).
+///
+/// Known false positives:
+/// - `async () => await expr` (async arrow with expression body, no braces) —
+///   the `await` sits at depth 0 but is inside an async arrow function.
+///
+/// False positives are harmless: the caller enables `JS_EVAL_FLAG_ASYNC` which
+/// is a no-op when no actual top-level await exists.
+pub fn has_top_level_await(code: &str) -> bool {
+    if !code.contains("await") {
+        return false;
+    }
+
+    let bytes = code.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut depth: u32 = 0;
+
+    while i < len {
+        let b = bytes[i];
+
+        if b == b'/' && i + 1 < len {
+            if bytes[i + 1] == b'/' {
+                i += 2;
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+        }
+
+        if b == b'"' || b == b'\'' || b == b'`' {
+            let q = b;
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == q {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        if b == b'{' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if b == b'}' {
+            depth = depth.saturating_sub(1);
+            i += 1;
+            continue;
+        }
+
+        if depth <= 1 && b == b'a' && i + 5 <= len && &bytes[i..i + 5] == b"await" {
+            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let after_ok = i + 5 >= len || !is_ident_byte(bytes[i + 5]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+
+        i += 1;
+    }
+
+    false
+}
+
+#[inline]
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
 #[cfg(test)]

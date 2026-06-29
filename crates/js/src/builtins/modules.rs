@@ -1047,8 +1047,8 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             // ── querystring ───────────────────────────────────────────────────────
             var qs = {
-                stringify: function(obj) { return Object.keys(obj).map(function(k) { return encodeURIComponent(k) + '=' + encodeURIComponent(obj[k]); }).join('&'); },
-                parse: function(s) { var o = {}; s.split('&').forEach(function(p) { var kv = p.split('='); if (kv[0]) o[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || ''); }); return o; },
+                stringify: function(obj, sep, eq) { sep = sep || '&'; eq = eq || '='; if (obj === null || obj === undefined) return ''; return Object.keys(obj).map(function(k) { var v = obj[k]; if (v === null || v === undefined) v = ''; return encodeURIComponent(k) + eq + encodeURIComponent(v); }).join(sep); },
+                parse: function(s, sep, eq) { if (s === null || s === undefined || s === '') return {}; sep = sep || '&'; eq = eq || '='; var o = {}; String(s).split(sep).forEach(function(p) { if (!p) return; var idx = p.indexOf(eq); var k, v; if (idx >= 0) { k = p.substring(0, idx); v = p.substring(idx + 1); } else { k = p; v = ''; } try { k = decodeURIComponent(k); } catch(_) {} try { v = decodeURIComponent(v); } catch(_) {} if (k) { if (o[k] !== undefined) { if (!Array.isArray(o[k])) o[k] = [o[k]]; o[k].push(v); } else { o[k] = v; } } }); return o; },
                 escape: encodeURIComponent,
                 unescape: decodeURIComponent
             };
@@ -1585,7 +1585,31 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                             var res = new ServerResponse(req);
                             res._connId = connId;
 
-                            try { handler(req, res); } catch(e) {
+                            // Emit body events asynchronously so 'data' listeners registered
+                            // during the handler call receive the body. This matches Node.js
+                            // behavior where the body flows after the handler sets up listeners.
+                            // Set _consumed = true to prevent _read() from pushing again.
+                            setTimeout(function() {
+                                if (req._body) {
+                                    req._consumed = true;
+                                    req.push(req._body);
+                                }
+                                req.push(null);
+                            }, 0);
+
+                            try {
+                                var _handlerResult = handler(req, res);
+                                // Support async route handlers: if the handler returns a Promise,
+                                // catch rejections and send a 500 response.
+                                if (_handlerResult && typeof _handlerResult === 'object' && typeof _handlerResult.then === 'function') {
+                                    _handlerResult.catch(function(e) {
+                                        if (!res._responded) {
+                                            try { __httpRespond(connId, 500, 'Internal Server Error', JSON.stringify({'Content-Type':'text/plain'}), 'Internal Server Error: ' + (e && e.message || e)); } catch(_) {}
+                                            res._responded = true;
+                                        }
+                                    });
+                                }
+                            } catch(e) {
                                 if (!res._responded) {
                                     try { __httpRespond(connId, 500, 'Internal Server Error', JSON.stringify({'Content-Type':'text/plain'}), 'Internal Server Error'); } catch(_) {}
                                     res._responded = true;
@@ -3349,15 +3373,24 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                     var mod;
                     try { mod = globalThis.require(specifier); }
                     finally { globalThis.__dirname = saved; }
-                    // Wrap as a module namespace object
+                    if (mod && mod.__vvva_asyncInit && typeof mod.__vvva_asyncInit.then === 'function') {
+                        mod.__vvva_asyncInit.then(function() {
+                            if (mod.__esModule) { resolve(mod); }
+                            else { resolve(Object.assign({ default: mod }, mod)); }
+                        }, function(err) {
+                            reject(err instanceof Error ? err : new Error(String(err)));
+                        });
+                        return;
+                    }
                     if (mod && mod.__esModule) {
                         resolve(mod);
+                    } else if (mod !== null && mod !== undefined && typeof mod === 'object') {
+                        resolve(Object.assign({ default: mod }, mod));
                     } else {
-                        var ns = Object.assign({ default: mod }, mod);
-                        resolve(ns);
+                        resolve({ default: mod });
                     }
                 } catch(e) {
-                    reject(e);
+                    reject(e instanceof Error ? e : new Error(String(e)));
                 }
             });
         };
@@ -3665,6 +3698,17 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 return _cached;
             }
 
+            // Native NAPI addons (.node files): delegate to Rust __napiRequire
+            // Must happen BEFORE __readFile which tries to read as UTF-8 text.
+            if (resolvedPath.endsWith('.node')) {
+                if (typeof globalThis.__napiRequire !== 'function') {
+                    throw new Error('NAPI not available: --allow-ffi is required to load .node addons');
+                }
+                result = globalThis.__napiRequire(resolvedPath);
+                globalThis.__requireCache[resolvedPath] = result;
+                return result;
+            }
+
             // Read and (if needed) transpile the file (path is already absolute)
             var source;
             try {
@@ -3702,16 +3746,6 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                         + ' not supported. Use dynamic import() instead.'),
                     { code: 'ERR_REQUIRE_ESM' }
                 );
-            }
-
-            // Native NAPI addons (.node files): delegate to Rust __napiRequire
-            if (resolvedPath.endsWith('.node')) {
-                if (typeof globalThis.__napiRequire !== 'function') {
-                    throw new Error('NAPI not available: --allow-ffi is required to load .node addons');
-                }
-                result = globalThis.__napiRequire(resolvedPath);
-                globalThis.__requireCache[resolvedPath] = result;
-                return result;
             }
 
             // Save and restore outer module state
@@ -3797,10 +3831,53 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 '__filename=globalThis.__filename,__dirname=globalThis.__dirname;\n' +
                 _metaPreamble + '\n' +
                 source;
-            try { eval(wrapper); }
-            catch (e) {
-                var _eMsg = (typeof e === 'object' && e !== null) ? (e.message || String(e)) : String(e);
-                throw new Error('[3va:' + resolvedPath + '] ' + _eMsg);
+
+            // Detect top-level await: if the source contains `await` outside of
+            // async function bodies, wrap in an async IIFE so eval() doesn't throw
+            // a syntax error.  The returned promise is stored on exports.__vvva_asyncInit
+            // so dynamic import() callers (via __importAsync) can wait for initialization.
+            var _hasTLA = /\bawait\b/.test(source) && (function() {
+                var d = 0, inStr = false, strCh = '', inLC = false, inBC = false;
+                var s = source;
+                for (var ci = 0; ci < s.length; ci++) {
+                    var ch = s[ci], nx = ci + 1 < s.length ? s[ci + 1] : '';
+                    if (inLC) { if (ch === '\n') inLC = false; continue; }
+                    if (inBC) { if (ch === '*' && nx === '/') { inBC = false; ci++; } continue; }
+                    if (inStr) { if (ch === '\\') { ci++; continue; } if (ch === strCh) inStr = false; continue; }
+                    if (ch === '/' && nx === '/') { inLC = true; ci++; continue; }
+                    if (ch === '/' && nx === '*') { inBC = true; ci++; continue; }
+                    if (ch === '"' || ch === "'" || ch === '`') { inStr = true; strCh = ch; continue; }
+                    if (ch === '{') d++;
+                    else if (ch === '}') d--;
+                    else if (d <= 1 && ch === 'a' && s.substring(ci, ci + 5) === 'await') {
+                        var pb = ci === 0 || !/[\w$]/.test(s[ci - 1]);
+                        var pa = ci + 5 >= s.length || !/[\w$]/.test(s[ci + 5]);
+                        if (pb && pa) return true;
+                    }
+                }
+                return false;
+            })();
+
+            if (_hasTLA) {
+                var _asyncWrapper = 'var module=globalThis.module,exports=globalThis.exports,' +
+                    'require=moduleRequire,' +
+                    '__filename=globalThis.__filename,__dirname=globalThis.__dirname;\n' +
+                    _metaPreamble + '\n' +
+                    'globalThis.module.exports.__vvva_asyncInit=(async function(){\n' +
+                    source + '\n' +
+                    'if(typeof module.exports.default==="undefined"&&Object.keys(module.exports).length>1){module.exports.__esModule=true;}' +
+                    '})();';
+                try { eval(_asyncWrapper); }
+                catch (e) {
+                    var _eMsg = (typeof e === 'object' && e !== null) ? (e.message || String(e)) : String(e);
+                    throw new Error('[3va:' + resolvedPath + '] ' + _eMsg);
+                }
+            } else {
+                try { eval(wrapper); }
+                catch (e) {
+                    var _eMsg = (typeof e === 'object' && e !== null) ? (e.message || String(e)) : String(e);
+                    throw new Error('[3va:' + resolvedPath + '] ' + _eMsg);
+                }
             }
 
             result = globalThis.module.exports;
@@ -5493,10 +5570,13 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
 // ── depd ─────────────────────────────────────────────────────────────────────
 (function() {
     function depd(ns) {
-        return function deprecate(fn, msg) {
+        function deprecate(fn, msg) {
             if (typeof fn !== 'function') return fn;
             return fn;
-        };
+        }
+        deprecate.function = deprecate;
+        deprecate.property = deprecate;
+        return deprecate;
     }
     depd.function = depd;
     depd.property = depd;
