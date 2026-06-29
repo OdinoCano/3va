@@ -97,6 +97,9 @@ impl TimerManager {
             }
         }
 
+        // Sort by ID (registration order) so multiple setTimeout(0) callbacks fire
+        // in FIFO order, matching Node.js behavior. HashMap iteration is random.
+        expired.sort_unstable();
         expired
     }
 

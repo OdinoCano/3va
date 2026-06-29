@@ -14,6 +14,13 @@ use crate::schema::ProjectConfig;
 use std::env;
 
 pub fn apply(mut cfg: ProjectConfig) -> ProjectConfig {
+    // run
+    if let Ok(v) = env::var("3VA_RUN_PORT") {
+        if let Ok(n) = v.parse::<u16>() {
+            cfg.run.port = Some(n);
+        }
+    }
+
     // dev
     if let Ok(v) = env::var("3VA_DEV_PORT") {
         if let Ok(n) = v.parse::<u16>() {

@@ -36,6 +36,7 @@ export default {
       ffi: [],                           // equivalent to --allow-ffi=<path>
     },
     inspect: false,       // default inspect address when --inspect is passed bare
+    port: 8080,           // default port for --port (sets process.env.PORT)
   },
 
   // Defaults for `3va dev`
@@ -121,6 +122,7 @@ Config file values can be overridden with environment variables using the patter
 
 | Variable | Overrides | Type |
 |----------|-----------|------|
+| `3VA_RUN_PORT` | `config.run.port` | `u16` |
 | `3VA_DEV_PORT` | `config.dev.port` | `u16` |
 | `3VA_DEV_HOST` | `config.dev.host` | string |
 | `3VA_DEV_PUBLIC_DIR` | `config.dev.public_dir` | string |
@@ -143,6 +145,7 @@ Config file values can be overridden with environment variables using the patter
 Bool values accept: `1`, `true`, `yes`, `on` (case-insensitive).
 
 ```bash
+3VA_RUN_PORT=8080 3va run app.ts   # overrides config.run.port
 3VA_DEV_PORT=8080 3va dev          # overrides config.dev.port
 3VA_TEST_CONCURRENCY=8 3va test    # overrides config.test.concurrency
 3VA_BUNDLE_MINIFY=true 3va bundle  # overrides config.bundle.minify

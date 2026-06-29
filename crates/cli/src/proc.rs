@@ -16,6 +16,7 @@ pub struct ProcessInfo {
     pub started_at: u64,
     pub restarts: u32,
     pub args: Vec<String>,
+    pub port: Option<u16>,
 }
 
 fn processes_dir() -> PathBuf {
@@ -123,6 +124,7 @@ pub fn start_process(
     entry: &Path,
     cwd: &Path,
     args: &[String],
+    port: Option<u16>,
 ) -> anyhow::Result<ProcessInfo> {
     ensure_dir()?;
 
@@ -136,8 +138,11 @@ pub fn start_process(
     let bin = std::env::current_exe()?;
 
     let mut cmd = std::process::Command::new(&bin);
-    cmd.arg("run")
-        .arg(entry)
+    cmd.arg("run");
+    if let Some(p) = port {
+        cmd.arg("--port").arg(p.to_string());
+    }
+    cmd.arg(entry)
         .args(args)
         .current_dir(cwd)
         .stdout(log.try_clone()?)
@@ -181,6 +186,7 @@ pub fn start_process(
         started_at: now(),
         restarts: 0,
         args: args.to_vec(),
+        port,
     };
 
     save_process(&info)?;
@@ -268,7 +274,7 @@ pub fn restart_process(name: &str) -> anyhow::Result<ProcessInfo> {
     let _ = stop_process(name);
 
     // Start again (resets restarts to 0), then restore count
-    let mut result = start_process(name, &entry, &cwd, &args)?;
+    let mut result = start_process(name, &entry, &cwd, &args, info.port)?;
     result.restarts = restarts;
     save_process(&result)?;
     Ok(result)
@@ -416,6 +422,7 @@ mod tests {
             started_at: 0,
             restarts: 0,
             args: vec![],
+            port: None,
         };
         save_process(&info).unwrap();
 

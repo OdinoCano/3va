@@ -72,7 +72,7 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
-## [2.1.1] — 2026-06-22
+## [2.1.2] — 2026-06-22
 
 ### Fixed
 
