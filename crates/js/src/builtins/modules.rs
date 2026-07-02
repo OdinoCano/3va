@@ -5966,7 +5966,24 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
         var t = (type || '').split(';')[0].trim().toLowerCase();
         return this._extensions[t] || null;
     };
+    // mime@1.x API (used by `send`/Express as `send.mime`) — aliases over the
+    // same tables as getType/getExtension, since callers like Express's
+    // response.js call `mime.lookup()`/`mime.extension()`, not getType/getExtension.
+    Mime.prototype.lookup = function(path, fallback) {
+        return this.getType(path) || fallback || this.default_type || null;
+    };
+    Mime.prototype.extension = function(type) {
+        return this.getExtension(type);
+    };
     var mime = new Mime();
+    // mime@1.x also exposes `mime.charsets.lookup(mimeType, fallback)` on the
+    // default instance (used by `send`/Express to append `; charset=` to
+    // Content-Type headers) — not part of the Mime prototype itself.
+    mime.charsets = {
+        lookup: function(mimeType, fallback) {
+            return (/^text\/|^application\/(javascript|json)/).test(mimeType) ? 'UTF-8' : fallback;
+        }
+    };
     // Seed from mime-types
     if (mimeTypes) {
         var db = globalThis.__requireCache['mime-db'] || {};
