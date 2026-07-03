@@ -19,6 +19,7 @@ pub mod builtins;
 pub mod esm;
 pub mod inspector;
 pub mod profiler;
+pub mod rejection_tracker;
 pub mod transpiler;
 
 use rquickjs::{AsyncContext, AsyncRuntime, Function};
@@ -170,6 +171,7 @@ impl JsEngine {
                     let rt_ptr =
                         unsafe { rquickjs_sys::JS_GetRuntime(rt_ptr) } as *mut std::ffi::c_void;
                     unsafe { async_context::install(&ctx, rt_ptr) }?;
+                    unsafe { rejection_tracker::install(rt_ptr) };
 
                     builtins::inject_all(&ctx, perms, tm, fw, pool)?;
 

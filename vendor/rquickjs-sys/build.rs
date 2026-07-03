@@ -111,6 +111,13 @@ fn main() {
     ];
 
     println!("cargo:rerun-if-changed=build.rs");
+    // Without this, editing quickjs.c (or any vendored source/patch) silently
+    // has no effect on the next `cargo build` — cargo only reruns this script
+    // when an explicit rerun-if-changed target changes, and `build.rs` alone
+    // isn't enough once that directive is present.
+    println!("cargo:rerun-if-changed=quickjs");
+    println!("cargo:rerun-if-changed=patches");
+    println!("cargo:rerun-if-changed=quickjs.bind.h");
     for feature in &features {
         println!("cargo:rerun-if-env-changed={}", feature_to_cargo(feature));
     }

@@ -557,6 +557,91 @@ async fn eval_and_print(engine: &vvva_js::JsEngine, src: &str, is_tty: bool) {
     }
 }
 
+/// If `name` matches a key under `package.json["scripts"]` in the current
+/// directory, runs it via the project's actual package manager (detected by
+/// lockfile — `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn, `bun.lockb` → bun,
+/// else npm) and exits the process with the child's exit code, mirroring
+/// `npm run <script>`/`pnpm <script>` exactly. Returns `Ok(false)` (does
+/// nothing) if there's no package.json, no matching script, or no package
+/// manager binary found — the caller falls back to clap's normal "unknown
+/// subcommand" error in that case.
+fn try_run_package_script(name: &str) -> anyhow::Result<bool> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Ok(pkg_json) = std::fs::read_to_string(cwd.join("package.json")) else {
+        return Ok(false);
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&pkg_json) else {
+        return Ok(false);
+    };
+    let Some(script_cmd) = json["scripts"][name].as_str() else {
+        return Ok(false);
+    };
+
+    // This delegates to a real, un-sandboxed external process (the project's
+    // package manager, running whatever `script_cmd` says — arbitrary shell).
+    // 3va's capability model (`vvva_permissions`) only governs JS executed
+    // *inside* `vvva_js`'s own QuickJS engine; it has no hook into an
+    // already-compiled Node/pnpm/vite binary's syscalls, so there is no
+    // `--allow-*` flag that could meaningfully restrict what this actually
+    // does. What *is* in scope, and what was missing here, is the same
+    // deny-by-default consent 3va already requires everywhere else
+    // (`docs/06-permissions/05-interactive-prompts.md`) instead of silently
+    // running an arbitrary command the moment someone types `3va <name>` —
+    // matching why `3va install` never runs postinstall scripts at all.
+    let pkg_permissions = read_package_json_permissions(&cwd);
+    let skip_prompt =
+        pkg_permissions.no_prompt || std::env::args().any(|a| a == "--yes" || a == "-y");
+
+    if !skip_prompt {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            eprintln!(
+                "[3va] \"{name}\" isn't a 3va command. package.json declares scripts.{name} = {script_cmd:?}.\n\
+                 Running it requires confirmation; non-interactive context (no TTY) denies by default.\n\
+                 Pass --yes, or set \"3va\": {{ \"no-prompt\": true }} in package.json, to allow it."
+            );
+            std::process::exit(1);
+        }
+        eprint!(
+            "\n[!] \"{name}\" isn't a 3va command — package.json declares scripts.{name} = {script_cmd:?}.\n\
+             Run it? [y/N] "
+        );
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        let confirmed = std::io::stdin().read_line(&mut input).is_ok()
+            && input.trim().eq_ignore_ascii_case("y");
+        if !confirmed {
+            eprintln!("[3va] Denied.");
+            std::process::exit(1);
+        }
+    }
+
+    let pm = if cwd.join("pnpm-lock.yaml").exists() {
+        "pnpm"
+    } else if cwd.join("yarn.lock").exists() {
+        "yarn"
+    } else if cwd.join("bun.lockb").exists() {
+        "bun"
+    } else {
+        "npm"
+    };
+
+    eprintln!("[3va] Running scripts.{name} via {pm}...\n");
+
+    let status = std::process::Command::new(pm)
+        .args(["run", name])
+        .current_dir(&cwd)
+        .status();
+    match status {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!("[3va] Could not run \"{pm} run {name}\": {e}");
+            Ok(false)
+        }
+    }
+}
+
 /// Discover the project entry point: package.json "main", then common fallbacks.
 fn discover_entry() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -570,7 +655,7 @@ fn discover_entry() -> PathBuf {
             }
         }
     }
-    for candidate in &["src/index.ts", "src/index.js", "index.ts", "index.js"] {
+    for candidate in ENTRY_CANDIDATES {
         let p = cwd.join(candidate);
         if p.exists() {
             return p;
@@ -578,6 +663,24 @@ fn discover_entry() -> PathBuf {
     }
     cwd.join("index.js")
 }
+
+/// Entry points tried by `discover_entry()`, in order. Covers both the
+/// `index.*` (Node-style) and `main.*` (Vite/CRA-style React/Preact/Solid)
+/// naming conventions, across `.ts`/`.tsx`/`.js`/`.jsx`.
+const ENTRY_CANDIDATES: &[&str] = &[
+    "src/index.ts",
+    "src/index.tsx",
+    "src/index.js",
+    "src/index.jsx",
+    "src/main.ts",
+    "src/main.tsx",
+    "src/main.js",
+    "src/main.jsx",
+    "index.ts",
+    "index.tsx",
+    "index.js",
+    "index.jsx",
+];
 
 /// Metadata about a JavaScript/TypeScript framework with a dev server.
 struct FrameworkInfo {
@@ -824,16 +927,19 @@ async fn run_dev_server(
     if !entry.exists() {
         anyhow::bail!(
             "Entry file not found: {}\n\
-             Tried: package.json \"main\" field, src/index.ts, src/index.js, index.ts, index.js\n\
+             Tried: package.json \"main\" field, {}\n\
              Hint: This project may use a framework (Astro, Next.js, Nuxt, SolidStart, RedwoodJS, etc.)\n\
              If so, ensure the corresponding config file (astro.config.*, next.config.*, nuxt.config.*, redwood.toml, etc.) exists.",
-            entry.display()
+            entry.display(),
+            ENTRY_CANDIDATES.join(", ")
         );
     }
 
-    let output = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("dist/bundle.js");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let output = cwd.join("dist/bundle.js");
+    // Canonicalized once so per-request path-traversal checks are cheap string
+    // prefix comparisons instead of a syscall on every request.
+    let project_root = cwd.canonicalize().unwrap_or(cwd);
 
     println!();
     println!("  3VA Dev Server");
@@ -939,7 +1045,19 @@ async fn run_dev_server(
     let listener = TcpListener::bind(&addr).await?;
     let url = format!("http://{}:{}", host, port);
 
-    println!("  Ready  : \x1b[36m{}\x1b[0m", url);
+    // Same convention as Vite: only advertise a LAN address when the server
+    // is actually reachable from the network (`--host` set to something
+    // other than loopback) — printing a Network line for a 127.0.0.1-only
+    // bind would be a dead link.
+    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+        println!("  Local  : \x1b[36m{}\x1b[0m", url);
+        println!("  \x1b[2m(!) Use --host to expose on the network\x1b[0m");
+    } else {
+        println!("  Local  : \x1b[36mhttp://localhost:{}\x1b[0m", port);
+        if let Some(ip) = primary_lan_ip() {
+            println!("  Network: \x1b[36mhttp://{}:{}\x1b[0m", ip, port);
+        }
+    }
     println!("  Press Ctrl+C to stop.\n");
 
     if open {
@@ -964,29 +1082,40 @@ async fn run_dev_server(
                 let tx_conn = tx.clone();
                 let pub_dir = public_dir.clone();
                 let out_path = output.clone();
+                let root = project_root.clone();
                 let drain_flag = draining.clone();
                 let conn_counter = active_conns.clone();
                 let _ = peer;
                 tokio::spawn(async move {
                     let _ = handle_dev_connection(
-                        &mut stream, tx_conn, pub_dir, out_path, csp_enabled, drain_flag,
+                        &mut stream, tx_conn, pub_dir, out_path, root, csp_enabled, drain_flag,
                     ).await;
                     conn_counter.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             _ = signal::ctrl_c() => {
-                println!("\n[dev] Draining connections (up to 30s)…");
+                println!("\n[dev] Draining connections (up to 30s)… press Ctrl+C again to force quit.");
                 draining.store(true, Ordering::Relaxed);
 
-                // Wait until all in-flight handlers finish or 30 s elapses.
+                // Wait until all in-flight handlers finish, 30 s elapses, or the
+                // user hits Ctrl+C again — whichever comes first. Long-lived
+                // connections (the HMR SSE stream a browser tab keeps open) would
+                // otherwise pin this at the full 30 s on every shutdown.
                 let drain_deadline = tokio::time::Instant::now()
                     + std::time::Duration::from_secs(30);
                 while active_conns.load(Ordering::Relaxed) > 0 {
-                    if tokio::time::Instant::now() >= drain_deadline {
+                    let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
                         println!("[dev] Drain timeout — forcing shutdown.");
                         break;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(remaining.min(std::time::Duration::from_millis(200))) => {}
+                        _ = signal::ctrl_c() => {
+                            println!("[dev] Second Ctrl+C — forcing immediate shutdown.");
+                            break;
+                        }
+                    }
                 }
                 println!("[dev] Shutdown complete.");
                 break;
@@ -995,6 +1124,24 @@ async fn run_dev_server(
     }
 
     Ok(())
+}
+
+/// Best-effort primary LAN IP, for the dev server's "Network:" banner line.
+///
+/// ponytail: this is the standard `connect()` a UDP socket to a public
+/// address (no packet is actually sent — UDP `connect` just picks a local
+/// route) and read back `local_addr()` trick, not real interface enumeration
+/// — it reports the one IP on the route to the public internet, not every
+/// NIC (Docker bridges, extra VPN adapters, etc., the way Vite's `Network:`
+/// list can show several). Getting all of them needs `getifaddrs`
+/// (platform-specific, unsafe) or a new dependency; this covers the actual
+/// common case — "open this on my phone on the same Wi-Fi" — in a few lines
+/// with zero new dependencies. Upgrade to real enumeration if multi-NIC
+/// support is specifically needed.
+fn primary_lan_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
 }
 
 /// Try to open the given URL in the system default browser.
@@ -1014,9 +1161,742 @@ fn open_browser(url: &str) {
     .spawn();
 }
 
-/// Tiny HMR client injected into every HTML response.
-/// On `reload` the page refreshes; on `error` it shows an overlay.
+/// Source extensions the on-demand dev server transpiles per request (JSX/TSX
+/// → JS, TS types stripped) instead of serving as static text, so the
+/// browser's native `<script type="module">` loader can `import` them.
+const DEV_SOURCE_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "mts"];
+
+/// Common web-asset extensions the dev server will serve from the project
+/// root (in addition to `public/`) when referenced by a root-level
+/// `index.html`. Deliberately not "serve any file under the project root" —
+/// that would expose `.env`, source under `crates/`, etc. to any request.
+const DEV_STATIC_ASSET_EXTENSIONS: &[&str] = &[
+    "json", "svg", "png", "jpg", "jpeg", "gif", "webp", "ico", "woff", "woff2", "ttf", "wasm",
+    "txt", "map",
+];
+
+/// `vvva_js::transpiler` compiles JSX with the classic runtime
+/// (`React.createElement(...)`), which assumes `React` is already in scope —
+/// true if the file wrote `import React from "react"` by hand, false for the
+/// automatic-runtime convention most current React/Vite scaffolds use (JSX
+/// works with no React import at all). Auto-injects the import the classic
+/// transform silently assumes, instead of making every project add an
+/// otherwise-unused import just to satisfy this dev server.
+fn inject_react_import_if_needed(transpiled: String, original_source: &str) -> String {
+    if transpiled.contains("React.createElement")
+        && !original_source.contains("import React")
+        && !original_source.contains("import * as React")
+    {
+        format!("import React from \"react\";\n{transpiled}")
+    } else {
+        transpiled
+    }
+}
+
+/// Serves a single project source/style/data/asset file for the on-demand
+/// ESM dev server (Vite-style unbundled dev serving). `is_import_query` is
+/// the `?import` marker `rewrite_specifier` adds when the request came from
+/// a JS `import` (as opposed to a direct `<link>`/`<img>`/browser-typed
+/// request for the same path) — three extension classes need to tell those
+/// two cases apart, because their *raw* file content isn't valid as an ES
+/// module on its own:
+/// - `.css`: raw CSS for a `<link>` tag; imported → wrapped in a tiny module
+///   that injects a `<style>` tag.
+/// - `.json`: raw JSON for a direct fetch; imported → `export default
+///   <the JSON verbatim>` (valid JS since JSON is a syntactic subset of it).
+/// - image/font/`.wasm` assets (`DEV_STATIC_ASSET_EXTENSIONS`): raw bytes for
+///   a direct `<img src>`/`<link>`/browser request; imported (`import logo
+///   from "./logo.png"`) → `export default "<url>"`, a URL string the
+///   component can put in `src=`, matching Vite's `plugins/asset.ts`
+///   convention — 3va doesn't hash/copy assets to a build output the way
+///   Vite's production build does, but dev serving doesn't need that.
+///
+/// `.js`/`.jsx`/`.ts`/`.tsx` (`DEV_SOURCE_EXTENSIONS`) are transpiled with
+/// import specifiers rewritten (`rewrite_specifier`). Everything else falls
+/// through to `serve_file_csp` unchanged.
+async fn serve_dev_source(
+    stream: &mut tokio::net::TcpStream,
+    abs_path: &std::path::Path,
+    project_root: &std::path::Path,
+    is_import_query: bool,
+    csp_enabled: bool,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    if ext == "css" {
+        let Ok(source) = std::fs::read_to_string(abs_path) else {
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            return Ok(());
+        };
+        if !is_import_query {
+            return serve_file_csp(stream, abs_path, csp_enabled).await;
+        }
+        let escaped = source
+            .replace('\\', "\\\\")
+            .replace('`', "\\`")
+            .replace("${", "\\${");
+        let js = format!(
+            "const __css = `{escaped}`;\n\
+             const __style = document.createElement('style');\n\
+             __style.textContent = __css;\n\
+             document.head.appendChild(__style);\n\
+             export default __css;\n"
+        );
+        return respond_js(stream, &js, csp_enabled).await;
+    }
+
+    if ext == "json" {
+        if !is_import_query {
+            return serve_file_csp(stream, abs_path, csp_enabled).await;
+        }
+        let Ok(source) = std::fs::read_to_string(abs_path) else {
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            return Ok(());
+        };
+        return respond_js(stream, &format!("export default {source};\n"), csp_enabled).await;
+    }
+
+    if ext != "css" && ext != "json" && DEV_STATIC_ASSET_EXTENSIONS.contains(&ext) {
+        if !is_import_query {
+            return serve_file_csp(stream, abs_path, csp_enabled).await;
+        }
+        let url = match abs_path.strip_prefix(project_root) {
+            Ok(rel) => format!("/{}", rel.to_string_lossy().replace('\\', "/")),
+            Err(_) => format!("/@fs{}", abs_path.display()),
+        };
+        return respond_js(stream, &format!("export default {url:?};\n"), csp_enabled).await;
+    }
+
+    if !DEV_SOURCE_EXTENSIONS.contains(&ext) {
+        return serve_file_csp(stream, abs_path, csp_enabled).await;
+    }
+
+    let Ok(source) = std::fs::read_to_string(abs_path) else {
+        stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await?;
+        return Ok(());
+    };
+
+    // Third-party deps under node_modules are frequently CommonJS (no ESM
+    // `export` at all) — serving that text as-is with `Content-Type:
+    // application/javascript` executes fine as a module with zero exports,
+    // so `import { Link } from "react-router-dom"` fails at the browser's
+    // module-linking stage ("does not provide an export named 'Link'")
+    // instead of at parse time. `.jsx`/`.tsx`/`.ts` are always the project's
+    // own authored source and assumed ESM; only plain `.js`/`.mjs`/`.cjs`
+    // need the CJS check.
+    if matches!(ext, "js" | "mjs" | "cjs")
+        && !vvva_js::esm::source_is_esm(&source, &abs_path.to_string_lossy())
+    {
+        return serve_cjs_interop(stream, abs_path, &source, project_root, csp_enabled).await;
+    }
+
+    let mut transpiled = match ext {
+        "jsx" | "tsx" => vvva_js::transpiler::transpile_jsx(&source),
+        "ts" | "mts" => vvva_js::transpiler::transpile(&source),
+        _ => vvva_js::transpiler::transpile_js(&source),
+    };
+
+    if matches!(ext, "jsx" | "tsx") {
+        transpiled = inject_react_import_if_needed(transpiled, &source);
+    }
+
+    let base = abs_path.to_string_lossy().into_owned();
+    let rewritten = rewrite_imports(&transpiled, |specifier| {
+        rewrite_specifier(specifier, &base, project_root)
+    });
+
+    respond_js(stream, &rewritten, csp_enabled).await
+}
+
+/// Wraps a CommonJS file in a synthetic ESM shim so the browser's native
+/// module loader can `import` named bindings from it — a scoped, static
+/// stand-in for what real bundlers do with a dedicated CJS→ESM pre-bundling
+/// pass (Vite's esbuild `optimizeDeps` step). `require(...)` targets and
+/// `exports.NAME =` / `module.exports.NAME =` / `Object.defineProperty(...)`
+/// assignments are found via a best-effort static text scan (`find_require_specifiers`,
+/// `find_cjs_export_names`) — the same class of technique as `rewrite_imports` — and
+/// each `require()` target is itself routed back through `rewrite_specifier`,
+/// so a CJS dependency chain (CJS requiring more CJS) resolves recursively:
+/// each hop re-enters `serve_dev_source`, which runs this same CJS check again.
+///
+/// ponytail: static analysis only. `require(someVariable)` (a computed,
+/// non-literal specifier) can't be discovered this way and throws at runtime
+/// with a clear "unresolved require" error naming the file, rather than
+/// silently breaking; a package whose CJS build does something more dynamic
+/// than "top-level require + static exports.X assignment" (e.g. exports
+/// built in a loop, exports reassigned conditionally) won't get the export
+/// names it needs re-exported. If a real dependency hits this ceiling, the
+/// fix is the same one real bundlers reach for: run `vvva_bundler` over the
+/// dependency ahead of time and serve its already-resolved, single-file ESM
+/// output instead of interop-shimming the raw file per request.
+async fn serve_cjs_interop(
+    stream: &mut tokio::net::TcpStream,
+    abs_path: &std::path::Path,
+    source: &str,
+    project_root: &std::path::Path,
+    csp_enabled: bool,
+) -> anyhow::Result<()> {
+    let base = abs_path.to_string_lossy().into_owned();
+
+    let mut preamble = String::new();
+    let mut require_arms = String::new();
+    for (i, spec) in find_require_specifiers(source).iter().enumerate() {
+        let url = rewrite_specifier(spec, &base, project_root);
+        preamble.push_str(&format!("import * as __dep{i} from \"{url}\";\n"));
+        require_arms.push_str(&format!(
+            "    case {spec:?}: return __dep{i}.default !== undefined ? __dep{i}.default : __dep{i};\n"
+        ));
+    }
+
+    // Babel/TS interop convention: a CJS file compiled from an ES module sets
+    // `exports.__esModule = true` and stashes the real default export at
+    // `exports.default`. Without this check, `export default module.exports`
+    // would hand callers the whole named-exports bag instead of the intended
+    // default value.
+    let default_export = if source.contains("__esModule") {
+        "export default (module.exports && module.exports.default !== undefined) ? module.exports.default : module.exports;\n"
+    } else {
+        "export default module.exports;\n"
+    };
+
+    let mut named_exports = String::new();
+    for name in resolve_cjs_export_names(source, &base, project_root) {
+        named_exports.push_str(&format!("export const {name} = module.exports.{name};\n"));
+    }
+
+    let shim = format!(
+        "{preamble}\
+         function require(__name) {{\n\
+         \x20 switch (__name) {{\n\
+         {require_arms}\
+         \x20   default: throw new Error(\"3va dev: unresolved require(\" + JSON.stringify(__name) + \") in \" + {base:?});\n\
+         \x20 }}\n\
+         }}\n\
+         const module = {{ exports: {{}} }};\n\
+         const exports = module.exports;\n\
+         (function(module, exports, require) {{\n\
+         {source}\n\
+         }})(module, exports, require);\n\
+         {default_export}\
+         {named_exports}"
+    );
+
+    respond_js(stream, &shim, csp_enabled).await
+}
+
+/// Best-effort static scan for `require("specifier")` call targets in a CJS
+/// file. Same identifier-boundary guard as `rewrite_imports` (`notRequire(`
+/// must not match); a computed `require(someVar)` is invisible to this scan
+/// by design — see the `ponytail:` note on `serve_cjs_interop`.
+fn find_require_specifiers(js: &str) -> Vec<String> {
+    const MARKER: &str = "require(";
+    let bytes = js.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < js.len() {
+        if bytes[i..].starts_with(MARKER.as_bytes()) {
+            let prev_is_ident = i > 0
+                && matches!(bytes[i - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$');
+            if !prev_is_ident {
+                let after = &js[i + MARKER.len()..];
+                let trimmed = after.trim_start();
+                if let Some(q) = trimmed.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+                    if let Some(end) = trimmed[1..].find(q) {
+                        let spec = &trimmed[1..1 + end];
+                        if !out.iter().any(|s| s == spec) {
+                            out.push(spec.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        i += js[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    out
+}
+
+/// Names to re-export as `export const NAME = module.exports.NAME` for the
+/// CJS→ESM shim: the union of a real, sandboxed execution of the module
+/// (`discover_cjs_export_names_dynamic`, authoritative when it succeeds) and
+/// the static text scan (`find_cjs_export_names`, a safety net when dynamic
+/// discovery fails to run the file at all — parse error, timeout, recursion
+/// depth exhausted). Extra names from either side can't hurt: `export const
+/// X = module.exports.X` where X ends up `undefined` is valid, just useless.
+fn resolve_cjs_export_names(
+    source: &str,
+    base: &str,
+    project_root: &std::path::Path,
+) -> Vec<String> {
+    let visited = std::collections::HashSet::new();
+    let mut names = discover_cjs_export_names_dynamic(source, base, project_root, &visited, 0)
+        .unwrap_or_default();
+    for name in find_cjs_export_names(source) {
+        if !names.iter().any(|n| n == &name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Executes the wrapped CJS body in a throwaway, sandboxed QuickJS context
+/// and asks the real engine for `Object.keys(module.exports)` afterward,
+/// rather than relying purely on static text scanning. This is what actually
+/// catches the extremely common tsc/Babel "barrel" re-export pattern —
+/// `__exportStar(require("./x"), exports)`, a runtime `for...in` copy loop —
+/// that no static scan can see, since the property names it adds are never
+/// spelled out as a literal `exports.NAME = ` anywhere in the source. That
+/// shape is exactly what broke `react-router-dom`'s CJS build here.
+///
+/// The naive version of this idea — stubbing `require()` with a generic
+/// Proxy — doesn't actually work: `for...in`/`Object.keys()` only see a
+/// target's *real* own enumerable properties, and a content-free Proxy has
+/// none, so `__exportStar`'s copy loop would iterate zero keys and this
+/// would still report no exports. Instead, each `require()` target is
+/// resolved and *recursively* discovered first (ESM deps via
+/// `find_esm_export_names`, CJS deps via this same function one level
+/// deeper), and the stub `require(name)` returns a real, fully keyed plain
+/// object literal built from those discovered names — so a copy loop over it
+/// actually has something to copy. `visited` + `depth` guard against
+/// circular/pathological `require()` chains (capped at 4 levels; a stub
+/// dependency beyond that resolves to `{}`, same as an unresolvable one).
+/// `process.env` is stubbed too, since unguarded `process.env.NODE_ENV` at
+/// module top level is common enough in published packages that skipping it
+/// would defeat this for a large fraction of real-world CJS. Bounded by a 2s
+/// interrupt per level so a pathological top-level script can't hang the dev
+/// server.
+///
+/// Returns `None` on any parse/execution/timeout failure so the caller
+/// (`resolve_cjs_export_names`) falls back to the static scan instead of
+/// losing every export name.
+/// Process-lifetime cache for `discover_cjs_export_names_dynamic`, keyed by
+/// file path and invalidated by mtime. Every request for a `node_modules`
+/// CJS dep otherwise re-runs the *entire* recursive QuickJS discovery tree
+/// from scratch — for a `react-router-dom`-shaped barrel that's dozens of
+/// nested `require()` targets, each spinning up its own sandboxed
+/// `rquickjs::Runtime`, on every single page load/reload. This is checked at
+/// every recursion depth (not just the outermost per-request call), so a
+/// shared sub-dependency ("react") pays the QuickJS cost once total, not once
+/// per file that requires it.
+///
+/// ponytail: correctness relies on the discovered names for a given file's
+/// own code being independent of which ancestor chain (`visited`) led to it
+/// — true for any non-circular dependency graph (the overwhelmingly common
+/// case), since `visited` only changes cycle-detection outcomes for
+/// dependencies that loop back to a *current* ancestor. A pathological
+/// circular graph where the same file is reached through two different
+/// cycles could in principle get a stale cached result from the first
+/// resolution; not worth guarding against for a dev-only convenience cache
+/// with a 2s-per-level execution budget already bounding the damage.
+type CjsDiscoveryCache =
+    std::collections::HashMap<std::path::PathBuf, (std::time::SystemTime, Vec<String>)>;
+static CJS_DISCOVERY_CACHE: std::sync::LazyLock<std::sync::Mutex<CjsDiscoveryCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+// `project_root` isn't read by this function's own logic today — it's only
+// threaded through the recursive call below — but every call site already
+// passes a real project root, so this reads as a forward-looking parameter
+// (future project-root-relative resolution rule) rather than dead code.
+#[allow(clippy::only_used_in_recursion)]
+fn discover_cjs_export_names_dynamic(
+    source: &str,
+    base: &str,
+    project_root: &std::path::Path,
+    visited: &std::collections::HashSet<std::path::PathBuf>,
+    depth: u32,
+) -> Option<Vec<String>> {
+    let base_path = std::path::PathBuf::from(base);
+    let mtime = std::fs::metadata(&base_path)
+        .and_then(|m| m.modified())
+        .ok();
+    if let Some(mtime) = mtime {
+        if let Ok(cache) = CJS_DISCOVERY_CACHE.lock() {
+            if let Some((cached_mtime, names)) = cache.get(&base_path) {
+                if *cached_mtime == mtime {
+                    return Some(names.clone());
+                }
+            }
+        }
+    }
+
+    let mut require_stub_cases = String::new();
+    if depth < 4 {
+        for spec in find_require_specifiers(source) {
+            let resolved = vvva_js::esm::resolve_esm(base, &spec);
+            // `visited` tracks the current *ancestor chain* (ancestors of
+            // this node, not the whole tree already walked) — a fresh clone
+            // is threaded per branch. Two sibling requires that both depend
+            // on, say, "react" are completely normal (not a cycle) and each
+            // needs its own real discovery; a single set mutated in place
+            // across siblings would wrongly treat the second occurrence as
+            // already-visited and stub it empty, which is exactly what broke
+            // this for real: react-router-dom's `dist/main.js` requires two
+            // sibling UMD builds that both require "react"/"react-dom" — the
+            // second one silently lost its `React.createContext` etc.,
+            // crashed on first use, and the whole discovery for that branch
+            // fell back to nothing.
+            let dep_names = if visited.contains(&resolved) {
+                Vec::new() // real cycle: this path is our own ancestor
+            } else if let Ok(dep_source) = std::fs::read_to_string(&resolved) {
+                let dep_base = resolved.to_string_lossy().into_owned();
+                if vvva_js::esm::source_is_esm(&dep_source, &dep_base) {
+                    find_esm_export_names(&dep_source)
+                } else {
+                    let mut child_visited = visited.clone();
+                    child_visited.insert(resolved.clone());
+                    discover_cjs_export_names_dynamic(
+                        &dep_source,
+                        &dep_base,
+                        project_root,
+                        &child_visited,
+                        depth + 1,
+                    )
+                    .unwrap_or_default()
+                }
+            } else {
+                Vec::new()
+            };
+            // Values are `__stub()` — a self-referential Proxy, not a plain
+            // `function(){}` — because real top-level code routinely *uses*
+            // what it requires (`React.createContext(x).displayName = "y"`,
+            // `forwardRef(fn)(...)`, chained method calls). A no-op function
+            // returns `undefined`, and assigning a property onto `undefined`
+            // throws, taking down the whole discovery pass for a module that
+            // would otherwise resolve fine. `__stub()` tolerates being
+            // called, indexed, and assigned into indefinitely.
+            let obj_literal = format!(
+                "{{{}}}",
+                dep_names
+                    .iter()
+                    .map(|n| format!("{n:?}: __stub()"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            require_stub_cases.push_str(&format!("    case {spec:?}: return {obj_literal};\n"));
+        }
+    }
+
+    let runtime = rquickjs::Runtime::new().ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    runtime.set_interrupt_handler(Some(Box::new(move || std::time::Instant::now() > deadline)));
+    let context = rquickjs::Context::full(&runtime).ok()?;
+
+    let probe = format!(
+        "(function() {{\n\
+           function __stub() {{\n\
+             return new Proxy(function __3va_stub() {{ return __stub(); }}, {{\n\
+               get: function(t, p) {{ return (p in t) ? t[p] : __stub(); }},\n\
+               apply: function() {{ return __stub(); }},\n\
+               construct: function() {{ return __stub(); }}\n\
+             }});\n\
+           }}\n\
+           function require(__name) {{\n\
+             switch (__name) {{\n\
+         {require_stub_cases}\
+               default: return __stub();\n\
+             }}\n\
+           }}\n\
+           var process = {{ env: {{}} }};\n\
+           var module = {{ exports: {{}} }};\n\
+           var exports = module.exports;\n\
+           (function(module, exports, require) {{\n\
+           {source}\n\
+           }})(module, exports, require);\n\
+           return Object.keys(module.exports);\n\
+         }})()"
+    );
+
+    let result: Option<Vec<String>> = context
+        .with(|ctx| ctx.eval::<Vec<String>, _>(probe.as_str()).ok())
+        .map(|names| {
+            names
+                .into_iter()
+                .filter(|n| n != "default" && n != "__esModule" && is_valid_js_identifier(n))
+                .collect()
+        });
+
+    if let (Some(names), Some(mtime)) = (&result, mtime) {
+        if let Ok(mut cache) = CJS_DISCOVERY_CACHE.lock() {
+            cache.insert(base_path, (mtime, names.clone()));
+        }
+    }
+
+    result
+}
+
+/// Best-effort static scan for an ESM file's named exports: `export const/let/
+/// var/function/class NAME`, and `export { a, b as c }` (the `as c` alias is
+/// what gets exposed, not the original local name `b`). Used by
+/// `discover_cjs_export_names_dynamic` to build a real-shaped `require()`
+/// stub for an ESM dependency of a CJS barrel file. `export default` is
+/// intentionally not included here — irrelevant to a `for...in` copy loop,
+/// which conventionally skips `default` (see `__exportStar` in real tsc
+/// output), and every caller of this function already excludes it too.
+fn find_esm_export_names(js: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for keyword in [
+        "export const ",
+        "export let ",
+        "export var ",
+        "export function ",
+        "export class ",
+    ] {
+        let mut from = 0;
+        while let Some(rel) = js[from..].find(keyword) {
+            let start = from + rel + keyword.len();
+            let trimmed = js[start..].trim_start_matches('*'); // `export function* gen()`
+            let end = trimmed
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+                .map_or(trimmed.len(), |o| o);
+            let name = &trimmed[..end];
+            if !name.is_empty()
+                && is_valid_js_identifier(name)
+                && !names.iter().any(|n: &String| n == name)
+            {
+                names.push(name.to_string());
+            }
+            from = from + rel + keyword.len();
+        }
+    }
+    // `export { a, b as c };` — one or more comma-separated bindings, each
+    // optionally renamed via `as`.
+    let mut from = 0;
+    while let Some(rel) = js[from..].find("export {") {
+        let start = from + rel + "export {".len();
+        let Some(end_rel) = js[start..].find('}') else {
+            break;
+        };
+        for item in js[start..start + end_rel].split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            let exported = item.rsplit(" as ").next().unwrap_or(item).trim();
+            if is_valid_js_identifier(exported) && !names.iter().any(|n| n == exported) {
+                names.push(exported.to_string());
+            }
+        }
+        from = start + end_rel;
+    }
+    names
+}
+
+/// Best-effort static scan for CJS named-export assignments: `exports.NAME =`,
+/// `module.exports.NAME =`, and the `Object.defineProperty(exports, "NAME", …)`
+/// form TypeScript/Babel emit for getter-based exports. `default` and
+/// `__esModule` are excluded — handled separately by `serve_cjs_interop`'s
+/// default-export logic, and `export const default = …` isn't valid syntax
+/// anyway. See the `ponytail:` note on `serve_cjs_interop` for what this
+/// static scan can't see (computed/conditional export assignment).
+fn find_cjs_export_names(js: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+
+    for prefix in ["exports.", "module.exports."] {
+        let mut from = 0;
+        while let Some(rel) = js[from..].find(prefix) {
+            let start = from + rel + prefix.len();
+            let end = js[start..]
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+                .map_or(js.len(), |o| start + o);
+            let name = &js[start..end];
+            let after = js[end..].trim_start();
+            if !name.is_empty()
+                && after.starts_with('=')
+                && !after.starts_with("==")
+                && !names.iter().any(|n| n == name)
+            {
+                names.push(name.to_string());
+            }
+            from = (from + rel + prefix.len()).max(from + 1);
+        }
+    }
+
+    for prefix in [
+        "Object.defineProperty(exports,",
+        "Object.defineProperty(module.exports,",
+    ] {
+        let mut from = 0;
+        while let Some(rel) = js[from..].find(prefix) {
+            let start = from + rel + prefix.len();
+            let trimmed = js[start..].trim_start();
+            if let Some(q) = trimmed.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+                if let Some(end) = trimmed[1..].find(q) {
+                    let name = &trimmed[1..1 + end];
+                    if !names.iter().any(|n| n == name) {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+            from = (from + rel + prefix.len()).max(from + 1);
+        }
+    }
+
+    names.retain(|n| n != "default" && n != "__esModule" && is_valid_js_identifier(n));
+    names
+}
+
+fn is_valid_js_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+async fn respond_js(
+    stream: &mut tokio::net::TcpStream,
+    body: &str,
+    csp_enabled: bool,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let csp = csp_header(csp_enabled);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/javascript; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n{csp}Connection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+/// Resolves `specifier` (imported from `base`, an absolute file path) to a URL
+/// the dev server can serve on the request it triggers: a project-relative
+/// path for anything inside `project_root`, `/@fs/<abs>` for anything outside
+/// it (node_modules, the pnpm store, …). `.css` targets get `?import`
+/// appended so `serve_dev_source` knows to wrap them as a style-injecting
+/// module rather than raw CSS on that follow-up request.
+fn rewrite_specifier(specifier: &str, base: &str, project_root: &std::path::Path) -> String {
+    let resolved = vvva_js::esm::resolve_esm(base, specifier);
+    let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
+    // Anything whose raw file content isn't valid as an ES module on its own
+    // (CSS, JSON, binary assets — see `serve_dev_source`) needs the `?import`
+    // marker so the server knows this request came from a JS `import`, not a
+    // direct `<link>`/`<img>`/browser-typed request for the same path.
+    let needs_import_marker =
+        ext == "css" || ext == "json" || DEV_STATIC_ASSET_EXTENSIONS.contains(&ext);
+    let url = match resolved.strip_prefix(project_root) {
+        // `resolve_esm` builds the path via a literal join, so a `./x` specifier
+        // leaves a redundant `.` component (e.g. `src/./App.jsx`) — harmless on
+        // disk, but ugly as a URL; drop `.` components for a clean path.
+        Ok(rel) => {
+            let cleaned: PathBuf = rel
+                .components()
+                .filter(|c| !matches!(c, std::path::Component::CurDir))
+                .collect();
+            format!("/{}", cleaned.to_string_lossy().replace('\\', "/"))
+        }
+        Err(_) => format!("/@fs{}", resolved.display()),
+    };
+    if needs_import_marker {
+        format!("{url}?import")
+    } else {
+        url
+    }
+}
+
+/// Rewrites `from "specifier"` / `import "specifier"` / `import("specifier")`
+/// occurrences in transpiled JS via `resolve`, so the browser's native ESM
+/// loader can fetch the result of resolution instead of the original
+/// (often bare or extension-less) specifier.
+///
+/// ponytail: scans for the literal token sequences oxc's codegen always
+/// produces for real import/export statements, rather than re-walking the
+/// AST a second time. Guards against matching mid-identifier (e.g. a call to
+/// a function named `doImport(...)`) by requiring the character before the
+/// marker not be an identifier character. A source string that coincidentally
+/// contains ` from "` or `import "`/`import(` outside a real declaration
+/// (extremely rare — would need to be inside a template literal or an
+/// unusual identifier) would be misrewritten; if that ever bites a real
+/// project, switch to mutating `ImportDeclaration`/`ExportNamedDeclaration`
+/// source literals directly during the existing oxc transform pass instead.
+fn rewrite_imports(js: &str, mut resolve: impl FnMut(&str) -> String) -> String {
+    const MARKERS: [&str; 2] = ["from ", "import"];
+    let bytes = js.as_bytes();
+    let mut out = String::with_capacity(js.len() + 64);
+    let mut i = 0usize;
+    let mut copied_up_to = 0usize;
+
+    'scan: while i < js.len() {
+        for marker in MARKERS {
+            let mbytes = marker.as_bytes();
+            if !bytes[i..].starts_with(mbytes) {
+                continue;
+            }
+            let prev_is_ident = i > 0
+                && matches!(bytes[i - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$');
+            if prev_is_ident {
+                continue;
+            }
+
+            let after_marker = &js[i + marker.len()..];
+            // `import` must be followed by whitespace+quote (bare side-effect
+            // import) or `(` (dynamic import); `import {`/`import Foo` (has a
+            // clause, handled via the later `from "..."` on the same
+            // statement) don't match here. `from ` must be whitespace+quote.
+            let (spec_region, quote_offset) = if marker == "import" && after_marker.starts_with('(')
+            {
+                (&after_marker[1..], 1)
+            } else {
+                let trimmed = after_marker.trim_start();
+                (trimmed, after_marker.len() - trimmed.len())
+            };
+            let quote = spec_region.chars().next();
+            if quote != Some('"') && quote != Some('\'') {
+                // Not a specifier here (e.g. `import Foo` / `import {`) —
+                // not this marker; let the outer loop advance one char and
+                // keep scanning (the later `from "..."` on this same
+                // statement, if any, is picked up on its own pass).
+                continue;
+            }
+            let q = quote.unwrap();
+            let Some(end_rel) = spec_region[1..].find(q) else {
+                continue;
+            };
+            let specifier = &spec_region[1..1 + end_rel];
+            let resolved = resolve(specifier);
+
+            out.push_str(&js[copied_up_to..i]);
+            out.push_str(marker);
+            out.push_str(&after_marker[..quote_offset]);
+            out.push(q);
+            out.push_str(&resolved);
+            out.push(q);
+
+            let match_len = marker.len() + quote_offset + 1 + end_rel + 1;
+            i += match_len;
+            copied_up_to = i;
+            continue 'scan;
+        }
+        // No marker matched at this byte position — step forward by one full
+        // UTF-8 char (not one byte) so `i` stays a valid string-slice boundary.
+        i += js[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    out.push_str(&js[copied_up_to..]);
+    out
+}
+
+/// Tiny HMR client injected into every HTML response — also carries a
+/// minimal `process` global, since plenty of published packages (React's own
+/// dev builds included) reference bare `process.env.NODE_ENV` at module
+/// top-level with no `typeof` guard. A classic (non-module) `<script>` tag
+/// puts this on `window`, so every ES module loaded afterward — on-demand
+/// source and CJS-interop shims alike — sees the same one `process` without
+/// each of them needing to declare/redeclare it. See `docs/compatibility.txt`
+/// for why `process` is one of the "pure JS, no native binding" polyfills.
 const HMR_CLIENT_JS: &str = r#"<script>
+var process = { env: { NODE_ENV: "development" }, browser: true, argv: [], version: "" };
 (function(){
   var es = new EventSource('/__hmr');
   es.onmessage = function(e){
@@ -1040,6 +1920,7 @@ async fn handle_dev_connection(
     tx: tokio::sync::broadcast::Sender<BuildEvent>,
     public_dir: PathBuf,
     bundle_path: PathBuf,
+    project_root: PathBuf,
     csp_enabled: bool,
     draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
@@ -1062,7 +1943,11 @@ async fn handle_dev_connection(
         return Ok(());
     }
 
-    let path = parts[1].split('?').next().unwrap_or("/");
+    let mut url_parts = parts[1].splitn(2, '?');
+    let path = url_parts.next().unwrap_or("/");
+    let is_import_query = url_parts
+        .next()
+        .is_some_and(|q| q.split('&').any(|kv| kv == "import"));
 
     // Health / status endpoints for load-balancer integration.
     if path == "/health" || path == "/_3va/status" {
@@ -1140,27 +2025,122 @@ async fn handle_dev_connection(
         return serve_file_csp(stream, &bundle_path, csp_enabled).await;
     }
 
-    // Static assets from public/
+    // /@fs/<abs-path> — Vite-style escape hatch for files resolved outside the
+    // project root (node_modules, the pnpm store, …). The path is always one
+    // we produced ourselves in a prior response (see `rewrite_specifier`), not
+    // typed by hand, but a local dev server has no stronger trust boundary
+    // than "this machine can already read the file" — same posture as Vite.
+    if let Some(fs_path) = path.strip_prefix("/@fs") {
+        let abs_path = PathBuf::from(fs_path);
+        if abs_path.is_file() {
+            return serve_dev_source(
+                stream,
+                &abs_path,
+                &project_root,
+                is_import_query,
+                csp_enabled,
+            )
+            .await;
+        }
+    }
+
+    // Static assets from public/ — but only for a *direct* request (no
+    // `?import`); `import logo from "./logo.png"` needs to go through the
+    // on-demand block below instead, which returns `export default "<url>"`
+    // rather than the raw bytes a `<script type="module">` can't accept.
     let rel = path.trim_start_matches('/');
-    if !rel.is_empty() {
+    if !rel.is_empty() && !is_import_query {
         let candidate = public_dir.join(rel);
         if candidate.exists() && candidate.is_file() {
             return serve_file_csp(stream, &candidate, csp_enabled).await;
         }
+        // Same asset, requested from the project root instead of public/ —
+        // covers plain images/fonts referenced by a root-level index.html.
+        if DEV_STATIC_ASSET_EXTENSIONS.contains(
+            &std::path::Path::new(rel)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or(""),
+        ) {
+            let candidate = project_root.join(rel);
+            if let Ok(canon) = candidate.canonicalize() {
+                if canon.starts_with(&project_root) && canon.is_file() {
+                    return serve_file_csp(stream, &canon, csp_enabled).await;
+                }
+            }
+        }
     }
 
-    // SPA fallback: serve public/index.html injecting HMR client, or a default page
+    // On-demand ESM dev serving (Vite-style): the browser's native
+    // `<script type="module">` loader requests project source files directly
+    // (e.g. `/src/main.jsx`) instead of a pre-bundled `/bundle.js`. Transpile
+    // per request and rewrite import specifiers so the next hop resolves too.
+    // `dist/bundle.js` (built above by the watcher thread) keeps working as a
+    // fallback for a hand-rolled `public/index.html` that references it.
+    // Also covers `.json`/asset imports (`?import` marker) — see
+    // `serve_dev_source` for why those need to come through here too.
+    if let Some(ext) = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
+        if DEV_SOURCE_EXTENSIONS.contains(&ext)
+            || ext == "css"
+            || ext == "json"
+            || DEV_STATIC_ASSET_EXTENSIONS.contains(&ext)
+        {
+            let candidate = project_root.join(rel);
+            // Canonicalize to block `..`-escapes out of the project root via a
+            // crafted request path; symlinks (pnpm's node_modules layout) are
+            // expected and fine as long as the *resolved* target still sits
+            // under project_root — external targets go through /@fs instead.
+            if let Ok(canon) = candidate.canonicalize() {
+                if canon.starts_with(&project_root) && canon.is_file() {
+                    return serve_dev_source(
+                        stream,
+                        &canon,
+                        &project_root,
+                        is_import_query,
+                        csp_enabled,
+                    )
+                    .await;
+                }
+            }
+            // A path that *looks* like a module/style request (has one of
+            // these extensions) but resolves to nothing must not silently
+            // fall through to the SPA-fallback HTML below — the browser
+            // requested it as `<script type="module">`/CSS and strictly
+            // rejects an `index.html` response for that (MIME-type
+            // mismatch), which reads as a confusing, unrelated error instead
+            // of the plain 404 this actually is.
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            return Ok(());
+        }
+    }
+
+    // SPA fallback: public/index.html, then a Vite-style root-level
+    // index.html, then a built-in default page — first one found wins.
     let index = public_dir.join("index.html");
     if index.exists() {
         return serve_html_with_hmr_csp(stream, &index, csp_enabled).await;
     }
+    let root_index = project_root.join("index.html");
+    if root_index.exists() {
+        return serve_html_with_hmr_csp(stream, &root_index, csp_enabled).await;
+    }
 
-    // No index.html — serve built-in dev page
+    // No index.html — serve built-in dev page. Actually executes the bundle
+    // (previous versions only linked to it) so a bare `3va dev` with no HTML
+    // of its own still renders whatever the entry file mounts.
     let html = format!(
         "<!DOCTYPE html><html><head><meta charset=utf-8><title>3VA Dev</title></head><body>\
+        <div id=\"root\"></div>\
         <h2 style='font-family:sans-serif'>3VA Dev Server</h2>\
         <p>Entry: <code>{}</code></p>\
-        <p>Bundle ready at <a href='/bundle.js'>/bundle.js</a></p>\
+        <script src=\"/bundle.js\"></script>\
         {HMR_CLIENT_JS}</body></html>",
         bundle_path.display()
     );
@@ -1352,8 +2332,311 @@ async fn run_test_watch_mode(paths: Vec<PathBuf>, coverage: bool) -> anyhow::Res
     }
 }
 
-/// Construye un PermissionState a partir de los flags del subcomando `run`.
+/// Expande `${VAR}` con variables de entorno **del host que lanza `3va run`**
+/// (no del script sandboxed — esto ocurre antes de que exista un PermissionState).
+/// Permite que N rutas absolutas distintas por equipo/servidor (`/var/node_module`,
+/// `/local/bin/node_modules`, `/tmp/node_modules`...) se escriban una sola vez como
+/// `${NODE_MODULES_ROOT}/express@4.22.2` en package.json; migrar de servidor es
+/// cambiar esa variable de entorno una vez, no editar cada ruta a mano.
+/// Si la variable no está definida se deja el placeholder literal (falla cerrado:
+/// esa ruta no existirá y por tanto no concede nada por accidente).
+/// Expands `${VAR}` and appends the name of any left
+/// unexpanded (env var not set) to `missing`, so callers can warn the user
+/// instead of leaving them to debug a confusing "Permission denied" later.
+fn expand_env_vars_tracked(raw: &str, missing: &mut Vec<String>) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find('}') {
+            Some(end) => {
+                let name = &after[..end];
+                match std::env::var(name) {
+                    Ok(val) => out.push_str(&val),
+                    Err(_) => {
+                        out.push_str(&rest[start..start + 2 + end + 1]);
+                        missing.push(name.to_string());
+                    }
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Rutas (`allow-read`, `allow-write`, `allow-ffi`) relativas en package.json se
+/// resuelven contra el directorio del propio package.json, no el cwd del proceso —
+/// así el mismo archivo sirve en dev y en producción sin reescribir cada ruta
+/// absoluta por máquina. Las rutas ya absolutas se dejan tal cual (tras expandir
+/// `${VAR}`).
+fn resolve_pkg_path(start_dir: &std::path::Path, raw: &str, missing: &mut Vec<String>) -> String {
+    let expanded = expand_env_vars_tracked(raw, missing);
+    let p = std::path::Path::new(&expanded);
+    if p.is_absolute() {
+        expanded
+    } else {
+        start_dir.join(p).to_string_lossy().into_owned()
+    }
+}
+
+fn collect_paths(
+    scope: &serde_json::Value,
+    key: &str,
+    start_dir: &std::path::Path,
+    missing: &mut Vec<String>,
+) -> Vec<String> {
+    scope[key]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(|s| resolve_pkg_path(start_dir, s, missing))
+        .collect()
+}
+
+fn collect_strings(scope: &serde_json::Value, key: &str) -> Vec<String> {
+    scope[key]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect()
+}
+
+/// Resuelve el `entry` de `3va start`: si ya es un archivo existente, se usa
+/// tal cual (comportamiento previo, sin args extra). Si no, se interpreta
+/// como el nombre de un script de `package.json.scripts` (p.ej. `dev` →
+/// `"vite"`), y el primer token de ese comando se busca en
+/// `node_modules/.bin/<bin>`. Los shims de npm/pnpm terminan con un
+/// comentario `# cmd-shim-target=<ruta.js>` que apunta al JS real invocado
+/// por node — de ahí sacamos el entry file que sí puede ejecutar `3va run`.
+/// El resto de tokens del script (p.ej. flags) se devuelven como args
+/// adicionales, antepuestos a los que pase el usuario en la CLI.
+fn resolve_start_entry(
+    cwd: &std::path::Path,
+    entry: &std::path::Path,
+) -> anyhow::Result<(PathBuf, Vec<String>)> {
+    let as_path = if entry.is_absolute() {
+        entry.to_path_buf()
+    } else {
+        cwd.join(entry)
+    };
+    if as_path.is_file() {
+        return Ok((entry.to_path_buf(), Vec::new()));
+    }
+
+    let script_name = entry.to_string_lossy().into_owned();
+    let pkg_content = std::fs::read_to_string(cwd.join("package.json")).map_err(|_| {
+        anyhow::anyhow!(
+            "'{}' is not a file and no package.json was found in {} to resolve it as a script",
+            script_name,
+            cwd.display()
+        )
+    })?;
+    let pkg: serde_json::Value = serde_json::from_str(&pkg_content)?;
+    let script_cmd = pkg["scripts"][&script_name].as_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "'{}' is not a file and no \"scripts.{}\" entry exists in package.json",
+            script_name,
+            script_name
+        )
+    })?;
+
+    let mut tokens = script_cmd.split_whitespace();
+    let bin_name = tokens
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("scripts.{} is empty", script_name))?;
+    let extra_args: Vec<String> = tokens.map(String::from).collect();
+
+    let shim_path = cwd.join("node_modules").join(".bin").join(bin_name);
+    let shim_content = std::fs::read_to_string(&shim_path).map_err(|_| {
+        anyhow::anyhow!(
+            "scripts.{} runs '{}', but {} was not found — is the dependency installed?",
+            script_name,
+            bin_name,
+            shim_path.display()
+        )
+    })?;
+    let js_entry = shim_content
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("# cmd-shim-target="))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} doesn't look like an npm/pnpm shim (no cmd-shim-target marker) — \
+                 point `3va start` directly at its JS entry file instead",
+                shim_path.display()
+            )
+        })?;
+
+    Ok((PathBuf::from(js_entry.trim()), extra_args))
+}
+
+/// Lee `package.json["3va"].permissions` cerca de `start_dir` y devuelve los
+/// allow-*/deny-* fusionados de todos los scopes declarados (".", nombres de paquete, etc).
+///
+/// ponytail: el motor de capabilities (`vvva_permissions`) no tiene noción de
+/// "módulo que llama", así que no se puede restringir un grant a un solo paquete
+/// (p.ej. que "express" tenga allow-net pero nada más lo tenga). Por eso los
+/// scopes se combinan en un único conjunto global — mismo techo que ya tienen
+/// hoy los flags CLI. Si se necesita aislar permisos por paquete, hace falta
+/// pasar el módulo actual hasta cada `PermissionState::check()`.
+fn read_package_json_permissions(start_dir: &std::path::Path) -> ThreeVaPermissions {
+    let mut merged = ThreeVaPermissions::default();
+    // `start_dir` is usually the entry file's own directory — for `3va run
+    // node_modules/vite/bin/vite.js` that's nowhere near the project's
+    // package.json. Walk up toward the filesystem root looking for the
+    // nearest one, same as Node's own project-root discovery, so grants
+    // declared once at the project root apply no matter how deep the actual
+    // entry file lives inside node_modules/.
+    let mut dir = start_dir;
+    let (start_dir, content) = loop {
+        // Skip package.json files that live inside a node_modules tree (e.g.
+        // vite's own package.json) — those describe the dependency, not the
+        // project. Keep walking up until we're past node_modules entirely.
+        let inside_node_modules = dir.components().any(|c| c.as_os_str() == "node_modules");
+        if !inside_node_modules {
+            if let Ok(c) = std::fs::read_to_string(dir.join("package.json")) {
+                break (dir, c);
+            }
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return merged,
+        }
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return merged,
+    };
+    // "3va": { "no-prompt": true } — equivale a pasar --no-prompt en cada `3va run`.
+    merged.no_prompt = json["3va"]["no-prompt"].as_bool().unwrap_or(false);
+    let Some(scopes) = json["3va"]["permissions"].as_object() else {
+        return merged;
+    };
+    let mut missing_vars = Vec::new();
+    for scope in scopes.values() {
+        merged.allow_read.extend(collect_paths(
+            scope,
+            "allow-read",
+            start_dir,
+            &mut missing_vars,
+        ));
+        merged.allow_write.extend(collect_paths(
+            scope,
+            "allow-write",
+            start_dir,
+            &mut missing_vars,
+        ));
+        merged.allow_net.extend(collect_strings(scope, "allow-net"));
+        merged.allow_env.extend(collect_strings(scope, "allow-env"));
+        merged.allow_ffi.extend(collect_paths(
+            scope,
+            "allow-ffi",
+            start_dir,
+            &mut missing_vars,
+        ));
+        if scope["allow-child-process"].as_bool() == Some(true) {
+            merged.allow_child_process = true;
+        }
+
+        // deny-* gana sobre cualquier allow-* más amplio (p.ej. permitir todo un
+        // paquete vía prefijo de directorio pero excluir un archivo puntual con
+        // una CVE conocida): PermissionState::check() consulta denied antes que
+        // granted, sin importar el orden de inserción.
+        merged.deny_read.extend(collect_paths(
+            scope,
+            "deny-read",
+            start_dir,
+            &mut missing_vars,
+        ));
+        merged.deny_write.extend(collect_paths(
+            scope,
+            "deny-write",
+            start_dir,
+            &mut missing_vars,
+        ));
+        merged.deny_net.extend(collect_strings(scope, "deny-net"));
+        merged.deny_env.extend(collect_strings(scope, "deny-env"));
+        merged.deny_ffi.extend(collect_paths(
+            scope,
+            "deny-ffi",
+            start_dir,
+            &mut missing_vars,
+        ));
+        if scope["deny-child-process"].as_bool() == Some(true) {
+            merged.deny_child_process = true;
+        }
+    }
+    missing_vars.sort();
+    missing_vars.dedup();
+    if !missing_vars.is_empty() {
+        eprintln!(
+            "3va: warning: package.json permissions reference undefined env var(s) {} \
+             — those allow-*/deny-* paths were left as literal \"${{VAR}}\" placeholders \
+             and will not match any real path (denied by default). Set the variable(s) \
+             or run `3va permissions learn` again to regenerate absolute paths.",
+            missing_vars.join(", ")
+        );
+    }
+    merged
+}
+
+/// allow-*/deny-* recolectados de `package.json["3va"].permissions`, en el mismo
+/// formato de listas que los flags CLI de `3va run`.
+#[derive(Default)]
+struct ThreeVaPermissions {
+    allow_read: Vec<String>,
+    allow_write: Vec<String>,
+    allow_net: Vec<String>,
+    allow_env: Vec<String>,
+    allow_child_process: bool,
+    allow_ffi: Vec<String>,
+    no_prompt: bool,
+    deny_read: Vec<String>,
+    deny_write: Vec<String>,
+    deny_net: Vec<String>,
+    deny_env: Vec<String>,
+    deny_ffi: Vec<String>,
+    deny_child_process: bool,
+}
+
+/// Combina un flag CLI (`--allow-x`) con la lista equivalente de package.json.
+/// Si el flag CLI ya es "wildcard" (`--allow-x` sin valor, slice vacío o con un
+/// string vacío) se respeta tal cual: ya cubre más que cualquier lista concreta.
+fn merge_opt_slice(cli: Option<&[String]>, pkg: &[String]) -> Option<Vec<String>> {
+    match cli {
+        None => (!pkg.is_empty()).then(|| pkg.to_vec()),
+        Some(slice) if slice.is_empty() || slice.iter().any(|s| s.is_empty()) => {
+            Some(slice.to_vec())
+        }
+        Some(slice) => {
+            let mut merged = slice.to_vec();
+            merged.extend(pkg.iter().cloned());
+            Some(merged)
+        }
+    }
+}
+
+/// Construye un PermissionState a partir de los flags del subcomando `run`,
+/// fusionados con `package.json["3va"].permissions` (los flags CLI solo añaden,
+/// nunca quitan, lo que ya venga concedido desde package.json).
 /// Extraído para permitir tests unitarios sin levantar el CLI completo.
+// 8 args (one over clippy's default limit of 7): each maps 1:1 to a
+// `3va run` CLI flag (--allow-read, --allow-write, ...) plus interactive
+// mode and the parsed package.json permissions — bundling them into a
+// struct would just move the same 8 fields one level down, not simplify
+// anything, since every field is independently optional and independently
+// sourced (CLI flag vs. package.json).
+#[allow(clippy::too_many_arguments)]
 fn build_permissions(
     allow_read: Option<&[String]>,
     allow_write: Option<&[String]>,
@@ -1362,9 +2645,22 @@ fn build_permissions(
     allow_child_process: bool,
     allow_ffi: Option<&[String]>,
     interactive: bool,
+    pkg_permissions: &ThreeVaPermissions,
 ) -> vvva_permissions::PermissionState {
     let mut permissions = vvva_permissions::PermissionState::new();
     permissions.set_interactive(interactive);
+
+    let allow_read = merge_opt_slice(allow_read, &pkg_permissions.allow_read);
+    let allow_read = allow_read.as_deref();
+    let allow_write = merge_opt_slice(allow_write, &pkg_permissions.allow_write);
+    let allow_write = allow_write.as_deref();
+    let allow_net = merge_opt_slice(allow_net, &pkg_permissions.allow_net);
+    let allow_net = allow_net.as_deref();
+    let allow_env = merge_opt_slice(allow_env, &pkg_permissions.allow_env);
+    let allow_env = allow_env.as_deref();
+    let allow_ffi = merge_opt_slice(allow_ffi, &pkg_permissions.allow_ffi);
+    let allow_ffi = allow_ffi.as_deref();
+    let allow_child_process = allow_child_process || pkg_permissions.allow_child_process;
 
     if let Some(reads) = allow_read {
         if reads.is_empty() || reads.iter().any(|s| s.is_empty()) {
@@ -1461,6 +2757,28 @@ fn build_permissions(
                 permissions.grant(vvva_permissions::Capability::FFI(PathBuf::from(path)));
             }
         }
+    }
+
+    // deny-* de package.json solo puede venir de ahí (no hay --deny-* en CLI hoy);
+    // se aplica al final pero el orden no importa: check_inner() consulta la
+    // deny-list antes que la granted-list.
+    for path in &pkg_permissions.deny_read {
+        permissions.deny(vvva_permissions::Capability::FileRead(PathBuf::from(path)));
+    }
+    for path in &pkg_permissions.deny_write {
+        permissions.deny(vvva_permissions::Capability::FileWrite(PathBuf::from(path)));
+    }
+    for host in &pkg_permissions.deny_net {
+        permissions.deny(vvva_permissions::Capability::Network(host.clone()));
+    }
+    for var in &pkg_permissions.deny_env {
+        permissions.deny(vvva_permissions::Capability::EnvVar(var.clone()));
+    }
+    for path in &pkg_permissions.deny_ffi {
+        permissions.deny(vvva_permissions::Capability::FFI(PathBuf::from(path)));
+    }
+    if pkg_permissions.deny_child_process {
+        permissions.deny(vvva_permissions::Capability::SpawnProcess);
     }
 
     permissions
@@ -1597,6 +2915,12 @@ enum Commands {
         /// or --allow-ffi=/path/to/lib.so to restrict to specific libraries.
         #[arg(long = "allow-ffi", num_args = 0.., require_equals = true, value_delimiter = ',')]
         allow_ffi: Option<Vec<String>>,
+
+        /// Never prompt for ungranted permissions — silently deny them instead.
+        /// Useful in an interactive terminal when you only want the allow-* /
+        /// package.json grants honored and everything else denied without asking.
+        #[arg(long = "no-prompt")]
+        no_prompt: bool,
 
         /// Activate the Chrome DevTools Protocol (CDP) inspector.
         /// Optional value: host:port (default 127.0.0.1:9229).
@@ -2193,7 +3517,26 @@ async fn run_audit_json(deny: bool, update_cache: bool, scan_secrets: bool) -> a
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // `3va <name>` where `<name>` isn't a built-in subcommand: fall
+            // back to `package.json.scripts.<name>`, the same convention
+            // npm/pnpm/yarn all follow (`pnpm build` runs `scripts.build`).
+            // Delegates to the project's actual package manager (`vvva_pm`'s
+            // own workspace script runner already does this — shells out to
+            // `npm run` rather than reimplementing PATH/node_modules/.bin
+            // semantics) instead of re-deriving shell/PATH handling here.
+            if e.kind() == clap::error::ErrorKind::InvalidSubcommand {
+                if let Some(name) = std::env::args().nth(1) {
+                    if try_run_package_script(&name)? {
+                        return Ok(());
+                    }
+                }
+            }
+            e.exit();
+        }
+    };
 
     let is_accessible = accessibility::is_accessible_mode(cli.accessible);
 
@@ -2223,6 +3566,7 @@ async fn main() -> anyhow::Result<()> {
             allow_env,
             allow_child_process,
             allow_ffi,
+            no_prompt,
             inspect,
             audit_log,
             audit_level,
@@ -2249,6 +3593,8 @@ async fn main() -> anyhow::Result<()> {
             }
 
             info!("Running {:?} (Sandboxed)", file);
+            let pkg_permissions =
+                read_package_json_permissions(file.parent().unwrap_or(std::path::Path::new(".")));
             let mut permissions = build_permissions(
                 allow_read.as_deref(),
                 allow_write.as_deref(),
@@ -2256,7 +3602,8 @@ async fn main() -> anyhow::Result<()> {
                 allow_env.as_deref(),
                 *allow_child_process,
                 allow_ffi.as_deref(),
-                std::io::stderr().is_terminal(), // solo prompt si stderr es visible (no capturado)
+                std::io::stderr().is_terminal() && !*no_prompt && !pkg_permissions.no_prompt,
+                &pkg_permissions,
             );
 
             // Wire in audit logging if --audit-log was specified
@@ -2837,14 +4184,17 @@ async fn main() -> anyhow::Result<()> {
             args,
         } => {
             let cwd = std::env::current_dir()?;
+            let (resolved_entry, mut resolved_args) = resolve_start_entry(&cwd, entry)?;
+            resolved_args.extend(args.iter().cloned());
             let process_name = match name {
                 Some(n) => n.clone(),
-                None => entry
+                None => resolved_entry
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "app".to_string()),
             };
-            let info = proc::start_process(&process_name, entry, &cwd, args, *port)?;
+            let info =
+                proc::start_process(&process_name, &resolved_entry, &cwd, &resolved_args, *port)?;
             println!();
             println!("  ✓ Started process '{}' (PID {})", info.name, info.pid);
             println!("    Logs: {}", info.log_path.display());
@@ -4382,7 +5732,16 @@ mod tests {
 
     #[test]
     fn no_flags_produces_deny_by_default() {
-        let state = build_permissions(None, None, None, None, false, None, false);
+        let state = build_permissions(
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            false,
+            &ThreeVaPermissions::default(),
+        );
         assert!(!state.check(&Capability::FileRead(PathBuf::from("/etc/passwd"))));
         assert!(!state.check(&Capability::FileWrite(PathBuf::from("/tmp/x"))));
         assert!(!state.check(&Capability::Network("registry.npmjs.org".to_string())));
@@ -4396,7 +5755,16 @@ mod tests {
     #[test]
     fn allow_read_flag_grants_file_read_for_path() {
         let reads = vec!["/app".to_string()];
-        let state = build_permissions(Some(&reads), None, None, None, false, None, false);
+        let state = build_permissions(
+            Some(&reads),
+            None,
+            None,
+            None,
+            false,
+            None,
+            false,
+            &ThreeVaPermissions::default(),
+        );
 
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/config.json"))));
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/subdir/main.ts"))));
@@ -4425,7 +5793,16 @@ mod tests {
         );
 
         let reads = vec![path_a, path_b];
-        let state = build_permissions(Some(&reads), None, None, None, false, None, false);
+        let state = build_permissions(
+            Some(&reads),
+            None,
+            None,
+            None,
+            false,
+            None,
+            false,
+            &ThreeVaPermissions::default(),
+        );
 
         assert!(state.check(&Capability::FileRead(check_a)));
         assert!(state.check(&Capability::FileRead(check_b)));
@@ -4438,7 +5815,16 @@ mod tests {
     #[test]
     fn allow_net_flag_grants_network_for_host() {
         let nets = vec!["registry.npmjs.org".to_string()];
-        let state = build_permissions(None, None, Some(&nets), None, false, None, false);
+        let state = build_permissions(
+            None,
+            None,
+            Some(&nets),
+            None,
+            false,
+            None,
+            false,
+            &ThreeVaPermissions::default(),
+        );
 
         assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
         assert!(!state.check(&Capability::Network("evil.com".to_string())));
@@ -4453,7 +5839,16 @@ mod tests {
             "registry.yarnpkg.com".to_string(),
             "jsr.io".to_string(),
         ];
-        let state = build_permissions(None, None, Some(&nets), None, false, None, false);
+        let state = build_permissions(
+            None,
+            None,
+            Some(&nets),
+            None,
+            false,
+            None,
+            false,
+            &ThreeVaPermissions::default(),
+        );
 
         assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
         assert!(state.check(&Capability::Network("registry.yarnpkg.com".to_string())));
@@ -4466,7 +5861,16 @@ mod tests {
     #[test]
     fn allow_env_no_scope_grants_all_env_access() {
         // --allow-env (no value) → Some(vec![]) → EnvAccess (all)
-        let state = build_permissions(None, None, None, Some(&[]), false, None, false);
+        let state = build_permissions(
+            None,
+            None,
+            None,
+            Some(&[]),
+            false,
+            None,
+            false,
+            &ThreeVaPermissions::default(),
+        );
         assert!(state.check(&Capability::EnvAccess));
         assert!(state.check(&Capability::EnvVar("PATH".to_string())));
         assert!(state.check(&Capability::EnvVar("SECRET_KEY".to_string())));
@@ -4477,7 +5881,16 @@ mod tests {
     fn allow_env_scoped_grants_only_named_vars() {
         // --allow-env=NODE_ENV,PORT → EnvVar grants for each name
         let vars = vec!["NODE_ENV".to_string(), "PORT".to_string()];
-        let state = build_permissions(None, None, None, Some(&vars), false, None, false);
+        let state = build_permissions(
+            None,
+            None,
+            None,
+            Some(&vars),
+            false,
+            None,
+            false,
+            &ThreeVaPermissions::default(),
+        );
 
         assert!(state.check(&Capability::EnvVar("NODE_ENV".to_string())));
         assert!(state.check(&Capability::EnvVar("PORT".to_string())));
@@ -4489,14 +5902,32 @@ mod tests {
 
     #[test]
     fn allow_env_not_provided_denies_everything() {
-        let state = build_permissions(None, None, None, None, false, None, false);
+        let state = build_permissions(
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            false,
+            &ThreeVaPermissions::default(),
+        );
         assert!(!state.check(&Capability::EnvAccess));
         assert!(!state.check(&Capability::EnvVar("PATH".to_string())));
     }
 
     #[test]
     fn allow_child_process_flag_grants_spawn_process() {
-        let state = build_permissions(None, None, None, None, true, None, false);
+        let state = build_permissions(
+            None,
+            None,
+            None,
+            None,
+            true,
+            None,
+            false,
+            &ThreeVaPermissions::default(),
+        );
         assert!(state.check(&Capability::SpawnProcess));
         assert!(!state.check(&Capability::EnvAccess));
     }
@@ -4515,6 +5946,7 @@ mod tests {
             false,
             None,
             false,
+            &ThreeVaPermissions::default(),
         );
 
         assert!(state.check(&Capability::FileRead(PathBuf::from("/app/main.js"))));
@@ -4522,6 +5954,501 @@ mod tests {
         assert!(state.check(&Capability::EnvAccess));
         assert!(!state.check(&Capability::SpawnProcess));
         assert!(!state.check(&Capability::FileWrite(PathBuf::from("/app/out.js"))));
+    }
+
+    // ── package.json["3va"].permissions ────────────────────────────────────────
+
+    #[test]
+    fn package_json_permissions_merge_across_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "tags-backend",
+                "3va": {
+                    "permissions": {
+                        ".": { "allow-env": ["SHELL", "SESSION_MANAGER"] },
+                        "express": { "allow-net": ["*"] }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        let state = build_permissions(None, None, None, None, false, None, false, &pkg_permissions);
+
+        assert!(state.check(&Capability::EnvVar("SHELL".to_string())));
+        assert!(state.check(&Capability::EnvVar("SESSION_MANAGER".to_string())));
+        assert!(!state.check(&Capability::EnvVar("AWS_SECRET_KEY".to_string())));
+        assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
+        assert!(!state.check(&Capability::SpawnProcess));
+    }
+
+    #[test]
+    fn cli_flags_add_to_package_json_permissions_without_removing_them() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"3va": {"permissions": {".": {"allow-env": ["SHELL"]}}}}"#,
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        let cli_env = vec!["PATH".to_string()];
+        let state = build_permissions(
+            None,
+            None,
+            None,
+            Some(&cli_env),
+            false,
+            None,
+            false,
+            &pkg_permissions,
+        );
+
+        assert!(state.check(&Capability::EnvVar("SHELL".to_string())));
+        assert!(state.check(&Capability::EnvVar("PATH".to_string())));
+    }
+
+    #[test]
+    fn package_json_no_prompt_flag_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"3va": {"no-prompt": true, "permissions": {".": {"allow-env": ["SHELL"]}}}}"#,
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        assert!(pkg_permissions.no_prompt);
+        assert!(pkg_permissions.allow_env.contains(&"SHELL".to_string()));
+    }
+
+    #[test]
+    fn package_json_relative_read_path_resolves_against_project_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"3va": {"permissions": {".": {"allow-read": ["node_modules/.pnpm/express@4.22.2"]}}}}"#,
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        let expected = dir
+            .path()
+            .join("node_modules/.pnpm/express@4.22.2")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(pkg_permissions.allow_read, vec![expected]);
+    }
+
+    #[test]
+    fn package_json_env_var_expands_in_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"3va": {"permissions": {".": {
+                "allow-read": ["${TEST_3VA_NODE_MODULES_ROOT}/express@4.22.2"]
+            }}}}"#,
+        )
+        .unwrap();
+
+        // SAFETY: single-threaded w.r.t. this variable name — no other test touches it.
+        unsafe {
+            std::env::set_var("TEST_3VA_NODE_MODULES_ROOT", "/var/node_module");
+        }
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        unsafe {
+            std::env::remove_var("TEST_3VA_NODE_MODULES_ROOT");
+        }
+
+        assert_eq!(
+            pkg_permissions.allow_read,
+            vec!["/var/node_module/express@4.22.2".to_string()]
+        );
+    }
+
+    #[test]
+    fn package_json_undefined_env_var_leaves_placeholder_literal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"3va": {"permissions": {".": {
+                "allow-read": ["${TEST_3VA_DEFINITELY_UNSET_VAR}/express@4.22.2"]
+            }}}}"#,
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        // Undefined var stays literal — the "path" no longer looks absolute, so it's
+        // joined under the project dir; either way it won't match a real file (fails closed).
+        let expected = dir
+            .path()
+            .join("${TEST_3VA_DEFINITELY_UNSET_VAR}/express@4.22.2")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(pkg_permissions.allow_read, vec![expected]);
+    }
+
+    #[test]
+    fn package_json_deny_file_wins_over_broader_allow_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"3va": {"permissions": {".": {
+                "allow-read": ["node_modules/.pnpm/express@4.22.2"],
+                "deny-read": ["node_modules/.pnpm/express@4.22.2/node_modules/express/lib/express.js"]
+            }}}}"#,
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        let state = build_permissions(None, None, None, None, false, None, false, &pkg_permissions);
+
+        let vulnerable_file = dir
+            .path()
+            .join("node_modules/.pnpm/express@4.22.2/node_modules/express/lib/express.js");
+        let sibling_file = dir
+            .path()
+            .join("node_modules/.pnpm/express@4.22.2/node_modules/express/index.js");
+
+        assert!(!state.check(&Capability::FileRead(vulnerable_file)));
+        assert!(state.check(&Capability::FileRead(sibling_file)));
+    }
+
+    #[test]
+    fn no_package_json_yields_default_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        assert!(pkg_permissions.allow_read.is_empty());
+        assert!(pkg_permissions.allow_env.is_empty());
+        assert!(!pkg_permissions.allow_child_process);
+    }
+
+    // ── Dev server: rewrite_imports ─────────────────────────────────────────────
+
+    #[test]
+    fn rewrite_imports_handles_named_default_and_bare_specifiers() {
+        let js = r#"import React from "react";
+import { useState } from "react-dom";
+import "./side-effect.js";
+console.log("from a log message that is not an import");
+"#;
+        let out = rewrite_imports(js, |spec| format!("RESOLVED[{spec}]"));
+        assert!(out.contains(r#"from "RESOLVED[react]""#));
+        assert!(out.contains(r#"from "RESOLVED[react-dom]""#));
+        assert!(out.contains(r#""RESOLVED[./side-effect.js]""#));
+        assert!(
+            out.contains("from a log message that is not an import"),
+            "plain text containing the word 'from' must be left untouched: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_imports_handles_dynamic_import() {
+        let js = r#"const mod = await import("./lazy.js");"#;
+        let out = rewrite_imports(js, |spec| format!("RESOLVED[{spec}]"));
+        assert_eq!(out, r#"const mod = await import("RESOLVED[./lazy.js]");"#);
+    }
+
+    #[test]
+    fn rewrite_imports_does_not_mangle_identifier_containing_import() {
+        // `doImport(` must not be treated as a dynamic `import(...)` — the
+        // marker only matches when the preceding character isn't an
+        // identifier character.
+        let js = r#"function doImport(url) { return fetch(url); }
+const real = import("./real.js");
+"#;
+        let out = rewrite_imports(js, |spec| format!("RESOLVED[{spec}]"));
+        assert!(out.contains("function doImport(url)"));
+        assert!(out.contains(r#"import("RESOLVED[./real.js]")"#));
+    }
+
+    #[test]
+    fn rewrite_imports_handles_export_from() {
+        let js = r#"export * from "./utils.js";
+export { helper } from "./helpers.js";
+"#;
+        let out = rewrite_imports(js, |spec| format!("RESOLVED[{spec}]"));
+        assert!(out.contains(r#"from "RESOLVED[./utils.js]""#));
+        assert!(out.contains(r#"from "RESOLVED[./helpers.js]""#));
+    }
+
+    // ── Dev server: CJS → ESM interop shim ──────────────────────────────────────
+
+    #[test]
+    fn find_require_specifiers_finds_targets_and_ignores_identifier_suffix() {
+        let js = r#"
+var react = require("react");
+var x = myrequire("should-not-match"); // preceded by an identifier char, must not match
+var dup = require('react');
+var relative = require("./helpers");
+"#;
+        let found = find_require_specifiers(js);
+        assert_eq!(found, vec!["react".to_string(), "./helpers".to_string()]);
+    }
+
+    #[test]
+    fn find_cjs_export_names_covers_all_assignment_forms() {
+        let js = r#"
+exports.Link = function Link() {};
+module.exports.useNavigate = function useNavigate() {};
+exports.__esModule = true;
+exports.default = MainComponent;
+Object.defineProperty(exports, "NavLink", { enumerable: true, get: function () { return NavLink; } });
+if (x == y) {} // must not match "==" as an assignment
+"#;
+        let mut names = find_cjs_export_names(js);
+        names.sort();
+        assert_eq!(names, vec!["Link", "NavLink", "useNavigate"]);
+    }
+
+    #[test]
+    fn serve_cjs_interop_shim_reexports_named_bindings_and_respects_es_module_default() {
+        // Simulates a typical Babel/TS-compiled CJS build of a named-export
+        // library (the react-router-dom shape that triggered this fix).
+        let source = r#"
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.Link = void 0;
+var react_1 = require("react");
+function Link() { return react_1.createElement("a"); }
+exports.Link = Link;
+var default_1 = Link;
+exports.default = default_1;
+"#;
+        assert!(!vvva_js::esm::source_is_esm(source, "dist/main.js"));
+
+        let names = find_cjs_export_names(source);
+        assert!(names.contains(&"Link".to_string()));
+        assert!(!names.contains(&"default".to_string()));
+
+        let requires = find_require_specifiers(source);
+        assert_eq!(requires, vec!["react".to_string()]);
+    }
+
+    #[test]
+    fn dynamic_discovery_does_not_treat_a_shared_sibling_dependency_as_a_cycle() {
+        // Real bug found against a real `react-router-dom` v6.30.4 install:
+        // `dist/main.js` conditionally re-exports one of two sibling UMD
+        // builds (`module.exports = require(dev ? "./x.dev.js" : "./x.min.js")`),
+        // and BOTH siblings require the same shared dependency ("shared.js"
+        // here, "react"/"react-dom" for real). With a single `visited` set
+        // mutated across siblings instead of cloned per branch, processing
+        // the first sibling marked "shared.js" visited, so the second
+        // sibling's own recursive discovery treated it as an already-visited
+        // cycle and stubbed it empty — `shared.js`'s real `helper` export
+        // (used immediately: `helper().displayName = "x"`) came back as a
+        // content-free stub, `helper()` returned `undefined`, and assigning
+        // `.displayName` on `undefined` threw, taking the whole branch's
+        // discovery down with it (`does not provide an export named 'Link'`
+        // in the real-world case).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("shared.js"),
+            "exports.helper = function helper() { return {}; };\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("sibling-a.js"),
+            r#"
+var shared = require("./shared");
+exports.fromA = shared.helper();
+exports.fromA.displayName = "A";
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("sibling-b.js"),
+            r#"
+var shared = require("./shared");
+exports.fromB = shared.helper();
+exports.fromB.displayName = "B";
+"#,
+        )
+        .unwrap();
+        let source = r#"
+if (process.env.NODE_ENV === "production") {
+  module.exports = require("./sibling-a");
+} else {
+  module.exports = require("./sibling-b");
+}
+"#;
+        let base = dir.path().join("main.js").to_string_lossy().into_owned();
+        let visited = std::collections::HashSet::new();
+        let names = discover_cjs_export_names_dynamic(source, &base, dir.path(), &visited, 0);
+        assert_eq!(
+            names,
+            Some(vec!["fromB".to_string()]),
+            "sibling-b's own require('./shared') must resolve for real (not be treated \
+             as already-visited just because sibling-a also required it), or its top-level \
+             `shared.helper().displayName = ...` throws and this whole branch reports no exports"
+        );
+    }
+
+    #[test]
+    fn dynamic_discovery_finds_exports_star_barrel_names_that_static_scan_cannot() {
+        // The real bug: a tsc-compiled barrel file re-exports everything from
+        // a sub-module via a runtime `for...in` copy loop, not a literal
+        // `exports.Link = ` line anywhere in the source — this is what a real
+        // `react-router-dom` main build looks like, and no static text scan
+        // can see "Link" coming from this.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("components.js"),
+            "export function Link() {}\nexport function NavLink() {}\n",
+        )
+        .unwrap();
+        let source = r#"
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+function __exportStar(m, exports) {
+  for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) exports[p] = m[p];
+}
+var components_1 = require("./components");
+__exportStar(components_1, exports);
+"#;
+        // Confirms the premise: the static scanner alone finds nothing here.
+        assert!(find_cjs_export_names(source).is_empty());
+
+        let base = dir.path().join("main.js").to_string_lossy().into_owned();
+        let visited = std::collections::HashSet::new();
+        let dynamic = discover_cjs_export_names_dynamic(source, &base, dir.path(), &visited, 0);
+        assert!(
+            dynamic.is_some(),
+            "dynamic discovery should successfully execute this CJS shape"
+        );
+        let dynamic = dynamic.unwrap();
+        assert!(
+            dynamic.contains(&"Link".to_string()) && dynamic.contains(&"NavLink".to_string()),
+            "the require('./components') stub is built from the real ESM file's named exports \
+             (Link, NavLink), and __exportStar's for...in loop should copy both onto module.exports; got {dynamic:?}"
+        );
+
+        let resolved = resolve_cjs_export_names(source, &base, dir.path());
+        assert!(resolved.contains(&"Link".to_string()));
+    }
+
+    #[test]
+    fn dynamic_discovery_tolerates_unguarded_process_env_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = r#"
+exports.mode = process.env.NODE_ENV === "production" ? "prod" : "dev";
+"#;
+        let base = dir.path().join("main.js").to_string_lossy().into_owned();
+        let visited = std::collections::HashSet::new();
+        let dynamic = discover_cjs_export_names_dynamic(source, &base, dir.path(), &visited, 0);
+        assert_eq!(dynamic, Some(vec!["mode".to_string()]));
+    }
+
+    #[test]
+    fn discovery_cache_invalidates_on_file_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lib.js");
+        std::fs::write(&path, "exports.a = 1;\n").unwrap();
+        let base = path.to_string_lossy().into_owned();
+        let visited = std::collections::HashSet::new();
+
+        let first =
+            discover_cjs_export_names_dynamic("exports.a = 1;\n", &base, dir.path(), &visited, 0);
+        assert_eq!(first, Some(vec!["a".to_string()]));
+
+        // Bump mtime forward enough to guarantee it differs on filesystems
+        // with coarse (1s) mtime resolution, then change the file's actual
+        // content — a cache keyed only on path (no mtime check) would still
+        // return the stale `["a"]` here instead of picking up `b`.
+        let new_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        std::fs::write(&path, "exports.b = 2;\n").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        file.set_modified(new_mtime).unwrap();
+
+        let second =
+            discover_cjs_export_names_dynamic("exports.b = 2;\n", &base, dir.path(), &visited, 0);
+        assert_eq!(
+            second,
+            Some(vec!["b".to_string()]),
+            "cache must invalidate when mtime changes"
+        );
+    }
+
+    #[test]
+    fn find_esm_export_names_covers_declarations_and_export_list() {
+        let js = r#"
+export const Link = () => {};
+export function NavLink() {}
+export class Router {}
+export { helper, internal as PublicName };
+export default Link;
+"#;
+        let mut names = find_esm_export_names(js);
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["Link", "NavLink", "PublicName", "Router", "helper"]
+        );
+    }
+
+    // ── Dev server: automatic-JSX-runtime React import injection ───────────────
+
+    #[test]
+    fn injects_react_import_when_jsx_used_without_explicit_import() {
+        let transpiled =
+            "function App() { return /* @__PURE__ */ React.createElement(\"div\", null); }"
+                .to_string();
+        let out = inject_react_import_if_needed(transpiled, "function App() { return <div />; }");
+        assert!(out.starts_with("import React from \"react\";\n"));
+    }
+
+    #[test]
+    fn does_not_double_import_react_when_already_imported() {
+        // `transpile_jsx` preserves the original `import React from "react"`
+        // statement verbatim in its output — `inject_react_import_if_needed`
+        // must not prepend a second one on top of it.
+        let transpiled = "import React from \"react\";\nfunction App() { return /* @__PURE__ */ React.createElement(\"div\", null); }".to_string();
+        let out = inject_react_import_if_needed(
+            transpiled.clone(),
+            "import React from \"react\";\nfunction App() { return <div />; }",
+        );
+        assert_eq!(
+            out, transpiled,
+            "output must be unchanged, not have a second import prepended"
+        );
+        assert_eq!(out.matches("import React").count(), 1);
+    }
+
+    #[test]
+    fn does_not_inject_react_import_when_no_jsx_used() {
+        let transpiled = "function add(a, b) { return a + b; }".to_string();
+        let out = inject_react_import_if_needed(
+            transpiled.clone(),
+            "function add(a, b) { return a + b; }",
+        );
+        assert_eq!(out, transpiled);
+    }
+
+    // ── Dev server: JSON/asset imports get the `?import` marker ────────────────
+
+    #[test]
+    fn rewrite_specifier_marks_json_and_assets_but_not_js() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("logo.png"), b"\x89PNG").unwrap();
+        std::fs::write(dir.path().join("util.js"), "export const x = 1;").unwrap();
+        let base = dir.path().join("main.js").to_string_lossy().into_owned();
+
+        assert_eq!(
+            rewrite_specifier("./data.json", &base, dir.path()),
+            "/data.json?import"
+        );
+        assert_eq!(
+            rewrite_specifier("./logo.png", &base, dir.path()),
+            "/logo.png?import"
+        );
+        assert_eq!(
+            rewrite_specifier("./util.js", &base, dir.path()),
+            "/util.js"
+        );
     }
 
     // ── Dev server: mime_type ─────────────────────────────────────────────────
@@ -4692,6 +6619,7 @@ mod tests {
                 tx,
                 PathBuf::from("."),
                 PathBuf::from("bundle.js"),
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                 false,
                 draining,
             )
