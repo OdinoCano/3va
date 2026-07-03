@@ -12,26 +12,51 @@ use crate::transpiler;
 /// Must stay in sync with `NodeModule.builtinModules` in modules.rs.
 const BUILTIN_NAMES: &[&str] = &[
     "assert",
+    "async_hooks",
     "buffer",
     "child_process",
+    "cluster",
+    "constants",
+    "diagnostics_channel",
+    "dns",
+    "dns/promises",
+    "domain",
     "crypto",
     "events",
     "fs",
+    "fs/promises",
     "http",
+    "http2",
     "https",
     "module",
     "net",
     "os",
     "path",
+    "path/posix",
+    "path/win32",
     "perf_hooks",
     "process",
     "querystring",
+    "readline",
+    "readline/promises",
+    "repl",
     "sqlite",
     "stream",
+    "stream/consumers",
+    "stream/promises",
+    "stream/web",
     "string_decoder",
+    "timers",
+    "timers/promises",
     "tls",
+    "trace_events",
+    "tty",
     "url",
     "util",
+    "v8",
+    "vm",
+    "wasi",
+    "worker_threads",
     "zlib",
 ];
 
@@ -133,7 +158,7 @@ pub fn find_in_node_modules(start_dir: &Path, name: &str) -> Option<PathBuf> {
 /// Extension wins: .mjs = always ESM, .cjs = always CJS.
 /// For .js/.ts fall back to scanning top-level import/export statements,
 /// skipping line and block comments to avoid false positives.
-fn source_is_esm(code: &str, path: &str) -> bool {
+pub fn source_is_esm(code: &str, path: &str) -> bool {
     if path.ends_with(".mjs") {
         return true;
     }
@@ -174,6 +199,12 @@ fn source_is_esm(code: &str, path: &str) -> bool {
 fn extract_cjs_named_exports(source: &str) -> Vec<String> {
     use std::collections::BTreeSet;
     let mut names = BTreeSet::new();
+    // Only trust the `key: () => expr` shape as an export-helper entry when
+    // the file actually uses the `__export(...)` bundler convention — this
+    // exact shape (identifier key, arrow returning a bare identifier) is
+    // common enough in ordinary object literals (event handler props, etc.)
+    // that scanning for it unconditionally would produce false positives.
+    let has_export_helper = source.contains("__export(");
     for line in source.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("exports.")
@@ -192,6 +223,24 @@ fn extract_cjs_named_exports(source: &str) -> Vec<String> {
             && let Some(eq_pos) = rest.find(" = ")
         {
             let name = rest[..eq_pos].trim();
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+            {
+                names.insert(name.to_string());
+            }
+        }
+        // esbuild/rollup/tsup-bundled CJS output re-exports via a runtime
+        // helper instead of static `exports.x =` assignments:
+        //   __export(target, { transform: () => transform, build: () => build });
+        // Each entry is `key: () => expr,` on its own line — match that shape
+        // rather than trying to balance-match the whole `__export(...)` call.
+        if has_export_helper
+            && let Some(colon_pos) = trimmed.find(':')
+            && trimmed[colon_pos + 1..].trim_start().starts_with("() =>")
+        {
+            let name = trimmed[..colon_pos].trim().trim_matches(['"', '\'']);
             if !name.is_empty()
                 && name
                     .chars()
@@ -290,7 +339,20 @@ impl Loader for EsmLoader {
             return Module::declare(ctx.clone(), name, wrapped);
         }
 
-        Module::declare(ctx.clone(), name, source)
+        let module = Module::declare(ctx.clone(), name, source)?;
+
+        // QuickJS gives every module its own native `import.meta` object,
+        // available as soon as it's declared (before evaluation runs) — no
+        // text-rewriting needed, unlike the entry file's `__vvva_meta_url__`
+        // stub-replacement path in `eval_file`. Populate `.url` per module so
+        // `new URL(x, import.meta.url)` etc. resolve against *this* file, not
+        // a value shared globally across every loaded module.
+        let meta_url = url::Url::from_file_path(path)
+            .map(|u| u.to_string())
+            .unwrap_or_else(|_| format!("file://{}", name.replace('\\', "/")));
+        module.meta()?.set("url", meta_url)?;
+
+        Ok(module)
     }
 }
 
@@ -322,13 +384,19 @@ fn resolve_relative(base: &Path) -> PathBuf {
     if base.is_file() {
         return base.to_path_buf();
     }
-    for ext in &["js", "mjs", "ts", "tsx", "cjs"] {
+    for ext in &["js", "mjs", "ts", "tsx", "jsx", "cjs"] {
         let p = base.with_extension(ext);
         if p.is_file() {
             return p;
         }
     }
-    for index in &["index.js", "index.mjs", "index.ts"] {
+    for index in &[
+        "index.js",
+        "index.mjs",
+        "index.ts",
+        "index.tsx",
+        "index.jsx",
+    ] {
         let p = base.join(index);
         if p.is_file() {
             return p;
@@ -510,7 +578,36 @@ pub fn load_module<'js>(ctx: Ctx<'js>, path: &Path) -> rquickjs::Result<(String,
 
 #[cfg(test)]
 mod tests {
-    use super::source_is_esm;
+    use super::{resolve_esm, source_is_esm};
+
+    // ── Extensionless relative imports must find .jsx/.tsx ────────────────────
+
+    #[test]
+    fn resolve_esm_finds_jsx_for_extensionless_relative_import() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("App.jsx"),
+            "export default function App() {}",
+        )
+        .unwrap();
+        let base = dir.path().join("main.jsx");
+        let resolved = resolve_esm(&base.to_string_lossy(), "./App");
+        assert_eq!(resolved, dir.path().join("App.jsx"));
+    }
+
+    #[test]
+    fn resolve_esm_finds_index_jsx_for_extensionless_directory_import() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("components")).unwrap();
+        std::fs::write(
+            dir.path().join("components/index.jsx"),
+            "export default function C() {}",
+        )
+        .unwrap();
+        let base = dir.path().join("main.jsx");
+        let resolved = resolve_esm(&base.to_string_lossy(), "./components");
+        assert_eq!(resolved, dir.path().join("components/index.jsx"));
+    }
 
     // ── Bug 4: source_is_esm must use extension first ─────────────────────────
 

@@ -379,6 +379,9 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                         };
                     }
                     return function() {};
+                },
+                stripVTControlCharacters: function(str) {
+                    return String(str).replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
                 }
             };
             globalThis.__requireCache['util'] = util;
@@ -2822,6 +2825,19 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
             globalThis.URLSearchParams = URLSearchParams;
 
             // ── URL ───────────────────────────────────────────────────────────────
+            function __urlNormalizePath(path) {
+                var absolute = path.charAt(0) === '/';
+                var segments = path.split('/');
+                var out = [];
+                for (var i = 0; i < segments.length; i++) {
+                    var seg = segments[i];
+                    if (seg === '.' || seg === '') continue;
+                    if (seg === '..') { if (out.length) out.pop(); continue; }
+                    out.push(seg);
+                }
+                var joined = out.join('/');
+                return (absolute ? '/' : '') + joined + (path.slice(-1) === '/' && joined ? '/' : '');
+            }
             function URL(input, base) {
                 if (typeof input !== 'string') throw new TypeError('Invalid URL');
                 // Resolve relative URLs against base
@@ -2869,7 +2885,7 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
                 this.hostname = hostPort[0].toLowerCase();
                 this.port = hostPort[1] || '';
                 this.host = this.hostname + (this.port ? ':' + this.port : '');
-                this.pathname = m[3] || '/';
+                this.pathname = __urlNormalizePath(m[3] || '/');
                 this.search = m[4] || '';
                 this.hash = m[5] || '';
                 var defaultPorts = { 'http:': '80', 'https:': '443', 'ftp:': '21' };

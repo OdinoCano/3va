@@ -819,6 +819,21 @@ napi_is!(napi_is_boolean, |v| unsafe { qjs::JS_IsBool(v) });
 napi_is!(napi_is_object, |v| unsafe { qjs::JS_IsObject(v) });
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn napi_get_prototype(
+    env: napi_env,
+    object: napi_value,
+    result: *mut napi_value,
+) -> napi_status {
+    if env.is_null() || object.is_null() || result.is_null() {
+        return napi_status::napi_invalid_arg;
+    }
+    let proto = qjs::JS_GetPrototype(ctx(env), jsval(object));
+    *result = env_alloc(env, proto);
+    qjs::JS_FreeValue(ctx(env), proto);
+    napi_status::napi_ok
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn napi_is_function(
     env: napi_env,
     v: napi_value,
@@ -849,6 +864,59 @@ pub unsafe extern "C" fn napi_create_buffer_copy(
         let mut sz: u64 = 0;
         let ptr = qjs::JS_GetArrayBuffer(ctx(env), &mut sz, buf);
         *result_data = ptr as *mut c_void;
+    }
+    *result = env_alloc(env, buf);
+    qjs::JS_FreeValue(ctx(env), buf);
+    napi_status::napi_ok
+}
+
+struct ExternalBufferFinalize {
+    env: napi_env,
+    cb: napi_finalize,
+    hint: *mut c_void,
+}
+unsafe impl Send for ExternalBufferFinalize {}
+
+// Bridges QuickJS's `JSFreeArrayBufferDataFunc(rt, opaque, ptr)` to the NAPI
+// `napi_finalize(env, data, hint)` contract used by `napi_create_external_buffer`.
+unsafe extern "C" fn external_buffer_free(
+    _rt: *mut qjs::JSRuntime,
+    opaque: *mut c_void,
+    ptr: *mut c_void,
+) {
+    let info = unsafe { Box::from_raw(opaque as *mut ExternalBufferFinalize) };
+    if let Some(cb) = info.cb {
+        unsafe { cb(info.env, ptr, info.hint) };
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn napi_create_external_buffer(
+    env: napi_env,
+    length: usize,
+    data: *mut c_void,
+    finalize_cb: napi_finalize,
+    finalize_hint: *mut c_void,
+    result: *mut napi_value,
+) -> napi_status {
+    if env.is_null() || result.is_null() {
+        return napi_status::napi_invalid_arg;
+    }
+    let info = Box::new(ExternalBufferFinalize {
+        env,
+        cb: finalize_cb,
+        hint: finalize_hint,
+    });
+    let buf = qjs::JS_NewArrayBuffer(
+        ctx(env),
+        data as *mut u8,
+        length as _,
+        Some(external_buffer_free),
+        Box::into_raw(info) as *mut c_void,
+        0,
+    );
+    if qjs::JS_IsException(buf) {
+        return napi_status::napi_generic_failure;
     }
     *result = env_alloc(env, buf);
     qjs::JS_FreeValue(ctx(env), buf);
@@ -1671,6 +1739,41 @@ pub unsafe extern "C" fn napi_unwrap(
     napi_status::napi_ok
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn napi_remove_wrap(
+    env: napi_env,
+    js_object: napi_value,
+    result: *mut *mut c_void,
+) -> napi_status {
+    if env.is_null() || js_object.is_null() {
+        return napi_status::napi_invalid_arg;
+    }
+    let ext = qjs::JS_GetPropertyStr(
+        ctx(env),
+        jsval(js_object),
+        NAPI_WRAP_KEY.as_ptr() as *const c_char,
+    );
+    if qjs::JS_IsException(ext) || qjs::JS_IsUndefined(ext) {
+        qjs::JS_FreeValue(ctx(env), ext);
+        return napi_status::napi_invalid_arg;
+    }
+    let mut ptr_val: i64 = 0;
+    qjs::JS_ToInt64(ctx(env), &mut ptr_val, ext);
+    qjs::JS_FreeValue(ctx(env), ext);
+    // Clear the wrap slot so a later napi_unwrap/napi_remove_wrap correctly
+    // reports "not wrapped" instead of returning the same pointer again.
+    qjs::JS_SetPropertyStr(
+        ctx(env),
+        jsval(js_object),
+        NAPI_WRAP_KEY.as_ptr() as *const c_char,
+        qjs::JS_UNDEFINED,
+    );
+    if !result.is_null() {
+        *result = ptr_val as *mut c_void;
+    }
+    napi_status::napi_ok
+}
+
 // ─ napi_define_class ────────────────────────────────────────────────────────
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn napi_define_class(
@@ -1853,6 +1956,112 @@ pub unsafe extern "C" fn napi_unref_threadsafe_function(
     napi_status::napi_ok
 }
 
+// ─ napi_create_async_work / napi_queue_async_work / napi_delete_async_work ──
+// Mirrors Node's libuv threadpool model: `execute` runs off the JS thread
+// (native code only, per the NAPI contract — it must not touch `env`),
+// `complete` must run back on the JS thread, so the worker thread just
+// signals completion here and the actual callback fires from the drain
+// function below, same as the threadsafe-function/deferred-promise queues.
+#[allow(non_camel_case_types)]
+type napi_async_execute_callback = unsafe extern "C" fn(env: napi_env, data: *mut c_void);
+#[allow(non_camel_case_types)]
+type napi_async_complete_callback =
+    unsafe extern "C" fn(env: napi_env, status: napi_status, data: *mut c_void);
+
+pub struct NapiAsyncWorkInner {
+    env: napi_env,
+    execute: napi_async_execute_callback,
+    complete: napi_async_complete_callback,
+    data: *mut c_void,
+}
+unsafe impl Send for NapiAsyncWorkInner {}
+unsafe impl Sync for NapiAsyncWorkInner {}
+
+#[allow(non_camel_case_types)]
+pub type napi_async_work = *mut NapiAsyncWorkInner;
+
+struct AsyncWorkDone {
+    work: napi_async_work,
+}
+unsafe impl Send for AsyncWorkDone {}
+unsafe impl Sync for AsyncWorkDone {}
+
+static ASYNC_WORK_DONE_QUEUE: std::sync::OnceLock<std::sync::Mutex<Vec<AsyncWorkDone>>> =
+    std::sync::OnceLock::new();
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn napi_create_async_work(
+    env: napi_env,
+    _async_resource: napi_value,
+    _async_resource_name: napi_value,
+    execute: napi_async_execute_callback,
+    complete: napi_async_complete_callback,
+    data: *mut c_void,
+    result: *mut napi_async_work,
+) -> napi_status {
+    if env.is_null() || result.is_null() {
+        return napi_status::napi_invalid_arg;
+    }
+    let work = Box::new(NapiAsyncWorkInner {
+        env,
+        execute,
+        complete,
+        data,
+    });
+    *result = Box::into_raw(work);
+    napi_status::napi_ok
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn napi_delete_async_work(
+    _env: napi_env,
+    work: napi_async_work,
+) -> napi_status {
+    if work.is_null() {
+        return napi_status::napi_invalid_arg;
+    }
+    drop(Box::from_raw(work));
+    napi_status::napi_ok
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn napi_queue_async_work(
+    _env: napi_env,
+    work: napi_async_work,
+) -> napi_status {
+    if work.is_null() {
+        return napi_status::napi_invalid_arg;
+    }
+    // Move the pointer across the thread boundary as a `usize` — a raw
+    // pointer field captured by a 2021-edition closure is Send-checked on
+    // its own (disjoint capture), so wrapping it in a newtype with a manual
+    // `unsafe impl Send` doesn't help; only the field itself gets captured.
+    let work_addr = work as usize;
+    std::thread::spawn(move || {
+        let work = work_addr as napi_async_work;
+        let inner = unsafe { &*work };
+        unsafe { (inner.execute)(inner.env, inner.data) };
+        ASYNC_WORK_DONE_QUEUE
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .push(AsyncWorkDone { work });
+    });
+    napi_status::napi_ok
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn napi_cancel_async_work(
+    _env: napi_env,
+    _work: napi_async_work,
+) -> napi_status {
+    // ponytail: work is already handed to a spawned thread by the time this
+    // could be called (no queued-but-not-started state in this simple
+    // model), so cancellation always "fails" — matches a real N-API host's
+    // legal response once execute has started, per the spec.
+    napi_status::napi_generic_failure
+}
+
 /// Drain all pending cross-thread NAPI calls (TSFNs and deferred resolutions).
 /// Call this from the JS event loop on every iteration.
 ///
@@ -1920,6 +2129,25 @@ pub unsafe fn drain_tsfn_queue() {
         // Free both resolve+reject JSValues now that we've consumed the deferred
         qjs::JS_FreeValue(ctx_ptr, resolve_ref);
         qjs::JS_FreeValue(ctx_ptr, reject_ref);
+        let mut ctx_tmp = ctx_ptr;
+        while qjs::JS_ExecutePendingJob(qjs::JS_GetRuntime(ctx_ptr), &mut ctx_tmp) > 0 {}
+    }
+
+    // Drain completed async work — `execute` already ran on a background
+    // thread (see napi_queue_async_work); `complete` must run here, on the
+    // JS thread.
+    let async_work_done = ASYNC_WORK_DONE_QUEUE
+        .get()
+        .map(|q| std::mem::take(&mut *q.lock().unwrap()))
+        .unwrap_or_default();
+    for done in async_work_done {
+        let inner = &*done.work;
+        let env = inner.env;
+        if env.is_null() {
+            continue;
+        }
+        (inner.complete)(env, napi_status::napi_ok, inner.data);
+        let ctx_ptr = (*env).ctx;
         let mut ctx_tmp = ctx_ptr;
         while qjs::JS_ExecutePendingJob(qjs::JS_GetRuntime(ctx_ptr), &mut ctx_tmp) > 0 {}
     }

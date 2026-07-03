@@ -137,14 +137,39 @@ pub fn start_process(
     // Use 3va run to execute the entry file
     let bin = std::env::current_exe()?;
 
+    // Resolve entry to an absolute path against `cwd` first — otherwise a
+    // relative entry (e.g. "index.js") no longer points at the right file
+    // once current_dir below moves the child into entry's parent directory.
+    let abs_entry = if entry.is_absolute() {
+        entry.to_path_buf()
+    } else {
+        cwd.join(entry)
+    };
+    let run_dir = abs_entry
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| cwd.to_path_buf());
+
     let mut cmd = std::process::Command::new(&bin);
     cmd.arg("run");
     if let Some(p) = port {
         cmd.arg("--port").arg(p.to_string());
     }
-    cmd.arg(entry)
+    // Dev-server CLIs (Vite, webpack-dev-server, nodemon...) commonly watch
+    // stdin for EOF as a "my parent terminal died" signal and shut themselves
+    // down when they see it — a convention they skip when CI=true, since CI
+    // runners have the same closed-stdin shape. `3va start` is headless the
+    // same way, so without this the child exits within seconds of stdin
+    // hitting EOF against Stdio::null(), before ever binding its port.
+    // `--allow-env=CI` is required too: the sandbox denies process.env reads
+    // not explicitly listed in package.json's allow-env, so just setting the
+    // OS env var isn't enough — the child script would still see `undefined`.
+    cmd.env("CI", "true");
+    cmd.arg("--allow-env=CI");
+    cmd.arg(&abs_entry)
         .args(args)
-        .current_dir(cwd)
+        .current_dir(run_dir)
         .stdout(log.try_clone()?)
         .stderr(log)
         .stdin(std::process::Stdio::null());

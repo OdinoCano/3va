@@ -1011,10 +1011,24 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             return s;
         }
 
+        // Node's fs functions accept a path as string | Buffer | URL (file://).
+        // Our native __fsXxx bridges only take strings, so coerce here once
+        // instead of at every call site.
+        function __fsPath(p) {
+            if (typeof p === 'string') return p;
+            if (typeof URL !== 'undefined' && p instanceof URL) {
+                if (p.protocol !== 'file:') throw new TypeError('ERR_INVALID_URL_SCHEME: The URL must be of scheme file');
+                return decodeURIComponent(p.pathname);
+            }
+            if (typeof Buffer !== 'undefined' && Buffer.isBuffer(p)) return p.toString();
+            return p;
+        }
+
         function wrapAsync(syncFn) {
             return function() {
                 var args = Array.prototype.slice.call(arguments);
                 var cb = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+                if (args.length) args[0] = __fsPath(args[0]);
                 var p = new Promise(function(resolve, reject) {
                     try { resolve(syncFn.apply(null, args)); }
                     catch(e) { reject(e); }
@@ -1031,8 +1045,9 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             constants: { F_OK: F_OK, R_OK: R_OK, W_OK: W_OK, X_OK: X_OK, COPYFILE_EXCL: 1 },
 
             // ── sync ────────────────────────────────────────────────────────────
-            existsSync: function(p) { return __fsExistsSync(p); },
+            existsSync: function(p) { return __fsExistsSync(__fsPath(p)); },
             readFileSync: function(p, opts) {
+                p = __fsPath(p);
                 var enc = opts && (typeof opts === 'string' ? opts : opts.encoding);
                 if (!enc) {
                     // No encoding → return Buffer (Node.js default)
@@ -1046,6 +1061,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 return Buffer.from(bytes).toString(enc);
             },
             writeFileSync: function(p, data, opts) {
+                p = __fsPath(p);
                 if (typeof data === 'string') return __fsWriteFileSync(p, data);
                 // Binary: write raw bytes without UTF-8 conversion
                 var src = data instanceof Uint8Array ? data :
@@ -1055,6 +1071,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 return __fsWriteFileBytesSync(p, arr);
             },
             appendFileSync: function(p, data) {
+                p = __fsPath(p);
                 if (typeof data === 'string') return __fsAppendFileSync(p, data);
                 var bytes = data instanceof Uint8Array ? data : new Uint8Array(0);
                 var fd = __fsFdOpen(p, 'a', null);
@@ -1062,6 +1079,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 finally { try { __fsFdClose(fd); } catch(_) {} }
             },
             readdirSync: function(p, opts) {
+                p = __fsPath(p);
                 var names = JSON.parse(__fsReaddirSync(p));
                 if (opts && opts.withFileTypes) {
                     return names.map(function(n) {
@@ -1070,19 +1088,19 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 }
                 return names;
             },
-            mkdirSync: function(p, opts) { return __fsMkdirSync(p); },
-            rmSync: function(p) { return __fsRmSync(p); },
-            unlinkSync: function(p) { return __fsUnlinkSync(p); },
-            renameSync: function(f, t) { return __fsRenameSync(f, t); },
-            copyFileSync: function(s, d) { return __fsCopyFileSync(s, d); },
-            cpSync: function(s, d, _opts) { return __fsCpSync(s, d); },
-            chmodSync: function(p, m) { return __fsChmodSync(p, String(m)); },
-            symlinkSync: function(target, p) { return __fsSymlinkSync(target, p); },
-            statSync: function(p) { return parseStat(__fsStatSync(p, 'true')); },
-            lstatSync: function(p) { return parseStat(__fsStatSync(p, 'false')); },
-            realpathSync: function(p) { return __fsRealpathSync(p); },
+            mkdirSync: function(p, opts) { return __fsMkdirSync(__fsPath(p)); },
+            rmSync: function(p) { return __fsRmSync(__fsPath(p)); },
+            unlinkSync: function(p) { return __fsUnlinkSync(__fsPath(p)); },
+            renameSync: function(f, t) { return __fsRenameSync(__fsPath(f), __fsPath(t)); },
+            copyFileSync: function(s, d) { return __fsCopyFileSync(__fsPath(s), __fsPath(d)); },
+            cpSync: function(s, d, _opts) { return __fsCpSync(__fsPath(s), __fsPath(d)); },
+            chmodSync: function(p, m) { return __fsChmodSync(__fsPath(p), String(m)); },
+            symlinkSync: function(target, p) { return __fsSymlinkSync(target, __fsPath(p)); },
+            statSync: function(p) { return parseStat(__fsStatSync(__fsPath(p), 'true')); },
+            lstatSync: function(p) { return parseStat(__fsStatSync(__fsPath(p), 'false')); },
+            realpathSync: function(p) { return __fsRealpathSync(__fsPath(p)); },
             accessSync: function(p, mode) {
-                var result = __fsAccessSync(p, String(mode === undefined ? 0 : mode));
+                var result = __fsAccessSync(__fsPath(p), String(mode === undefined ? 0 : mode));
                 if (result !== 'ok') throw new Error(result);
             },
 
@@ -1129,6 +1147,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             lstat:       wrapAsync(function(p) { return parseStat(__fsStatSync(p, 'false')); }),
             realpath:    wrapAsync(function(p) { return __fsRealpathSync(p); }),
             access: function(p, mode, cb) {
+                p = __fsPath(p);
                 if (typeof mode === 'function') { cb = mode; mode = 0; }
                 var result = __fsAccessSync(p, String(mode === undefined ? 0 : mode));
                 var err = result === 'ok' ? null : new Error(result);
@@ -1138,6 +1157,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
 
             // ── fd-based operations ─────────────────────────────────────────────
             open: function(path, flags, mode, cb) {
+                path = __fsPath(path);
                 if (typeof mode === 'function') { cb = mode; mode = 0o666; }
                 if (typeof flags === 'number') flags = ['r','w','r+','w','w','a','a+'][flags] || 'r';
                 var result;
@@ -1146,6 +1166,7 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 return result;
             },
             openSync: function(path, flags, mode) {
+                path = __fsPath(path);
                 if (typeof flags === 'number') flags = ['r','w','r+','w','w','a','a+'][flags] || 'r';
                 return __fsFdOpen(path, flags, mode || 0o666);
             },
@@ -1548,6 +1569,8 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 });
             };
         });
+        // node:fs/promises re-exports the same `constants` as node:fs.
+        fs.promises.constants = fs.constants;
 
         globalThis.fs = fs;
         // Re-register in require cache so require('fs') reflects the full object

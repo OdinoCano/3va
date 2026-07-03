@@ -6640,10 +6640,29 @@ JSValue JS_NewError(JSContext *ctx)
 static JSValue JS_ThrowError2(JSContext *ctx, JSErrorEnum error_num,
                               const char *fmt, va_list ap, BOOL add_backtrace)
 {
-    char buf[256];
+    /* 3va: messages longer than a fixed stack buffer (e.g. a deep pnpm
+     * node_modules path plus context) used to be silently truncated here,
+     * hiding the real error text (dlopen failures, module-resolution
+     * errors, ...). Size the buffer to fit the formatted message instead
+     * of guessing — vsnprintf() with a NULL/0 target returns the length
+     * the full output would need, per C99, without writing anything. */
+    char stack_buf[256];
+    char *buf = stack_buf;
     JSValue obj, ret;
+    va_list ap2;
 
-    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_copy(ap2, ap);
+    int needed = vsnprintf(stack_buf, sizeof(stack_buf), fmt, ap);
+    if (needed >= (int)sizeof(stack_buf)) {
+        buf = js_malloc_rt(ctx->rt, needed + 1);
+        if (buf) {
+            vsnprintf(buf, needed + 1, fmt, ap2);
+        } else {
+            buf = stack_buf; /* OOM: fall back to the truncated message */
+        }
+    }
+    va_end(ap2);
+
     obj = JS_NewObjectProtoClass(ctx, ctx->native_error_proto[error_num],
                                  JS_CLASS_ERROR);
     if (unlikely(JS_IsException(obj))) {
@@ -6653,6 +6672,9 @@ static JSValue JS_ThrowError2(JSContext *ctx, JSErrorEnum error_num,
         JS_DefinePropertyValue(ctx, obj, JS_ATOM_message,
                                JS_NewString(ctx, buf),
                                JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    }
+    if (buf != stack_buf) {
+        js_free_rt(ctx->rt, buf);
     }
     if (add_backtrace) {
         build_backtrace(ctx, obj, NULL, 0, 0);
