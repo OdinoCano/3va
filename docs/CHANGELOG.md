@@ -5,6 +5,291 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [Unreleased]
+
+### Fixed (major)
+
+- **`3va bundle` did not actually bundle multiple files** — `Bundler::add_entry()` only ever
+  registered the entry file; `bundle()` never walked the import graph to discover, resolve, and
+  inline anything it imported. `extract_imports()` found `import`/`require()` specifiers via regex
+  but the result was only ever used for the code-splitter's dependency map — nothing acted on it to
+  grow the module set. `generate_iife()` (the CLI's only reachable output format — `--format` isn't
+  exposed) additionally only took *one* arbitrary module out of the set and discarded the rest. Net
+  effect: any project with more than one file (i.e. any real project) produced a bundle containing
+  a literal, unresolved `import` statement inside an IIFE function body — invalid syntax (`import`
+  is only legal at module top level), confirmed failing `node --check`. Only a single file with zero
+  imports ever worked.
+
+  Added a real graph-walking bundler (`bundle_graph` in `crates/bundler/src/lib.rs`, wired into
+  `bundle_file` for the default `Iife` format and no `--split`): BFS from the entry, each module
+  transpiled to a CommonJS-shaped function body (`vvva_js::transpiler::transpile_to_cjs` — JSX/TS
+  stripped in the same pass; already-CommonJS `node_modules` packages are left as-is), every
+  `require(...)` call rewritten from its original specifier text to the target's resolved canonical
+  absolute path (which doubles as its registry key), assembled into a `__modules[id] = function
+  (module, exports, require) {...}` registry with a small `require()`/cache runtime, closing over
+  the entry. `.json` becomes `module.exports = <parsed JSON>`; `.css` injects a `<style>` tag when a
+  DOM is present and no-ops otherwise (bundles primarily target `3va run`, a non-browser context);
+  image/font assets embed their original path as a string (not copied/hashed — no production asset
+  pipeline yet). Verified against a real multi-file project with both an ESM and a CommonJS
+  `node_modules` dependency, a JSON import, and a default-exported component: the output passes
+  `node --check` and actually runs correctly via `3va run`, producing real interop results instead
+  of a parse error. ponytail-scoped: tree-shaking, code-splitting (`--split`), and source maps
+  (`--source-map`) are **not** implemented for this new path — only the pre-existing single-file
+  `Bundler` API (unreachable from the CLI) still has them, now clearly a separate, older code path.
+  (`crates/bundler/src/lib.rs`, `crates/bundler/Cargo.toml` — `vvva_js` moved from a dev- to a
+  regular dependency)
+
+- **`3va bundle` failed with "No such file or directory" if the output directory didn't exist** —
+  `bundle_file` now creates it (`std::fs::create_dir_all`) before writing, matching every other
+  bundler (Vite/webpack/esbuild all do this). (`crates/bundler/src/lib.rs`)
+
+- **Two real bugs found in `vvva_js::transpiler`'s ESM→CommonJS converter** while building the
+  bundler above (used by both `transpile_to_cjs` and, indirectly, `3va dev`'s CJS interop shim) —
+  both were pre-existing, not introduced by the bundler work:
+  1. `export default function main() {...}` compiled to `module.exports["default"] = main();` —
+     **calling** the function eagerly at module-load time and exporting its return value, instead
+     of exporting the function itself. Root cause: the default-export name extractor used
+     `w.trim_end_matches('(')` to strip call parens from a token like `"main()"`, but that only
+     strips a trailing `(` — the token *ends* with `)`, so nothing was ever stripped. Fixed to
+     split on the first `(` and keep the identifier before it.
+  2. `import X from "mod"` (a *simple* default import — by far the most common import form in any
+     React codebase, e.g. `import App from "./App"`) compiled to `var X = require("mod");` with no
+     `.default` unwrapping, silently binding `X` to the *whole CJS exports object* instead of the
+     default export value — breaking `App()`/`<App />` at runtime for essentially every
+     `export default function App() {...}` file. The *combined* import form
+     (`import X, { a } from "mod"`) already correctly applied `(_tmp.default !== undefined) ?
+     _tmp.default : _tmp` interop a few lines up in the same function; the simple form was the odd
+     one out. Fixed to apply the same interop.
+  (`crates/js/src/transpiler.rs`, `convert_export`/`convert_import`)
+
+### Added
+
+- **`package.json["3va"].permissions` is now actually read by `3va run`** — this closes the gap
+  where the entry below (2.1.0, "`package.json#3va.permissions`") described a feature that was
+  never wired into `build_permissions()`; `ThreeVaConfig`/`PackagePermissionScope` never existed
+  in the codebase, and the README correctly listed the feature as "(v2.1 roadmap)" the whole time.
+  This entry documents what's actually implemented now, in `crates/cli/src/main.rs`:
+  - Per-scope `allow-read` / `allow-write` / `allow-net` / `allow-env` / `allow-ffi` /
+    `allow-child-process`, merged across all scopes (scope keys are for human readability only —
+    the capability engine has no per-module isolation) and unioned with `--allow-*` CLI flags
+    (CLI only adds; it cannot revoke a `package.json` grant).
+  - `deny-read` / `deny-write` / `deny-net` / `deny-env` / `deny-ffi` / `deny-child-process` per
+    scope, checked before any `allow-*` — lets a broad directory-prefix grant exclude one file
+    (e.g. a dependency file with a known CVE).
+  - Relative paths in `allow-*`/`deny-*` resolve against the directory containing `package.json`,
+    not the invocation `cwd`.
+  - `${VAR}` expansion in path fields, against the environment of the host process launching
+    `3va run` (not the sandboxed script's `process.env`), so one absolute root that differs per
+    server/team can be declared once and switched per environment. Undefined variables are left
+    as a literal placeholder (fails closed).
+  - Top-level `"3va": { "no-prompt": true }`, equivalent to the new `--no-prompt` CLI flag on
+    `3va run` (see below).
+  - See `docs/06-permissions/06-package-json-permissions.md` for the full reference.
+
+- **`3va run --no-prompt`** — forces `interactive = false` regardless of TTY state, so any
+  capability not covered by `allow-*` is denied silently instead of prompting. Previously the
+  only way to suppress prompts in an attended terminal was redirecting stdin from `/dev/null`.
+  (`crates/cli/src/main.rs`)
+
+- **`3va dev` entry discovery covers `.jsx`/`.tsx` and the `main.*` naming convention** —
+  previously only `src/index.ts`, `src/index.js`, `index.ts`, `index.js` were tried, so a typical
+  Vite/CRA-style React app (`src/main.jsx`) failed with "Entry file not found". Now also tries
+  `src/index.tsx`, `src/index.jsx`, `src/main.ts`, `src/main.tsx`, `src/main.js`, `src/main.jsx`,
+  `index.tsx`, `index.jsx`. (`crates/cli/src/main.rs`, `ENTRY_CANDIDATES`)
+
+- **`3va dev` on-demand ESM serving (Vite-style)** — a root-level `index.html` referencing
+  `<script type="module" src="/src/main.jsx">` now works directly, without a hand-written
+  `public/index.html` pointing at `/bundle.js`. `.js`/`.jsx`/`.ts`/`.tsx` requests are transpiled
+  per request (JSX/TS stripped via the existing `vvva_js::transpiler`) and their import
+  specifiers rewritten (`rewrite_imports`/`rewrite_specifier`) to browser-resolvable URLs:
+  project-relative imports stay project-relative, bare specifiers and anything under
+  `node_modules` resolve via `vvva_js::esm::resolve_esm` to `/@fs/<abs-path>`. `import "./x.css"`
+  is wrapped in a tiny style-injecting module (`?import` query); a `.css` path requested directly
+  (a `<link>` tag) is served as raw CSS. The full-bundle path (`dist/bundle.js` via
+  `vvva_bundler::bundle_file`, served at `/bundle.js`) is unchanged and still runs on start/on
+  every source change, for a `public/index.html` that references it directly. The previous
+  built-in fallback page (served when no `index.html` exists anywhere) was also fixed to actually
+  execute the bundle (`<script src="/bundle.js">`) instead of only linking to it.
+  (`crates/cli/src/main.rs`)
+
+### Fixed
+
+- `docs/06-permissions/05-interactive-prompts.md` no longer describes `--no-prompt` and
+  `package.json` permission declarations as future/roadmap items.
+
+- **`3va dev` shutdown could hang for the full 30s drain timeout even after repeated Ctrl+C** —
+  the drain loop only polled `active_conns` on a timer and never listened for another `ctrl_c()`
+  signal, so a long-lived connection (the `/__hmr` SSE stream a browser tab keeps open) pinned
+  every shutdown at 30s regardless of how many times the user pressed Ctrl+C. A second Ctrl+C
+  during drain now forces immediate shutdown. (`crates/cli/src/main.rs`, `run_dev_server`)
+
+- **Extensionless relative imports of `.jsx`/directory-`index.jsx` silently failed to resolve** —
+  `resolve_relative()` in `crates/js/src/esm.rs` (used by both the runtime's own ESM loader and
+  the new `3va dev` on-demand serving above) probed `["js", "mjs", "ts", "tsx", "cjs"]` when an
+  import had no extension, missing `jsx` entirely, and only checked `index.js`/`index.mjs`/
+  `index.ts` for directory imports, missing `index.jsx`/`index.tsx`. `import App from "./App"`
+  (no extension — the common React/Vite convention) resolving to `App.jsx` returned the original,
+  nonexistent extensionless path instead. In `3va dev` this surfaced as a browser console error —
+  *"Failed to load module script: … MIME type of text/html"* — because the dev server, unable to
+  find the file, fell through to serving the SPA-fallback `index.html` for what the browser had
+  requested as a `<script type="module">`. Fixed by adding `jsx` to the extension probe list and
+  `index.jsx`/`index.tsx` to the directory-index list. Also hardened `3va dev` itself: a request
+  path with a `.js`/`.jsx`/`.ts`/`.tsx`/`.css` extension that still resolves to nothing now
+  returns a plain `404` instead of silently falling through to the SPA-fallback HTML, so a future
+  resolution gap fails loudly instead of producing this same confusing MIME-mismatch error.
+  (`crates/js/src/esm.rs`, `crates/cli/src/main.rs`)
+
+- **`3va dev` on-demand serving of CommonJS `node_modules` deps threw `does not provide an
+  export named 'X'`** — third-party packages are frequently CommonJS (`react-router-dom`'s `main`
+  build, for example), which has no ES `export` statements at all. Serving that source verbatim
+  as a `<script type="module">` executed without error but exposed zero named exports, so
+  `import { Link } from "react-router-dom"` failed at the browser's module-linking stage. Added a
+  CJS→ESM interop shim (`serve_cjs_interop`, `find_require_specifiers`, `find_cjs_export_names`
+  in `crates/cli/src/main.rs`): CJS files (detected via the now-`pub` `vvva_js::esm::source_is_esm`)
+  are wrapped in `(function(module, exports, require) { … })(...)`, with `require()` targets
+  statically found and routed through the same on-demand resolution (recursing through more CJS
+  interop if needed) and each statically-found `exports.NAME =` / `module.exports.NAME =` /
+  `Object.defineProperty(exports, "NAME", …)` assignment re-exported as a named ES binding.
+  Respects the Babel/TS `__esModule` interop marker for `export default`. ponytail-scoped: static
+  text scan only, so a computed `require(someVar)` or dynamically-built export object isn't
+  discoverable — throws a clear "unresolved require" error naming the file rather than failing
+  silently; see the `ponytail:` comment on `serve_cjs_interop` for the upgrade path (pre-bundle
+  the dependency with `vvva_bundler` instead) if a real package needs it.
+
+  **Follow-up correction:** the static-scan-only version above still missed named exports for a
+  real `react-router-dom` build, because tsc/Babel-compiled "barrel" files re-export everything
+  from sub-modules via a runtime `__exportStar(require("./x"), exports)` copy loop (`for...in`
+  over the required module) rather than a literal `exports.NAME = ` line anywhere in the source —
+  invisible to any static text scan. Replaced with `discover_cjs_export_names_dynamic`: the
+  wrapped CJS body is actually executed in a throwaway, sandboxed `rquickjs::Context::full`
+  (2-second interrupt-bounded), with each `require()` target *recursively* resolved and
+  discovered first (ESM deps via the new `find_esm_export_names`, CJS deps via this same function
+  one level deeper, capped at 4 levels with a visited-set cycle guard) so the stub `require()`
+  returns a real, correctly-keyed object for `__exportStar`'s loop to actually copy from — not a
+  content-free placeholder. `resolve_cjs_export_names` unions this dynamic result with the
+  original static scan (`find_cjs_export_names`) as a fallback for when execution fails outright
+  (parse error, timeout, depth exhausted). `rquickjs` is now a direct dependency of `vvva_cli`
+  (`crates/cli/Cargo.toml`) for this. (`crates/cli/src/main.rs`)
+
+  **Second follow-up correction:** still failed against a *real* `react-router-dom@6.30.4`
+  install (verified against the actual published package, not a synthetic repro). Two bugs, both
+  fixed in `discover_cjs_export_names_dynamic`:
+  1. `dist/main.js` does `module.exports = require(dev ? "./umd/x.dev.js" : "./umd/x.min.js")` —
+     a whole-module conditional re-assignment to one of two sibling UMD builds, evaluated correctly
+     once `process.env` was stubbed as a plain `{}` (already handled). But both UMD siblings
+     `require("react")`/`require("react-dom")`, and `visited` was a single `HashSet` *mutated
+     across siblings* rather than cloned per branch — after processing the first sibling, `react`
+     was marked visited, so the second sibling's own `require("react")` was wrongly treated as an
+     already-visited cycle and stubbed empty. `visited` is now passed as an immutable ancestor-path
+     set, cloned (not shared) into each child call — siblings depending on the same package is
+     normal, not a cycle. Added
+     `dynamic_discovery_does_not_treat_a_shared_sibling_dependency_as_a_cycle` reproducing this
+     with two tempfile siblings sharing a dependency.
+  2. Even with (1) fixed, required-module stub *values* were plain `function(){}` (returns
+     `undefined` when called). Real top-level code routinely uses what it requires immediately —
+     `React__namespace.createContext(x).displayName = "y"` is exactly what a real
+     `react-router-dom` UMD build does — and assigning a property onto `undefined` throws,
+     aborting that module's entire discovery. Stub values are now `__stub()`, a self-referential
+     `Proxy` (get/apply/construct traps all yield another `__stub()`) that tolerates being called,
+     indexed, and assigned into indefinitely, rather than a fixed no-op function.
+  (`crates/cli/src/main.rs`)
+
+- **`3va dev` on-demand-served packages threw `Uncaught ReferenceError: process is not defined`
+  in the browser** — separate from the two discovery-time bugs above (which only affected the
+  server-side probe used to compute export *names*), the actual shim sent to the browser had no
+  `process` global at all, and browser-targeted "development" builds (React's included) routinely
+  check bare `process.env.NODE_ENV` with no `typeof` guard at module top level. Added a minimal
+  `process` shim (`env.NODE_ENV = "development"`, `browser: true`) to `HMR_CLIENT_JS`
+  (`crates/cli/src/main.rs`) — a classic (non-module) `<script>` already injected into every served
+  HTML page, so it lands on `window` once and every ES module/CJS-interop shim loaded afterward
+  sees the same `process` without redeclaring it per file. See `docs/compatibility.txt` for why
+  `process` is safe as a pure-JS, no-native-binding polyfill.
+
+- **`3va dev`-served `.jsx`/`.tsx` threw `Uncaught ReferenceError: React is not defined`** for any
+  file using JSX without an explicit `import React from "react"` — the automatic-runtime
+  convention nearly every current React/Vite scaffold relies on (JSX "just works" with no React
+  import). `vvva_js::transpiler::transpile_jsx` compiles JSX to the *classic* runtime
+  (`React.createElement(...)`), which assumes `React` is already in scope; it doesn't add the
+  import itself. Added `inject_react_import_if_needed` (`crates/cli/src/main.rs`): after
+  transpiling, if the output references `React.createElement` and the original source never
+  imported `React`, prepends `import React from "react";` (which then flows through the normal
+  `rewrite_imports` pass like any other import, resolving to the real installed `react` package).
+  Does not touch `vvva_js::transpiler` itself, or the `3va run`/`3va test` code paths that also
+  call it — scoped to the dev-server-only shim step.
+
+### Changed
+
+- **`3va dev` startup banner now matches Vite's `Local:`/`Network:` convention** instead of
+  printing a single `Ready:` line. With the default `--host 127.0.0.1` (loopback-only, matching
+  Vite's own default), prints `Local:` plus a `(!) Use --host to expose on the network` hint —
+  same as Vite, no dead `Network:` link for a server nothing outside the machine can reach. With
+  an explicit non-loopback `--host` (e.g. `0.0.0.0`), prints `Local: http://localhost:PORT` and
+  `Network: http://<lan-ip>:PORT` so another device on the same network (a phone, for a quick
+  mobile check) has a real address to use. The LAN IP comes from `primary_lan_ip()`
+  (`crates/cli/src/main.rs`) — the standard zero-dependency `UdpSocket::connect` route-picking
+  trick, not real interface enumeration, so it reports one IP (the one on the route to the public
+  internet), not every NIC the way Vite's list sometimes does for Docker bridges/extra VPN
+  adapters; real multi-NIC enumeration needs `getifaddrs` or a new dependency and wasn't judged
+  worth it for a startup banner.
+
+### Added (continued)
+
+Found by cloning the real Vite and pnpm source into `.compatibility/` and comparing their actual
+dev-server/resolution behavior against `3va dev`:
+
+- **`import img from "./logo.png"` / `import data from "./x.json"` now work** — previously the raw
+  file bytes were served with `Content-Type: application/javascript` (image) or `application/json`
+  (JSON) for a `<script type="module">` request, which the browser's strict MIME-type check
+  rejects; these imports silently didn't work. `rewrite_specifier` now appends the same `?import`
+  marker already used for `import "./x.css"` to any specifier resolving to a
+  `DEV_STATIC_ASSET_EXTENSIONS` file or `.json`, and `serve_dev_source` returns `export default
+  "<url>"` for assets (matching Vite's `plugins/asset.ts` convention — a URL string, not the bytes)
+  and `export default <parsed JSON>` for JSON (valid JS syntax as-is, no transform needed). A
+  direct request for the same path (a `<link>`/`<img>`/browser-typed fetch, no `?import`) still
+  gets the raw file, unchanged. (`crates/cli/src/main.rs`)
+
+- **CJS export discovery is now cached** — every request for a `node_modules` CJS dependency
+  previously re-ran the *entire* recursive QuickJS discovery tree (`discover_cjs_export_names_dynamic`)
+  from scratch, including every nested `require()` target, on every single page load or HMR
+  reload; Vite avoids the equivalent redundant work via its on-disk `optimizeDeps` pre-bundle
+  cache. Added `CJS_DISCOVERY_CACHE`, a process-lifetime `HashMap<PathBuf, (SystemTime, Vec<String>)>`
+  behind a `LazyLock<Mutex<_>>` (stdlib only, no new dependency), checked at every recursion depth
+  — not just the outermost per-request call — so a shared sub-dependency like `react`, required by
+  many files, pays the QuickJS execution cost once total rather than once per requiring file.
+  Invalidated by mtime, so editing a `node_modules` file during a session is picked up on the next
+  request. (`crates/cli/src/main.rs`)
+
+- **`3va <name>` falls back to `package.json.scripts.<name>`** when `<name>` isn't one of 3va's own
+  subcommands (`3va build`, `3va lint`, etc.) — the same convention `npm run <name>`/`pnpm <name>`
+  follow, and the actual reason `3va build` didn't work even though `package.json` declared a
+  `"build"` script: 3va had no generic single-project script runner at all (only
+  `3va workspace run <script>`, monorepo-only). `Cli::try_parse()` replaces the old `Cli::parse()`
+  in `main()`; on `ErrorKind::InvalidSubcommand`, `try_run_package_script` checks
+  `package.json["scripts"]` for a matching key and, if found, shells out to the project's actual
+  package manager (`pnpm`/`yarn`/`bun`/`npm`, detected by lockfile) — `<pm> run <name>` — exiting
+  with the child's exit code, exactly mirroring what `npm run`/`pnpm <name>` would do. Mirrors the
+  pattern already used by `vvva_pm::run_workspace_script`, which itself shells out to `npm run`
+  rather than reimplementing PATH/`node_modules/.bin` semantics. A real 3va subcommand always wins
+  over a same-named script (`3va dev` runs 3va's own dev server, never `scripts.dev`, even if one
+  is defined) — only genuinely unrecognized names fall through. (`crates/cli/src/main.rs`)
+
+  **Follow-up correction:** the version above silently ran the delegated script the instant a
+  package.json `scripts.<name>` matched — a real philosophy violation, not just a missing feature.
+  The delegated process is a full external binary (the real package manager, running arbitrary
+  shell) completely outside `vvva_permissions`' capability model, which only governs JS executed
+  *inside* 3va's own QuickJS engine — there is no `--allow-*` flag that could meaningfully restrict
+  what an already-compiled `vite`/`webpack`/etc. binary does, and auto-running arbitrary shell
+  commands the moment someone types `3va <name>` is exactly the class of thing `3va install`
+  already refuses to do for postinstall scripts ("There are no exceptions"). Gated behind the same
+  interactive-consent pattern used everywhere else in 3va
+  (`docs/06-permissions/05-interactive-prompts.md`): a `[y/N]` prompt in a TTY, a hard deny with no
+  prompt outside one (CI/pipes — matches `PermissionState::prompt_user`'s own non-interactive
+  behavior), and `--yes` or `"3va": { "no-prompt": true }` (reusing the existing
+  `read_package_json_permissions`/`no-prompt` mechanism) to skip the prompt deliberately.
+  (`crates/cli/src/main.rs`, `try_run_package_script`)
+
+---
+
 ## [2.1.0] — 2026-06-22
 
 ### Added
@@ -39,6 +324,10 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   `package.json`. Supports `Capability::Network(host)` with `grant`/`deny`/`prompt`. Enables
   `--package-json` flag on `permissions suggest`/`learn`. Added `ThreeVaConfig` and
   `PackagePermissionScope` types. (`crates/pm/src/manifest.rs`, `crates/cli/src/main.rs`)
+  **Correction:** this entry described work that never shipped — `ThreeVaConfig` and
+  `PackagePermissionScope` are not present in this codebase, and `3va run` did not read
+  `package.json` permissions until the [Unreleased] entry above. Left here unmodified for
+  historical accuracy of what this changelog said at the time.
 
 - **`3va create <template>`** — New CLI subcommand for scaffolding projects. Supported frameworks:
   nuxt, solid, redwood, refine, next, astro, remix, svelte. Uses official framework scaffolders
@@ -72,7 +361,7 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
-## [2.1.2] — 2026-06-22
+## [v2.1.3] — 2026-06-22
 
 ### Fixed
 

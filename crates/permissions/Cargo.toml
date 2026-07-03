@@ -1,6 +1,6 @@
 [package]
 name = "vvva_permissions"
-version = "2.1.2"
+version = "2.1.3"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Capability-based permission sandbox for the 3va JavaScript runtime — deny-by-default with interactive prompts and audit logging"

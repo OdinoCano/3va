@@ -197,6 +197,106 @@ fn bundle_file_writes_output_to_disk() {
     );
 }
 
+// ── Real module-graph walk (crates/bundler/src/lib.rs::bundle_graph) ─────────
+//
+// `bundle_file` previously only ever processed the entry file — any `import`
+// was left untouched in the output, producing a syntactically invalid bundle
+// for any project with more than one file. These exercise the fix: real
+// imports across multiple project files, an ESM npm dependency, a CommonJS
+// npm dependency, a JSON import, and a default-export React-shaped component
+// (the pattern the `.default`-unwrapping bug in `vvva_js`'s transpiler broke).
+
+fn write_nested(dir: &TempDir, rel: &str, content: &str) -> PathBuf {
+    let path = dir.path().join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, content).unwrap();
+    path
+}
+
+#[test]
+fn bundle_graph_inlines_a_multi_file_project_with_esm_and_cjs_deps() {
+    let dir = TempDir::new().unwrap();
+
+    write_nested(
+        &dir,
+        "node_modules/esmlib/package.json",
+        r#"{"name":"esmlib","main":"index.js"}"#,
+    );
+    write_nested(
+        &dir,
+        "node_modules/esmlib/index.js",
+        "export function greet() { return \"esm-hi\"; }",
+    );
+    write_nested(
+        &dir,
+        "node_modules/cjslib/package.json",
+        r#"{"name":"cjslib","main":"index.js"}"#,
+    );
+    write_nested(
+        &dir,
+        "node_modules/cjslib/index.js",
+        "exports.hello = function() { return \"cjs-hi\"; };",
+    );
+    write_nested(&dir, "src/data.json", r#"{"n": 42}"#);
+    write_nested(
+        &dir,
+        "src/App.jsx",
+        "import { greet } from \"esmlib\";\n\
+         import { hello } from \"cjslib\";\n\
+         import data from \"./data.json\";\n\
+         export default function App() {\n\
+         \x20 return greet() + \" \" + hello() + \" \" + data.n;\n\
+         }\n",
+    );
+    let entry = write_nested(
+        &dir,
+        "src/main.jsx",
+        "import App from \"./App.jsx\";\nconsole.log(App());",
+    );
+
+    let output = dir.path().join("dist/bundle.js");
+    bundle_file(&entry.to_string_lossy(), &output.to_string_lossy(), None).unwrap();
+
+    let code = std::fs::read_to_string(&output).unwrap();
+    // Every import must have been resolved to a real, distinct registry
+    // entry — not left as a literal (syntactically invalid) `import`/bare
+    // specifier `require(...)`.
+    assert!(
+        !code.contains("import "),
+        "no raw import should survive: {code}"
+    );
+    assert!(
+        !code.contains("require(\"esmlib\")"),
+        "esmlib must resolve to a real path: {code}"
+    );
+    assert!(
+        !code.contains("require(\"cjslib\")"),
+        "cjslib must resolve to a real path: {code}"
+    );
+    assert!(
+        code.contains("esm-hi"),
+        "esmlib's module body must be inlined: {code}"
+    );
+    assert!(
+        code.contains("cjs-hi"),
+        "cjslib's module body must be inlined: {code}"
+    );
+    assert!(
+        code.contains("\"n\": 42") || code.contains("\"n\":42"),
+        "JSON body must be inlined: {code}"
+    );
+}
+
+#[test]
+fn bundle_graph_output_creates_missing_output_directory() {
+    let dir = TempDir::new().unwrap();
+    let entry = write_file(&dir, "index.js", "console.log('ok');");
+    let output = dir.path().join("nested/does/not/exist/out.js");
+
+    bundle_file(&entry.to_string_lossy(), &output.to_string_lossy(), None).unwrap();
+    assert!(output.exists());
+}
+
 #[test]
 fn bundle_file_with_sourcemap_option_writes_map_file() {
     let dir = TempDir::new().unwrap();

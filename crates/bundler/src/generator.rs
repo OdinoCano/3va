@@ -202,7 +202,11 @@ impl CodeGenerator {
     /// - Collapses runs of whitespace to a single space
     /// - Removes spaces around operator characters: `= + - * / % < > ! & | ^ ~ ? : ; , { } ( ) [ ]`
     /// - Removes trailing semicolons before `}` and leading semicolons after `{`
-    fn minify(&self, code: &str) -> String {
+    ///
+    /// Minifies arbitrary JS text — exposed so callers assembling their own
+    /// output (e.g. the module-registry bundle in `lib.rs`) can reuse this
+    /// instead of duplicating a second minifier.
+    pub fn minify(&self, code: &str) -> String {
         let chars: Vec<char> = code.chars().collect();
         let len = chars.len();
         let mut out = String::with_capacity(len / 2);

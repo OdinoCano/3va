@@ -880,10 +880,24 @@ fn convert_import(src: &[u8], start: usize, len: usize) -> Option<(String, usize
         return Some((out.trim_end().to_string(), end));
     }
 
-    // Default: `import X from 'mod'`
+    // Default: `import X from 'mod'` — needs the same `.default` interop the
+    // combined-import branch above already applies (`import X, {a} from
+    // 'mod'`), and for the same reason: `require('mod')` returns the whole
+    // CJS exports object (named exports live directly on it, e.g.
+    // `module.exports.greeting = ...`), not the default export value alone.
+    // Without unwrapping `.default` here, `import App from "./App"` for the
+    // single most common export shape in a React codebase — `export default
+    // function App() {...}` — bound `App` to the *exports object*, not the
+    // component, silently breaking `App()`/`<App />` at runtime instead of
+    // failing to parse (this branch was previously the odd one out; every
+    // other import form in this file already unwraps `.default` correctly).
     if !clause.is_empty() {
+        let name = clause.trim();
+        let tmp = format!("_im_{}", mangle_mod(module));
         return Some((
-            format!("var {} = require(\"{module}\");", clause.trim()),
+            format!(
+                "var {tmp} = require(\"{module}\");\nvar {name} = ({tmp}.default !== undefined) ? {tmp}.default : {tmp};"
+            ),
             end,
         ));
     }
@@ -966,10 +980,19 @@ fn convert_export(src: &[u8], start: usize, len: usize) -> Option<(String, usize
             || val.starts_with("async function ")
             || val.starts_with("class ")
         {
+            // `w.trim_end_matches('(')` only strips a trailing `(` — useless
+            // here since the whole token is e.g. `"main()"` (name immediately
+            // followed by `(`, no space), which *ends* with `)`, not `(`, so
+            // nothing was ever trimmed: the "name" silently kept its call
+            // parens attached, turning `module.exports["default"] = main;`
+            // into `= main();` — the default export ends up being the
+            // function's *return value*, called eagerly at module-load time,
+            // instead of the function itself. Split on the first `(` and
+            // keep the identifier before it instead.
             let name = val
                 .split_whitespace()
                 .find(|&w| w != "function" && w != "async" && w != "class")
-                .map(|w| w.trim_end_matches('('))
+                .map(|w| w.split('(').next().unwrap_or(w).trim())
                 .filter(|n| !n.is_empty());
             if let Some(n) = name {
                 return Some((format!("{val}\nmodule.exports[\"default\"] = {n};\n"), end));
@@ -1318,9 +1341,17 @@ mod tests {
 
     #[test]
     fn esm_default_import() {
+        // `path` unwraps `.default` if present (real ESM interop) but falls
+        // back to the whole `require()` result when it isn't (plain CJS
+        // modules like Node's real `path`, which has no `.default`) — so
+        // `path.join(...)` keeps working either way.
         let src = "import path from 'path';\nconsole.log(path.join('a','b'));";
         let out = static_esm_to_cjs(src);
-        assert!(out.contains("var path = require(\"path\")"), "got: {out}");
+        assert!(out.contains("require(\"path\")"), "got: {out}");
+        assert!(
+            out.contains("var path = (") && out.contains(".default !== undefined)"),
+            "got: {out}"
+        );
         assert!(!out.contains("import "), "got: {out}");
     }
 
@@ -1558,6 +1589,41 @@ mod tests {
         assert!(
             !out.contains("import path"),
             "unused import should be gone, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn transpile_to_cjs_default_export_function_is_not_called_eagerly() {
+        // Regression: `export default function main() {...}` must reference
+        // the function, not invoke it — a bug in the name-extraction logic
+        // turned it into `module.exports["default"] = main();`, silently
+        // calling the function at module-load time instead of exporting it.
+        let src = "export default function main() { return 42; }";
+        let out = transpile_to_cjs(src, false);
+        assert!(
+            out.contains("module.exports[\"default\"] = main;"),
+            "must assign the function reference, not call it — got:\n{out}"
+        );
+        assert!(
+            !out.contains("main();") && !out.contains("main() ;"),
+            "must not call main() eagerly — got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn transpile_to_cjs_simple_default_import_unwraps_default_export() {
+        // Regression: `import X from "mod"` (by far the most common import
+        // form in any React codebase — `import App from "./App"`) must
+        // unwrap `.default`, exactly like the combined-import form
+        // (`import X, { a } from "mod"`) already correctly does a few lines
+        // up in the same function. Without it, `X` was bound to the whole
+        // CJS exports object instead of the default export value.
+        let src = r#"import App from "./App";
+console.log(App);"#;
+        let out = transpile_to_cjs(src, false);
+        assert!(
+            out.contains("var App = (_im_") && out.contains(".default !== undefined)"),
+            "must unwrap .default for a simple default import — got:\n{out}"
         );
     }
 

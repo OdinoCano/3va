@@ -266,24 +266,41 @@ pub fn bundle_file(
     output: &str,
     options: Option<BundlerOptions>,
 ) -> anyhow::Result<()> {
-    let root = PathBuf::from(".");
-    let mut bundler = Bundler::new(root);
+    let options = options.unwrap_or_default();
 
-    let sourcemap = options.as_ref().map(|o| o.sourcemap).unwrap_or(false);
-
-    if let Some(opts) = options {
-        bundler = bundler.with_options(opts);
+    if let Some(parent) = Path::new(output).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
 
+    // Only `Iife` goes through the real module-graph walk (`bundle_graph`) —
+    // see its doc comment for why the other formats, `--split`, and
+    // `--source-map` aren't covered by this pass and what still uses the old
+    // (single-file-only, pre-existing) path.
+    if options.format == OutputFormat::Iife && !options.splitting {
+        if options.sourcemap {
+            tracing::warn!(
+                "--source-map is not yet supported for the module-graph bundler; \
+                 writing the bundle without a source map."
+            );
+        }
+        let code = bundle_graph(Path::new(input), options.minify)?;
+        std::fs::write(output, code)?;
+        tracing::info!("Bundled {} -> {}", input, output);
+        return Ok(());
+    }
+
+    let root = PathBuf::from(".");
+    let mut bundler = Bundler::new(root).with_options(options.clone());
     bundler.add_entry(input)?;
 
     let (code, map) = bundler.bundle_with_sourcemap()?;
 
-    if sourcemap {
+    if options.sourcemap {
         if let Some(map_json) = map {
             let map_path = format!("{}.map", output);
             std::fs::write(&map_path, &map_json)?;
-            // Append sourceMappingURL comment to bundle
             let code = format!("{}\n//# sourceMappingURL={}.map\n", code, output);
             std::fs::write(output, code)?;
             tracing::info!("Source map written to {}", map_path);
@@ -297,6 +314,189 @@ pub fn bundle_file(
     tracing::info!("Bundled {} -> {}", input, output);
 
     Ok(())
+}
+
+/// Real module-graph bundler: walks the import graph from `entry` (BFS),
+/// resolving and transpiling every transitively-imported file into a single
+/// CommonJS-style module registry, then wraps it in one IIFE.
+///
+/// Why CommonJS-style (`__modules[id] = function(module, exports, require)
+/// {...}`) rather than concatenating real ESM syntax: `import`/`export` are
+/// only legal at a module's top level, so per-module code can't be wrapped in
+/// its own function scope (needed to avoid identifier collisions between
+/// files — e.g. two files each declaring `const x = ...`) while staying
+/// valid ESM. Each module is transpiled to CommonJS via the shared
+/// `vvva_js::transpiler::transpile_to_cjs` (JSX/TS stripped in the same
+/// pass), and every `require(...)` call inside the result is rewritten from
+/// the original specifier text to the target's resolved, canonical absolute
+/// path — which doubles as that module's registry key — so the runtime
+/// `__require()` lookup is an exact-match, no re-resolution needed at
+/// bundle-run time.
+///
+/// ponytail: `.css`/`.json`/asset imports get the same `?import`-equivalent
+/// treatment as `3va dev`'s on-demand server (style injection / `export
+/// default <value>` / `export default "<path>"` respectively) — see
+/// `bundle_module_body`. Circular imports are broken by inserting into the
+/// registry *before* recursing, matching how `__require`'s runtime cache
+/// already handles circularity (partially-populated `exports` visible to the
+/// cycle, same as Node/CommonJS) — not specially tested here, but the same
+/// mechanism real CJS relies on. Tree-shaking, code-splitting, and source
+/// maps are NOT implemented for this path (see `bundle_file`) — this closes
+/// the "doesn't actually bundle multiple files" gap; those are follow-ups.
+fn bundle_graph(entry: &Path, minify: bool) -> anyhow::Result<String> {
+    let entry = entry.canonicalize().unwrap_or_else(|_| entry.to_path_buf());
+    if !entry.is_file() {
+        anyhow::bail!("Entry file not found: {}", entry.display());
+    }
+
+    let mut registry: HashMap<PathBuf, String> = HashMap::new();
+    let mut queue: Vec<PathBuf> = vec![entry.clone()];
+    let mut queued: HashSet<PathBuf> = HashSet::from([entry.clone()]);
+
+    while let Some(path) = queue.pop() {
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Reading {}: {e}", path.display()))?;
+        let base = path.to_string_lossy().into_owned();
+
+        let body = bundle_module_body(&path, &source, &base);
+
+        // Rewrite every `require("spec")` call to the target's resolved
+        // absolute-path registry key, discovering new modules to queue.
+        let rewritten = rewrite_bundle_requires(&body, |spec| {
+            let resolved = vvva_js::esm::resolve_esm(&base, spec)
+                .canonicalize()
+                .unwrap_or_else(|_| vvva_js::esm::resolve_esm(&base, spec));
+            if queued.insert(resolved.clone()) {
+                queue.push(resolved.clone());
+            }
+            resolved.to_string_lossy().into_owned()
+        });
+
+        registry.insert(path, rewritten);
+    }
+
+    let mut modules_src = String::new();
+    for (path, body) in &registry {
+        modules_src.push_str(&format!(
+            "  {:?}: function(module, exports, require) {{\n{body}\n  }},\n",
+            path.to_string_lossy()
+        ));
+    }
+
+    let code = format!(
+        "(function() {{\n\
+         var __modules = {{\n{modules_src}}};\n\
+         var __cache = {{}};\n\
+         function require(id) {{\n\
+         \x20 if (__cache[id]) return __cache[id].exports;\n\
+         \x20 var module = {{ exports: {{}} }};\n\
+         \x20 __cache[id] = module;\n\
+         \x20 if (!__modules[id]) throw new Error(\"3va bundle: module not found: \" + id);\n\
+         \x20 __modules[id](module, module.exports, require);\n\
+         \x20 return module.exports;\n\
+         }}\n\
+         require({:?});\n\
+         }})();",
+        entry.to_string_lossy()
+    );
+
+    Ok(if minify {
+        CodeGenerator::new(BundlerOptions::default()).minify(&code)
+    } else {
+        code
+    })
+}
+
+/// Transforms one module's source into a CommonJS-shaped function body
+/// (still containing unresolved `require("original-specifier")` calls —
+/// `bundle_graph` rewrites those afterward). Extension-driven, mirroring
+/// `crates/cli/src/main.rs`'s `serve_dev_source` (the `3va dev` equivalent):
+/// `.json` becomes `module.exports = <parsed JSON>`; `.css` becomes a style-
+/// injecting side effect; asset extensions become `module.exports =
+/// "<original project-relative-ish path>"` (a string, not copied/hashed into
+/// the output — there's no build-output asset pipeline here, a real gap
+/// versus Vite's production build, ponytail-deferred); everything else is
+/// `.js`/`.jsx`/`.ts`/`.tsx`/`.mjs`, transpiled via
+/// `vvva_js::transpiler::transpile_to_cjs` if it's ESM, left as-is (already
+/// CommonJS — real npm packages routinely are) otherwise.
+fn bundle_module_body(path: &Path, source: &str, base: &str) -> String {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    match ext {
+        "json" => format!("module.exports = {source};"),
+        "css" => {
+            let escaped = source
+                .replace('\\', "\\\\")
+                .replace('`', "\\`")
+                .replace("${", "\\${");
+            // `3va bundle`'s primary target is `3va run <bundle>` (a CLI/
+            // server context — no DOM), not just `<script>`-tag inclusion in
+            // a browser page — unlike `3va dev`'s equivalent (which only
+            // ever runs in a browser), so the DOM write can't be unconditional
+            // here without crashing every bundle that happens to import CSS
+            // outside a browser. Guard it, mirroring how real npm packages
+            // guard `process`/`window` for universal (isomorphic) code.
+            format!(
+                "if (typeof document !== 'undefined') {{\n\
+                 \x20 var __style = document.createElement('style');\n\
+                 \x20 __style.textContent = `{escaped}`;\n\
+                 \x20 document.head.appendChild(__style);\n\
+                 }}\n\
+                 module.exports = {{ default: `{escaped}` }};"
+            )
+        }
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "ico" | "woff" | "woff2" | "ttf" => {
+            format!("module.exports = {:?};", path.display().to_string())
+        }
+        _ if vvva_js::esm::source_is_esm(source, base) => {
+            vvva_js::transpiler::transpile_to_cjs(source, matches!(ext, "jsx" | "tsx"))
+        }
+        _ => source.to_string(),
+    }
+}
+
+/// Finds `require("specifier")` calls in CJS-shaped module text and replaces
+/// each specifier via `resolve`. Same identifier-boundary-guarded scanning
+/// technique as `crates/cli/src/main.rs`'s `find_require_specifiers`/
+/// `rewrite_imports` (duplicated here rather than shared across the
+/// crates/cli binary crate and this library crate — a small, self-contained
+/// scanner, not worth a cross-crate abstraction for ~30 lines).
+fn rewrite_bundle_requires(js: &str, mut resolve: impl FnMut(&str) -> String) -> String {
+    const MARKER: &str = "require(";
+    let bytes = js.as_bytes();
+    let mut out = String::with_capacity(js.len() + 64);
+    let mut i = 0usize;
+    let mut copied_up_to = 0usize;
+
+    while i < js.len() {
+        if js.as_bytes()[i..].starts_with(MARKER.as_bytes()) {
+            let prev_is_ident = i > 0
+                && matches!(bytes[i - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$');
+            if !prev_is_ident {
+                let after = &js[i + MARKER.len()..];
+                let trimmed = after.trim_start();
+                if let Some(q) = trimmed.chars().next().filter(|c| matches!(c, '"' | '\''))
+                    && let Some(end) = trimmed[1..].find(q)
+                {
+                    let spec = &trimmed[1..1 + end];
+                    let resolved = resolve(spec);
+                    let quote_offset = after.len() - trimmed.len();
+                    out.push_str(&js[copied_up_to..i]);
+                    out.push_str(MARKER);
+                    out.push_str(&after[..quote_offset]);
+                    out.push(q);
+                    out.push_str(&resolved);
+                    out.push(q);
+                    let match_len = MARKER.len() + quote_offset + 1 + end + 1;
+                    i += match_len;
+                    copied_up_to = i;
+                    continue;
+                }
+            }
+        }
+        i += js[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    out.push_str(&js[copied_up_to..]);
+    out
 }
 
 /// Start a file-watching build loop. Bundles `input` → `output` immediately,
