@@ -1,0 +1,244 @@
+Análisis de Compatibilidad para QuickJS Runtime
+Resumen de Dureza de Implementación
+Categoría	Dificultad	Se puede hacer en JS puro?
+Eventos (EventEmitter)	Baja	✅ Sí
+assert, util, path, querystring	Baja	✅ Sí
+URL parsing (WHATWG)	Media	✅ Sí (con libs)
+Buffer (Uint8Array interop)	Media	⚠️ Parcial
+TextEncoder/Decoder	Media	✅ Sí
+ReadableStream/WritableStream	Alta	⚠️ Parcial (backpressure es crítico)
+fs (archivo)	Alta	❌ No (syscalls)
+net (sockets)	Muy Alta	❌ No
+crypto (hash, hmac, aes)	Muy Alta	❌ No (necesitas libs C)
+HTTP client/server	Muy Alta	❌ No
+zlib compression	Alta	❌ No
+child_process/spawn	Muy Alta	❌ No
+worker_threads	Muy Alta	❌ No
+async_hooks	Muy Alta	❌ No
+TLS/SSL	Muy Alta	❌ No
+WebSocket	Alta	❌ No
+Tier 1: Crítico - No hay polyfill JS posible
+1. Sistema de Módulos (require/exports)
+Por qué es complejo:
+bun/src/js/builtins/CommonJS.ts - usa:
+  $requireMap.$has("module")
+  $evaluateCommonJSModule
+  $createCommonJSModule
+  $resolveSync
+Lo que necesitas:
+- Resolución de rutas node_modules
+- Caching de módulos
+- Exports (CommonJS y ESM interop)
+- Detección circular de imports
+- Loader hooks
+Bibliotecas JS puras que puedes usar:
+- resolve (npm) para resolución
+- module (npm) para CommonJS
+2. Buffer y Typed Arrays
+Por qué es complejo:
+- Zero-copy alignment con el motor JS
+- Buffer.from() comparte memoria con Uint8Array
+- buf[index] vs buf.getIndex() diferencia de speed
+- Buffer.allocUnsafe() / Buffer.allocUnsafeSlow()
+Lo que necesitas implementar:
+// QuickJS tiene:
+JSValue js_buffer_constructor(JSContext *ctx);
+JSValue js_buffer_slice(JSContext *ctx, JSValue this_val);
+JSValue js_buffer_toString(JSContext *ctx, JSValue this_val);
+Polyfill JS: buffer npm (MIT) - usa Uint8Array internamente
+3. Streams (Readable/Writable/Transform)
+Por qué es complejo:
+backpressure real:
+  reader.read() → llena queue → pausa источник
+  writer.write() → drena queue → resume source
+Mínimo viable en JS:
+class ReadableStream {
+  constructor(underlyingSource = {}) {
+    this._controller = new ReadableStreamDefaultController();
+    // En JS puro: simulable pero no tendras backpressure real
+  }
+}
+Puedes usar: readable-stream npm (MIT) - polyfill de streams
+4. File System (fs)
+Lo que Node.js soporta:
+Función	Syscall	Notas
+fs.readFile	read()	 
+fs.writeFile	write()	 
+fs.open	open()	flags: r, w, a, x
+fs.close	close()	 
+fs.mkdir	mkdir()	recursive, mode
+fs.rmdir	rmdir()	 
+fs.unlink	unlink()	 
+fs.rename	rename()	 
+fs.stat	stat()	size, mtime, isFile
+fs.watch	inotify/FSEvents	eventos
+fs.access	access()	 
+fs.realpath	realpath()	symlinks
+fs.readdir	getdents()	 
+fs.watchFile	stat() polling	 
+fs.createReadStream	open() + read()	retorna ReadableStream
+fs.createWriteStream	open() + write()	retorna WritableStream
+Para QuickJS necesitas wrappers de syscalls - revisa bun/src/sys/ que tiene abstracción cross-platform
+5. Networking (net, http, https)
+Stack completo necesario:
+TCP sockets (net)
+    ↓
+TLS/SSL (https) → necesitas OpenSSL o similar
+    ↓
+HTTP/1.1 (http)
+    ↓
+HTTP/2 (http2) → necesita hpack, frames
+    ↓
+HTTP/3 (quic) → necesita QUIC protocol
+    ↓
+WebSocket → frame parsing, mask/unmask
+Dependencias de Bun:
+- lsquic (MIT) - HTTP/3
+- ls-hpack (MIT) - HTTP/2 compression
+- uSockets (Apache) - sockets de alto performance
+- boringssl - TLS
+Alternativas para QuickJS:
+- uWebSockets.js para sockets
+- node:http polyfill con libs C
+- OpenSSL via libssl
+6. Crypto
+Lo que Node.js soporta:
+Módulo	Algoritmos	Notas
+crypto.hash	sha1, sha256, sha512, md5	 
+crypto.hmac	hmac-sha*	 
+crypto.cipher	aes-, des-, chacha20	 
+crypto.sign	rsa, ecdsa, ed25519	 
+crypto.random	bytes, UUID	 
+crypto.pbkdf2	password hashing	 
+crypto.scrypt	password hashing	 
+crypto.diffieHellman	DH key exchange	 
+crypto.KeyObject	key management	 
+Bun usa: boringssl (custom) + node:crypto
+Para QuickJS:
+- node:crypto polyfill con libs C
+- SubtleCrypto (Web Crypto API) es estándar y más portable
+Tier 2: Alto Valor - Complejidad Moderada
+7. Process y OS
+Funciones que SÍ puedes hacer en JS:
+// process.js - puro JS
+process.platform   // 'linux', 'darwin', 'win32'
+process.arch       // 'x64', 'arm64'
+process.env        // env vars (necesita syscall)
+process.pid        // PID (syscall)
+process.cwd()     // cwd (syscall)
+process.exit()     // exit (syscall)
+process.hrtime()  // high res time (syscall)
+process.memoryUsage() // memory (syscall)
+Dependencias nativas mínimas:
+- process.binding('uv').errname - error codes
+- process.env - lectura de env vars
+8. Timers
+En JS puro puedes implementar:
+setTimeout(fn, ms) → scheduling + callback queue
+setInterval(fn, ms) → scheduling + repeat
+setImmediate(fn) → microtask-like but not really
+process.nextTick(fn) → cola de microtasks
+
+// Usa libuv o similar para el event loop
+Necesitas: Event loop (libuv, mpio, or tu propio while(1) con select())
+9. Child Process (spawn)
+Syscalls involucrados:
+fork()        // crear proceso hijo
+execve()      // ejecutar programa
+pipe()        // crear pipes para IPC
+waitpid()     // esperar por hijo
+kill()        // enviar signals
+Lo que Bun hace:
+bun/src/runtime/api/bun/subprocess.rs
+bun/src/runtime/api/bun/spawn.rs
+10. Worker Threads
+Lo que necesitas:
+- SharedArrayBuffer para memoria compartida
+- Atomics para sincronización
+- MessageChannel para comunicación
+- postMessage con serialization
+Sin SharedArrayBuffer - solo puedes pasar mensajes serializados (limitado)
+Tier 3: Se puede hacer en JS puro
+Polyfills MIT disponibles:
+buffer                    - Buffer global
+events                    - EventEmitter
+assert                    - assertions
+util                      - util.* functions
+path                      - path.*
+querystring              - query string parsing
+punycode                 - unicode domain encoding
+url                       - URL parsing (WHATWG)
+string_decoder            - streaming string decode
+process                   - process global
+os-browserify            - os.*
+stream-browserify         - stream.*
+https-browserify         - https (puro JS)
+http-browserify          - http (puro JS)
+crypto-browserify         - crypto.* (limitado)
+vm-browserify            - vm.*
+tty-browserify           - tty.*
+Arquitectura Recomendada para QuickJS
+┌─────────────────────────────────────────────────────┐
+│                    Tu Runtime QuickJS                │
+├─────────────────────────────────────────────────────┤
+│  JavaScript APIs (polyfills JS puros)               │
+│  ├── events (EventEmitter) ✅                        │
+│  ├── assert, util, path, querystring, url ✅         │
+│  ├── buffer (Uint8Array) ✅                          │
+│  └── timers (setTimeout, etc) ✅                     │
+├─────────────────────────────────────────────────────┤
+│  Native Bindings (C/C++)                             │
+│  ├── fs (syscalls) ❌                               │
+│  ├── net/socket (BSD socket API) ❌                 │
+│  ├── crypto (OpenSSL/lib sodium) ❌                  │
+│  ├── zlib (zlib) ❌                                 │
+│  ├── child_process (fork/exec) ❌                    │
+│  └── tls/ssl (OpenSSL) ❌                           │
+├─────────────────────────────────────────────────────┤
+│  HTTP Stack (C libraries)                            │
+│  ├── HTTP/1.1 ❌                                    │
+│  ├── HTTP/2 (nghttp2) ❌                           │
+│  ├── HTTP/3 (quiche) ❌                            │
+│  └── WebSocket (uWebSockets) ❌                     │
+├─────────────────────────────────────────────────────┤
+│  Event Loop (libuv o similar) ❌                     │
+├─────────────────────────────────────────────────────┤
+│  QuickJS Core Engine ✅                              │
+└─────────────────────────────────────────────────────┘
+Plan de Implementación por Prioridad
+Fase 1 - Core JS (1-2 semanas):
+1. Polyfills JS puros: events, assert, util, path, buffer
+2. TextEncoder/Decoder
+3. URL (WHATWG)
+4. Timers + Event loop básico
+Fase 2 - I/O Básico (2-4 semanas):
+5. fs bindings (C) - read, write, open, stat, mkdir, etc
+6. process bindings (C) - env, cwd, exit, pid
+7. child_process spawn (C)
+Fase 3 - Networking (4-8 semanas):
+8. net sockets (C) - TCP/UDP
+9. HTTP client - fetch-like API
+10. TLS/SSL (OpenSSL)
+Fase 4 - Full Node.js Compat (8+ semanas):
+11. crypto模块 completa
+12. HTTP/2, HTTP/3
+13. WebSocket
+14. worker_threads
+15. async_hooks
+libraries C Recomendadas para tu Stack
+Funcionalidad	Biblioteca	Licencia
+TLS/SSL	OpenSSL o BoringSSL	Apache/MIT
+HTTP/3	quiche, lsquic, ngtcp2	Apache/MIT
+HTTP/2	nghttp2	MIT
+Compression	zlib-ng, brotli, zstd	MIT/BSD
+Networking	libuv, uSockets	MIT/Apache
+Crypto	libsodium, OpenSSL	MIT
+DNS	c-ares	MIT
+SQLite	sqlite3	Public Domain
+Conclusión
+Para máxima compatibilidad Node.js necesitas:
+1. No puedes delegar - Las funciones de archivo, red, crypto y compresión requieren bindings nativos C
+2. QuickJS + polyfills JS te da ~60% compatibilidad
+3. Con bindings C puedes llegar a ~90%
+4. El 10% restante (V8-specific APIs como v8.*, async_hooks profundo) es muy difícil
+Polyfills MIT que puedes usar inmediatamente están listados arriba en Tier 3.

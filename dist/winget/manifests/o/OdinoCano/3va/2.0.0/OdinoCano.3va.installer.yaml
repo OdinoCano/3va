@@ -1,5 +1,5 @@
 PackageIdentifier: OdinoCano.3va
-PackageVersion: 2.0.0
+PackageVersion: 2.1.3
 MinimumOSVersion: 10.0.17763.0
 InstallModes:
   - interactive
@@ -11,7 +11,7 @@ ReleaseDate: 2026-06-10
 Installers:
   - Architecture: x64
     InstallerType: zip
-    InstallerUrl: https://github.com/OdinoCano/3va/releases/download/v2.0.0/3va-v2.0.0-x86_64-pc-windows-msvc.zip
+    InstallerUrl: https://github.com/OdinoCano/3va/releases/download/v2.1.3/3va-v2.1.3-x86_64-pc-windows-msvc.zip
     InstallerSha256: 68a61a89459547f090c39a761677fe4580bb73a55ee15c8699874bda8c2bc9b9
     NestedInstallerType: portable
     NestedInstallerFiles:

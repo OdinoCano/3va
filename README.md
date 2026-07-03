@@ -193,11 +193,13 @@ Two commands help derive the minimum permission set:
 3va permissions learn app.ts     # run with all permissions, report which were used
 ```
 
-### Package-level permission declarations (v2.1 roadmap)
+### Package-level permission declarations
 
-Currently, permissions are CLI flags. The planned v2.1 model moves them into `package.json` under a `"3va"` key — a pattern already established by `"jest"`, `"eslint"`, and `"prettier"`. Node.js, Bun, pnpm, and Yarn ignore unknown keys, so there is no conflict.
-
-The target schema:
+Besides CLI flags, `3va run` reads permission grants from `package.json` under
+a `"3va"` key — a pattern already established by `"jest"`, `"eslint"`, and
+`"prettier"`. Node.js, Bun, pnpm, and Yarn ignore unknown keys, so there is no
+conflict. CLI flags and `package.json` grants are merged (CLI only adds, never
+revokes a `package.json` grant).
 
 ```json
 {
@@ -207,10 +209,12 @@ The target schema:
     "axios": "^1.6.0"
   },
   "3va": {
+    "no-prompt": true,
     "permissions": {
       ".": {
         "allow-net": ["api.example.com"],
-        "allow-read": ["./config"]
+        "allow-read": ["./config", "${NODE_MODULES_ROOT}/express@4.22.2"],
+        "deny-read": ["${NODE_MODULES_ROOT}/express@4.22.2/node_modules/express/lib/express.js"]
       },
       "axios": {
         "allow-net": ["api.example.com"]
@@ -223,7 +227,27 @@ The target schema:
 }
 ```
 
-`3va permissions suggest` (available today) will be extended to generate this section directly, and `3va permissions learn` to persist the observed permission set into it.
+- Scope keys (`.`, `axios`, `express`) are for human readability only — every
+  scope's grants are merged into one flat set for the whole process (the
+  capability engine has no notion of "which module is calling").
+- `deny-*` fields win over any broader `allow-*`, letting you grant a vendored
+  directory by prefix while excluding one file with a known CVE.
+- Relative paths resolve against the directory containing `package.json`, not
+  the invocation `cwd` — the same file works from any working directory.
+- `${VAR}` in path fields expands against the environment of the host process
+  running `3va run` (evaluated before any capability exists), so one absolute
+  root that differs per server/team (`/var/node_module`, `/local/bin/node_modules`, …)
+  can be declared once and switched per environment without editing
+  `package.json`. An undefined variable is left as a literal placeholder
+  (fails closed) rather than collapsing to an empty string.
+- `"no-prompt": true` is equivalent to passing `--no-prompt` on every
+  invocation: any capability not covered by `allow-*` is denied silently
+  instead of prompting.
+
+`3va permissions suggest` (available today) will be extended to generate this
+section directly, and `3va permissions learn` to persist the observed
+permission set into it. Full reference:
+[`docs/06-permissions/06-package-json-permissions.md`](docs/06-permissions/06-package-json-permissions.md).
 
 ---
 
@@ -311,6 +335,18 @@ v2 roadmap targets RUDY (R-U-Dead-Yet) detection and adaptive rate limiting.
 
 ## Dev Tooling
 
+### `package.json` scripts fallback
+
+`3va <name>` runs `package.json.scripts.<name>` (via the project's actual package manager — `pnpm`/`yarn`/`bun`/`npm`, detected by lockfile) whenever `<name>` isn't one of 3va's own subcommands — the same convention `npm run <name>`/`pnpm <name>` follow:
+
+```bash
+3va build   # not a 3va subcommand → runs `pnpm run build` (or npm/yarn/bun)
+```
+
+Built-in subcommands always win: `3va dev`/`3va test`/etc. run 3va's own implementation, never a same-named script.
+
+**This is not sandboxed** — the delegated script is a real external process (the actual package manager, running arbitrary shell), completely outside `vvva_permissions`' capability model (which only governs JS executed inside 3va's own QuickJS engine). Consistent with `3va install` never running postinstall scripts, running it requires explicit consent: a `[y/N]` prompt in a TTY, `--yes` to skip it, `"3va": { "no-prompt": true }` in `package.json` to skip it permanently, or a hard deny with no prompt at all outside a TTY (CI, pipes).
+
 ### Test runner
 
 Jest-compatible. No configuration required.
@@ -329,11 +365,12 @@ Supports `describe`, `test`, `expect`, all standard matchers, `toMatchSnapshot`,
 
 ```bash
 3va bundle src/index.ts
-3va bundle src/index.ts -o dist/bundle.js --minify --source-map
-3va bundle src/index.ts --split   # code splitting
+3va bundle src/index.ts -o dist/bundle.js --minify
 ```
 
-Tree shaking, code splitting, minification, and source maps. For automatic rebuilds on change, use `3va dev` (the dev server watches and rebuilds with a 300 ms debounce).
+Walks the real import graph from the entry — project files, `node_modules` (both ESM and CommonJS packages), `.json`, and `.css` — and inlines everything into one self-contained file, runnable standalone via `3va run dist/bundle.js` or in a browser `<script>` tag. `.css` imports inject a `<style>` tag when a DOM is present (browser) and no-op otherwise (CLI/server); asset imports (images, fonts) embed the original path as a string, not a copied/hashed file — there's no production asset pipeline yet. The output directory is created automatically if it doesn't exist.
+
+`--minify` works; `--source-map` and `--split` are not yet implemented for this real multi-file bundling path (only for the legacy single-file path reachable via the library API, not the CLI) — the output runs correctly without them, just without a source map or separate chunks. Tree shaking also isn't applied to the multi-file graph yet. For automatic rebuilds on change, use `3va dev` (the dev server watches and rebuilds with a 300 ms debounce) — it also serves the project directly via on-demand transpilation without needing a full bundle at all.
 
 ### Dev server with HMR
 
@@ -342,7 +379,13 @@ Tree shaking, code splitting, minification, and source maps. For automatic rebui
 3va dev --port 3000 --host 0.0.0.0 --open
 ```
 
-Automatically detects the project framework (Next.js, Astro, Nuxt, SvelteKit, Remix, Gatsby, SolidStart, Qwik) and delegates to its native dev server. For custom servers, runs a built-in dev server with HMR via Server-Sent Events (`/__hmr`), 300ms debounce, and SPA fallback.
+Automatically detects the project framework (Next.js, Astro, Nuxt, SvelteKit, Remix, Gatsby, SolidStart, Qwik) and delegates to its native dev server. For custom/unrecognized setups, runs a built-in dev server:
+
+- **On-demand ESM serving** (Vite-style): a root-level `index.html` referencing `<script type="module" src="/src/main.jsx">` works directly — `.js`/`.jsx`/`.ts`/`.tsx` files are transpiled per request (JSX/TS stripped via oxc) and their import specifiers rewritten so the browser's native ES module loader can resolve them: project-relative imports stay project-relative, bare specifiers (`"react"`) and anything under `node_modules` resolve to `/@fs/<path>`. `import "./x.css"` is wrapped in a tiny style-injecting module; `.css` requested directly (a `<link>` tag) is served as-is.
+- A full bundle to `dist/bundle.js` still runs on start and on every source change (300ms debounce) — served at `/bundle.js`, useful for a hand-rolled `public/index.html` that references it directly instead of the raw entry.
+- SPA fallback checks `public/index.html`, then a root-level `index.html`, then a built-in default page — HMR is full-page reload via Server-Sent Events (`/__hmr`), not granular per-module hot replacement.
+
+Two Ctrl+C within the 30s drain window force an immediate shutdown — useful since a browser tab's open `/__hmr` connection otherwise keeps the server "draining" for the full timeout.
 
 ### CPU profiler
 
@@ -539,8 +582,8 @@ The JavaScript engine is QuickJS embedded via `rquickjs`. QuickJS is a small, em
 | Version | Target | Focus |
 |---------|--------|-------|
 | **2.0.0** | 2026-06-01 ✅ | Full runtime + PM + toolchain + Inspector + NAPI + WASM + PQ-TLS |
-| **2.1.0** | 2026 Q3 | package.json `"3va"` permissions key (generated by the existing `permissions suggest`/`learn` commands), permission profiles for common frameworks |
-| **2.2.0** | 2027 | Node.js compat v2 (full dns record resolution, repl, wasi, trace_events, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting |
+| **2.1.0** | 2026-07 ✅ | package.json `"3va"` permissions key (`allow-*`/`deny-*`, `${VAR}` expansion, `--no-prompt`) — see [`docs/06-permissions/06-package-json-permissions.md`](docs/06-permissions/06-package-json-permissions.md) |
+| **2.2.0** | 2027 | `permissions suggest`/`learn` generate/persist the `package.json` section directly; permission profiles for common frameworks; Node.js compat v2 (full dns record resolution, repl, wasi, trace_events, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting |
 | **3.0** | TBD | Post-quantum TLS in full production mode |
 
 Full roadmap: [`docs/12-roadmap/`](docs/12-roadmap/)
