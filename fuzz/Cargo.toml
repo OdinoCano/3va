@@ -2,7 +2,7 @@
 name = "vvva_bundler-fuzz"
 version = "0.0.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [package.metadata]
 cargo-fuzz = true
@@ -21,6 +21,24 @@ path = "../crates/permissions"
 [dependencies.vvva_pm]
 path = "../crates/pm"
 
+# The fuzz crate is its own workspace (required by cargo-fuzz), so it does
+# not inherit [patch.crates-io] from the root Cargo.toml. Re-declare the
+# same patches so the dependency graph here matches the one the root uses:
+#
+# - vvva-rquickjs-{sys,core}: vvva-rquickjs-core (path) depends on
+#   vvva-rquickjs-sys by *version*; without this patch the fuzz resolver
+#   pulls the crates.io copy, which has a different `JSContext` type than
+#   the local vendor copy and causes E0308 mismatches when vvva_js mixes
+#   the two.
+# - inferno + quick-xml: mirror the root patches so RUSTSEC-2026-0195
+#   stays fixed in the fuzz tree too (the denial would re-surface
+#   otherwise because fuzz has its own Cargo.lock).
+[patch.crates-io]
+vvva-rquickjs-sys  = { path = "../vendor/rquickjs-sys" }
+vvva-rquickjs-core = { path = "../vendor/rquickjs-core" }
+inferno            = { path = "../vendor/inferno" }
+quick-xml          = { path = "../vendor/quick-xml" }
+
 [[bin]]
 name = "fuzz_target_1"
 path = "fuzz_targets/fuzz_target_1.rs"
@@ -38,6 +56,27 @@ bench = false
 [[bin]]
 name = "fuzz_pm_resolver"
 path = "fuzz_targets/fuzz_pm_resolver.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_js_import_meta"
+path = "fuzz_targets/fuzz_js_import_meta.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_js_esm_resolver"
+path = "fuzz_targets/fuzz_js_esm_resolver.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_js_transpiler"
+path = "fuzz_targets/fuzz_js_transpiler.rs"
 test = false
 doc = false
 bench = false
