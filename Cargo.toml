@@ -58,7 +58,7 @@ p384 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
 md-5 = "0.10"
 notify = { version = "6", features = ["macos_fsevent"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
-inferno = { version = "0.11", default-features = false, features = ["nameattr"] }
+inferno = { version = "0.12", default-features = false, features = ["nameattr"] }
 
 
 [profile.release]
@@ -71,3 +71,10 @@ lto = "thin"
 # version (not path), and vvva-rquickjs-sys/core are not yet on crates.io.
 vvva-rquickjs-sys  = { path = "vendor/rquickjs-sys" }
 vvva-rquickjs-core = { path = "vendor/rquickjs-core" }
+# Local copies of inferno 0.12.6 + quick-xml 0.41.0. The published inferno
+# 0.12.6 pins quick-xml = ^0.39 which is vulnerable to RUSTSEC-2026-0195
+# (unbounded namespace-declaration allocation in NsReader). The patched
+# version relaxes the floor to 0.41, allowing the fixed quick-xml release.
+# Tracked upstream at jonhoo/inferno#369 — drop these once it ships.
+inferno   = { path = "vendor/inferno" }
+quick-xml = { path = "vendor/quick-xml" }

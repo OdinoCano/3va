@@ -186,7 +186,22 @@ fn strip_inline_flow_types(source: &str) -> String {
                 let mut depth = 0u32;
                 let mut i = 0;
                 let bytes = params.as_bytes();
-                // Build clean params skipping type annotations
+                // Bail out of the per-byte scanner if the line contains any
+                // non-ASCII bytes.  The scanner below uses `bytes[i] as char`
+                // to match against `(`/`)`/`:` literals, which would silently
+                // corrupt UTF-8 multi-byte sequences by widening them to
+                // U+00XX code points and re-encoding as multi-byte UTF-8.
+                // Falling back to the raw line copy preserves the input
+                // exactly; any Flow types in the line simply survive the
+                // strip pass (a minor regression for non-ASCII sources,
+                // matched by the corresponding OXC parse failure that would
+                // also bail out at the higher level).
+                if bytes.iter().any(|b| *b >= 0x80) {
+                    result.push_str(line);
+                    result.push('\n');
+                    continue;
+                }
+                // Build clean params skipping type annotations.
                 while i < bytes.len() {
                     let ch = bytes[i] as char;
                     match ch {
