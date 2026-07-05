@@ -1,0 +1,23 @@
+# Gitleaks configuration — only allow secrets scan, with explicit allowlist
+# for the test fixtures and documentation that intentionally contain example
+# credentials.  These are NOT real secrets.
+
+title = "3va gitleaks config"
+
+[extend]
+# Use the built-in ruleset as a starting point.
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and docs contain example credentials by design"
+paths = [
+  '''crates/firewall/Cargo.toml''',          # "mSlowloris/RUDY" is a path-like string, not a secret
+  '''docs/''',
+  '''crates/js/tests/compat_fixes\.rs''',   # PEM test fixture
+  '''crates/pm/src/secrets\.rs''',          # JWT example with placeholder values
+  '''\.md$''',
+  '''target/''',
+  '''fuzz/artifacts/''',
+  '''fuzz/corpus/''',
+  '''vendor/''',
+]

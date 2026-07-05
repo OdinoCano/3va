@@ -1,9 +1,39 @@
 #!/bin/sh
 # Pre-push hook — installed by cargo-husky
-# Runs on every `git push`. Blocks push if any test fails.
+# Runs on every `git push`. Blocks push if any check fails.
+# Order (cheapest first, fuzz last because it can take minutes):
+#   1. cargo test
+#   2. cargo deny check
+#   3. cargo fuzz run (short smoke test on each target)
+#   4. gitleaks (full-tree scan, catches anything added since the last push)
 set -e
 
-echo "[pre-push] Running test suite..."
+echo "[pre-push] 1/4 Running test suite..."
 cargo test
+
+echo "[pre-push] 2/4 Running cargo-deny..."
+cargo deny check
+
+echo "[pre-push] 3/4 Running fuzz smoke tests..."
+# A 10-second run per target catches obvious regressions without
+# slowing down every push.  Adjust the time budget by changing
+# MAX_FUZZ_TIME below.
+MAX_FUZZ_TIME=10
+FUZZ_DIR="fuzz"
+if [ -d "$FUZZ_DIR" ]; then
+    for target in $(cd "$FUZZ_DIR" && cargo fuzz list 2>/dev/null); do
+        echo "[pre-push]   fuzz: $target (${MAX_FUZZ_TIME}s)"
+        (cd "$FUZZ_DIR" && cargo fuzz run "$target" -- \
+            -max_total_time=$MAX_FUZZ_TIME \
+            -max_len=4096 \
+            -timeout=5)
+    done
+else
+    echo "[pre-push]   no fuzz/ directory found, skipping"
+fi
+
+echo "[pre-push] 4/4 Full-tree secret scan (gitleaks)..."
+# detect scans the entire working tree against the current commit.
+gitleaks detect --no-banner --redact
 
 echo "[pre-push] OK"
