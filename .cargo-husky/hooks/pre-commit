@@ -1,12 +1,22 @@
 #!/bin/sh
 # Pre-commit hook — installed by cargo-husky
-# Runs on every `git commit`. Blocks commit if formatting or lints fail.
+# Runs on every `git commit`. Blocks commit if any check fails.
+# Order (fastest first so a broken commit fails early):
+#   1. cargo fmt --check
+#   2. cargo clippy (lint)
+#   3. gitleaks (secret scan)
 set -e
 
-echo "[pre-commit] Checking formatting..."
+echo "[pre-commit] 1/3 Checking formatting..."
 cargo fmt --check
 
-echo "[pre-commit] Running clippy..."
+echo "[pre-commit] 2/3 Running clippy..."
 cargo clippy --all-targets -- -D warnings
+
+echo "[pre-commit] 3/3 Scanning for secrets (gitleaks)..."
+# Scan only the staged diff so unrelated secrets already in the tree
+# don't block unrelated work.  --staged inspects only what is about
+# to be committed; --no-gitignored is implied when --staged is used.
+gitleaks protect --staged --redact --no-banner
 
 echo "[pre-commit] OK"
