@@ -7,6 +7,8 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+## [v2.1.3] — 2026-07-06
+
 ### Fixed (major)
 
 - **`3va start` was a fire-and-forget daemon with no supervision, and `3va audit`'s heuristic scan
@@ -277,6 +279,8 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   adapters; real multi-NIC enumeration needs `getifaddrs` or a new dependency and wasn't judged
   worth it for a startup banner.
 
+- **`process.version` / `process.versions['3va']`** — Bumped to `2.1.3`.
+
 ### Added (continued)
 
 Found by cloning the real Vite and pnpm source into `.compatibility/` and comparing their actual
@@ -332,6 +336,19 @@ dev-server/resolution behavior against `3va dev`:
   behavior), and `--yes` or `"3va": { "no-prompt": true }` (reusing the existing
   `read_package_json_permissions`/`no-prompt` mechanism) to skip the prompt deliberately.
   (`crates/cli/src/main.rs`, `try_run_package_script`)
+
+- **Clippy warnings** — Resolved `dead_code`, `await_holding_lock`, and `manual_strip` lints
+  across builtin modules:
+  - `grpc.rs`: Changed `rx` from `std::sync::Mutex` to `tokio::sync::Mutex` to fix
+    `await_holding_lock` lint during `recv().await`
+  - `imap.rs`: Added `#[allow(dead_code)]` on unused `Logout` variant and `send_command` method;
+    fixed `manual_strip` to use `strip_prefix()`
+  - `irc.rs`, `mqtt.rs`, `ssh.rs`, `webrtc.rs`: Added `#[allow(dead_code)]` on unused struct fields
+  - Test files: Added `#[allow(dead_code)]` on `engine_with_net` helper functions
+
+### Security
+
+- See [SECURITY.md](./SECURITY.md) for RUSTSEC-2023-0071 status.
 
 ---
 
@@ -410,29 +427,6 @@ dev-server/resolution behavior against `3va dev`:
   deterministic builds from the committed `Cargo.lock`.
 
 - **`process.version` / `process.versions['3va']`** — Bumped to `2.1.0`.
-
-### Security
-
-- See [SECURITY.md](./SECURITY.md) for RUSTSEC-2023-0071 status.
-
----
-
-## [v2.1.3] — 2026-06-22
-
-### Fixed
-
-- **Clippy warnings** — Resolved `dead_code`, `await_holding_lock`, and `manual_strip` lints
-  across builtin modules:
-  - `grpc.rs`: Changed `rx` from `std::sync::Mutex` to `tokio::sync::Mutex` to fix
-    `await_holding_lock` lint during `recv().await`
-  - `imap.rs`: Added `#[allow(dead_code)]` on unused `Logout` variant and `send_command` method;
-    fixed `manual_strip` to use `strip_prefix()`
-  - `irc.rs`, `mqtt.rs`, `ssh.rs`, `webrtc.rs`: Added `#[allow(dead_code)]` on unused struct fields
-  - Test files: Added `#[allow(dead_code)]` on `engine_with_net` helper functions
-
-### Changed
-
-- **`process.version` / `process.versions['3va']`** — Bumped to `2.1.3`.
 
 ### Security
 
