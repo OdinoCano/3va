@@ -7,9 +7,9 @@ fuzz_target!(|data: &[u8]| {
     let Ok(input) = std::str::from_utf8(data) else { return };
 
     // Fuzz IIFE format
-    let mut gen = CodeGenerator::new(BundlerOptions::default());
-    gen.add_module("main".to_string(), input.to_string());
-    let _ = gen.generate();
+    let mut generator = CodeGenerator::new(BundlerOptions::default());
+    generator.add_module("main".to_string(), input.to_string());
+    let _ = generator.generate();
 
     // Fuzz ESM format
     let mut gen_esm = CodeGenerator::new(BundlerOptions {
