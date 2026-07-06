@@ -3129,7 +3129,8 @@ enum Commands {
     },
 
     // ── Process Management ────────────────────────────────────────────────────
-    /// Start a managed process in production (daemon)
+    /// Start a managed process in production (daemon), pm2-style: supervises
+    /// the app and restarts it on crash.
     Start {
         /// Name to identify the process (default: derived from entry filename)
         #[arg(long, short)]
@@ -3138,9 +3139,38 @@ enum Commands {
         /// Equivalent to `--port <port>` in the underlying `3va run`.
         #[arg(long, short)]
         port: Option<u16>,
+        /// Number of instances to run, load-balanced on the same port via
+        /// SO_REUSEPORT (cluster mode, like `pm2 -i`/Node's cluster module).
+        #[arg(long, short, default_value = "1")]
+        instances: u32,
+        /// Give up restarting after this many consecutive crashes.
+        #[arg(long = "max-restarts", default_value = "15")]
+        max_restarts: u32,
+        /// Stay in the foreground instead of daemonizing — this process IS
+        /// the supervisor. Use this as a container's CMD/ENTRYPOINT: unlike
+        /// the default (which forks a supervisor and exits), it never exits
+        /// on its own, so it's a valid PID 1.
+        #[arg(long, short)]
+        attach: bool,
         /// Entry file to run
         entry: PathBuf,
         /// Arguments passed to the entry script
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Internal: runs the process-supervisor loop. Invoked by `3va start`;
+    /// not meant to be run directly.
+    #[command(name = "__supervise", hide = true)]
+    Supervise {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "1")]
+        instances: u32,
+        #[arg(long = "max-restarts", default_value = "15")]
+        max_restarts: u32,
+        #[arg(long, short)]
+        port: Option<u16>,
+        entry: PathBuf,
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -3332,20 +3362,10 @@ enum Commands {
 }
 
 async fn run_audit_human(deny: bool, update_cache: bool, scan_secrets: bool) -> anyhow::Result<()> {
-    // ── Phase 1: static malware analysis ─────────────────────────────────────
+    // ── Phase 1: OSV known-vulnerability scan (real, confirmed CVEs/GHSAs) ───
+    // Shown first: this is ground truth, unlike the heuristic scan below.
     println!();
-    println!("=== Phase 1: Static Malware Analysis ===");
-    let malware_clean = match vvva_pm::audit_packages() {
-        Ok(clean) => clean,
-        Err(e) => {
-            eprintln!("  (skipped: {e})");
-            true // no node_modules → nothing to flag
-        }
-    };
-
-    // ── Phase 2: OSV known-vulnerability scan ────────────────────────────────
-    println!();
-    println!("=== Phase 2: Known Vulnerabilities (OSV) ===");
+    println!("=== Phase 1: Known Vulnerabilities (OSV) ===");
     let (report_opt, vuln_ok) = match vvva_pm::run_audit(update_cache).await {
         Ok(report) => {
             let ok = vvva_pm::print_audit_report(&report, deny);
@@ -3358,6 +3378,17 @@ async fn run_audit_human(deny: bool, update_cache: bool, scan_secrets: bool) -> 
     };
     let _ = report_opt;
 
+    // ── Phase 2: static heuristic scan (informational; pattern-based, not confirmed) ──
+    println!();
+    println!("=== Phase 2: Heuristic Pattern Scan (informational) ===");
+    let malware_clean = match vvva_pm::audit_packages() {
+        Ok(clean) => clean,
+        Err(e) => {
+            eprintln!("  (skipped: {e})");
+            true // no node_modules → nothing to flag
+        }
+    };
+
     // ── Phase 3: secrets detection (opt-in) ──────────────────────────────────
     let secrets_clean = if scan_secrets {
         println!();
@@ -3367,11 +3398,11 @@ async fn run_audit_human(deny: bool, update_cache: bool, scan_secrets: bool) -> 
         true
     };
 
-    if !malware_clean {
-        anyhow::bail!("Audit failed: malware patterns detected.");
-    }
     if !vuln_ok {
-        anyhow::bail!("Audit failed: CRITICAL or HIGH vulnerabilities detected.");
+        anyhow::bail!("Audit failed: CRITICAL or HIGH known vulnerabilities detected.");
+    }
+    if !malware_clean {
+        anyhow::bail!("Audit failed: critical-severity heuristic pattern detected.");
     }
     if !secrets_clean {
         anyhow::bail!("Audit failed: hardcoded secrets detected.");
@@ -3439,7 +3470,7 @@ async fn run_audit_json(deny: bool, update_cache: bool, scan_secrets: bool) -> a
                 "passed": false,
                 "error": e.to_string(),
                 "phases": {
-                    "malware": { "clean": malware_ok },
+                    "heuristic": { "clean": malware_ok },
                     "osv": { "total_packages": 0, "packages_with_vulns": 0, "total_vulns": 0, "critical": 0, "high": 0, "findings": [] },
                     "secrets": { "scanned": false, "findings": [] }
                 }
@@ -3479,7 +3510,7 @@ async fn run_audit_json(deny: bool, update_cache: bool, scan_secrets: bool) -> a
     let output = serde_json::json!({
         "passed": passed,
         "phases": {
-            "malware": {
+            "heuristic": {
                 "clean": malware_ok,
             },
             "osv": {
@@ -4180,6 +4211,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Start {
             name,
             port,
+            instances,
+            max_restarts,
+            attach,
             entry,
             args,
         } => {
@@ -4193,12 +4227,50 @@ async fn main() -> anyhow::Result<()> {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "app".to_string()),
             };
-            let info =
-                proc::start_process(&process_name, &resolved_entry, &cwd, &resolved_args, *port)?;
-            println!();
-            println!("  ✓ Started process '{}' (PID {})", info.name, info.pid);
-            println!("    Logs: {}", info.log_path.display());
-            println!();
+            if *attach {
+                println!(
+                    "  Running '{}' in the foreground ({} instance(s)) — Ctrl+C or SIGTERM to stop.",
+                    process_name, instances
+                );
+                proc::run_supervisor(
+                    &process_name,
+                    &resolved_entry,
+                    &resolved_args,
+                    *port,
+                    *instances,
+                    *max_restarts,
+                    true,
+                )
+                .await?;
+            } else {
+                let info = proc::start_managed(
+                    &process_name,
+                    &resolved_entry,
+                    &cwd,
+                    &resolved_args,
+                    *port,
+                    *instances,
+                    *max_restarts,
+                )?;
+                println!();
+                println!(
+                    "  ✓ Started process '{}' (supervisor PID {}, {} instance(s))",
+                    info.name, info.pid, instances
+                );
+                println!("    Logs: {}", info.log_path.display());
+                println!();
+            }
+        }
+        Commands::Supervise {
+            name,
+            instances,
+            max_restarts,
+            port,
+            entry,
+            args,
+        } => {
+            proc::run_supervisor(name, entry, args, *port, *instances, *max_restarts, false)
+                .await?;
         }
         Commands::Stop { name } => {
             proc::stop_process(name)?;
@@ -4218,26 +4290,28 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 println!();
                 println!(
-                    "  {:<20} {:<8} {:<8} {:<10} Entry",
-                    "Name", "PID", "Status", "Restarts"
+                    "  {:<20} {:<8} {:<8} {:<10} {:<6} Entry",
+                    "Name", "PID", "Status", "Restarts", "Inst"
                 );
                 println!(
-                    "  {:-<20} {:-<8} {:-<8} {:-<10} {:-<20}",
-                    "", "", "", "", ""
+                    "  {:-<20} {:-<8} {:-<8} {:-<10} {:-<6} {:-<20}",
+                    "", "", "", "", "", ""
                 );
                 for p in &processes {
                     let status_icon = match p.status.as_str() {
                         "running" => "\x1b[32mrunning\x1b[0m",
                         "stopped" => "\x1b[33mstopped\x1b[0m",
                         "error" => "\x1b[31merror\x1b[0m",
+                        "crashed" => "\x1b[31mcrashed\x1b[0m",
                         _ => &p.status,
                     };
                     println!(
-                        "  {:<20} {:<8} {} {:<10} {}",
+                        "  {:<20} {:<8} {} {:<10} {:<6} {}",
                         p.name,
                         p.pid,
                         status_icon,
                         p.restarts,
+                        p.instances,
                         p.entry.display()
                     );
                 }

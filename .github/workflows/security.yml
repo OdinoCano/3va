@@ -91,15 +91,22 @@ jobs:
           targets: x86_64-unknown-linux-gnu
           components: rust-src
       - uses: Swatinem/rust-cache@v2
+      # `--tests` skips doctests: rustdoc's doctest linker invocation doesn't
+      # pass -fsanitize=address/undefined to `cc`, so ASan/UBSan-instrumented
+      # std/core symbols pulled into the doctest binary are left undefined
+      # and every doctest fails to link (not a real bug in the crate — a
+      # known rustdoc + -Z sanitizer + -Zbuild-std interaction). The unit and
+      # integration tests below are what actually exercise unsafe code paths
+      # anyway; doc examples aren't what these gates are for.
       - name: AddressSanitizer
         run: |
           RUSTFLAGS="-Z sanitizer=address" \
-            cargo +nightly test -Zbuild-std \
+            cargo +nightly test -Zbuild-std --tests \
             --target x86_64-unknown-linux-gnu \
             -p vvva_permissions -p vvva_js
       - name: UndefinedBehaviorSanitizer
         run: |
           RUSTFLAGS="-Z sanitizer=undefined" \
-            cargo +nightly test -Zbuild-std \
+            cargo +nightly test -Zbuild-std --tests \
             --target x86_64-unknown-linux-gnu \
             -p vvva_permissions -p vvva_js
