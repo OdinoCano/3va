@@ -1,23 +1,37 @@
 //! SSH/SFTP client built-in module
 //!
-//! Provides: `require('ssh2')` with `Client` class
+//! Provides: `require('ssh2')` with `Client` class, backed by real SSH via
+//! `russh` (client protocol, password auth, exec channels) and `russh-sftp`
+//! (SFTP subsystem: readdir/open/mkdir/rmdir/unlink/rename/stat/read/write).
+//!
+//! All async natives below always *resolve* (never reject) with a JSON
+//! envelope `{"ok":true,"data":...}` / `{"ok":false,"code":"...","message":"..."}`.
+//! This sidesteps constructing real `Error` objects (with `.code`) from a
+//! Rust async block driven off the JS thread — `Ctx` can't safely call back
+//! into the JS engine from an arbitrary await-resumption point, matching the
+//! same constraint `tcp.rs`'s `__netAcceptAsync` and `dns`'s `__dnsQuery`
+//! already work around. The JS glue below parses the envelope and builds a
+//! proper `new Error()` with `.code` on the JS thread, where it's safe to do so.
 //!
 //! Native functions:
 //! - `__sshCreate()` -> id
-//! - `__sshConnect(id, host, port, username, authType, authData)`
-//! - `__sshExec(id, command)` -> JSON
-//! - `__sshSftp(id)` -> sftpId
-//! - `__sftpReaddir(id, path)` -> JSON
-//! - `__sftpOpen(id, path, flags, mode)` -> handle
-//! - `__sftpClose(id, handle)`
-//! - `__sftpMkdir(id, path, mode)`
-//! - `__sftpRmdir(id, path)`
-//! - `__sftpUnlink(id, path)`
-//! - `__sftpRename(id, oldPath, newPath)`
-//! - `__sftpStat(id, path)` -> JSON
+//! - `__sshConnect(id, host, port, username, password)` -> Promise<envelope>
+//! - `__sshExec(id, command)` -> Promise<envelope {stdout, stderr, code}>
+//! - `__sshSftp(id)` -> Promise<envelope {sftpId}>
+//! - `__sftpReaddir(id, path)` -> Promise<envelope [entries]>
+//! - `__sftpReadFile(id, path)` -> Promise<envelope [bytes]>
+//! - `__sftpWriteFile(id, path, bytes)` -> Promise<envelope>
+//! - `__sftpMkdir(id, path)` / `__sftpRmdir` / `__sftpUnlink` -> Promise<envelope>
+//! - `__sftpRename(id, oldPath, newPath)` -> Promise<envelope>
+//! - `__sftpStat(id, path)` -> Promise<envelope {size, mtime, mode}>
 //! - `__sshClose(id)`
 
+use rquickjs::function::Async;
 use rquickjs::{Ctx, Function, Result};
+use russh::ChannelMsg;
+use russh::client::{self, Handle};
+use russh_sftp::client::SftpSession;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use vvva_permissions::{Capability, PermissionState};
@@ -25,26 +39,37 @@ use vvva_permissions::{Capability, PermissionState};
 type SshId = u32;
 type SftpId = u32;
 
-struct SshState {
-    host: String,
-    port: u16,
-    username: String,
-    connected: bool,
+struct SshHandler;
+impl client::Handler for SshHandler {
+    type Error = russh::Error;
+    // Accepts any server key (StrictHostKeyChecking=no equivalent). The
+    // library default is to reject every key, so this MUST be overridden or
+    // every connection fails during key exchange.
+    // TODO: verify against a known fingerprint instead of trusting blindly.
+    async fn check_server_key(
+        &mut self,
+        _key: &russh::keys::PublicKey,
+    ) -> std::result::Result<bool, Self::Error> {
+        Ok(true)
+    }
 }
 
-struct SftpState {
-    #[allow(dead_code)]
-    ssh_id: SshId,
+struct SshConn {
+    handle: Handle<SshHandler>,
 }
 
-static SSH_REGISTRY: OnceLock<Mutex<HashMap<SshId, SshState>>> = OnceLock::new();
-static SFTP_REGISTRY: OnceLock<Mutex<HashMap<SftpId, SftpState>>> = OnceLock::new();
+struct SftpConn {
+    sftp: SftpSession,
+}
 
-fn ssh_registry() -> &'static Mutex<HashMap<SshId, SshState>> {
+static SSH_REGISTRY: OnceLock<Mutex<HashMap<SshId, Arc<SshConn>>>> = OnceLock::new();
+static SFTP_REGISTRY: OnceLock<Mutex<HashMap<SftpId, Arc<SftpConn>>>> = OnceLock::new();
+
+fn ssh_registry() -> &'static Mutex<HashMap<SshId, Arc<SshConn>>> {
     SSH_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn sftp_registry() -> &'static Mutex<HashMap<SftpId, SftpState>> {
+fn sftp_registry() -> &'static Mutex<HashMap<SftpId, Arc<SftpConn>>> {
     SFTP_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -58,188 +83,344 @@ fn next_sftp_id() -> SftpId {
     C.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Clones the connection out from under the registry lock so the guard is
+/// never held across an `.await` (holding a `std::sync::Mutex` guard across
+/// an await point can stall or deadlock the whole tokio worker if another
+/// task needs the same lock while this one's I/O is in flight).
+fn get_ssh(id: SshId) -> Option<Arc<SshConn>> {
+    ssh_registry().lock().unwrap().get(&id).cloned()
+}
+
+fn get_sftp(id: SftpId) -> Option<Arc<SftpConn>> {
+    sftp_registry().lock().unwrap().get(&id).cloned()
+}
+
+fn ok_envelope(data: serde_json::Value) -> String {
+    json!({"ok": true, "data": data}).to_string()
+}
+
+fn err_envelope(code: &str, message: impl std::fmt::Display) -> String {
+    json!({"ok": false, "code": code, "message": message.to_string()}).to_string()
+}
+
 pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
     let globals = ctx.globals();
-    let _perms = permissions.clone();
 
-    let create_fn = Function::new(ctx.clone(), move || -> SshId {
-        let id = next_ssh_id();
-        ssh_registry().lock().unwrap().insert(
-            id,
-            SshState {
-                host: String::new(),
-                port: 22,
-                username: String::new(),
-                connected: false,
-            },
-        );
-        id
-    })?;
+    let create_fn = Function::new(ctx.clone(), move || -> SshId { next_ssh_id() })?;
     globals.set("__sshCreate", create_fn)?;
 
-    let perms2 = permissions.clone();
+    let perms = permissions.clone();
     let connect_fn = Function::new(
         ctx.clone(),
-        move |id: SshId,
-              host: String,
-              port: u16,
-              username: String,
-              _auth_type: String,
-              _auth_data: String|
-              -> Option<String> {
-            if !perms2.check(&Capability::Network(host.clone())) {
-                return Some(format!("EACCES: permission denied (--allow-net={})", host));
-            }
-            let mut reg = ssh_registry().lock().unwrap();
-            if let Some(state) = reg.get_mut(&id) {
-                state.host = host;
-                state.port = port;
-                state.username = username;
-                state.connected = true;
-                None
-            } else {
-                Some("Invalid SSH ID".to_string())
-            }
-        },
+        Async(
+            move |id: SshId, host: String, port: u16, username: String, password: String| {
+                let perms = perms.clone();
+                async move {
+                    if !perms.check(&Capability::Network(host.clone())) {
+                        return Ok::<String, rquickjs::Error>(err_envelope(
+                            "EACCES",
+                            format!("Network access denied. Run with --allow-net={host}"),
+                        ));
+                    }
+
+                    let config = Arc::new(client::Config::default());
+                    let mut handle =
+                        match client::connect(config, (&host[..], port), SshHandler).await {
+                            Ok(h) => h,
+                            Err(e) => return Ok(err_envelope("ECONNREFUSED", e)),
+                        };
+
+                    match handle.authenticate_password(&username, &password).await {
+                        Ok(auth) if auth.success() => {
+                            ssh_registry()
+                                .lock()
+                                .unwrap()
+                                .insert(id, Arc::new(SshConn { handle }));
+                            Ok(ok_envelope(serde_json::Value::Null))
+                        }
+                        Ok(_) => Ok(err_envelope("EAUTH", "authentication failed")),
+                        Err(e) => Ok(err_envelope("EAUTH", e)),
+                    }
+                }
+            },
+        ),
     )?;
     globals.set("__sshConnect", connect_fn)?;
 
     let exec_fn = Function::new(
         ctx.clone(),
-        move |id: SshId, _command: String| -> Option<String> {
-            let reg = ssh_registry().lock().unwrap();
-            if let Some(state) = reg.get(&id) {
-                if !state.connected {
-                    return Some("Not connected".to_string());
+        Async(move |id: SshId, command: String| async move {
+            let conn = match get_ssh(id) {
+                Some(c) => c,
+                None => {
+                    return Ok::<String, rquickjs::Error>(err_envelope(
+                        "ENOTCONN",
+                        "Invalid SSH ID",
+                    ));
                 }
-                Some(r#"{"stdout":"","stderr":"","code":0}"#.to_string())
-            } else {
-                Some("Invalid SSH ID".to_string())
+            };
+
+            let mut channel = match conn.handle.channel_open_session().await {
+                Ok(ch) => ch,
+                Err(e) => {
+                    return Ok(err_envelope(
+                        "EIO",
+                        format!("channel_open_session failed: {e}"),
+                    ));
+                }
+            };
+
+            if let Err(e) = channel.exec(true, command.as_bytes()).await {
+                return Ok(err_envelope("EIO", format!("exec failed: {e}")));
             }
-        },
+
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut code = None;
+            loop {
+                match channel.wait().await {
+                    Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
+                    Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
+                        stderr.extend_from_slice(&data)
+                    }
+                    Some(ChannelMsg::ExitStatus { exit_status }) => code = Some(exit_status),
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                    _ => {}
+                }
+            }
+
+            Ok(ok_envelope(json!({
+                "stdout": String::from_utf8_lossy(&stdout),
+                "stderr": String::from_utf8_lossy(&stderr),
+                "code": code.unwrap_or(0),
+            })))
+        }),
     )?;
     globals.set("__sshExec", exec_fn)?;
 
-    let sftp_fn = Function::new(ctx.clone(), move |id: SshId| -> Option<String> {
-        let reg = ssh_registry().lock().unwrap();
-        if let Some(state) = reg.get(&id) {
-            if !state.connected {
-                return Some("Not connected".to_string());
+    let sftp_fn = Function::new(
+        ctx.clone(),
+        Async(move |id: SshId| async move {
+            let conn = match get_ssh(id) {
+                Some(c) => c,
+                None => {
+                    return Ok::<String, rquickjs::Error>(err_envelope(
+                        "ENOTCONN",
+                        "Invalid SSH ID",
+                    ));
+                }
+            };
+
+            let channel = match conn.handle.channel_open_session().await {
+                Ok(ch) => ch,
+                Err(e) => {
+                    return Ok(err_envelope(
+                        "EIO",
+                        format!("channel_open_session failed: {e}"),
+                    ));
+                }
+            };
+            if let Err(e) = channel.request_subsystem(true, "sftp").await {
+                return Ok(err_envelope(
+                    "EIO",
+                    format!("sftp subsystem request failed: {e}"),
+                ));
             }
-            drop(reg);
+            let sftp = match SftpSession::new(channel.into_stream()).await {
+                Ok(s) => s,
+                Err(e) => return Ok(err_envelope("EIO", format!("sftp session failed: {e}"))),
+            };
+
             let sftp_id = next_sftp_id();
             sftp_registry()
                 .lock()
                 .unwrap()
-                .insert(sftp_id, SftpState { ssh_id: id });
-            Some(sftp_id.to_string())
-        } else {
-            Some("Invalid SSH ID".to_string())
-        }
-    })?;
+                .insert(sftp_id, Arc::new(SftpConn { sftp }));
+            Ok(ok_envelope(json!({ "sftpId": sftp_id })))
+        }),
+    )?;
     globals.set("__sshSftp", sftp_fn)?;
 
     let readdir_fn = Function::new(
         ctx.clone(),
-        move |id: SftpId, _path: String| -> Option<String> {
-            let reg = sftp_registry().lock().unwrap();
-            if let Some(_state) = reg.get(&id) {
-                Some("[]".to_string())
-            } else {
-                Some("Invalid SFTP ID".to_string())
+        Async(move |id: SftpId, path: String| async move {
+            let conn = match get_sftp(id) {
+                Some(c) => c,
+                None => {
+                    return Ok::<String, rquickjs::Error>(err_envelope(
+                        "ENOTCONN",
+                        "Invalid SFTP ID",
+                    ));
+                }
+            };
+            match conn.sftp.read_dir(&path).await {
+                Ok(rd) => {
+                    let entries: Vec<serde_json::Value> = rd
+                        .map(|entry| {
+                            let meta = entry.metadata();
+                            json!({
+                                "filename": entry.file_name(),
+                                "longname": entry.file_name(),
+                                "attrs": {
+                                    "size": meta.len(),
+                                    "mtime": meta.mtime.unwrap_or(0),
+                                    "atime": meta.atime.unwrap_or(0),
+                                    "mode": meta.permissions.unwrap_or(0),
+                                }
+                            })
+                        })
+                        .collect();
+                    Ok(ok_envelope(serde_json::Value::Array(entries)))
+                }
+                Err(e) => Ok(err_envelope("EIO", format!("readdir failed: {e}"))),
             }
-        },
+        }),
     )?;
     globals.set("__sftpReaddir", readdir_fn)?;
 
-    let open_fn = Function::new(
+    let read_file_fn = Function::new(
         ctx.clone(),
-        move |id: SftpId, path: String, _flags: String, _mode: u32| -> Option<String> {
-            let reg = sftp_registry().lock().unwrap();
-            if let Some(_state) = reg.get(&id) {
-                Some(format!(r#"{{"handle":"{}"}}"#, path))
-            } else {
-                Some("Invalid SFTP ID".to_string())
+        Async(move |id: SftpId, path: String| async move {
+            let conn = match get_sftp(id) {
+                Some(c) => c,
+                None => {
+                    return Ok::<String, rquickjs::Error>(err_envelope(
+                        "ENOTCONN",
+                        "Invalid SFTP ID",
+                    ));
+                }
+            };
+            match conn.sftp.read(&path).await {
+                Ok(bytes) => Ok(ok_envelope(json!(bytes))),
+                Err(e) => Ok(err_envelope("EIO", format!("read failed: {e}"))),
             }
-        },
+        }),
     )?;
-    globals.set("__sftpOpen", open_fn)?;
+    globals.set("__sftpReadFile", read_file_fn)?;
 
-    let close_fn = Function::new(
+    let write_file_fn = Function::new(
         ctx.clone(),
-        move |id: SftpId, _handle: String| -> Option<String> {
-            let reg = sftp_registry().lock().unwrap();
-            if let Some(_state) = reg.get(&id) {
-                None
-            } else {
-                Some("Invalid SFTP ID".to_string())
+        Async(move |id: SftpId, path: String, data: Vec<u8>| async move {
+            let conn = match get_sftp(id) {
+                Some(c) => c,
+                None => {
+                    return Ok::<String, rquickjs::Error>(err_envelope(
+                        "ENOTCONN",
+                        "Invalid SFTP ID",
+                    ));
+                }
+            };
+            match conn.sftp.write(&path, &data).await {
+                Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
+                Err(e) => Ok(err_envelope("EIO", format!("write failed: {e}"))),
             }
-        },
+        }),
     )?;
-    globals.set("__sftpClose", close_fn)?;
+    globals.set("__sftpWriteFile", write_file_fn)?;
 
     let mkdir_fn = Function::new(
         ctx.clone(),
-        move |id: SftpId, _path: String, _mode: u32| -> Option<String> {
-            let reg = sftp_registry().lock().unwrap();
-            if let Some(_state) = reg.get(&id) {
-                None
-            } else {
-                Some("Invalid SFTP ID".to_string())
+        Async(move |id: SftpId, path: String| async move {
+            let conn = match get_sftp(id) {
+                Some(c) => c,
+                None => {
+                    return Ok::<String, rquickjs::Error>(err_envelope(
+                        "ENOTCONN",
+                        "Invalid SFTP ID",
+                    ));
+                }
+            };
+            match conn.sftp.create_dir(&path).await {
+                Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
+                Err(e) => Ok(err_envelope("EIO", format!("mkdir failed: {e}"))),
             }
-        },
+        }),
     )?;
     globals.set("__sftpMkdir", mkdir_fn)?;
 
     let rmdir_fn = Function::new(
         ctx.clone(),
-        move |id: SftpId, _path: String| -> Option<String> {
-            let reg = sftp_registry().lock().unwrap();
-            if let Some(_state) = reg.get(&id) {
-                None
-            } else {
-                Some("Invalid SFTP ID".to_string())
+        Async(move |id: SftpId, path: String| async move {
+            let conn = match get_sftp(id) {
+                Some(c) => c,
+                None => {
+                    return Ok::<String, rquickjs::Error>(err_envelope(
+                        "ENOTCONN",
+                        "Invalid SFTP ID",
+                    ));
+                }
+            };
+            match conn.sftp.remove_dir(&path).await {
+                Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
+                Err(e) => Ok(err_envelope("EIO", format!("rmdir failed: {e}"))),
             }
-        },
+        }),
     )?;
     globals.set("__sftpRmdir", rmdir_fn)?;
 
     let unlink_fn = Function::new(
         ctx.clone(),
-        move |id: SftpId, _path: String| -> Option<String> {
-            let reg = sftp_registry().lock().unwrap();
-            if let Some(_state) = reg.get(&id) {
-                None
-            } else {
-                Some("Invalid SFTP ID".to_string())
+        Async(move |id: SftpId, path: String| async move {
+            let conn = match get_sftp(id) {
+                Some(c) => c,
+                None => {
+                    return Ok::<String, rquickjs::Error>(err_envelope(
+                        "ENOTCONN",
+                        "Invalid SFTP ID",
+                    ));
+                }
+            };
+            match conn.sftp.remove_file(&path).await {
+                Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
+                Err(e) => Ok(err_envelope("EIO", format!("unlink failed: {e}"))),
             }
-        },
+        }),
     )?;
     globals.set("__sftpUnlink", unlink_fn)?;
 
     let rename_fn = Function::new(
         ctx.clone(),
-        move |id: SftpId, _old_path: String, _new_path: String| -> Option<String> {
-            let reg = sftp_registry().lock().unwrap();
-            if let Some(_state) = reg.get(&id) {
-                None
-            } else {
-                Some("Invalid SFTP ID".to_string())
-            }
-        },
+        Async(
+            move |id: SftpId, old_path: String, new_path: String| async move {
+                let conn = match get_sftp(id) {
+                    Some(c) => c,
+                    None => {
+                        return Ok::<String, rquickjs::Error>(err_envelope(
+                            "ENOTCONN",
+                            "Invalid SFTP ID",
+                        ));
+                    }
+                };
+                match conn.sftp.rename(&old_path, &new_path).await {
+                    Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
+                    Err(e) => Ok(err_envelope("EIO", format!("rename failed: {e}"))),
+                }
+            },
+        ),
     )?;
     globals.set("__sftpRename", rename_fn)?;
 
     let stat_fn = Function::new(
         ctx.clone(),
-        move |id: SftpId, _path: String| -> Option<String> {
-            let reg = sftp_registry().lock().unwrap();
-            if let Some(_state) = reg.get(&id) {
-                Some(r#"{"size":0,"mtime":0,"mode":0}"#.to_string())
-            } else {
-                Some("Invalid SFTP ID".to_string())
+        Async(move |id: SftpId, path: String| async move {
+            let conn = match get_sftp(id) {
+                Some(c) => c,
+                None => {
+                    return Ok::<String, rquickjs::Error>(err_envelope(
+                        "ENOTCONN",
+                        "Invalid SFTP ID",
+                    ));
+                }
+            };
+            match conn.sftp.metadata(&path).await {
+                Ok(attrs) => Ok(ok_envelope(json!({
+                    "size": attrs.len(),
+                    "mtime": attrs.mtime.unwrap_or(0),
+                    "mode": attrs.permissions.unwrap_or(0),
+                }))),
+                Err(e) => Ok(err_envelope("EIO", format!("stat failed: {e}"))),
             }
-        },
+        }),
     )?;
     globals.set("__sftpStat", stat_fn)?;
 
@@ -249,61 +430,69 @@ pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
     })?;
     globals.set("__sshClose", ssh_close_fn)?;
 
-    ctx.eval::<(), _>(r#"
+    ctx.eval::<(), _>(
+        r#"
     (function() {
+        // Parses the {"ok":bool,"data"|"code"+"message"} envelope every
+        // native async SSH/SFTP function resolves with (never rejects — see
+        // module doc comment) into either the real data or a proper Error
+        // with a Node-style `.code`, constructed here on the JS thread.
+        function _unwrap(json) {
+            var env = JSON.parse(json);
+            if (env.ok) return { error: null, data: env.data };
+            var err = new Error(env.message);
+            err.code = env.code;
+            return { error: err, data: null };
+        }
+
         function Client(options) {
             this._id = null;
             this._connected = false;
-            this._sftp = null;
             this._handlers = {};
             this._opts = options || {};
         }
 
         Client.prototype.connect = function(options) {
+            var self = this;
             options = options || {};
             var host = options.host || 'localhost';
             var port = options.port || 22;
             var username = options.username || 'root';
-            var password = options.password || null;
-            var privateKey = options.privateKey || null;
-            var authType = password ? 'password' : 'publickey';
-            var authData = password || (privateKey || '');
+            var password = options.password || '';
 
             this._id = __sshCreate();
-            var err = __sshConnect(this._id, host, port, username, authType, authData);
-            if (err) throw new Error(err);
-            this._connected = true;
-            if (options.readyTimeout !== undefined) {
-                var self = this;
-                setTimeout(function() {
-                    if (self._connected && self._connectCallback) {
-                        self._connectCallback();
-                    }
-                }, options.readyTimeout);
-            }
+            __sshConnect(this._id, host, port, username, password).then(function(json) {
+                var r = _unwrap(json);
+                if (r.error) { self.emit('error', r.error); return; }
+                self._connected = true;
+                self.emit('ready');
+            }).catch(function(err) { self.emit('error', err); });
+
             return this;
         };
 
-        function fakeChannel() {
-            var ch = { stdout: { on: function() { return this; }, once: function() { return this; } },
-                       stderr: { on: function() { return this; }, once: function() { return this; } } };
-            ch.on = ch.once = function(e, cb) { if (e === 'close') setTimeout(function() { cb(0); }, 10); return ch; };
-            return ch;
-        }
-
         Client.prototype.exec = function(command, callback) {
-            if (!this._id) {
-                var ch = fakeChannel();
-                if (callback) callback(null, ch);
-                return ch;
+            var self = this;
+            if (!this._connected) {
+                var err = Object.assign(new Error('Not connected'), { code: 'ENOTCONN' });
+                if (callback) callback(err, null);
+                return this;
             }
-            var result = __sshExec(this._id, command);
-            if (!result || result === 'null') result = '{"stdout":"","stderr":"","code":0}';
-            var data;
-            try { data = JSON.parse(result); } catch(e) { data = { stdout: '', stderr: '', code: 0 }; }
-            var ch = fakeChannel();
-            if (callback) callback(null, ch);
-            return ch;
+            __sshExec(this._id, command).then(function(json) {
+                var r = _unwrap(json);
+                if (r.error) { if (callback) callback(r.error, null); return; }
+                var ch = new (require('events').EventEmitter)();
+                ch.stdout = new (require('events').EventEmitter)();
+                ch.stderr = new (require('events').EventEmitter)();
+                if (callback) callback(null, ch);
+                setTimeout(function() {
+                    ch.stdout.emit('data', Buffer.from(r.data.stdout));
+                    if (r.data.stderr) ch.stderr.emit('data', Buffer.from(r.data.stderr));
+                    ch.emit('close', r.data.code);
+                    ch.emit('exit', r.data.code);
+                }, 0);
+            }).catch(function(err) { if (callback) callback(err, null); });
+            return this;
         };
 
         Client.prototype.shell = function(options, callback) {
@@ -314,16 +503,17 @@ pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         };
 
         Client.prototype.sftp = function(callback) {
-            if (!this._id) {
-                var wrapper = new SftpWrapper(0);
-                if (callback) callback(null, wrapper);
-                return wrapper;
+            var self = this;
+            if (!this._connected) {
+                var err = Object.assign(new Error('Not connected'), { code: 'ENOTCONN' });
+                if (callback) callback(err, null);
+                return;
             }
-            var result = __sshSftp(this._id);
-            this._sftpId = result ? parseInt(result) : 0;
-            var wrapper = new SftpWrapper(this._sftpId);
-            if (callback) callback(null, wrapper);
-            return wrapper;
+            __sshSftp(this._id).then(function(json) {
+                var r = _unwrap(json);
+                if (r.error) { if (callback) callback(r.error, null); return; }
+                if (callback) callback(null, new SftpWrapper(r.data.sftpId));
+            }).catch(function(err) { if (callback) callback(err, null); });
         };
 
         Client.prototype.end = function() {
@@ -336,66 +526,9 @@ pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
 
         Client.prototype.disconnect = Client.prototype.end;
 
-        Client.prototype.readFile = function(path, options, callback) {
-            if (typeof options === 'function') { callback = options; }
-            if (callback) callback(null, '');
-            return '';
-        };
-
-        Client.prototype.writeFile = function(path, data, options, callback) {
-            if (typeof options === 'function') { callback = options; }
-            if (callback) callback(null);
-            return this;
-        };
-
-        Client.prototype.stat = function(path, callback) {
-            var sftp = this.sftp();
-            return sftp ? sftp.stat(path, callback) : (callback && callback(null, {size:0,mtime:0,mode:0}));
-        };
-
-        Client.prototype.mkdir = function(path, attrs, callback) {
-            if (typeof attrs === 'function') { callback = attrs; attrs = {}; }
-            var sftp = this.sftp();
-            if (sftp) return sftp.mkdir(path, attrs, callback);
-            if (callback) callback(null);
-            return this;
-        };
-
-        Client.prototype.rmdir = function(path, callback) {
-            var sftp = this.sftp();
-            if (sftp) return sftp.rmdir(path, callback);
-            if (callback) callback(null);
-            return this;
-        };
-
-        Client.prototype.unlink = function(path, callback) {
-            var sftp = this.sftp();
-            if (sftp) return sftp.unlink(path, callback);
-            if (callback) callback(null);
-            return this;
-        };
-
-        Client.prototype.rename = function(from, to, callback) {
-            var sftp = this.sftp();
-            if (sftp) return sftp.rename(from, to, callback);
-            if (callback) callback(null);
-            return this;
-        };
-
-        Client.prototype.readdir = function(path, callback) {
-            var sftp = this.sftp();
-            if (sftp) return sftp.readdir(path, callback);
-            if (callback) callback(null, []);
-            return [];
-        };
-
         Client.prototype.on = Client.prototype.addListener = function(event, listener) {
             this._handlers[event] = this._handlers[event] || [];
             this._handlers[event].push(listener);
-            if (event === 'ready' && this._connected) {
-                var self = this;
-                setTimeout(function() { listener(); }, 10);
-            }
             return this;
         };
 
@@ -412,60 +545,131 @@ pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             (this._handlers[event] || []).forEach(function(h) { h.apply(null, args); });
         };
 
+        // Convenience wrappers that go through sftp() automatically, mirroring
+        // the ssh2 npm package's Client-level shortcuts.
+        Client.prototype.readFile = function(path, options, callback) {
+            if (typeof options === 'function') { callback = options; }
+            this.sftp(function(err, sftp) {
+                if (err) { if (callback) callback(err); return; }
+                sftp.readFile(path, callback);
+            });
+        };
+
+        Client.prototype.writeFile = function(path, data, options, callback) {
+            if (typeof options === 'function') { callback = options; }
+            this.sftp(function(err, sftp) {
+                if (err) { if (callback) callback(err); return; }
+                sftp.writeFile(path, data, callback);
+            });
+        };
+
+        Client.prototype.stat = function(path, callback) {
+            this.sftp(function(err, sftp) {
+                if (err) { if (callback) callback(err, null); return; }
+                sftp.stat(path, callback);
+            });
+        };
+
+        Client.prototype.mkdir = function(path, attrs, callback) {
+            if (typeof attrs === 'function') { callback = attrs; }
+            this.sftp(function(err, sftp) {
+                if (err) { if (callback) callback(err); return; }
+                sftp.mkdir(path, callback);
+            });
+        };
+
+        Client.prototype.rmdir = function(path, callback) {
+            this.sftp(function(err, sftp) {
+                if (err) { if (callback) callback(err); return; }
+                sftp.rmdir(path, callback);
+            });
+        };
+
+        Client.prototype.unlink = function(path, callback) {
+            this.sftp(function(err, sftp) {
+                if (err) { if (callback) callback(err); return; }
+                sftp.unlink(path, callback);
+            });
+        };
+
+        Client.prototype.rename = function(from, to, callback) {
+            this.sftp(function(err, sftp) {
+                if (err) { if (callback) callback(err); return; }
+                sftp.rename(from, to, callback);
+            });
+        };
+
+        Client.prototype.readdir = function(path, callback) {
+            this.sftp(function(err, sftp) {
+                if (err) { if (callback) callback(err, []); return; }
+                sftp.readdir(path, callback);
+            });
+        };
+
         function SftpWrapper(sftpId) {
             this._sftpId = sftpId;
         }
 
         SftpWrapper.prototype.readdir = function(path, callback) {
-            var result = __sftpReaddir(this._sftpId, path);
-            var data; try { data = JSON.parse(result); } catch(e) { data = []; }
-            if (callback) callback(null, data);
-            return data;
+            __sftpReaddir(this._sftpId, path).then(function(json) {
+                var r = _unwrap(json);
+                if (callback) callback(r.error, r.error ? [] : r.data);
+            }).catch(function(err) { if (callback) callback(err, []); });
         };
 
-        SftpWrapper.prototype.open = function(path, flags, mode, callback) {
-            var result = __sftpOpen(this._sftpId, path, flags, mode || 0);
-            var handle; try { handle = JSON.parse(result).handle; } catch(e) { handle = path; }
-            if (callback) callback(null, handle);
-            return handle;
+        SftpWrapper.prototype.readFile = function(path, options, callback) {
+            if (typeof options === 'function') { callback = options; }
+            __sftpReadFile(this._sftpId, path).then(function(json) {
+                var r = _unwrap(json);
+                if (r.error) { if (callback) callback(r.error, null); return; }
+                if (callback) callback(null, Buffer.from(r.data));
+            }).catch(function(err) { if (callback) callback(err, null); });
         };
 
-        SftpWrapper.prototype.close = function(handle, callback) {
-            __sftpClose(this._sftpId, handle);
-            if (callback) callback(null);
-            return this;
+        SftpWrapper.prototype.writeFile = function(path, data, options, callback) {
+            if (typeof options === 'function') { callback = options; }
+            var bytes = typeof data === 'string'
+                ? Array.from(new TextEncoder().encode(data))
+                : Array.from(data instanceof Uint8Array ? data : new Uint8Array(data));
+            __sftpWriteFile(this._sftpId, path, bytes).then(function(json) {
+                var r = _unwrap(json);
+                if (callback) callback(r.error);
+            }).catch(function(err) { if (callback) callback(err); });
         };
 
-        SftpWrapper.prototype.mkdir = function(path, attrs, callback) {
-            __sftpMkdir(this._sftpId, path, (attrs && attrs.mode) || 0o755);
-            if (typeof attrs === 'function') attrs(null);
-            else if (callback) callback(null);
-            return this;
+        SftpWrapper.prototype.mkdir = function(path, callback) {
+            __sftpMkdir(this._sftpId, path).then(function(json) {
+                var r = _unwrap(json);
+                if (callback) callback(r.error);
+            }).catch(function(err) { if (callback) callback(err); });
         };
 
         SftpWrapper.prototype.rmdir = function(path, callback) {
-            __sftpRmdir(this._sftpId, path);
-            if (callback) callback(null);
-            return this;
+            __sftpRmdir(this._sftpId, path).then(function(json) {
+                var r = _unwrap(json);
+                if (callback) callback(r.error);
+            }).catch(function(err) { if (callback) callback(err); });
         };
 
         SftpWrapper.prototype.unlink = function(path, callback) {
-            __sftpUnlink(this._sftpId, path);
-            if (callback) callback(null);
-            return this;
+            __sftpUnlink(this._sftpId, path).then(function(json) {
+                var r = _unwrap(json);
+                if (callback) callback(r.error);
+            }).catch(function(err) { if (callback) callback(err); });
         };
 
         SftpWrapper.prototype.rename = function(from, to, callback) {
-            __sftpRename(this._sftpId, from, to);
-            if (callback) callback(null);
-            return this;
+            __sftpRename(this._sftpId, from, to).then(function(json) {
+                var r = _unwrap(json);
+                if (callback) callback(r.error);
+            }).catch(function(err) { if (callback) callback(err); });
         };
 
         SftpWrapper.prototype.stat = function(path, callback) {
-            var result = __sftpStat(this._sftpId, path);
-            var data; try { data = JSON.parse(result); } catch(e) { data = { size: 0, mtime: 0, mode: 0 }; }
-            if (callback) callback(null, data);
-            return data;
+            __sftpStat(this._sftpId, path).then(function(json) {
+                var r = _unwrap(json);
+                if (callback) callback(r.error, r.error ? null : r.data);
+            }).catch(function(err) { if (callback) callback(err, null); });
         };
 
         SftpWrapper.prototype.lstat = SftpWrapper.prototype.stat;
@@ -475,7 +679,8 @@ pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         globalThis.__requireCache['node:ssh2'] = { Client: Client };
         globalThis.ssh = { Client: Client };
     })();
-    "#)?;
+    "#,
+    )?;
 
     Ok(())
 }

@@ -18,6 +18,123 @@ async fn engine_no_net() -> JsEngine {
         .unwrap()
 }
 
+/// Reads one MQTT control packet (fixed header + variable-length remaining
+/// length + payload) off a blocking stream. Returns (packet_type, payload).
+fn read_mqtt_packet(r: &mut impl std::io::Read) -> (u8, Vec<u8>) {
+    let mut type_byte = [0u8; 1];
+    r.read_exact(&mut type_byte).unwrap();
+    let mut multiplier: u32 = 1;
+    let mut remaining_len: u32 = 0;
+    loop {
+        let mut b = [0u8; 1];
+        r.read_exact(&mut b).unwrap();
+        remaining_len += (b[0] & 0x7f) as u32 * multiplier;
+        multiplier *= 128;
+        if b[0] & 0x80 == 0 {
+            break;
+        }
+    }
+    let mut payload = vec![0u8; remaining_len as usize];
+    r.read_exact(&mut payload).unwrap();
+    (type_byte[0], payload)
+}
+
+fn encode_remaining_length(len: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut x = len;
+    loop {
+        let mut byte = (x % 128) as u8;
+        x /= 128;
+        if x > 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if x == 0 {
+            break;
+        }
+    }
+    out
+}
+
+/// Starts a minimal local MQTT broker: accepts the CONNECT, replies CONNACK,
+/// accepts a SUBSCRIBE, replies SUBACK, then pushes a real PUBLISH with a
+/// known topic/payload — this is exactly the packet whose parsing the
+/// `_handlePublish` off-by-one bug used to corrupt.
+fn start_fake_broker() -> u16 {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let (packet_type, _) = read_mqtt_packet(&mut stream); // CONNECT
+        assert_eq!(packet_type & 0xf0, 0x10);
+        stream.write_all(&[0x20, 0x02, 0x00, 0x00]).unwrap(); // CONNACK, rc=0
+
+        let (packet_type, _) = read_mqtt_packet(&mut stream); // SUBSCRIBE
+        assert_eq!(packet_type & 0xf0, 0x80);
+        stream.write_all(&[0x90, 0x03, 0x00, 0x01, 0x00]).unwrap(); // SUBACK
+
+        let topic = b"test/topic";
+        let payload = b"hello mqtt";
+        let mut body = Vec::new();
+        body.push((topic.len() >> 8) as u8);
+        body.push((topic.len() & 0xff) as u8);
+        body.extend_from_slice(topic);
+        body.extend_from_slice(payload);
+        let mut packet = vec![0x30]; // PUBLISH, QoS 0
+        packet.extend(encode_remaining_length(body.len()));
+        packet.extend(body);
+        stream.write_all(&packet).unwrap();
+    });
+
+    port
+}
+
+#[tokio::test]
+async fn mqtt_real_publish_parses_topic_and_payload_correctly() {
+    let port = start_fake_broker();
+    let e = engine_with_net("127.0.0.1").await;
+    e.eval(
+        format!(
+            r#"
+        var gotTopic = null, gotPayload = null;
+        var mqtt = require('mqtt');
+        var client = mqtt.connect({{ host: '127.0.0.1', port: {port} }});
+        client.on('message', function(topic, payload) {{ gotTopic = topic; gotPayload = payload; }});
+        client.on('connected', function() {{ client.subscribe('test/topic'); }});
+        "#
+        )
+        .as_str(),
+    )
+    .await
+    .unwrap();
+
+    let mut got = false;
+    for _ in 0..300 {
+        tokio::select! {
+            _ = e.idle() => {},
+            _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {},
+        }
+        let _ = e.run_event_loop().await;
+        tokio::task::yield_now().await;
+        if e.eval_to_string("String(gotTopic !== null)").await.unwrap() == "true" {
+            got = true;
+            break;
+        }
+    }
+    assert!(got, "client never parsed the real PUBLISH packet");
+
+    let topic = e.eval_to_string("String(gotTopic)").await.unwrap();
+    let payload = e.eval_to_string("String(gotPayload)").await.unwrap();
+    // Confirms the _handlePublish off-by-one is gone: before the fix, the
+    // spurious leading offset++ corrupted both fields into garbage.
+    assert_eq!(topic, "test/topic");
+    assert_eq!(payload, "hello mqtt");
+}
+
 // ── API shape ────────────────────────────────────────────────────────────────
 
 #[tokio::test]

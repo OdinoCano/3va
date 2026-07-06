@@ -119,10 +119,15 @@ The following methods exist in the require cache but **throw at call time**. The
 | `tty.isatty(fd)` | Calls real `__isatty` (Rust `std::io::IsTerminal`); `process.stdout.isTTY` / `process.stdin.isTTY` reflect actual TTY state |
 | `v8.getHeapStatistics()` | Returns a zeroed object; `getHeapSpaceStatistics()` returns `[]` |
 | `vm.runInNewContext(code, sandbox)` | Uses `with(sandbox)` so sandbox vars shadow globals; `globalThis`/`require`/`process` still reachable — no real V8-style context isolation. Use `worker_threads` for process-level sandboxing |
-| `dns.resolveMx/Txt/Srv/Ns/Cname/Naptr/Ptr/Soa` | Callback receives `ENOTSUP` error |
-| `dns.reverse(ip, cb)` | Callback receives `ENOTSUP` error |
+| `dns.resolveMx/Txt/Srv/Ns/Cname/Naptr/Ptr/Soa/reverse` | Real DNS queries via `hickory-resolver` (native `__dnsQuery`) |
 | `dns.lookupService(addr, port, cb)` | Callback receives `ENOTSUP` error |
-| `readline.createInterface()` | No real stdin backing; `question()` always resolves with `''`; async iterator yields nothing |
+| `readline.createInterface()` | Backed by real `process.stdin` (native `__stdinRead`); `Interface` consumes Node-style `'data'` events or a WHATWG `getReader()` |
+| `irc.Client` | **Real** — `TcpStream`/TLS connect, RFC 2812 line protocol (PING→PONG, PRIVMSG parsing) |
+| `ftp.Client` | **Real** — `TcpStream`/TLS connect, RFC 959 commands (USER/PASS auth, PASV data channel, LIST/RETR/STOR) |
+| `pop3.Client` | **Real** — `TcpStream`/TLS connect, RFC 1939 line protocol (USER/PASS, LIST/RETR/DELE) |
+| `mqtt.connect()` | **Real** — `TcpStream`/TLS connect, MQTT 3.1.1 binary protocol (QoS 0 only, no keepalive PINGREQ) |
+| `ssh.Client` | **Real** — `russh`/`russh-sftp`, password auth only (no public-key), no host key verification (accepts any server key) |
+| `webrtc.RTCPeerConnection` | **Mocked** — API shape only; no real ICE/DTLS/SRTP (requires STUN/TURN servers for P2P) |
 | `worker_threads.Worker` | No `SharedArrayBuffer`/`Atomics` — all data sharing must use `postMessage` |
 | `repl`, `wasi`, `trace_events` | Not implemented; `require()` throws `MODULE_NOT_FOUND` |
 

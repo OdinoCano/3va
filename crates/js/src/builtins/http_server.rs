@@ -22,9 +22,39 @@ use tokio::net::TcpListener;
 use tokio::time::Instant;
 
 use vvva_firewall::{Firewall, FirewallDecision};
-use vvva_permissions::{Capability, PermissionState};
+use vvva_permissions::PermissionState;
 
 const HARD_MAX_BODY: usize = 100 * 1024 * 1024;
+
+/// Bind a TCP listener, enabling `SO_REUSEPORT` when `VVVA_CLUSTER` is set so
+/// `3va start --instances N` can run N processes load-balanced by the kernel
+/// on the same port (mirrors Node's `cluster` module, which does the same at
+/// the libuv layer). Off by default: without cluster mode, two accidental
+/// binds to the same port should still fail loudly with EADDRINUSE.
+#[cfg(unix)]
+fn bind_listener(addr: &str) -> std::io::Result<std::net::TcpListener> {
+    if std::env::var_os("VVVA_CLUSTER").is_none() {
+        return std::net::TcpListener::bind(addr);
+    }
+    let sockaddr: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|e| std::io::Error::other(format!("invalid address {addr}: {e}")))?;
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(sockaddr),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_reuse_address(true)?;
+    socket.set_reuse_port(true)?;
+    socket.bind(&sockaddr.into())?;
+    socket.listen(1024)?;
+    Ok(socket.into())
+}
+
+#[cfg(not(unix))]
+fn bind_listener(addr: &str) -> std::io::Result<std::net::TcpListener> {
+    std::net::TcpListener::bind(addr)
+}
 
 struct ConnEntry {
     stream: StdTcpStream,
@@ -248,7 +278,7 @@ pub fn inject_http_server(
             Function::new(
                 ctx.clone(),
                 move |ctx: Ctx<'_>, port: u16, host: String| -> Result<u32> {
-                    if !perms.check(&Capability::Network(host.clone())) {
+                    if !perms.check_bind(&host) {
                         return Err(js_code_err(
                             &ctx,
                             "EACCES",
@@ -256,7 +286,7 @@ pub fn inject_http_server(
                         ));
                     }
 
-                    let std_listener = std::net::TcpListener::bind(format!("{}:{}", host, port))
+                    let std_listener = bind_listener(&format!("{}:{}", host, port))
                         .map_err(|e| js_code_err(&ctx, "EADDRINUSE", &e.to_string()))?;
                     std_listener
                         .set_nonblocking(true)

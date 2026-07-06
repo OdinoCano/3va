@@ -204,12 +204,71 @@ async fn dns_resolve4_callback_form() {
     panic!("dns.resolve4('localhost') did not call back");
 }
 
+#[tokio::test]
+async fn dns_resolve_mx_uses_real_query() {
+    // Exercises the hickory-resolver-backed __dnsQuery path (previously a stub
+    // that always returned []). Tolerant of no network/DNS in the sandbox —
+    // the point is that a real query round-trip happens, not a hardcoded [].
+    let e = engine_with_net().await;
+    e.eval(
+        r#"
+        var result = null;
+        require('dns').resolveMx('gmail.com', function(err, records) {
+            result = err ? ('ERR:' + err.code) : JSON.stringify(records);
+        });
+        "#,
+    )
+    .await
+    .unwrap();
+    for _ in 0..40 {
+        e.idle().await;
+        tokio::task::yield_now().await;
+        let r = e.eval_to_string("String(result)").await.unwrap();
+        if r != "null" {
+            assert!(
+                r.contains("exchange") || r.contains("ERR:ENODATA") || r.contains("ERR:ENOTFOUND"),
+                "unexpected dns.resolveMx result: {r}"
+            );
+            return;
+        }
+    }
+    panic!("dns.resolveMx('gmail.com') did not call back");
+}
+
+#[tokio::test]
+async fn dns_resolve_soa_returns_object_not_stub_array() {
+    let e = engine_with_net().await;
+    e.eval(
+        r#"
+        var result = null;
+        require('dns').resolveSoa('gmail.com', function(err, soa) {
+            result = err ? ('ERR:' + err.code) : JSON.stringify(soa);
+        });
+        "#,
+    )
+    .await
+    .unwrap();
+    for _ in 0..40 {
+        e.idle().await;
+        tokio::task::yield_now().await;
+        let r = e.eval_to_string("String(result)").await.unwrap();
+        if r != "null" {
+            assert!(
+                r.contains("nsname") || r.contains("ERR:ENODATA") || r.contains("ERR:ENOTFOUND"),
+                "unexpected dns.resolveSoa result: {r}"
+            );
+            return;
+        }
+    }
+    panic!("dns.resolveSoa('gmail.com') did not call back");
+}
+
 // ── readline ─────────────────────────────────────────────────────────────────
-// NOTE: These tests verify API shape only. The readline implementation is a stub
-// with no real stdin backing — question() returns '' unless input provides a
-// getReader() method. Behavioral tests require a mock stdin. See:
-// - docs/11-guidelines/01-ai-coding-guidelines.md §2.3 (partial stubs table)
-// - crates/js/src/builtins/modules.rs (readline section, ~line 4403)
+// process.stdin is now backed by real OS stdin (native __stdinRead, process.rs),
+// and Interface consumes it via Node-style 'data' events (see _feedChars /
+// Interface constructor in crates/js/src/builtins/modules.rs). These tests
+// still only check API shape since the test process's stdin is /dev/null
+// (immediate EOF) — genuine line-by-line behavior needs a piped mock stdin.
 
 #[tokio::test]
 async fn readline_module_loads() {
@@ -337,4 +396,63 @@ async fn heap_snapshot_has_nodes_and_strings() {
             .unwrap_or(false),
         "strings array is empty"
     );
+}
+
+// ── stdin ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn stdin_read_native_binding_resolves() {
+    // The test harness's own stdin is /dev/null (no controlling TTY/pipe), so
+    // this can't assert real interactive input — it does confirm the native
+    // __stdinRead() binding (blocking OS read on a background thread) actually
+    // runs to completion and reports EOF instead of hanging the event loop.
+    let e = engine().await;
+    e.eval(
+        r#"
+        var done = false;
+        var bytesRead = -1;
+        __stdinRead().then(function(chunk) {
+            bytesRead = chunk.length;
+            done = true;
+        });
+        "#,
+    )
+    .await
+    .unwrap();
+    for _ in 0..100 {
+        e.idle().await;
+        tokio::task::yield_now().await;
+        if e.eval_to_string("String(done)").await.unwrap() == "true" {
+            let bytes = e.eval_to_string("String(bytesRead)").await.unwrap();
+            assert_eq!(bytes, "0", "expected EOF (0 bytes) from /dev/null stdin");
+            return;
+        }
+    }
+    panic!("__stdinRead() never resolved");
+}
+
+#[tokio::test]
+async fn readline_over_process_stdin_reaches_close_on_eof() {
+    // process.stdin is /dev/null in the test harness, so the readline Interface
+    // should hit EOF almost immediately and emit 'close' — proving the Node-style
+    // 'data'/'end' wiring in the Interface constructor actually drives the stream
+    // instead of sitting inert (the old stub never emitted 'close' on its own).
+    let e = engine().await;
+    e.eval(
+        r#"
+        var closed = false;
+        var rl = require('readline').createInterface({ input: process.stdin });
+        rl.on('close', function() { closed = true; });
+        "#,
+    )
+    .await
+    .unwrap();
+    for _ in 0..100 {
+        e.idle().await;
+        tokio::task::yield_now().await;
+        if e.eval_to_string("String(closed)").await.unwrap() == "true" {
+            return;
+        }
+    }
+    panic!("readline Interface over process.stdin never closed on EOF");
 }

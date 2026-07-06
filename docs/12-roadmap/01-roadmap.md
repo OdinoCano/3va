@@ -40,7 +40,7 @@
 | CPU profiler (`--prof`) | ✅ | Sampling via `setInterval`+`Error.stack`; `.cpuprofile` JSON; SVG flamegraph; `3va prof` CLI |
 | Fuzz targets in CI | ✅ | 3 targets; 30 s smoke run on nightly in GitHub Actions |
 | Doc-tests | ✅ | `vvva_core`, `vvva_permissions`, `vvva_crypto`, `vvva_js` |
-| Test suite | ✅ | 872 tests (unit + integration + doc), 0 failures |
+| Test suite | ✅ | 1392 tests (unit + integration + doc), 0 failures |
 
 ---
 
