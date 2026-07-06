@@ -604,7 +604,7 @@ Every PR must pass all CI gates before merge:
 |------|-------------|
 | `cargo fmt --check` | Yes |
 | `cargo clippy -D warnings` | Yes |
-| `cargo test` (1008 tests) | Yes |
+| `cargo test` (1407 tests) | Yes |
 | `cargo deny check` (CVEs + licenses) | Yes |
 | Gitleaks secret scanning | Yes |
 | Semgrep SAST (ERROR severity) | Yes |
