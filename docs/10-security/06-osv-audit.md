@@ -4,12 +4,20 @@
 
 `3va audit` detects known vulnerabilities in installed dependencies by querying the [Open Source Vulnerabilities API (OSV)](https://osv.dev). OSV aggregates data from NVD, GitHub Advisory Database (GHSA), RustSec, PyPI Advisory, and others, so a single query covers multiple authoritative sources.
 
-The auditor operates in two sequential phases:
+The auditor operates in two sequential phases, **OSV first**: it's ground
+truth (a confirmed, published CVE/GHSA), unlike the heuristic scan, so it's
+what you should read first and what `--deny` gates on.
 
 | Phase | Module | What it detects |
 |------|--------|-------------|
-| 1 | `MalwareScanner` | Malware patterns in code extracted from `node_modules/` |
-| 2 | `auditor::run_audit` | Known CVEs, GHSAs, and advisories for each `package@version` |
+| 1 | `auditor::run_audit` (OSV) | Known CVEs, GHSAs, and advisories for each `package@version` |
+| 2 | `MalwareScanner` (heuristic, informational) | Suspicious code patterns in `node_modules/` — not confirmed malware, just worth a look |
+
+> **Phase naming:** the CLI output and JSON both call phase 2 "heuristic"
+> (`=== Phase 2: Heuristic Pattern Scan (informational) ===`, JSON key
+> `"heuristic"`), not "malware" or "threats" — its findings are pattern
+> matches, not verdicts. Only a **Critical**-severity heuristic hit fails the
+> command; High/Medium/Low print as informational warnings.
 
 ---
 
@@ -209,10 +217,25 @@ The `--deny` flag causes the command to exit with code ≠ 0 if and only if at l
 
 The two phases are complementary, not redundant:
 
-| | Malware Scanner (Phase 1) | OSV Auditor (Phase 2) |
+| | OSV Auditor (Phase 1) | Malware Scanner (Phase 2, heuristic) |
 |---|---|---|
-| **Source of truth** | Heuristics + custom patterns | Public OSV database |
-| **What it detects** | Unreported malicious code, obfuscation, exfiltration | Known and published CVEs and advisories |
-| **Requires network** | No | Yes (with offline cache) |
-| **False positives** | Possible (heuristic) | Low (authoritative data) |
-| **Coverage** | 0-day and novel malware | Cataloged vulnerabilities |
+| **Source of truth** | Public OSV database | Heuristics + custom patterns |
+| **What it detects** | Known and published CVEs and advisories | Unreported malicious code, obfuscation, exfiltration |
+| **Requires network** | Yes (with offline cache) | No |
+| **False positives** | Low (authoritative data) | Possible (heuristic) — treat findings as leads, not verdicts |
+| **Coverage** | Cataloged vulnerabilities | 0-day and novel malware |
+| **Gates `--deny`/exit code** | Yes (CRITICAL/HIGH) | Only on a Critical-severity hit |
+
+### 6.9.1 `.exec()` false positives (fixed)
+
+The heuristic scanner used to flag *any* `.exec(...)` call — `object.exec(...)`
+regardless of what `object` was — as `"Process execution"` (Critical),
+intending to catch `child_process.exec()`. In practice this also fired on
+`someRegex.exec(str)`, a routine call in parser-heavy packages like `mime` and
+`finalhandler`, producing dozens of false positives per audit.
+
+The fix (`crates/pm/src/malware_scanner.rs`): `.exec(...)` on its own no
+longer triggers a threat unless the same file also references
+`child_process` — `.execSync(...)` and `.spawn(...)` still trigger
+unconditionally, since neither has a `RegExp` counterpart to be confused
+with.

@@ -163,6 +163,49 @@ impl PermissionState {
         false
     }
 
+    /// Check permission to *bind/listen* a local server on `host`, as opposed
+    /// to connecting out to it.
+    ///
+    /// `http.createServer().listen(port)` and `net.createServer().listen(port)`
+    /// default their bind host to `0.0.0.0` (all interfaces) regardless of
+    /// which specific remote host the user wrote in `allow-net` — so a plain
+    /// `check(&Capability::Network(host))` almost always fails even when the
+    /// user clearly intended to let the script run its own server (they
+    /// granted `allow-net: ["127.0.0.1"]` or some other host, not literally
+    /// `"0.0.0.0"`). Running a server you wrote is a different risk than
+    /// connecting out to arbitrary hosts, so any existing network grant is
+    /// treated as authorization to bind on a local/wildcard address.
+    ///
+    /// This must never be reused for outbound checks (fetch/http.request/tcp
+    /// connect) — there, the granted host must still match the real
+    /// destination, or granting `allow-net: ["api.example.com"]` would also
+    /// silently permit SSRF-style requests to `127.0.0.1`.
+    pub fn check_bind(&self, host: &str) -> bool {
+        let required = Capability::Network(host.to_string());
+
+        if self.deny_all_net {
+            self.record_audit(&required, false);
+            return false;
+        }
+        {
+            let denied = self.denied.read().unwrap();
+            if denied.iter().any(|d| caps_match(d, &required)) {
+                drop(denied);
+                self.record_audit(&required, false);
+                return false;
+            }
+        }
+        if is_local_bind_host(host) {
+            let granted = self.granted.read().unwrap();
+            if granted.iter().any(|g| matches!(g, Capability::Network(_))) {
+                drop(granted);
+                self.record_audit(&required, true);
+                return true;
+            }
+        }
+        self.check(&required)
+    }
+
     fn record_audit(&self, cap: &Capability, allowed: bool) {
         let log = match &self.audit_log {
             Some(l) => l,
@@ -318,6 +361,12 @@ fn path_covered_by(target: &std::path::Path, allowed: &std::path::Path) -> bool 
     canon_path(norm_t.as_ref()).starts_with(canon_path(norm_a.as_ref()))
 }
 
+/// Wildcard/loopback addresses a server binds to when the app didn't ask for
+/// a specific host — these describe *this machine*, not a remote target.
+fn is_local_bind_host(host: &str) -> bool {
+    matches!(host, "0.0.0.0" | "::" | "127.0.0.1" | "::1" | "localhost")
+}
+
 fn caps_match(granted: &Capability, required: &Capability) -> bool {
     match (granted, required) {
         (Capability::FileRead(allowed), Capability::FileRead(target)) => {
@@ -359,6 +408,44 @@ fn host_matches(pattern: &str, host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_bind_allows_wildcard_bind_host_when_any_net_grant_exists() {
+        // The common real-world case: package.json grants allow-net for a
+        // specific host, but http.createServer().listen(port) with no host
+        // defaults to binding "0.0.0.0" — that must still be allowed to run
+        // the server the user clearly intended to permit.
+        let state = PermissionState::new();
+        state.grant(Capability::Network("127.0.0.1".to_string()));
+        assert!(state.check_bind("0.0.0.0"));
+        assert!(state.check_bind("127.0.0.1"));
+        assert!(state.check_bind("localhost"));
+    }
+
+    #[test]
+    fn check_bind_denies_without_any_net_grant() {
+        let state = PermissionState::new();
+        assert!(!state.check_bind("0.0.0.0"));
+    }
+
+    #[test]
+    fn check_bind_respects_explicit_deny_net() {
+        let state = PermissionState::new();
+        state.grant(Capability::Network("127.0.0.1".to_string()));
+        state.deny(Capability::Network("0.0.0.0".to_string()));
+        assert!(!state.check_bind("0.0.0.0"));
+    }
+
+    #[test]
+    fn check_bind_does_not_relax_outbound_connect_checks() {
+        // Granting allow-net for one host must never let an *outbound*
+        // connection reach a different host, even a loopback one (SSRF).
+        // check_bind's relaxation is bind-only — plain check() must stay strict.
+        let state = PermissionState::new();
+        state.grant(Capability::Network("api.example.com".to_string()));
+        assert!(!state.check(&Capability::Network("127.0.0.1".to_string())));
+        assert!(!state.check(&Capability::Network("0.0.0.0".to_string())));
+    }
 
     #[test]
     fn deny_by_default() {

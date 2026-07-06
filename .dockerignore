@@ -1,0 +1,8 @@
+target
+.git
+node_modules
+dist
+.compatibility
+wiki
+fuzz
+tmp_test

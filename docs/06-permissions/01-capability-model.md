@@ -208,6 +208,18 @@ impl Capability {
 | `*.example.com` | `api.example.com` | `example.com`, `evil.com` |
 | `api.example.com` | `api.example.com` | `other.example.com` |
 
+> The matching above (`PermissionState::check()`) is for **outbound**
+> connections. Binding your **own** local server (`http`/`net`
+> `.createServer().listen()`) uses `PermissionState::check_bind(host)`
+> instead, which additionally allows any existing `allow-net` grant to
+> authorize binding on `0.0.0.0`/`::`/`127.0.0.1`/`::1`/`localhost` — those
+> describe *this machine*, not a remote target, and requiring an exact-match
+> grant for them made ordinary `allow-net: ["<some-host>"]` grants fail to
+> let the script's own server start (it defaults to binding `0.0.0.0`). See
+> `docs/06-permissions/06-package-json-permissions.md` § 6.8 for the full
+> rationale; outbound checks are unaffected (`allow-net` for one host still
+> cannot reach another, e.g. no SSRF to `127.0.0.1`).
+
 ## 1.6 CLI Construction
 
 ### 1.6.1 Flag Parsing

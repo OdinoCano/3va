@@ -655,11 +655,12 @@ Process metadata is stored in `~/.3va/processes/<name>.json`. Logs are written t
 
 ### 2.8.1 `start`
 
-Starts an entry file as a managed background process (daemon). The process runs in a new session (`setsid`) and continues running after the CLI exits.
+Starts an entry file as a managed process, pm2-style: a supervisor spawns the
+app, watches it, and restarts it automatically on crash.
 
 **Signature:**
 ```
-3va start [--name <NAME>] <ENTRY> [-- <ARGS>...]
+3va start [--name <NAME>] [--port <N>] [--instances <N>] [--max-restarts <N>] [--attach] <ENTRY> [-- <ARGS>...]
 ```
 
 **Parameters:**
@@ -668,14 +669,39 @@ Starts an entry file as a managed background process (daemon). The process runs 
 | `ENTRY` | `path` (required) | Entry file (`.js`, `.ts`, `.jsx`, `.tsx`) to execute |
 | `--name <NAME>` / `-n` | `string` | Custom process name (default: derived from the entry filename stem) |
 | `--port <N>` / `-p <N>` | `u16` | Port to listen on. Sets `PORT` env var for the managed process. |
+| `--instances <N>` / `-i` | `u32` (default `1`) | Number of app instances to run, load-balanced on the same port via `SO_REUSEPORT` (cluster mode, like `pm2 -i`/Node's `cluster` module) |
+| `--max-restarts <N>` | `u32` (default `15`) | Give up restarting after this many consecutive crashes |
+| `--attach` / `-a` | flag | Stay in the foreground instead of daemonizing (see below) |
 | `ARGS` | `string...` | Arguments forwarded to the script. Must appear after `--`. |
 
-**Behavior:**
+**Behavior — background mode (default):**
 1. Resolves the entry file path relative to the current directory.
-2. Spawns `3va run <ENTRY>` in a new process group via `setsid()`.
-3. Captures stdout and stderr to `~/.3va/processes/<name>.log`.
-4. Writes process metadata (PID, CWD, arguments, timestamps) to `~/.3va/processes/<name>.json`.
-5. Returns immediately — the daemon continues running independently.
+2. Spawns a detached supervisor process (`3va __supervise`, an internal
+   subcommand) in a new session via `setsid()`. The supervisor — not just the
+   app — is what survives the CLI invocation exiting.
+3. The supervisor spawns `instances` copies of `3va run <ENTRY>` and watches
+   all of them. If any instance exits unexpectedly, the supervisor kills the
+   rest of the cohort and restarts all `instances` together, with a linear
+   backoff between attempts, up to `--max-restarts` times before giving up
+   and marking the process `crashed`.
+4. Captures stdout/stderr to `~/.3va/processes/<name>.log`.
+5. Writes process metadata (supervisor PID, instance PIDs, CWD, arguments,
+   restart count, timestamps) to `~/.3va/processes/<name>.json`.
+6. Returns immediately — the supervisor continues running independently.
+
+**Behavior — foreground mode (`--attach`):** the same supervisor loop runs
+*in* the current process instead of a detached daemon. It never exits on its
+own (only on crash-limit or a shutdown signal), which makes it a valid `PID 1`
+for a container: use `3va start --attach <entry>` as the container's
+`CMD`/`ENTRYPOINT` instead of `3va start` (whose default background mode
+daemonizes and returns immediately — exiting the foreground process a
+container runs as `CMD` kills the container).
+
+Cluster mode (`--instances > 1`) sets `VVVA_CLUSTER=1` for the spawned
+instances, which makes `http.createServer()`/`net.createServer()` bind with
+`SO_REUSEPORT` so all instances can share one port. Outside cluster mode this
+is off, so binding the same port twice by accident still fails loudly with
+`EADDRINUSE`.
 
 **Examples:**
 ```bash
@@ -689,18 +715,27 @@ Starts an entry file as a managed background process (daemon). The process runs 
 3va start --port 8080 server.js
 3va start -p 8080 server.js
 
+# Cluster mode: 4 instances sharing port 8080, restart individually-crashed
+# instances (as a cohort) automatically, give up after 5 consecutive crashes
+3va start --port 8080 --instances 4 --max-restarts 5 server.js
+
 # Start with arguments forwarded to the script
 3va start --name worker worker.js -- --queue emails --concurrency 5
 
 # Start in a project subdirectory
 cd /opt/myapp && 3va start dist/bundle.js
+
+# Docker CMD / ENTRYPOINT — foreground, valid PID 1, auto-restarts on crash
+3va start --attach --port 8080 server.js
 ```
 
 ---
 
 ### 2.8.2 `stop`
 
-Stops a managed process gracefully (SIGTERM), then forcibly (SIGKILL) if it does not exit within 1.5 seconds.
+Stops a managed process gracefully (SIGTERM to the supervisor), then forcibly
+(SIGKILL) if it does not exit within 30 seconds (polled every 200 ms, so a
+process that exits quickly doesn't incur the full wait).
 
 **Signature:**
 ```
@@ -714,13 +749,15 @@ Stops a managed process gracefully (SIGTERM), then forcibly (SIGKILL) if it does
 
 **Behavior:**
 1. Loads the process metadata from `~/.3va/processes/<name>.json`.
-2. Sends `SIGTERM` to the process.
-3. Waits 1.5 seconds.
-4. If the process is still alive, sends `SIGKILL`.
-5. Updates the process status to `stopped`.
+2. Sends `SIGTERM` to the supervisor process. The supervisor traps it, kills
+   every app instance it owns, marks the process `stopped`, and exits
+   without respawning.
+3. Polls for up to 30 seconds; if the supervisor is still alive, sends
+   `SIGKILL`.
+4. Updates the process status to `stopped`.
 
 > On Windows there is no SIGTERM equivalent; the runtime first attempts a
-> graceful `taskkill` (WM_CLOSE), waits 1.5 seconds, and forces termination
+> graceful `taskkill` (WM_CLOSE), polls the same way, and forces termination
 > with `taskkill /F` if the process is still alive.
 
 **Examples:**
@@ -733,7 +770,8 @@ Stops a managed process gracefully (SIGTERM), then forcibly (SIGKILL) if it does
 
 ### 2.8.3 `restart`
 
-Restarts a managed process by stopping it and starting it again with the same entry, arguments, and working directory.
+Restarts a managed process by stopping it and starting it again with the same
+entry, arguments, working directory, instance count, and max-restarts.
 
 **Signature:**
 ```
@@ -746,10 +784,11 @@ Restarts a managed process by stopping it and starting it again with the same en
 | `NAME` | `string` (required) | Name of the process to restart |
 
 **Behavior:**
-1. Loads the process metadata (entry, CWD, arguments).
+1. Loads the process metadata (entry, CWD, arguments, instances, max-restarts).
 2. Stops the existing process (if running).
-3. Starts a new process with the same configuration.
-4. The new PID is different from the previous one.
+3. Starts a new supervisor with the same configuration.
+4. The new supervisor PID is different from the previous one; the restart
+   counter carries over (it is not reset to 0).
 
 **Examples:**
 ```bash
@@ -762,7 +801,7 @@ Restarts a managed process by stopping it and starting it again with the same en
 ### 2.8.4 `status`
 
 Displays the status of one or all managed processes. Status is colour-coded in terminals
-(green = `running`, yellow = `stopped`, red = `error`). If `NAME` is omitted, all processes are listed.
+(green = `running`, yellow = `stopped`, red = `error`/`crashed`). If `NAME` is omitted, all processes are listed.
 
 **Signature:**
 ```
@@ -777,9 +816,10 @@ Displays the status of one or all managed processes. Status is colour-coded in t
 **Status values:**
 | Status | Meaning |
 |--------|---------|
-| `running` | Process is alive according to PID check |
+| `running` | Supervisor is alive according to PID check |
 | `stopped` | Process was deliberately stopped |
-| `error` | Process exited unexpectedly |
+| `error` | Supervisor process is no longer alive (e.g. killed out-of-band) |
+| `crashed` | Supervisor gave up after `--max-restarts` consecutive crashes |
 
 **Examples:**
 ```bash
@@ -792,14 +832,18 @@ Displays the status of one or all managed processes. Status is colour-coded in t
 
 **Sample output:**
 ```
-  Name                 PID      Status   Restarts   Entry
-  -------------------- -------- -------- ---------- --------------------
-  my-api               574912   running  0          /opt/myapp/server.js
-  worker               574988   stopped  1          /opt/myapp/worker.js
+  Name                 PID      Status   Restarts   Inst   Entry
+  -------------------- -------- -------- ---------- ------ --------------------
+  my-api               574912   running  0          1      /opt/myapp/server.js
+  api-cluster          575210   running  2          4      /opt/myapp/server.js
+  worker               574988   stopped  1          1      /opt/myapp/worker.js
 ```
 
-The `Restarts` column counts how many times the process has been restarted via
-`3va restart` since it was first started.
+`PID` is the supervisor's PID, not an individual app instance's — the
+supervisor is what `3va stop`/`3va restart` act on. `Inst` shows how many app
+instances are managed together (cluster mode). The `Restarts` column counts
+both automatic crash-restarts and manual `3va restart` invocations since the
+process was first started.
 
 ---
 

@@ -126,20 +126,29 @@ Development server with hot module replacement. Automatically detects frameworks
 ```
 
 ### 1.3.6 Command: start
-Starts an entry file as a managed background daemon (production process manager).
+Starts an entry file as a managed process (pm2-style production process
+manager): a supervisor spawns the app and restarts it automatically on crash.
 
 ```
-3va start [--name <NAME>] <ENTRY> [-- <ARGS>...]
+3va start [--name <NAME>] [--instances <N>] [--max-restarts <N>] [--attach] <ENTRY> [-- <ARGS>...]
 ```
+
+`--instances N` runs N app instances load-balanced on the same port
+(`SO_REUSEPORT` cluster mode). `--attach` stays in the foreground instead of
+daemonizing — use this as a container's `CMD`/`ENTRYPOINT` (a valid `PID 1`
+that never exits on its own). See [02-comandos.md § 2.8](02-comandos.md) for
+the full behavior.
 
 **Example:**
 ```bash
 3va start server.js
 3va start --name my-api server.js -- --port 3000
+3va start --attach --instances 4 --port 8080 server.js
 ```
 
 ### 1.3.7 Command: stop
-Stops a managed process (SIGTERM → SIGKILL after 1.5 s).
+Stops a managed process — SIGTERM to the supervisor (which stops every app
+instance it owns), then SIGKILL if it's still alive after 30 s.
 
 ```
 3va stop <NAME>

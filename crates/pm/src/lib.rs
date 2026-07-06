@@ -1488,22 +1488,24 @@ pub fn audit_packages() -> anyhow::Result<bool> {
     }
 
     println!();
-    println!("  Packages scanned : {}", installed.len());
-    println!("  Threats found    : {}", total_threats);
-    println!("  Packages flagged : {}", packages_with_issues);
+    println!("  Packages scanned  : {}", installed.len());
+    println!("  Heuristic warnings: {}", total_threats);
+    println!("  Packages flagged  : {}", packages_with_issues);
 
     if total_threats == 0 {
         println!();
-        println!("✓ Audit complete. All packages are clean.");
+        println!("✓ Heuristic scan complete. Nothing suspicious found.");
         Ok(true)
     } else {
         println!();
         if any_critical {
             eprintln!(
-                "✗ Audit failed: critical threats detected. Remove affected packages immediately."
+                "✗ Heuristic scan failed: critical-severity pattern detected. Review the flagged package(s) above — these are pattern matches, not confirmed malware."
             );
         } else {
-            eprintln!("! Audit complete with warnings. Review flagged packages.");
+            eprintln!(
+                "! Heuristic scan found lower-severity patterns worth a look; none are confirmed malicious."
+            );
         }
         Ok(!any_critical)
     }

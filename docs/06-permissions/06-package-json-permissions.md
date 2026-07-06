@@ -193,7 +193,57 @@ already happened automatically in non-TTY contexts (CI, pipes).
 
 ---
 
-## 6.8 Precedence Summary
+## 6.8 `allow-net` And Your Own Server's Bind Host
+
+`allow-net` grants are matched against the exact host being checked (plus
+`*`/`*.suffix` wildcards — see `docs/06-permissions/01-capability-model.md`).
+That's the right model for *outbound* connections (`fetch`, `http.request`,
+raw TCP `connect`): granting `allow-net: ["api.example.com"]` must not also
+let the script reach `127.0.0.1` or some other host.
+
+But `http.createServer()`/`net.createServer()` binding your **own** server is
+a different action with a different risk, and a literal-match check used to
+make it fail in a confusing way: `server.listen(port)` with no explicit host
+defaults to binding `"0.0.0.0"` (all interfaces), so even a project with
+
+```json
+{
+  "3va": {
+    "permissions": {
+      ".": { "allow-net": ["127.0.0.1"] }
+    }
+  }
+}
+```
+
+would see its own `server.listen(8080, () => ...)` silently fail to start —
+the permission check compared the literal bind host `"0.0.0.0"` against the
+granted `"127.0.0.1"` and found no match, denying it, with no visible error
+(the failure surfaces as an unhandled rejection inside the async listen
+call, not a printed exception).
+
+**Fix:** `PermissionState::check_bind(host)` (`crates/permissions/src/capability.rs`)
+is used only at the `listen()` call sites (`crates/js/src/builtins/http_server.rs`,
+`crates/js/src/builtins/tcp.rs`'s `__netListen`). When the bind host is a
+wildcard/loopback address (`0.0.0.0`, `::`, `127.0.0.1`, `::1`, `localhost`),
+*any* existing `allow-net` grant — for any host — authorizes the bind, since
+running a server you wrote is treated as implied by having any network
+capability at all. Explicit `deny-net` entries still block it.
+
+This relaxation is bind-only. Outbound checks (`fetch`, `http.request`, TCP
+`connect`, the PQ-TLS client) still call the strict `check()` — granting
+`allow-net: ["api.example.com"]` still cannot be used to reach `127.0.0.1` or
+any other unlisted host; that would otherwise be an SSRF hole.
+
+In short: any `allow-net` entry (even for an unrelated host) is now
+sufficient for your own `.listen()` to bind on `0.0.0.0`/`localhost`. If you
+want your server bound to a *specific* non-wildcard address instead (e.g.
+`server.listen(8080, "10.0.0.5")`), that still requires an `allow-net` entry
+matching `10.0.0.5` exactly (or `*`).
+
+---
+
+## 6.9 Precedence Summary
 
 For a single capability check:
 

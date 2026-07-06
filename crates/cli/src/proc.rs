@@ -4,7 +4,20 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn default_instances() -> u32 {
+    1
+}
+
+fn default_max_restarts() -> u32 {
+    15
+}
+
 /// Managed process metadata.
+///
+/// `pid` is always the *supervisor* process — the long-lived process that
+/// owns the app instance(s) and restarts them on crash — not an app instance
+/// itself. `instance_pids` holds the actual worker PIDs (more than one only
+/// in cluster mode, `instances > 1`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
     pub name: String,
@@ -17,6 +30,12 @@ pub struct ProcessInfo {
     pub restarts: u32,
     pub args: Vec<String>,
     pub port: Option<u16>,
+    #[serde(default = "default_instances")]
+    pub instances: u32,
+    #[serde(default = "default_max_restarts")]
+    pub max_restarts: u32,
+    #[serde(default)]
+    pub instance_pids: Vec<u32>,
 }
 
 fn processes_dir() -> PathBuf {
@@ -118,28 +137,10 @@ fn list_all_processes() -> Vec<ProcessInfo> {
     processes
 }
 
-/// Spawn a process in the background with logging.
-pub fn start_process(
-    name: &str,
-    entry: &Path,
-    cwd: &Path,
-    args: &[String],
-    port: Option<u16>,
-) -> anyhow::Result<ProcessInfo> {
-    ensure_dir()?;
-
-    let log_file = log_path(name);
-    let log = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_file)?;
-
-    // Use 3va run to execute the entry file
-    let bin = std::env::current_exe()?;
-
-    // Resolve entry to an absolute path against `cwd` first — otherwise a
-    // relative entry (e.g. "index.js") no longer points at the right file
-    // once current_dir below moves the child into entry's parent directory.
+/// Resolve `entry` to an absolute path against `cwd`, and the directory the
+/// app should run from — otherwise a relative entry (e.g. "index.js") no
+/// longer points at the right file once the child's cwd changes.
+fn resolve_entry_and_run_dir(entry: &Path, cwd: &Path) -> (PathBuf, PathBuf) {
     let abs_entry = if entry.is_absolute() {
         entry.to_path_buf()
     } else {
@@ -150,31 +151,56 @@ pub fn start_process(
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| cwd.to_path_buf());
+    (abs_entry, run_dir)
+}
+
+/// Spawn the managed daemon in the background: launches `3va __supervise`
+/// (setsid-detached, like the old direct-`3va run` daemon) instead of the app
+/// itself, so a supervisor process — not just the app — outlives this CLI
+/// invocation and can restart the app on crash. `3va stop` still just sends
+/// SIGTERM to `info.pid`; the supervisor traps it, drains its children, and
+/// exits without respawning (see `run_supervisor`).
+pub fn start_managed(
+    name: &str,
+    entry: &Path,
+    cwd: &Path,
+    args: &[String],
+    port: Option<u16>,
+    instances: u32,
+    max_restarts: u32,
+) -> anyhow::Result<ProcessInfo> {
+    ensure_dir()?;
+
+    let log_file = log_path(name);
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)?;
+
+    let bin = std::env::current_exe()?;
+    let (abs_entry, run_dir) = resolve_entry_and_run_dir(entry, cwd);
 
     let mut cmd = std::process::Command::new(&bin);
-    cmd.arg("run");
+    cmd.arg("__supervise")
+        .arg("--name")
+        .arg(name)
+        .arg("--instances")
+        .arg(instances.to_string())
+        .arg("--max-restarts")
+        .arg(max_restarts.to_string());
     if let Some(p) = port {
         cmd.arg("--port").arg(p.to_string());
     }
-    // Dev-server CLIs (Vite, webpack-dev-server, nodemon...) commonly watch
-    // stdin for EOF as a "my parent terminal died" signal and shut themselves
-    // down when they see it — a convention they skip when CI=true, since CI
-    // runners have the same closed-stdin shape. `3va start` is headless the
-    // same way, so without this the child exits within seconds of stdin
-    // hitting EOF against Stdio::null(), before ever binding its port.
-    // `--allow-env=CI` is required too: the sandbox denies process.env reads
-    // not explicitly listed in package.json's allow-env, so just setting the
-    // OS env var isn't enough — the child script would still see `undefined`.
-    cmd.env("CI", "true");
-    cmd.arg("--allow-env=CI");
-    cmd.arg(&abs_entry)
-        .args(args)
-        .current_dir(run_dir)
+    cmd.arg(&abs_entry);
+    if !args.is_empty() {
+        cmd.arg("--").args(args);
+    }
+    cmd.current_dir(&run_dir)
         .stdout(log.try_clone()?)
         .stderr(log)
         .stdin(std::process::Stdio::null());
 
-    // Start a new process group so the child survives the parent's exit
+    // Start a new process group so the supervisor survives the parent's exit.
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -193,10 +219,8 @@ pub fn start_process(
 
     let pid = child.id();
 
-    // Detach — don't wait for the child
-    // On Unix, because we created a new session with setsid(), the child continues
-    // even when the parent exits. The child handle is dropped to avoid zombies.
-    // The child's stdio is connected to the log file, not the terminal.
+    // Detach — don't wait for the child. The supervisor is responsible for
+    // its own children and for updating the saved ProcessInfo as it runs.
     std::thread::spawn(move || {
         let _ = child.wait();
     });
@@ -212,10 +236,202 @@ pub fn start_process(
         restarts: 0,
         args: args.to_vec(),
         port,
+        instances,
+        max_restarts,
+        instance_pids: vec![],
     };
 
     save_process(&info)?;
     Ok(info)
+}
+
+/// Spawn one app instance (`3va run <entry>`) as a child of the supervisor.
+///
+/// `cluster` sets `VVVA_CLUSTER=1` so the HTTP server binds with
+/// `SO_REUSEPORT`, letting `instances > 1` share the same port. `inherit_stdio`
+/// is true only for `3va start --attach`, where the app's output should go
+/// straight to the foreground terminal/container log instead of a file.
+fn spawn_app_instance(
+    entry: &Path,
+    cwd: &Path,
+    args: &[String],
+    port: Option<u16>,
+    cluster: bool,
+    inherit_stdio: bool,
+    log_file_path: &Path,
+) -> anyhow::Result<tokio::process::Child> {
+    let bin = std::env::current_exe()?;
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.arg("run");
+    if let Some(p) = port {
+        cmd.arg("--port").arg(p.to_string());
+    }
+    // See the note in the old start_process: CI=true plus --allow-env=CI
+    // keeps dev-server CLIs (Vite, nodemon, ...) from treating a closed
+    // stdin as "my terminal died" and exiting before they bind their port.
+    cmd.env("CI", "true");
+    cmd.arg("--allow-env=CI");
+    if cluster {
+        cmd.env("VVVA_CLUSTER", "1");
+    }
+    cmd.arg(entry)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null());
+
+    if inherit_stdio {
+        cmd.stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+    } else {
+        let log_out = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file_path)?;
+        let log_err = log_out.try_clone()?;
+        cmd.stdout(log_out).stderr(log_err);
+    }
+
+    cmd.spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn app instance: {}", e))
+}
+
+/// Resolves as soon as any one of `children` exits. Each child's `wait()` is
+/// polled directly (not moved into a separate task) so the caller keeps
+/// ownership and can still kill every child — including the ones that
+/// haven't exited — once this returns.
+async fn wait_for_any_exit(children: &mut [tokio::process::Child]) {
+    let waits: Vec<_> = children
+        .iter_mut()
+        .map(|c| {
+            Box::pin(c.wait())
+                as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send + '_>>
+        })
+        .collect();
+    let _ = futures::future::select_all(waits).await;
+}
+
+/// The supervisor loop: spawns `instances` app processes, waits for either a
+/// shutdown signal or any instance exiting unexpectedly, and in the latter
+/// case kills the remaining siblings and restarts the whole cohort together
+/// (with linear backoff), up to `max_restarts` times.
+///
+/// Runs either as the long-lived body of the detached `3va __supervise`
+/// process (background `3va start`) or in-process as `3va start --attach`,
+/// in which case it IS the foreground process a container should run as PID 1.
+pub async fn run_supervisor(
+    name: &str,
+    entry: &Path,
+    args: &[String],
+    port: Option<u16>,
+    instances: u32,
+    max_restarts: u32,
+    inherit_stdio: bool,
+) -> anyhow::Result<()> {
+    ensure_dir()?;
+    let instances = instances.max(1);
+    let cwd = std::env::current_dir()?;
+    let log_file_path = log_path(name);
+
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    let mut restarts = 0u32;
+
+    loop {
+        let mut children = Vec::with_capacity(instances as usize);
+        for _ in 0..instances {
+            children.push(spawn_app_instance(
+                entry,
+                &cwd,
+                args,
+                port,
+                instances > 1,
+                inherit_stdio,
+                &log_file_path,
+            )?);
+        }
+        let pids: Vec<u32> = children.iter().filter_map(|c| c.id()).collect();
+
+        {
+            let mut info = load_process(name).unwrap_or_else(|_| ProcessInfo {
+                name: name.to_string(),
+                entry: entry.to_path_buf(),
+                pid: std::process::id(),
+                cwd: cwd.clone(),
+                log_path: log_file_path.clone(),
+                status: "running".to_string(),
+                started_at: now(),
+                restarts,
+                args: args.to_vec(),
+                port,
+                instances,
+                max_restarts,
+                instance_pids: vec![],
+            });
+            info.pid = std::process::id();
+            info.status = "running".to_string();
+            info.restarts = restarts;
+            info.instance_pids = pids.clone();
+            let _ = save_process(&info);
+        }
+
+        // `children` stays owned by this loop (not moved into spawned tasks) so
+        // that whichever branch below fires, we can still reach in and kill the
+        // survivors directly — moving each Child into its own task that awaits
+        // `child.wait()` would leave no way to interrupt that wait from here.
+        #[cfg(unix)]
+        let shutdown = tokio::select! {
+            _ = wait_for_any_exit(&mut children) => false,
+            _ = sigterm.recv() => true,
+            _ = tokio::signal::ctrl_c() => true,
+        };
+        #[cfg(not(unix))]
+        let shutdown = tokio::select! {
+            _ = wait_for_any_exit(&mut children) => false,
+            _ = tokio::signal::ctrl_c() => true,
+        };
+
+        // Either an instance exited unexpectedly or we're shutting down —
+        // either way, stop the remaining siblings so the cohort moves together.
+        for child in &mut children {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+
+        if shutdown {
+            if let Ok(mut info) = load_process(name) {
+                info.status = "stopped".to_string();
+                let _ = save_process(&info);
+            }
+            return Ok(());
+        }
+
+        // `3va stop`/`3va delete` may have raced the crash — don't respawn
+        // something the user just asked to stop.
+        if let Ok(info) = load_process(name) {
+            if info.status == "stopped" {
+                return Ok(());
+            }
+        }
+
+        restarts += 1;
+        if restarts > max_restarts {
+            if let Ok(mut info) = load_process(name) {
+                info.status = "crashed".to_string();
+                let _ = save_process(&info);
+            }
+            anyhow::bail!(
+                "'{}' exited {} times in a row — giving up (--max-restarts {})",
+                name,
+                restarts,
+                max_restarts
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(
+            300 * restarts.min(10) as u64,
+        ))
+        .await;
+    }
 }
 
 /// Stop a managed process by name.
@@ -299,7 +515,15 @@ pub fn restart_process(name: &str) -> anyhow::Result<ProcessInfo> {
     let _ = stop_process(name);
 
     // Start again (resets restarts to 0), then restore count
-    let mut result = start_process(name, &entry, &cwd, &args, info.port)?;
+    let mut result = start_managed(
+        name,
+        &entry,
+        &cwd,
+        &args,
+        info.port,
+        info.instances,
+        info.max_restarts,
+    )?;
     result.restarts = restarts;
     save_process(&result)?;
     Ok(result)
@@ -448,6 +672,9 @@ mod tests {
             restarts: 0,
             args: vec![],
             port: None,
+            instances: 1,
+            max_restarts: 15,
+            instance_pids: vec![],
         };
         save_process(&info).unwrap();
 
