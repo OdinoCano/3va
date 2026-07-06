@@ -18,6 +18,28 @@ async fn engine_with_net() -> JsEngine {
     JsEngine::new(Arc::new(perms)).await.unwrap()
 }
 
+/// Forces this process's real fd 0 to `/dev/null`. Relying on whatever stdin
+/// the test binary happened to inherit is flaky — e.g. a git pre-push hook's
+/// stdin is a pipe carrying ref-update data, not `/dev/null`, so a real read
+/// on fd 0 wouldn't hit EOF quickly and a test asserting on that would
+/// hang/fail depending on how `cargo test` was invoked.
+#[cfg(unix)]
+fn redirect_stdin_to_devnull() {
+    unsafe {
+        unsafe extern "C" {
+            fn open(path: *const std::os::raw::c_char, flags: i32) -> i32;
+            fn dup2(oldfd: i32, newfd: i32) -> i32;
+            fn close(fd: i32) -> i32;
+        }
+        let path = std::ffi::CString::new("/dev/null").unwrap();
+        let fd = open(path.as_ptr(), 0 /* O_RDONLY */);
+        if fd >= 0 {
+            dup2(fd, 0);
+            close(fd);
+        }
+    }
+}
+
 // ── timers/promises ───────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -402,10 +424,13 @@ async fn heap_snapshot_has_nodes_and_strings() {
 
 #[tokio::test]
 async fn stdin_read_native_binding_resolves() {
-    // The test harness's own stdin is /dev/null (no controlling TTY/pipe), so
-    // this can't assert real interactive input — it does confirm the native
-    // __stdinRead() binding (blocking OS read on a background thread) actually
-    // runs to completion and reports EOF instead of hanging the event loop.
+    // Force real fd 0 to /dev/null (see helper doc) so this can assert EOF
+    // deterministically — it can't assert real interactive input, but it does
+    // confirm the native __stdinRead() binding (blocking OS read on a
+    // background thread) actually runs to completion and reports EOF instead
+    // of hanging the event loop.
+    #[cfg(unix)]
+    redirect_stdin_to_devnull();
     let e = engine().await;
     e.eval(
         r#"
@@ -433,10 +458,14 @@ async fn stdin_read_native_binding_resolves() {
 
 #[tokio::test]
 async fn readline_over_process_stdin_reaches_close_on_eof() {
-    // process.stdin is /dev/null in the test harness, so the readline Interface
-    // should hit EOF almost immediately and emit 'close' — proving the Node-style
-    // 'data'/'end' wiring in the Interface constructor actually drives the stream
-    // instead of sitting inert (the old stub never emitted 'close' on its own).
+    // Force real fd 0 to /dev/null (see helper doc above engine_with_net).
+    #[cfg(unix)]
+    redirect_stdin_to_devnull();
+
+    // With fd 0 now /dev/null, the readline Interface should hit EOF almost
+    // immediately and emit 'close' — proving the Node-style 'data'/'end'
+    // wiring in the Interface constructor actually drives the stream instead
+    // of sitting inert (the old stub never emitted 'close' on its own).
     let e = engine().await;
     e.eval(
         r#"
