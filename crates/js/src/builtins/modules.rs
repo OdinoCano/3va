@@ -1,7 +1,135 @@
 use rquickjs::{Ctx, Function, Result, function::Rest};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use vvva_permissions::{Capability, PermissionState};
+
+/// Lazily-built shared resolver for `dns.resolveMx/Txt/Srv/Ns/Cname/Naptr/Ptr/Soa`
+/// and `dns.reverse` — these need real DNS record queries (not just A/AAAA), which
+/// `tokio::net::lookup_host` (used by `dns.lookup`/`dns.resolve`) cannot provide.
+fn dns_resolver() -> std::result::Result<&'static hickory_resolver::TokioResolver, String> {
+    static RESOLVER: OnceLock<std::result::Result<hickory_resolver::TokioResolver, String>> =
+        OnceLock::new();
+    RESOLVER
+        .get_or_init(|| {
+            hickory_resolver::TokioResolver::builder_tokio()
+                .and_then(|b| b.build())
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+}
+
+/// Renders a resolved `Lookup`'s answer records into the JSON shape Node's
+/// `dns.resolve*` callbacks expect for the given record type.
+fn dns_lookup_to_json(
+    rrtype: &str,
+    answers: &[hickory_resolver::proto::rr::Record],
+) -> serde_json::Value {
+    use hickory_resolver::proto::rr::RData;
+    use serde_json::json;
+
+    match rrtype {
+        "MX" => serde_json::Value::Array(
+            answers
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::MX(mx) => Some(json!({
+                        "exchange": mx.exchange.to_string().trim_end_matches('.'),
+                        "priority": mx.preference,
+                    })),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        "TXT" => serde_json::Value::Array(
+            answers
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::TXT(txt) => Some(json!(
+                        txt.txt_data
+                            .iter()
+                            .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+                            .collect::<Vec<_>>()
+                    )),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        "SRV" => serde_json::Value::Array(
+            answers
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::SRV(srv) => Some(json!({
+                        "priority": srv.priority,
+                        "weight": srv.weight,
+                        "port": srv.port,
+                        "name": srv.target.to_string().trim_end_matches('.'),
+                    })),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        "NS" => serde_json::Value::Array(
+            answers
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::NS(ns) => Some(json!(ns.0.to_string().trim_end_matches('.'))),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        "CNAME" => serde_json::Value::Array(
+            answers
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::CNAME(cname) => Some(json!(cname.0.to_string().trim_end_matches('.'))),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        "NAPTR" => serde_json::Value::Array(
+            answers
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::NAPTR(n) => Some(json!({
+                        "flags": String::from_utf8_lossy(&n.flags),
+                        "service": String::from_utf8_lossy(&n.services),
+                        "regexp": String::from_utf8_lossy(&n.regexp),
+                        "replacement": n.replacement.to_string().trim_end_matches('.'),
+                        "order": n.order,
+                        "preference": n.preference,
+                    })),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        "PTR" => serde_json::Value::Array(
+            answers
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::PTR(ptr) => Some(json!(ptr.0.to_string().trim_end_matches('.'))),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        "SOA" => answers
+            .iter()
+            .find_map(|r| match &r.data {
+                RData::SOA(soa) => Some(json!({
+                    "nsname": soa.mname.to_string().trim_end_matches('.'),
+                    "hostmaster": soa.rname.to_string().trim_end_matches('.'),
+                    "serial": soa.serial,
+                    "refresh": soa.refresh,
+                    "retry": soa.retry,
+                    "expire": soa.expire,
+                    "minttl": soa.minimum,
+                })),
+                _ => None,
+            })
+            .unwrap_or(serde_json::Value::Null),
+        _ => serde_json::Value::Array(vec![]),
+    }
+}
 
 /// Inject CommonJS `require()`, `module`, `exports`, `__filename`, `__dirname` globals.
 ///
@@ -212,6 +340,64 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         }),
     )?;
     globals.set("__dnsLookup", dns_fn)?;
+
+    // Native __dnsQuery(hostname, rrtype) -> Promise<string (JSON)>
+    // Real record-type DNS queries (MX/TXT/SRV/NS/CNAME/NAPTR/SOA) and reverse
+    // (PTR) lookups via hickory-resolver, since `tokio::net::lookup_host` (used
+    // by __dnsLookup above) only ever does A/AAAA resolution through the OS.
+    let dns_query_fn = Function::new(
+        ctx.clone(),
+        rquickjs::function::Async(move |hostname: String, rrtype: String| async move {
+            use hickory_resolver::proto::rr::RecordType;
+
+            let record_type = match rrtype.as_str() {
+                "MX" => RecordType::MX,
+                "TXT" => RecordType::TXT,
+                "SRV" => RecordType::SRV,
+                "NS" => RecordType::NS,
+                "CNAME" => RecordType::CNAME,
+                "NAPTR" => RecordType::NAPTR,
+                "SOA" => RecordType::SOA,
+                "PTR" => RecordType::PTR,
+                other => {
+                    return Err(rquickjs::Error::new_from_js_message(
+                        "dns",
+                        "query",
+                        format!("unsupported record type: {other}"),
+                    ));
+                }
+            };
+
+            let resolver = dns_resolver()
+                .map_err(|e| rquickjs::Error::new_from_js_message("dns", "query", e))?;
+
+            let lookup = if record_type == RecordType::PTR {
+                let ip: std::net::IpAddr = hostname.parse().map_err(|_| {
+                    rquickjs::Error::new_from_js_message(
+                        "dns",
+                        "query",
+                        format!("EINVAL: not an IP address: {hostname}"),
+                    )
+                })?;
+                resolver.reverse_lookup(ip).await
+            } else {
+                resolver.lookup(hostname.clone(), record_type).await
+            };
+
+            match lookup {
+                Ok(lookup) => {
+                    let json = dns_lookup_to_json(&rrtype, lookup.answers());
+                    Ok(serde_json::to_string(&json).unwrap_or_else(|_| "null".to_string()))
+                }
+                Err(e) => Err(rquickjs::Error::new_from_js_message(
+                    "dns",
+                    "query",
+                    format!("ENOTFOUND {hostname}: {e}"),
+                )),
+            }
+        }),
+    )?;
+    globals.set("__dnsQuery", dns_query_fn)?;
 
     // Register Node.js built-in module shims in the require cache by their bare names.
     // These are looked up before any file resolution, so require('util') etc. always work.
@@ -4507,6 +4693,24 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
 (function() {
     var EventEmitter = globalThis.__requireCache['events'];
 
+    function _feedChars(self, value) {
+        if (value instanceof Uint8Array) value = new TextDecoder().decode(value);
+        for (var i = 0; i < value.length; i++) {
+            var char = value[i];
+            if (char === '\n') {
+                var line = self._lineBuffer.join('');
+                self._lineBuffer = [];
+                self.line = line;
+                self.emit('line', line);
+            } else if (char === '\r') {
+            } else if (char === '\x03') {
+                self.emit('SIGINT');
+            } else {
+                self._lineBuffer.push(char);
+            }
+        }
+    }
+
     function Interface(options) {
         EventEmitter.call(this);
         if (typeof options === 'object') {
@@ -4521,7 +4725,16 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
         this._lineBuffer = [];
         this._reader = null;
         if (this.input && typeof this.input.getReader === 'function') {
+            // WHATWG ReadableStream input — pull-based, start consuming right away
+            // (mirrors Node, which begins reading stdin as soon as an Interface exists).
             this._reader = this.input.getReader();
+            this._readFromInput();
+        } else if (this.input && typeof this.input.on === 'function') {
+            // Node-style Readable (e.g. process.stdin) — event-based consumption.
+            var self = this;
+            this.input.on('data', function(chunk) { _feedChars(self, chunk); });
+            this.input.on('end', function() { if (!self._closed) self.close(); });
+            if (typeof this.input.resume === 'function') this.input.resume();
         }
     }
     if (EventEmitter) {
@@ -4562,25 +4775,8 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
         var self = this;
         if (!this._reader || this._closed || this._paused) return;
         this._reader.read().then(function(result) {
-            if (result.done || self._closed) return;
-            var value = result.value;
-            if (value instanceof Uint8Array) {
-                value = new TextDecoder().decode(value);
-            }
-            for (var i = 0; i < value.length; i++) {
-                var char = value[i];
-                if (char === '\n') {
-                    var line = self._lineBuffer.join('');
-                    self._lineBuffer = [];
-                    self.line = line;
-                    self.emit('line', line);
-                } else if (char === '\r') {
-                } else if (char === '\x03') {
-                    self.emit('SIGINT');
-                } else {
-                    self._lineBuffer.push(char);
-                }
-            }
+            if (result.done || self._closed) { if (result.done && !self._closed) self.close(); return; }
+            _feedChars(self, result.value);
             self._readFromInput();
         }).catch(function(e) {
             self.emit('error', e);
@@ -4937,6 +5133,32 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
         });
     }
 
+    // Backs resolveMx/Txt/Srv/Ns/Cname/Naptr/Ptr/Soa and reverse() with real
+    // record-type DNS queries via native __dnsQuery (hickory-resolver), not
+    // just the A/AAAA-only __dnsLookup used by lookup()/resolve().
+    function _resolveByType(hostname, rrtype, syscall, cb) {
+        if (typeof __dnsQuery !== 'function') {
+            var err = Object.assign(new Error('DNS not available'), { code: 'ENOTSUP', syscall: syscall });
+            if (typeof cb === 'function') return setTimeout(function() { cb(err); }, 0);
+            throw err;
+        }
+        __dnsQuery(hostname, rrtype).then(function(json) {
+            var result = JSON.parse(json);
+            var empty = rrtype === 'SOA' ? (result === null) : (Array.isArray(result) && result.length === 0);
+            if (empty) {
+                var nf = Object.assign(new Error(syscall + ' ENODATA ' + hostname),
+                    { code: 'ENODATA', syscall: syscall, hostname: hostname });
+                if (typeof cb === 'function') cb(nf);
+                return;
+            }
+            if (typeof cb === 'function') cb(null, result);
+        }).catch(function(err) {
+            var dnsErr = err instanceof Error ? err :
+                Object.assign(new Error(String(err)), { code: 'ENOTFOUND', syscall: syscall, hostname: hostname });
+            if (typeof cb === 'function') cb(dnsErr);
+        });
+    }
+
     var dns = {
         lookup: function(hostname, options, callback) {
             if (typeof options === 'function') { callback = options; options = 0; }
@@ -4992,36 +5214,18 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
             if (typeof options === 'function') { cb = options; options = {}; }
             dns.resolve(hostname, 'AAAA', cb);
         },
-        resolveMx: function(hostname, cb) {
-            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
-        },
-        resolveTxt: function(hostname, cb) {
-            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
-        },
-        resolveSrv: function(hostname, cb) {
-            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
-        },
-        resolveNs: function(hostname, cb) {
-            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
-        },
-        resolveCname: function(hostname, cb) {
-            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
-        },
-        resolveNaptr: function(hostname, cb) {
-            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
-        },
-        resolvePtr: function(hostname, cb) {
-            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
-        },
-        resolveSoa: function(hostname, cb) {
-            if (typeof cb === 'function') setTimeout(function() { cb(null, null); }, 0);
-        },
+        resolveMx: function(hostname, cb) { _resolveByType(hostname, 'MX', 'queryMx', cb); },
+        resolveTxt: function(hostname, cb) { _resolveByType(hostname, 'TXT', 'queryTxt', cb); },
+        resolveSrv: function(hostname, cb) { _resolveByType(hostname, 'SRV', 'querySrv', cb); },
+        resolveNs: function(hostname, cb) { _resolveByType(hostname, 'NS', 'queryNs', cb); },
+        resolveCname: function(hostname, cb) { _resolveByType(hostname, 'CNAME', 'queryCname', cb); },
+        resolveNaptr: function(hostname, cb) { _resolveByType(hostname, 'NAPTR', 'queryNaptr', cb); },
+        resolvePtr: function(hostname, cb) { _resolveByType(hostname, 'PTR', 'queryPtr', cb); },
+        resolveSoa: function(hostname, cb) { _resolveByType(hostname, 'SOA', 'querySoa', cb); },
         resolveAny: function(hostname, cb) {
             dns.resolve(hostname, 'ANY', cb);
         },
-        reverse: function(ip, cb) {
-            if (typeof cb === 'function') setTimeout(function() { cb(null, []); }, 0);
-        },
+        reverse: function(ip, cb) { _resolveByType(ip, 'PTR', 'getHostByAddr', cb); },
         setServers: function() {},
         getServers: function() { return []; },
         ADDRCONFIG: 0,
@@ -5396,10 +5600,35 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
 
     var _isatty = (typeof __isatty === 'function') ? __isatty : function() { return false; };
 
-    // stdin as a no-op Readable (CLI tools that read from stdin get an ended stream)
+    // stdin backed by real OS stdin via __stdinRead() (native blocking read on
+    // a background thread); an empty chunk means EOF. Falls back to a no-op,
+    // already-ended stream if the native binding isn't present.
     var stream = globalThis.__requireCache['stream'];
     if (stream && !p.stdin) {
-        var stdin = new stream.Readable({ read: function() { this.push(null); } });
+        var stdin;
+        if (typeof __stdinRead === 'function') {
+            stdin = new stream.Readable({
+                read: function() {
+                    var self = this;
+                    if (self._reading || self._readableState.ended) return;
+                    self._reading = true;
+                    __stdinRead().then(function(chunk) {
+                        self._reading = false;
+                        if (!chunk || chunk.length === 0) {
+                            self.push(null);
+                        } else {
+                            self.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+                        }
+                    }).catch(function(err) {
+                        self._reading = false;
+                        self.emit('error', err);
+                        self.push(null);
+                    });
+                }
+            });
+        } else {
+            stdin = new stream.Readable({ read: function() { this.push(null); } });
+        }
         stdin.isTTY = _isatty(0);
         stdin.fd = 0;
         p.stdin = stdin;

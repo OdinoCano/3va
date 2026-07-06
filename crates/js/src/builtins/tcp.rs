@@ -335,7 +335,7 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             Function::new(
                 ctx.clone(),
                 move |ctx: Ctx<'_>, port: u16, host: String| -> Result<u32> {
-                    if !perms.check(&Capability::Network(host.clone())) {
+                    if !perms.check_bind(&host) {
                         return Err(js_code_err(
                             &ctx,
                             "EACCES",

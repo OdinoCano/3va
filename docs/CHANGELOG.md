@@ -9,6 +9,51 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Fixed (major)
 
+- **`3va start` was a fire-and-forget daemon with no supervision, and `3va audit`'s heuristic scan
+  drowned real vulnerabilities in false positives.** Three related fixes:
+
+  1. **`.exec()` false positives in the malware heuristic scanner** — any `.exec(...)` call, on any
+     object, was flagged as `"Process execution"` (Critical), intending to catch
+     `child_process.exec()` but also firing on `someRegex.exec(str)` — routine in parser-heavy
+     packages like `mime`/`finalhandler` — producing dozens of false positives per audit. Fixed:
+     `.exec(...)` alone no longer triggers unless the file also references `child_process`;
+     `.execSync(...)`/`.spawn(...)` still trigger unconditionally (no `RegExp` counterpart to be
+     confused with). (`crates/pm/src/malware_scanner.rs`)
+  2. **`3va audit`'s two phases were ordered and labeled backwards** — the heuristic scan (pattern
+     matches, not confirmed malware) printed first and was called "Threats", ahead of the OSV
+     scan (real, published CVEs/GHSAs) that `--deny` actually gates on. Reordered: OSV prints first;
+     the heuristic phase is now labeled "Heuristic Pattern Scan (informational)" (JSON key
+     `"heuristic"`, not `"malware"`) and only a Critical-severity hit fails the command.
+     (`crates/pm/src/lib.rs`, `crates/cli/src/main.rs`)
+  3. **`3va start` had no crash recovery and couldn't run as a container's `PID 1`** — it spawned
+     `3va run <entry>` once, detached, and never looked at it again; a crashed process just stayed
+     dead, and because the daemon always forked-and-exited, using it as a Docker `CMD` killed the
+     container immediately. Added a real supervisor (`3va __supervise`, internal): watches the app
+     and restarts it (linear backoff, capped by `--max-restarts`, default 15) on unexpected exit.
+     `3va start --attach`/`-a` runs the same supervisor in the foreground instead of daemonizing —
+     use this as a container's `CMD`/`ENTRYPOINT` (a valid `PID 1` that never exits on its own).
+     `3va start --instances N`/`-i` runs N app instances load-balanced on one port via
+     `SO_REUSEPORT` (`VVVA_CLUSTER=1`, cluster-mode only — normal single-instance binds still fail
+     loudly with `EADDRINUSE` on an accidental double-start), mirroring `pm2 -i`/Node's `cluster`
+     module. `3va status` now shows an `Inst` column and a `crashed` status for a supervisor that
+     gave up after `--max-restarts`. (`crates/cli/src/proc.rs`, `crates/cli/src/main.rs`,
+     `crates/js/src/builtins/http_server.rs`)
+
+- **`package.json["3va"].permissions`'s `allow-net` silently failed to let a script's own server
+  start** — `http.createServer()`/`net.createServer()` default their bind host to `"0.0.0.0"` when
+  `.listen(port)` is called without an explicit host, but the permission check compared that literal
+  `"0.0.0.0"` against whatever host was actually granted (e.g. `allow-net: ["127.0.0.1"]`), which
+  never matched — `.listen()` failed with no visible error (an unhandled rejection inside the async
+  listen call). Read from the outside, it looked like `package.json` permissions weren't being read
+  at all; they were, the exact-match model for a bind host just didn't make sense. Added
+  `PermissionState::check_bind(host)` (`crates/permissions/src/capability.rs`), used only at
+  `listen()` call sites (`crates/js/src/builtins/http_server.rs`,
+  `crates/js/src/builtins/tcp.rs`'s `__netListen`): when the bind host is a wildcard/loopback
+  address (`0.0.0.0`, `::`, `127.0.0.1`, `::1`, `localhost`), any existing `allow-net` grant
+  authorizes the bind. Outbound checks (`fetch`, `http.request`, TCP connect, PQ-TLS) are
+  unaffected — they still call the strict `check()`, so `allow-net: ["api.example.com"]` still
+  cannot reach `127.0.0.1` or any other unlisted host (no SSRF regression).
+
 - **`3va bundle` did not actually bundle multiple files** — `Bundler::add_entry()` only ever
   registered the entry file; `bundle()` never walked the import graph to discover, resolve, and
   inline anything it imported. `extract_imports()` found `import`/`require()` specifiers via regex
@@ -303,22 +348,33 @@ dev-server/resolution behavior against `3va dev`:
   Node.js 16+ API. `[Symbol.asyncIterator]()`, `tee()`, `pipeTo()`, `pipeThrough()` all available.
 
 - **`dns` module (full)** — `dns.lookup()`, `dns.resolve()`, `dns.resolve4()`, `dns.resolve6()`,
-  `dns.promises.*` all working via `tokio::net::lookup_host`. Requires `--allow-net`.
+  `dns.promises.*` via `tokio::net::lookup_host` (A/AAAA). `resolveMx`/`resolveTxt`/`resolveSrv`/
+  `resolveNs`/`resolveCname`/`resolveNaptr`/`resolvePtr`/`resolveSoa`/`reverse` now issue real
+  DNS queries via `hickory-resolver` (native `__dnsQuery`) instead of returning stubbed empty
+  results. Requires `--allow-net`.
 
-- **Network protocol modules** — New built-in modules for IRC, FTP, POP3, MQTT, SSH/SFTP, and WebRTC:
-  - `irc` — IRC client with connection pooling, nick/user registration, JOIN/PART/QUIT, PRIVMSG
-  - `ftp` — FTP client with PASV data connections, authentication, file operations (GET/PUT/LIST)
-  - `pop3` — POP3 client with connection pooling, authentication, RETR/DELE/LIST operations
-  - `mqtt` — MQTT 3.1.1 client with QoS 0/1 support, subscribe/publish, connection pooling
-  - `ssh` — SSH2/SFTP client with keypair support, SFTP operations (read/write/stat/mkdir/rmdir)
-  - `webrtc` — WebRTC peer connection and data channels (RTCPeerConnection, RTCDataChannel)
-  All modules use deny-by-default `Capability::Network(host)` permissions. (`crates/js/src/builtins/`)
+- **Network protocol modules** — New built-in modules for IRC, FTP, POP3, MQTT, SSH/SFTP, and WebRTC.
+  **`irc`, `ftp`, `pop3`, `mqtt`, and `ssh` do real network I/O**:
+  - `irc.Client` — RFC 2812 line protocol (real socket connect, PING→PONG, PRIVMSG/JOIN/PART parsing)
+  - `ftp.Client` — RFC 959 commands (real socket connect, USER/PASS auth, PASV data channel, LIST/RETR/STOR)
+  - `pop3.Client` — RFC 1939 line protocol (real socket connect, USER/PASS, LIST/RETR/DELE)
+  - `mqtt.connect()` — MQTT 3.1.1 binary protocol (real socket connect, CONNECT/SUBSCRIBE/PUBLISH,
+    QoS 0 only — no PUBACK/PUBREC/PUBREL/PUBCOMP handshake, no PINGREQ keepalive)
+  - `ssh.Client` — real SSH via `russh` (password auth, `exec()` with real stdout/stderr/exit code)
+    and `russh-sftp` (readdir/readFile/writeFile/mkdir/rmdir/unlink/rename/stat over a real SFTP
+    subsystem channel). Host key verification is not implemented — any server key is accepted
+    (`StrictHostKeyChecking=no` equivalent); no public-key auth yet, password only.
+
+  `webrtc` is **mocked** — API surface matches `RTCPeerConnection`/`RTCDataChannel` but no real
+  ICE/STUN/TURN/DTLS/SRTP (requires P2P signaling infrastructure).
+
+  All modules gate `connect()` behind `Capability::Network(host)`. (`crates/js/src/builtins/`)
 
 - **`readline` module** — `createInterface()`, `Symbol.asyncIterator()`, `question()`,
   `pause()`/`resume()`, `setPrompt()`, `write()`, and `line`/`close`/`SIGINT` events.
-  `readline.promises` namespace also implemented. **Note:** no real stdin backing;
-  `question()` resolves with empty string unless input provides a `getReader()` method
-  ( WHATWG Stream interface). See `docs/11-guidelines/01-ai-coding-guidelines.md` §2.3.
+  `readline.promises` namespace also implemented. `process.stdin` is backed by real OS stdin
+  (native `__stdinRead`, blocking read on a background thread) and `Interface` consumes it via
+  Node-style `'data'`/`'end'` events, in addition to the WHATWG `getReader()` path.
 
 - **`package.json#3va.permissions`** — New manifest field for declaring required permissions in
   `package.json`. Supports `Capability::Network(host)` with `grant`/`deny`/`prompt`. Enables
@@ -376,7 +432,7 @@ dev-server/resolution behavior against `3va dev`:
 
 ### Changed
 
-- **`process.version` / `process.versions['3va']`** — Bumped to `2.1.1`.
+- **`process.version` / `process.versions['3va']`** — Bumped to `2.1.3`.
 
 ### Security
 

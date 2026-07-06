@@ -59,6 +59,12 @@ md-5 = "0.10"
 notify = { version = "6", features = ["macos_fsevent"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 inferno = { version = "0.12", default-features = false, features = ["nameattr"] }
+hickory-resolver = "0.26"
+socket2 = "0.6"
+russh = { version = "0.62", features = ["ring"] }
+russh-sftp = "2.3"
+webrtc = "0.20.0-rc.1"
+async-trait = "0.1"
 
 
 [profile.release]

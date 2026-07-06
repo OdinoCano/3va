@@ -38,13 +38,13 @@ The scope of 3va comprises the following main components:
 - TypeScript and JSX support (runtime transpilation)
 - ESM and CommonJS module loading
 
-#### 2.1.1.6 Bundler (vvva_bundler) [TO BE IMPLEMENTED]
+#### 2.1.1.6 Bundler (vvva_bundler)
 - TypeScript and JSX transpilation
 - Tree shaking based on static analysis
 - Automatic code splitting
 - Source map generation
 
-#### 2.1.1.7 Test Runner (vvva_test) [TO BE IMPLEMENTED]
+#### 2.1.1.7 Test Runner (vvva_test)
 - Jest compatibility
 - Standard and custom matchers
 - Snapshot support

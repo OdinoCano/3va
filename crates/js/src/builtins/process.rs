@@ -495,15 +495,42 @@ pub fn inject_process(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
         })?,
     )?;
 
+    // --- __stdinRead() -> Promise<Vec<u8>> — real, blocking read of the next
+    // chunk from OS stdin. Runs on a blocking thread so a script waiting on
+    // input doesn't stall the event loop/timers. An empty result means EOF
+    // (mirrors a POSIX read() returning 0), since a real read always blocks
+    // until at least one byte is available or the stream closes.
+    globals.set(
+        "__stdinRead",
+        Function::new(
+            ctx.clone(),
+            rquickjs::function::Async(move |_args: Rest<i32>| async move {
+                tokio::task::spawn_blocking(|| -> Vec<u8> {
+                    use std::io::Read;
+                    let mut buf = vec![0u8; 4096];
+                    match std::io::stdin().lock().read(&mut buf) {
+                        Ok(n) => {
+                            buf.truncate(n);
+                            buf
+                        }
+                        Err(_) => Vec::new(),
+                    }
+                })
+                .await
+                .unwrap_or_default()
+            }),
+        )?,
+    )?;
+
     // --- process object built via native Rust APIs (no format-string injection risk) ---
     let process = Object::new(ctx.clone())?;
 
     // Strings and numbers
-    process.set("version", "3va/2.1.0")?;
+    process.set("version", "3va/2.1.3")?;
     process.set("pid", std::process::id())?;
 
     let versions = Object::new(ctx.clone())?;
-    versions.set("3va", "2.1.0")?;
+    versions.set("3va", "2.1.3")?;
     // Expose fake Node.js-compatible version strings so packages checking
     // process.versions.node / process.versions.v8 don't crash.
     versions.set("node", "20.0.0")?;
