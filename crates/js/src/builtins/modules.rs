@@ -2210,18 +2210,86 @@ pub fn inject_require(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()
 
             // ── perf_hooks ────────────────────────────────────────────────────────
             var __perfOrigin = Date.now();
+            var __perfEntries = [];
+            var __perfObservers = [];
+            function __perfNotify(entry) {
+                for (var i = 0; i < __perfObservers.length; i++) {
+                    var obs = __perfObservers[i];
+                    if (obs._types && obs._types.indexOf(entry.entryType) === -1) continue;
+                    (function(obs, entry) {
+                        queueMicrotask(function() {
+                            try {
+                                obs._callback({
+                                    getEntries: function() { return [entry]; },
+                                    getEntriesByName: function(n) { return n === entry.name ? [entry] : []; },
+                                    getEntriesByType: function(t) { return t === entry.entryType ? [entry] : []; },
+                                }, obs);
+                            } catch (e) {}
+                        });
+                    })(obs, entry);
+                }
+            }
             var __perfObj = {
               timeOrigin: __perfOrigin,
               now: function() { return Date.now() - __perfOrigin; },
-              mark: function() {},
-              measure: function() {},
-              getEntriesByName: function() { return []; },
-              getEntriesByType: function() { return []; },
-              clearMarks: function() {},
-              clearMeasures: function() {},
+              mark: function(name, options) {
+                var entry = {
+                    name: name, entryType: 'mark',
+                    startTime: (options && options.startTime) || (Date.now() - __perfOrigin),
+                    duration: 0, detail: (options && options.detail) || null,
+                };
+                __perfEntries.push(entry);
+                __perfNotify(entry);
+                return entry;
+              },
+              measure: function(name, startMark, endMark) {
+                var startTime = 0;
+                var endTime = Date.now() - __perfOrigin;
+                if (startMark && typeof startMark === 'object') {
+                    if (startMark.start !== undefined) startTime = typeof startMark.start === 'string' ? (__perfObj.getEntriesByName(startMark.start)[0] || {}).startTime || 0 : startMark.start;
+                    if (startMark.end !== undefined) endTime = typeof startMark.end === 'string' ? (__perfObj.getEntriesByName(startMark.end)[0] || {}).startTime || endTime : startMark.end;
+                    if (startMark.duration !== undefined) endTime = startTime + startMark.duration;
+                } else {
+                    if (typeof startMark === 'string') startTime = (__perfObj.getEntriesByName(startMark)[0] || {}).startTime || 0;
+                    if (typeof endMark === 'string') endTime = (__perfObj.getEntriesByName(endMark)[0] || {}).startTime || endTime;
+                }
+                var entry = {
+                    name: name, entryType: 'measure',
+                    startTime: startTime, duration: endTime - startTime, detail: null,
+                };
+                __perfEntries.push(entry);
+                __perfNotify(entry);
+                return entry;
+              },
+              getEntries: function() { return __perfEntries.slice(); },
+              getEntriesByName: function(name, type) {
+                return __perfEntries.filter(function(e) { return e.name === name && (!type || e.entryType === type); });
+              },
+              getEntriesByType: function(type) {
+                return __perfEntries.filter(function(e) { return e.entryType === type; });
+              },
+              clearMarks: function(name) {
+                __perfEntries = __perfEntries.filter(function(e) { return e.entryType !== 'mark' || (name !== undefined && e.name !== name); });
+              },
+              clearMeasures: function(name) {
+                __perfEntries = __perfEntries.filter(function(e) { return e.entryType !== 'measure' || (name !== undefined && e.name !== name); });
+              },
             };
+            function PerformanceObserver(callback) {
+                this._callback = callback;
+                this._types = null;
+            }
+            PerformanceObserver.prototype.observe = function(options) {
+                this._types = (options && (options.entryTypes || (options.type ? [options.type] : null))) || null;
+                if (__perfObservers.indexOf(this) === -1) __perfObservers.push(this);
+            };
+            PerformanceObserver.prototype.disconnect = function() {
+                var idx = __perfObservers.indexOf(this);
+                if (idx !== -1) __perfObservers.splice(idx, 1);
+            };
+            PerformanceObserver.supportedEntryTypes = ['mark', 'measure'];
             globalThis.performance = __perfObj;
-            globalThis.__requireCache['perf_hooks'] = { performance: __perfObj, PerformanceObserver: function() {} };
+            globalThis.__requireCache['perf_hooks'] = { performance: __perfObj, PerformanceObserver: PerformanceObserver };
             globalThis.__requireCache['node:perf_hooks'] = globalThis.__requireCache['perf_hooks'];
 
             // ── WeakRef polyfill (QuickJS lacks native WeakRef / FinalizationRegistry) ──
@@ -4892,10 +4960,30 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
         }
     };
 
-    Channel.prototype.bindStore = function(store, transform) {};
-    Channel.prototype.unbindStore = function(store) {};
-    Channel.prototype.runStores = function(data, fn, thisArg) {
-        return fn.call(thisArg);
+    Channel.prototype.bindStore = function(store, transform) {
+        this._stores = this._stores || [];
+        this._stores.push({ store: store, transform: transform });
+    };
+    Channel.prototype.unbindStore = function(store) {
+        if (!this._stores) return false;
+        for (var i = 0; i < this._stores.length; i++) {
+            if (this._stores[i].store === store) { this._stores.splice(i, 1); return true; }
+        }
+        return false;
+    };
+    Channel.prototype.runStores = function(context, fn, thisArg) {
+        var args = Array.prototype.slice.call(arguments, 3);
+        var self = this;
+        this.publish(context);
+        var stores = this._stores || [];
+        var idx = 0;
+        function next() {
+            if (idx >= stores.length) return fn.apply(thisArg, args);
+            var pair = stores[idx++];
+            var value = pair.transform ? pair.transform(context) : context;
+            return pair.store.run(value, next);
+        }
+        return next();
     };
 
     function channel(name) {
@@ -4953,6 +5041,8 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
 (function() {
     var EventEmitter = globalThis.__requireCache['events'];
 
+    var _domainStack = [];
+
     function Domain() {
         EventEmitter.call(this);
         this.members = [];
@@ -4962,30 +5052,57 @@ fn inject_missing_node_modules(ctx: &Ctx) -> Result<()> {
         Domain.prototype.constructor = Domain;
     }
     Domain.prototype.run = function(fn) {
-        try { return fn(); } catch(e) { this.emit('error', e); }
+        var args = Array.prototype.slice.call(arguments, 1);
+        this.enter();
+        try { return fn.apply(this, args); }
+        catch(e) { this.emit('error', e); }
+        finally { this.exit(); }
     };
-    Domain.prototype.add = function(emitter) { this.members.push(emitter); };
+    Domain.prototype.add = function(emitter) {
+        this.members.push(emitter);
+        if (emitter) emitter.domain = this;
+    };
     Domain.prototype.remove = function(emitter) {
         var idx = this.members.indexOf(emitter);
         if (idx !== -1) this.members.splice(idx, 1);
+        if (emitter && emitter.domain === this) emitter.domain = null;
     };
     Domain.prototype.bind = function(fn) {
         var self = this;
         return function() {
-            try { return fn.apply(this, arguments); } catch(e) { self.emit('error', e); }
+            self.enter();
+            try { return fn.apply(this, arguments); }
+            catch(e) { self.emit('error', e); }
+            finally { self.exit(); }
         };
     };
     Domain.prototype.intercept = function(fn) {
         var self = this;
         return function(err) {
             if (err) { self.emit('error', err); return; }
+            self.enter();
             try { return fn.apply(this, Array.prototype.slice.call(arguments, 1)); }
             catch(e) { self.emit('error', e); }
+            finally { self.exit(); }
         };
     };
-    Domain.prototype.enter = function() {};
-    Domain.prototype.exit = function() {};
-    Domain.prototype.dispose = function() {};
+    Domain.prototype.enter = function() {
+        _domainStack.push(this);
+        domain.active = this;
+        if (globalThis.process) globalThis.process.domain = this;
+    };
+    Domain.prototype.exit = function() {
+        var idx = _domainStack.lastIndexOf(this);
+        if (idx !== -1) _domainStack.splice(idx, 1);
+        var top = _domainStack.length ? _domainStack[_domainStack.length - 1] : null;
+        domain.active = top;
+        if (globalThis.process) globalThis.process.domain = top;
+    };
+    Domain.prototype.dispose = function() {
+        this.removeAllListeners && this.removeAllListeners();
+        this.members = [];
+        this.exit();
+    };
 
     var domain = {
         Domain: Domain,

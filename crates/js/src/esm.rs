@@ -17,6 +17,7 @@ const BUILTIN_NAMES: &[&str] = &[
     "child_process",
     "cluster",
     "constants",
+    "dgram",
     "diagnostics_channel",
     "dns",
     "dns/promises",

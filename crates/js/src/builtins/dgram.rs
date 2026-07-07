@@ -306,22 +306,25 @@ pub fn inject_dgram(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> 
     };
 
     Socket.prototype.send = function(msg, offset, length, port, address, callback) {
-        // Overload: send(msg, port, address, [callback])
+        // Overload: send(msg, port, [address], [callback])
         if (typeof offset === 'number' && typeof length === 'number') {
-            // full signature
+            // full signature: send(msg, offset, length, port, [address], [callback])
+            if (typeof address === 'function') { callback = address; address = undefined; }
         } else {
-            callback = address;
-            address = port;
-            port = length;
-            length = msg.length;
+            // short-form args bound positionally: offset=port, length=address|callback, port=callback
+            callback = (typeof length === 'function') ? length : port;
+            address = (typeof length === 'function') ? undefined : length;
+            port = offset;
             offset = 0;
+            length = msg ? msg.length : 0;
         }
+        address = address || '127.0.0.1';
         var data;
         if (typeof msg === 'string') {
-            data = btoa(msg);
+            data = btoa(msg.slice(offset, offset + length));
         } else if (msg instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(msg))) {
             var b = '';
-            for (var i = 0; i < msg.length; i++) b += String.fromCharCode(msg[i]);
+            for (var i = offset; i < offset + length && i < msg.length; i++) b += String.fromCharCode(msg[i]);
             data = btoa(b);
         } else {
             data = btoa(String(msg));

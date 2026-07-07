@@ -69,7 +69,9 @@ async-trait = "0.1"
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+strip = true
 
 [patch.crates-io]
 # Route crates.io lookups for the renamed forks to their local vendor paths.
