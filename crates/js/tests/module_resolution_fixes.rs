@@ -32,7 +32,7 @@ async fn engine_with_tmp_read() -> JsEngine {
 /// __fallbackModules is returned even if __resolvePath would throw.
 #[tokio::test]
 async fn fallback_module_returned_when_package_not_in_node_modules() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -52,7 +52,7 @@ async fn fallback_module_returned_when_package_not_in_node_modules() {
 /// must NOT override it.
 #[tokio::test]
 async fn builtin_shadows_fallback_stub() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -70,7 +70,7 @@ async fn builtin_shadows_fallback_stub() {
 /// The fallback value is returned as-is (function, object, primitive).
 #[tokio::test]
 async fn fallback_module_can_be_a_function() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -89,7 +89,7 @@ async fn fallback_module_can_be_a_function() {
 /// require() of an absolute .mjs path must throw with code ERR_REQUIRE_ESM.
 #[tokio::test]
 async fn require_mjs_throws_err_require_esm() {
-    let e = engine_with_tmp_read().await;
+    let mut e = engine_with_tmp_read().await;
 
     // Write a temp .mjs file so require() gets past __resolvePath to the ESM check.
     let tmp = std::env::temp_dir().join("_3va_test_esm_mod.mjs");
@@ -117,7 +117,7 @@ async fn require_mjs_throws_err_require_esm() {
 /// (extension wins over content; it's loaded as CJS).
 #[tokio::test]
 async fn require_cjs_extension_never_throws_err_require_esm() {
-    let e = engine_with_tmp_read().await;
+    let mut e = engine_with_tmp_read().await;
 
     let tmp = std::env::temp_dir().join("_3va_test_cjs_mod.cjs");
     std::fs::write(&tmp, "module.exports = { ok: true };\n").unwrap();
@@ -144,7 +144,7 @@ async fn require_cjs_extension_never_throws_err_require_esm() {
 /// Ordinary .js files must still load normally (no false ERR_REQUIRE_ESM).
 #[tokio::test]
 async fn require_js_cjs_file_loads_normally() {
-    let e = engine_with_tmp_read().await;
+    let mut e = engine_with_tmp_read().await;
 
     let tmp = std::env::temp_dir().join("_3va_test_plain_cjs.js");
     std::fs::write(&tmp, "module.exports = { value: 7 };\n").unwrap();

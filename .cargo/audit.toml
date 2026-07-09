@@ -1,9 +1,1 @@
 [advisories]
-# dlopen_derive 0.1.4 — unmaintained (no CVE, no exploit).
-# Dep transitiva: rquickjs 0.6 → rquickjs-core → dlopen → dlopen_derive.
-# No hay versión de rquickjs 0.6.x que la elimine; el upgrade a 0.11+ requiere
-# refactorizar la API del motor JS. Se ignora hasta migrar rquickjs.
-ignore = [
-    "RUSTSEC-2023-0051",  # dlopen_derive unmaintained
-    "RUSTSEC-2024-0370",  # proc-macro-error unmaintained (también via rquickjs-macro)
-]

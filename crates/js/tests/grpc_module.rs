@@ -17,7 +17,7 @@ async fn engine_no_net() -> JsEngine {
         .unwrap()
 }
 
-async fn wait_for_result(engine: &JsEngine, global: &str) -> String {
+async fn wait_for_result(engine: &mut JsEngine, global: &str) -> String {
     for _ in 0..40 {
         engine.idle().await;
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -36,7 +36,7 @@ async fn wait_for_result(engine: &JsEngine, global: &str) -> String {
 
 #[tokio::test]
 async fn grpc_globals_exist() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e.eval_to_string("typeof __grpcLoadProto").await.unwrap();
     assert_eq!(r, "function", "grpcLoadProto should be a function");
 
@@ -84,7 +84,7 @@ async fn grpc_globals_exist() {
 
 #[tokio::test]
 async fn grpc_channel_denied_without_permission() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     e.eval(
         r#"globalThis.__grpcResult = null;
            (async function() {
@@ -98,7 +98,7 @@ async fn grpc_channel_denied_without_permission() {
     )
     .await
     .unwrap();
-    let result = wait_for_result(&e, "__grpcResult").await;
+    let result = wait_for_result(&mut e, "__grpcResult").await;
     assert!(
         result.contains("threw:") && result.contains("Network access denied"),
         "gRPC channel should be denied without permission, got: {}",
@@ -110,7 +110,7 @@ async fn grpc_channel_denied_without_permission() {
 
 #[tokio::test]
 async fn grpc_load_proto_parses_service() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let proto = r#"
         syntax = "proto3";
         package mypackage;
@@ -145,7 +145,7 @@ async fn grpc_load_proto_parses_service() {
 
 #[tokio::test]
 async fn grpc_create_channel_returns_promise() {
-    let e = engine_with_net("localhost").await;
+    let mut e = engine_with_net("localhost").await;
     e.eval(
         r#"globalThis.__grpcResult = null;
            (async function() {
@@ -160,7 +160,7 @@ async fn grpc_create_channel_returns_promise() {
     )
     .await
     .unwrap();
-    let result = wait_for_result(&e, "__grpcResult").await;
+    let result = wait_for_result(&mut e, "__grpcResult").await;
     // Should either create channel successfully (returns number) or fail with connection error
     assert!(
         result.starts_with("channel_created:") || result.starts_with("error:"),
@@ -173,7 +173,7 @@ async fn grpc_create_channel_returns_promise() {
 
 #[tokio::test]
 async fn grpc_invalid_channel_operations() {
-    let e = engine_with_net("localhost").await;
+    let mut e = engine_with_net("localhost").await;
 
     e.eval(
         r#"globalThis.__grpcResult = null;
@@ -188,7 +188,7 @@ async fn grpc_invalid_channel_operations() {
     )
     .await
     .unwrap();
-    let result = wait_for_result(&e, "__grpcResult").await;
+    let result = wait_for_result(&mut e, "__grpcResult").await;
     assert!(
         result.starts_with("got_error:"),
         "invalid channel should error, got: {}",
@@ -208,7 +208,7 @@ async fn grpc_invalid_channel_operations() {
     )
     .await
     .unwrap();
-    let result = wait_for_result(&e, "__grpcResult").await;
+    let result = wait_for_result(&mut e, "__grpcResult").await;
     assert!(
         result.starts_with("got_error:"),
         "invalid stream read should error, got: {}",
@@ -228,7 +228,7 @@ async fn grpc_invalid_channel_operations() {
     )
     .await
     .unwrap();
-    let result = wait_for_result(&e, "__grpcResult").await;
+    let result = wait_for_result(&mut e, "__grpcResult").await;
     assert!(
         result.starts_with("got_error:"),
         "invalid stream write should error, got: {}",
@@ -240,7 +240,7 @@ async fn grpc_invalid_channel_operations() {
 
 #[tokio::test]
 async fn grpc_package_definition_format() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let proto = r#"
         syntax = "proto3";
         package testpkg;
@@ -276,7 +276,7 @@ async fn grpc_package_definition_format() {
 
 #[tokio::test]
 async fn grpc_stream_without_channel_fails() {
-    let e = engine_with_net("localhost").await;
+    let mut e = engine_with_net("localhost").await;
     e.eval(
         r#"globalThis.__grpcResult = null;
            (async function() {
@@ -291,7 +291,7 @@ async fn grpc_stream_without_channel_fails() {
     )
     .await
     .unwrap();
-    let result = wait_for_result(&e, "__grpcResult").await;
+    let result = wait_for_result(&mut e, "__grpcResult").await;
     assert!(
         result.starts_with("got_error:"),
         "stream without channel should error, got: {}",
@@ -301,7 +301,7 @@ async fn grpc_stream_without_channel_fails() {
 
 #[tokio::test]
 async fn grpc_close_nonexistent_channel_succeeds() {
-    let e = engine_with_net("localhost").await;
+    let mut e = engine_with_net("localhost").await;
     // Closing a non-existent channel should be a no-op (not throw)
     let r = e
         .eval_to_string(
@@ -321,7 +321,7 @@ async fn grpc_close_nonexistent_channel_succeeds() {
 
 #[tokio::test]
 async fn grpc_cancel_nonexistent_stream_succeeds() {
-    let e = engine_with_net("localhost").await;
+    let mut e = engine_with_net("localhost").await;
     // Canceling a non-existent stream should be a no-op (not throw)
     let r = e
         .eval_to_string(

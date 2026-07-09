@@ -8,7 +8,7 @@ The scope of 3va comprises the following main components:
 
 #### 2.1.1.1 Runtime (vvva_core)
 - Asynchronous event loop based on Tokio
-- JavaScript engine integration (QuickJS via rquickjs)
+- JavaScript engine integration (V8 via v8 crate)
 - Support for ESM and CommonJS
 - Implementation of standard web APIs (fetch, WebSocket, ReadableStream)
 - Module management and require/import
@@ -33,7 +33,7 @@ The scope of 3va comprises the following main components:
 - Proprietary lockfile format
 
 #### 2.1.1.5 JavaScript Engine (vvva_js)
-- QuickJS integration
+- V8 integration
 - Polyfills for Node.js APIs
 - TypeScript and JSX support (runtime transpilation)
 - ESM and CommonJS module loading
@@ -93,7 +93,7 @@ The following components are outside the initial scope:
 ### Phase 1: Foundation (Months 1-3)
 - Functional core runtime
 - Basic CLI with permissions
-- Operational QuickJS integration
+- Operational V8 integration
 
 ### Phase 2: Package Manager (Months 4-6)
 - Package installation

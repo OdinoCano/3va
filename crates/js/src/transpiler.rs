@@ -272,7 +272,7 @@ fn strip_inline_flow_types(source: &str) -> String {
 /// Replace every `import.meta.*` usage with a named stub that 3va injects
 /// at runtime.
 ///
-/// QuickJS evaluates transpiled entry files in *script* mode, not module mode,
+/// V8 evaluates transpiled entry files in *script* mode, not module mode,
 /// so `import.meta` is a syntax error there. We replace all occurrences with
 /// the stubs below before the code reaches the parser:
 ///
@@ -492,7 +492,7 @@ pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
     let replaced = replace_import_meta(source);
     let out = try_transpile_inner(&replaced, jsx, true).unwrap_or(replaced);
     // OXC 0.132 leaves a bare `export {};` in CJS output to flag the file as an
-    // ES module in bundlers that inspect the AST. QuickJS script mode rejects it.
+    // ES module in bundlers that inspect the AST. V8 script mode rejects it.
     // Strip it — the CJS require() shim does not need this marker.
     let out = strip_bare_export_marker(&out);
     // OXC 0.132 does not convert static `import`/`export` declarations to
@@ -501,7 +501,7 @@ pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
     let out = static_esm_to_cjs(&out);
     // Dynamic import() calls are not converted by static_esm_to_cjs (they are
     // expressions, not declarations). Rewrite them to __importAsync() so the
-    // CJS require() shim handles resolution instead of the QuickJS ESM loader.
+    // CJS require() shim handles resolution instead of the V8 ESM loader.
     if out.contains("import(") {
         let mut result = String::with_capacity(out.len());
         let bytes = out.as_bytes();
@@ -1593,7 +1593,7 @@ mod tests {
     fn transpile_to_cjs_strips_bare_export_marker() {
         // OXC 0.132 eliminates unused imports as dead code and emits a bare
         // `export {};` as an ES-module marker — verify it gets stripped so
-        // QuickJS script mode can evaluate the result without a syntax error.
+        // V8 script mode can evaluate the result without a syntax error.
         let src = "import path from 'path';\nglobalThis.x = 1;";
         let out = transpile_to_cjs(src, false);
         assert!(

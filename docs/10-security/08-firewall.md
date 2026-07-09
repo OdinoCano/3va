@@ -35,7 +35,7 @@ parse_request(stream, timeouts, header_limits)
 
 ### Principio de operación
 
-El bucle de aceptación en `__httpAcceptAsync` es un `loop {}` de Rust. Las conexiones rechazadas (firewall, timeout, flood) no emergen a JavaScript — el loop descarta la conexión y acepta la siguiente sin retornar al event loop de QuickJS. Esto evita que el código JS tenga que manejar errores de infraestructura y mantiene el servidor respondiendo incluso bajo ataque.
+El bucle de aceptación en `__httpAcceptAsync` es un `loop {}` de Rust. Las conexiones rechazadas (firewall, timeout, flood) no emergen a JavaScript — el loop descarta la conexión y acepta la siguiente sin retornar al event loop de V8. Esto evita que el código JS tenga que manejar errores de infraestructura y mantiene el servidor respondiendo incluso bajo ataque.
 
 ---
 

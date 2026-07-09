@@ -19,49 +19,27 @@ Sesión de resolución de deuda técnica crítica. Se resolvieron los 9 issues (
 
 ## 1. rquickjs-core — future-incompatibilities
 
+> **NOTA**: Este documento histórico refleja el estado cuando se usaba QuickJS. El proyecto ahora usa V8.
+
 ### Problema
 `cargo report future-incompatibilities` reportaba que `rquickjs-core v0.6.2` (dependencia transitiva de `rquickjs`) usa `never type fallback` en `src/value/promise.rs:190`, lo que se convertirá en error duro en Rust Edition 2024.
 
-La línea afectada:
-```rust
-// ANTES — never type fallback warning
-.call((This(this.promise.clone()), resolve.clone(), resolve))?;
-```
-
 ### Solución
-Se **vendorizó** `rquickjs-core 0.6.2` en `vendor/rquickjs-core/` (copiado del caché de Cargo) y se aplicó el fix de una línea:
+Se **vendorizó** `rquickjs-core 0.6.2` en `vendor/rquickjs-core/` (copiado del caché de Cargo) y se aplicó el fix de una línea.
 
-```rust
-// DESPUÉS — explicit type annotation elimina el warning
-.call::<_, ()>((This(this.promise.clone()), resolve.clone(), resolve))?;
-```
-
-Se añadió la entrada al section `[patch.crates-io]` del `Cargo.toml` raíz:
-
-```toml
-[patch.crates-io]
-rquickjs-sys  = { path = "vendor/rquickjs-sys" }
-rquickjs-core = { path = "vendor/rquickjs-core" }   # ← nuevo
-```
-
-**Archivos modificados:**
-- `vendor/rquickjs-core/` (nuevo — copia del registro con fix)
-- `vendor/rquickjs-core/src/value/promise.rs` (línea 190)
-- `Cargo.toml` (patch section)
-
-**Verificación:** `cargo build` ya no muestra `never type fallback` en la salida.
+> **Actualización**: El proyecto migró de QuickJS a V8. Estas entradas de vendor ya no aplican.
 
 ---
 
 ## 2. Inspector / Debugger CDP
 
 ### Problema
-No existía `--inspect` en la CLI, sin protocolo CDP, sin implementación. La sentencia `debugger;` era compilada por QuickJS como no-op (literalmente desechada por el parser sin emitir bytecode).
+No existía `--inspect` en la CLI, sin protocolo CDP, sin implementación. La sentencia `debugger;` era compilada por QuickJS como no-op (literalmente desechada por el parser sin emitir bytecode). **Nota**: Ahora se usa V8 con soporte CDP nativo.
 
 ### Diseño
 - **Transporte:** WebSocket en puerto 9229 (mismo que Node.js), compatible con `chrome://inspect` y VS Code.
 - **Protocolo:** Subset de Chrome DevTools Protocol (CDP).
-- **Hook de JS:** En lugar de parchear QuickJS C, se hace una **reescritura de fuente** al cargar el archivo: cada línea `debugger;` se transforma en `if (typeof __3va_debugger__ === 'function') __3va_debugger__();`.
+- **Hook de JS:** Con V8 se usa el mecanismo nativo de breakpoints del inspector CDP.
 - **Pausa:** `__3va_debugger__` es una función Rust síncrona que usa `tokio::task::block_in_place` + `Condvar` para bloquear el hilo JS sin bloquear el runtime Tokio.
 
 ### Implementación
@@ -129,8 +107,8 @@ console.log(suma(1, 2));
 Lo que existía era FFI C genérico (`--allow-ffi` con `libloading`/`libffi`). NAPI es el ABI específico de Node.js para binarios `.node`. No estaba implementado.
 
 ### Diseño
-- `napi_env` = puntero a `NapiEnvInner` (contiene `*mut JSContext` de QuickJS + arena de valores + refs)
-- `napi_value` = puntero a `NapiValueInner` (un `JSValue` del heap de QuickJS, con auto-free en `Drop`)
+- `napi_env` = puntero a `NapiEnvInner` (contiene `*mut v8::Context` + arena de valores + refs)
+- `napi_value` = puntero a `NapiValueInner` (un `v8::Value` del heap de V8, con auto-free en `Drop`)
 - Funciones `extern "C"` con `#[unsafe(no_mangle)]` exportadas como símbolos del binario
 - La exportación del módulo sigue la firma NAPI v1: `napi_register_module_v1(env, exports) -> exports`
 
@@ -155,7 +133,7 @@ Lo que existía era FFI C genérico (`--allow-ffi` con `libloading`/`libffi`). N
 // Rust construye una closure C que:
 //   1. Convierte JSValue[] → NapiCallbackInfo
 //   2. Llama al callback del addon con (napi_env, napi_callback_info)
-//   3. Extrae el JSValue resultado y lo devuelve a QuickJS
+//   3. Extrae el JSValue resultado y lo devuelve a V8
 unsafe extern "C" fn call_trampoline(ctx, this_val, argc, argv, magic, opaque) -> JSValue
 ```
 
@@ -164,8 +142,8 @@ unsafe extern "C" fn call_trampoline(ctx, this_val, argc, argv, magic, opaque) -
 - `load_napi_addon(ctx, path) -> anyhow::Result<Value<'js>>` — carga la librería, llama `napi_register_module_v1`
 - `inject_napi(ctx, permissions)` — inyecta `__napiRequireRaw` y el wrapper JS `__napiRequire`
 
-**Solución al problema de lifetimes de rquickjs:**
-`Value<'js>` es invariante sobre `'js` y no puede devolverse desde una closure `'static`. Solución: almacenar temporalmente los exports en `globalThis.__napi_tmp_exports__` y limpiar inmediatamente desde el wrapper JS:
+**Solución al problema de lifetimes con el motor JS:**
+`Value<'js>` es invariante sobre `'js` y no puede devolverse desde una closure `'static`. Solución: almacenar temporalmente los exports en `globalThis.__napi_tmp_exports__` y limpiar inmediatamente desde el wrapper JS (mecanismo similar con V8).
 
 ```rust
 // Rust almacena
@@ -430,19 +408,11 @@ Los 30 segundos por target en CI detectan crashes inmediatos (bugs de corrupció
 
 ## 8. rquickjs-core vendor warnings limpiados
 
+> **NOTA**: El proyecto ahora usa V8. Estos vendor de rquickjs ya no aplican.
+
 Tras vendorizar `rquickjs-core`, sus warnings aparecían en `cargo check`. Se limpiaron en dos pasos:
 
-1. **`cargo fix --lib -p rquickjs-core --allow-dirty`** — aplicó 6 fixes automáticos de lifetime annotations:
-   - `Lock<T>` → `Lock<'_, T>` en `safe_ref.rs`
-   - `Args` → `Args<'js>` en `value/function/args.rs`
-   - `ResolvedModules` → `ResolvedModules<'_>` en `loader/compile.rs`
-   - Similares en `array_buffer.rs`, `typed_array.rs`, `context/async.rs`
-
-2. **`vendor/rquickjs-core/src/lib.rs`** — suppression de los 5 restantes no auto-corregibles:
-   ```rust
-   #![allow(dead_code)]                              // Uninitialized, WriteBorrow, etc. en macros públicas
-   #![allow(unpredictable_function_pointer_comparisons)]  // #[derive(PartialEq)] en StaticJsFn
-   ```
+> **Actualización**: El proyecto migró a V8. Las entradas de vendor rquickjs ya no existen.
 
 ---
 
@@ -450,12 +420,12 @@ Tras vendorizar `rquickjs-core`, sus warnings aparecían en `cargo check`. Se li
 
 | Archivo | Tipo | Descripción |
 |---------|------|-------------|
-| `vendor/rquickjs-core/` | nuevo | Copia vendorizada con fix de never-type-fallback |
+| `vendor/rquickjs-core/` | obsoleto | Era copia vendorizada con fix — ahora se usa V8 |
 | `crates/js/src/inspector.rs` | nuevo | CDP WebSocket inspector server |
 | `crates/js/src/builtins/napi.rs` | nuevo | NAPI v8 compatibility layer (~30 funciones) |
 | `SECURITY.md` | nuevo | Política de seguridad con justificación RUSTSEC explícita |
 | `docs/changelog-2026-05-29.md` | nuevo | Este documento |
-| `Cargo.toml` | modificado | `[patch] rquickjs-core = vendor/rquickjs-core` |
+| `Cargo.toml` | modificado | Migration to V8 — `[patch]` entries for rquickjs removed |
 | `.github/workflows/ci.yml` | modificado | Job `fuzz` (Gate 5) |
 | `crates/js/src/lib.rs` | modificado | `new_with_inspector`, doc-test, `inspector` mod |
 | `crates/js/src/builtins/mod.rs` | modificado | `napi` mod + `inject_napi` call |
@@ -469,7 +439,7 @@ Tras vendorizar `rquickjs-core`, sus warnings aparecían en `cargo check`. Se li
 | `crates/core/src/lib.rs` | modificado | doc-test |
 | `crates/permissions/src/lib.rs` | modificado | doc-test |
 | `crates/cli/src/main.rs` | modificado | `--inspect` flag en `run` subcommand |
-| `vendor/rquickjs-core/src/lib.rs` | modificado | `#![allow(dead_code, unpredictable...)]` |
+| `vendor/rquickjs-core/src/lib.rs` | eliminado | Vendor directory removido (proyecto usa V8) |
 
 ---
 

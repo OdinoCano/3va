@@ -1,11 +1,10 @@
-use rquickjs::{Ctx, Function, Result, Value, function::Rest};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use v8::{ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue};
 
 type TimerId = u64;
 
-/// Entry in the timer manager: tracks when each timer fires.
 struct TimerEntry {
     fires_at: Instant,
     repeating: bool,
@@ -13,8 +12,6 @@ struct TimerEntry {
     cancelled: bool,
 }
 
-/// Manages JS timers — registration and expiry polling.
-/// Stored in a thread-local so Rust-backed native functions can access it.
 pub struct TimerManager {
     timers: Mutex<HashMap<TimerId, TimerEntry>>,
 }
@@ -26,7 +23,6 @@ impl TimerManager {
         })
     }
 
-    /// Register a one-shot timer.
     pub fn set_timeout(&self, id: TimerId, ms: u64) {
         let fires_at = Instant::now() + Duration::from_millis(ms);
         let mut timers = self.timers.lock().unwrap();
@@ -41,7 +37,6 @@ impl TimerManager {
         );
     }
 
-    /// Register a repeating interval timer.
     pub fn set_interval(&self, id: TimerId, ms: u64) {
         let fires_at = Instant::now() + Duration::from_millis(ms);
         let mut timers = self.timers.lock().unwrap();
@@ -56,7 +51,6 @@ impl TimerManager {
         );
     }
 
-    /// Cancel a timer by ID.
     pub fn cancel(&self, id: TimerId) {
         let mut timers = self.timers.lock().unwrap();
         if let Some(entry) = timers.get_mut(&id) {
@@ -64,7 +58,6 @@ impl TimerManager {
         }
     }
 
-    /// Return IDs of all expired (and not cancelled) timers, and reschedule intervals.
     pub fn poll_expired_ids(&self) -> Vec<TimerId> {
         let now = Instant::now();
         let mut expired = Vec::new();
@@ -97,19 +90,15 @@ impl TimerManager {
             }
         }
 
-        // Sort by ID (registration order) so multiple setTimeout(0) callbacks fire
-        // in FIFO order, matching Node.js behavior. HashMap iteration is random.
         expired.sort_unstable();
         expired
     }
 
-    /// Return whether there are any pending (non-cancelled) timers.
     pub fn has_pending(&self) -> bool {
         let timers = self.timers.lock().unwrap();
         timers.values().any(|e| !e.cancelled)
     }
 
-    /// Next expiry duration (for sleep decisions).
     pub fn next_expiry(&self) -> Option<Duration> {
         let now = Instant::now();
         let timers = self.timers.lock().unwrap();
@@ -120,15 +109,20 @@ impl TimerManager {
             .min()
     }
 
-    /// Fire all expired timers by calling the JS `__fireTimer(id)` function.
-    pub fn fire_pending(ctx: &Ctx, manager: Arc<Self>) -> Result<()> {
+    pub fn fire_pending(
+        scope: &mut ContextScope<HandleScope>,
+        manager: Arc<Self>,
+    ) -> anyhow::Result<()> {
         let expired = manager.poll_expired_ids();
         for id in expired {
             let code = format!(
                 "if (typeof __fireTimer === 'function') {{ __fireTimer({}); }}",
                 id
             );
-            let _ = ctx.eval::<Value, _>(code.as_str());
+            let script = v8::Script::compile(scope, v8::String::new(scope, &code).unwrap(), None);
+            if let Some(s) = script {
+                let _ = s.run(scope);
+            }
         }
         Ok(())
     }
@@ -142,41 +136,84 @@ impl Default for TimerManager {
     }
 }
 
-/// Inject timer globals into the QuickJS context.
-pub fn inject_timers(ctx: &Ctx, manager: Arc<TimerManager>) -> Result<()> {
-    // __nativeSetTimeout(id, ms) — returns nothing (JS side stores the id)
-    let mgr = manager.clone();
-    let native_set_timeout = Function::new(ctx.clone(), move |args: Rest<i32>| {
-        let mut iter = args.0.iter();
-        let id = iter.next().copied().unwrap_or(0) as u64;
-        let ms = iter.next().copied().unwrap_or(0) as u64;
-        mgr.set_timeout(id, ms);
-    })?;
+pub fn inject_timers(
+    scope: &mut ContextScope<HandleScope>,
+    manager: Arc<TimerManager>,
+) -> anyhow::Result<()> {
+    let mgr_ptr = Arc::into_raw(manager.clone()) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, mgr_ptr);
+    let native_set_timeout = v8::Function::builder(
+        |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
+            let mgr = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                Arc::from_raw(ptr as *const TimerManager)
+            };
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as u64;
+            let ms = args.get(1).uint32_value(scope).unwrap_or(0) as u64;
+            mgr.set_timeout(id, ms);
+            std::mem::forget(mgr);
+        },
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
 
-    // __nativeSetInterval(id, ms)
-    let mgr = manager.clone();
-    let native_set_interval = Function::new(ctx.clone(), move |args: Rest<i32>| {
-        let mut iter = args.0.iter();
-        let id = iter.next().copied().unwrap_or(0) as u64;
-        let ms = iter.next().copied().unwrap_or(0) as u64;
-        mgr.set_interval(id, ms);
-    })?;
+    let mgr_ptr = Arc::into_raw(manager.clone()) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, mgr_ptr);
+    let native_set_interval = v8::Function::builder(
+        |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
+            let mgr = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                Arc::from_raw(ptr as *const TimerManager)
+            };
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as u64;
+            let ms = args.get(1).uint32_value(scope).unwrap_or(0) as u64;
+            mgr.set_interval(id, ms);
+            std::mem::forget(mgr);
+        },
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
 
-    // __nativeClearTimer(id)
-    let mgr = manager.clone();
-    let native_clear_timer = Function::new(ctx.clone(), move |args: Rest<i32>| {
-        let id = args.0.first().copied().unwrap_or(0) as u64;
-        mgr.cancel(id);
-    })?;
+    let mgr_ptr = Arc::into_raw(manager.clone()) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, mgr_ptr);
+    let native_clear_timer = v8::Function::builder(
+        |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
+            let mgr = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                Arc::from_raw(ptr as *const TimerManager)
+            };
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as u64;
+            mgr.cancel(id);
+            std::mem::forget(mgr);
+        },
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
 
-    let globals = ctx.globals();
-    globals.set("__nativeSetTimeout", native_set_timeout)?;
-    globals.set("__nativeSetInterval", native_set_interval)?;
-    globals.set("__nativeClearTimer", native_clear_timer)?;
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    global.set(
+        scope,
+        v8::String::new(scope, "__nativeSetTimeout").unwrap().into(),
+        native_set_timeout.into(),
+    );
+    global.set(
+        scope,
+        v8::String::new(scope, "__nativeSetInterval")
+            .unwrap()
+            .into(),
+        native_set_interval.into(),
+    );
+    global.set(
+        scope,
+        v8::String::new(scope, "__nativeClearTimer").unwrap().into(),
+        native_clear_timer.into(),
+    );
 
-    // Inject JS-level timer wrappers
-    ctx.eval::<(), _>(
-        r#"
+    let js_polyfill = r#"
         globalThis.__timerCallbacks = {};
         globalThis.__timerNextId = 0;
 
@@ -208,7 +245,6 @@ pub fn inject_timers(ctx: &Ctx, manager: Arc<TimerManager>) -> Result<()> {
             var intervalMs = Math.floor(+ms) || 0;
             var wrapper = function() {
                 fn();
-                // Re-register callback for next interval tick
                 globalThis.__timerCallbacks[id] = wrapper;
             };
             globalThis.__timerCallbacks[id] = wrapper;
@@ -222,8 +258,6 @@ pub fn inject_timers(ctx: &Ctx, manager: Arc<TimerManager>) -> Result<()> {
             __nativeClearTimer(id);
         };
 
-        // setImmediate/clearImmediate — defined in process.rs with __drainImmediate
-        // (real queue, not setTimeout). Make a stub here that gets overridden later.
         if (typeof globalThis.setImmediate === 'undefined') {
             globalThis.setImmediate = function(fn) {
                 return globalThis.setTimeout(fn, 0);
@@ -233,12 +267,14 @@ pub fn inject_timers(ctx: &Ctx, manager: Arc<TimerManager>) -> Result<()> {
             };
         }
 
-        // queueMicrotask — fires after current sync execution, before timers
         globalThis.queueMicrotask = function(fn) {
             Promise.resolve().then(fn);
         };
-    "#,
-    )?;
+    "#;
+
+    let script = v8::Script::compile(scope, v8::String::new(scope, js_polyfill).unwrap(), None)
+        .ok_or_else(|| anyhow::anyhow!("compile error"))?;
+    let _ = script.run(scope);
 
     Ok(())
 }

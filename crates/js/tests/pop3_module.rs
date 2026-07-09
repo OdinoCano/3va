@@ -57,7 +57,7 @@ fn start_fake_pop3d() -> u16 {
 #[tokio::test]
 async fn pop3_real_stat_and_retr_over_the_wire() {
     let port = start_fake_pop3d();
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
     e.eval(
         format!(
             r#"
@@ -148,7 +148,7 @@ async fn pop3_real_stat_and_retr_over_the_wire() {
 
 #[tokio::test]
 async fn pop3_global_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof pop3 === 'object')")
         .await
@@ -158,7 +158,7 @@ async fn pop3_global_exists() {
 
 #[tokio::test]
 async fn pop3_client_constructor_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof pop3.Client === 'function')")
         .await
@@ -168,7 +168,7 @@ async fn pop3_client_constructor_exists() {
 
 #[tokio::test]
 async fn pop3_client_has_expected_methods() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -193,7 +193,7 @@ async fn pop3_client_has_expected_methods() {
 
 #[tokio::test]
 async fn pop3_client_has_event_emitter() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -216,7 +216,7 @@ async fn pop3_client_has_event_emitter() {
 
 #[tokio::test]
 async fn pop3_connect_blocked_without_net_grant() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -237,7 +237,7 @@ async fn pop3_connect_blocked_without_net_grant() {
 
 #[tokio::test]
 async fn pop3_constructor_options() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -258,7 +258,7 @@ async fn pop3_constructor_options() {
 
 #[tokio::test]
 async fn pop3_list_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -280,7 +280,7 @@ async fn pop3_list_api() {
 
 #[tokio::test]
 async fn pop3_retrieve_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -302,7 +302,7 @@ async fn pop3_retrieve_api() {
 
 #[tokio::test]
 async fn pop3_delete_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -324,7 +324,7 @@ async fn pop3_delete_api() {
 
 #[tokio::test]
 async fn pop3_stat_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -346,7 +346,7 @@ async fn pop3_stat_api() {
 
 #[tokio::test]
 async fn pop3_reset_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -368,7 +368,7 @@ async fn pop3_reset_api() {
 
 #[tokio::test]
 async fn pop3_quit_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"

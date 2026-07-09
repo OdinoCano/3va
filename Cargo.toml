@@ -6,9 +6,6 @@ members = [
     "crates/crypto",
     "crates/test",
     "crates/wasm",
-    "vendor/rquickjs-sys",
-    "vendor/rquickjs-core",
-    "vendor/vvva-rquickjs",
 ]
 
 [workspace.dependencies]
@@ -16,9 +13,7 @@ tokio = { version = "1.37", features = ["full"] }
 clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Points to the vendored fork so the patched QuickJS C code is always used,
-# both in local builds and when users `cargo install` from crates.io.
-rquickjs = { path = "vendor/vvva-rquickjs", version = "0.6.4", package = "vvva-rquickjs", features = ["full-async", "parallel"] }
+v8 = "150.0.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
@@ -74,15 +69,5 @@ codegen-units = 1
 strip = true
 
 [patch.crates-io]
-# Route crates.io lookups for the renamed forks to their local vendor paths.
-# These are needed because vvva-rquickjs-core depends on vvva-rquickjs-sys by
-# version (not path), and vvva-rquickjs-sys/core are not yet on crates.io.
-vvva-rquickjs-sys  = { path = "vendor/rquickjs-sys" }
-vvva-rquickjs-core = { path = "vendor/rquickjs-core" }
-# Local copies of inferno 0.12.6 + quick-xml 0.41.0. The published inferno
-# 0.12.6 pins quick-xml = ^0.39 which is vulnerable to RUSTSEC-2026-0195
-# (unbounded namespace-declaration allocation in NsReader). The patched
-# version relaxes the floor to 0.41, allowing the fixed quick-xml release.
-# Tracked upstream at jonhoo/inferno#369 — drop these once it ships.
 inferno   = { path = "vendor/inferno" }
 quick-xml = { path = "vendor/quick-xml" }

@@ -71,7 +71,7 @@ The converter exported `Foo` immediately — before the IIFE ran — so callers 
 
 ### Dynamic `import()` unsupported in eval context
 
-**Problem:** QuickJS's `import()` uses the ES module loader, which is not configured for CJS-wrapped eval. Any `import(specifier)` expression threw at runtime.
+**Problem:** El `import()` del motor JS usa el ES module loader, que no está configurado para CJS-wrapped eval. Cualquier expresión `import(specifier)` tiraba error en runtime.
 
 **Fix:** `import(` is replaced with `__importAsync(` at source load time. The polyfill wraps synchronous `require()` in a resolved Promise:
 ```js

@@ -22,7 +22,7 @@ fn path_str(dir: &TempDir, name: &str) -> String {
 /// Drive the engine until `result_global` is set or we time out (5 s).
 /// A trigger closure runs in a blocking thread after 120 ms so the watcher fires.
 async fn drive_until_watch_event(
-    e: &JsEngine,
+    e: &mut JsEngine,
     result_global: &str,
     trigger: impl FnOnce() + Send + 'static,
 ) -> String {
@@ -62,7 +62,7 @@ async fn watch_detects_file_change() {
     let file = path_str(&dir, "watched.txt");
     std::fs::write(&file, "initial").unwrap();
 
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
 
     e.eval(&format!(
         r#"
@@ -79,7 +79,7 @@ async fn watch_detects_file_change() {
     .unwrap();
 
     let file_clone = file.clone();
-    let result = drive_until_watch_event(&e, "__watchEvent", move || {
+    let result = drive_until_watch_event(&mut e, "__watchEvent", move || {
         std::fs::write(&file_clone, "updated").unwrap();
     })
     .await;
@@ -101,7 +101,7 @@ async fn watch_detects_file_creation() {
     // Remove trailing slash
     let dir_path = dir_path.trim_end_matches('/').to_string();
 
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
 
     e.eval(&format!(
         r#"
@@ -120,7 +120,7 @@ async fn watch_detects_file_creation() {
     .unwrap();
 
     let new_file = dir.path().join("newfile.txt");
-    let result = drive_until_watch_event(&e, "__watchEvent", move || {
+    let result = drive_until_watch_event(&mut e, "__watchEvent", move || {
         std::fs::write(&new_file, "hello").unwrap();
     })
     .await;
@@ -143,7 +143,7 @@ async fn watch_emits_change_event_on_emitter() {
     let file = path_str(&dir, "emitter.txt");
     std::fs::write(&file, "init").unwrap();
 
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
 
     e.eval(&format!(
         r#"
@@ -161,7 +161,7 @@ async fn watch_emits_change_event_on_emitter() {
     .unwrap();
 
     let file_clone = file.clone();
-    let result = drive_until_watch_event(&e, "__emitterFired", move || {
+    let result = drive_until_watch_event(&mut e, "__emitterFired", move || {
         std::fs::write(&file_clone, "changed").unwrap();
     })
     .await;
@@ -178,7 +178,7 @@ async fn watch_requires_read_permission() {
     std::fs::write(&file, "data").unwrap();
 
     // Engine with NO permissions
-    let e = JsEngine::new(Arc::new(PermissionState::new()))
+    let mut e = JsEngine::new(Arc::new(PermissionState::new()))
         .await
         .unwrap();
 
@@ -210,7 +210,7 @@ async fn watch_close_stops_events() {
     let file = path_str(&dir, "closeme.txt");
     std::fs::write(&file, "v0").unwrap();
 
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
 
     // Open a watcher, close it immediately, then write — should get no events.
     e.eval(&format!(
@@ -254,7 +254,7 @@ async fn watch_file_detects_modification() {
     let file = path_str(&dir, "polled.txt");
     std::fs::write(&file, "v0").unwrap();
 
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
 
     e.eval(&format!(
         r#"
@@ -271,7 +271,7 @@ async fn watch_file_detects_modification() {
     .unwrap();
 
     let file_clone = file.clone();
-    let result = drive_until_watch_event(&e, "__polledEvent", move || {
+    let result = drive_until_watch_event(&mut e, "__polledEvent", move || {
         std::fs::write(&file_clone, "v1").unwrap();
     })
     .await;

@@ -345,7 +345,7 @@ v2 roadmap targets RUDY (R-U-Dead-Yet) detection and adaptive rate limiting.
 
 Built-in subcommands always win: `3va dev`/`3va test`/etc. run 3va's own implementation, never a same-named script.
 
-**This is not sandboxed** — the delegated script is a real external process (the actual package manager, running arbitrary shell), completely outside `vvva_permissions`' capability model (which only governs JS executed inside 3va's own QuickJS engine). Consistent with `3va install` never running postinstall scripts, running it requires explicit consent: a `[y/N]` prompt in a TTY, `--yes` to skip it, `"3va": { "no-prompt": true }` in `package.json` to skip it permanently, or a hard deny with no prompt at all outside a TTY (CI, pipes).
+**This is not sandboxed** — the delegated script is a real external process (the actual package manager, running arbitrary shell), completely outside `vvva_permissions`' capability model (which only governs JS executed inside 3va's own V8 engine). Consistent with `3va install` never running postinstall scripts, running it requires explicit consent: a `[y/N]` prompt in a TTY, `--yes` to skip it, `"3va": { "no-prompt": true }` in `package.json` to skip it permanently, or a hard deny with no prompt at all outside a TTY (CI, pipes).
 
 ### Test runner
 
@@ -564,14 +564,14 @@ Framework detection in `3va dev` supports: Next.js, Astro, Nuxt, SvelteKit, Remi
 | `vvva_core` | Tokio async event loop and scheduler |
 | `vvva_cli` | `clap`-based CLI, subcommand routing, `--accessible` mode |
 | `vvva_permissions` | Capability-based deny-by-default permission engine |
-| `vvva_js` | QuickJS via `rquickjs`; ESM loader, TypeScript transpiler, async/await, Promise microtask loop, CDP inspector, profiler |
+| `vvva_js` | V8 (via the `v8` crate); ESM loader, TypeScript transpiler, async/await, Promise microtask loop, CDP inspector, profiler |
 | `vvva_pm` | Package manager, malware scanner, secrets scanner, OSV auditor, lockfile |
 | `vvva_bundler` | Bundler with tree shaking, code splitting, watch mode |
 | `vvva_test` | Test runner, matchers, snapshot engine, coverage |
 | `vvva_crypto` | ML-KEM-768, ML-DSA-65, HKDF, AES-GCM, classical crypto wrappers |
 | `vvva_wasm` | WebAssembly/WASI runtime via `wasmtime` |
 
-The JavaScript engine is QuickJS embedded via `rquickjs`. QuickJS is a small, embeddable engine with full ES2023 support, which makes it straightforward to intercept syscalls at the Rust boundary. This is the primary mechanism for permission enforcement.
+The JavaScript engine is V8, embedded via the `v8` crate. This is the primary mechanism for permission enforcement: syscalls are intercepted at the Rust boundary via native bindings injected into the V8 context.
 
 **Note on `unsafe`:** The NAPI layer (`crates/js/src/builtins/napi.rs`) uses `unsafe extern "C"` to implement the ~30 NAPI v8 ABI functions. This is unavoidable for binary addon compatibility. All other crates aim to be `unsafe`-free; the CI runs `cargo-geiger` as an informational check on every commit.
 

@@ -32,7 +32,7 @@ async fn bundle_and_run_with_opts(entry: &str, global_var: &str, opts: BundlerOp
     bundler.add_entry(entry).unwrap();
     let code = bundler.bundle().unwrap();
 
-    let engine = make_engine().await;
+    let mut engine = make_engine().await;
     engine.eval(&code).await.unwrap();
     engine
         .eval_to_string(&format!("String(globalThis.{global_var})"))
@@ -442,7 +442,7 @@ async fn bundled_js_syntax_error_propagates_at_eval() {
     match bundler.bundle() {
         Err(_) => { /* bundler caught the syntax error — acceptable */ }
         Ok(code) => {
-            let engine = make_engine().await;
+            let mut engine = make_engine().await;
             let result = engine.eval(&code).await;
             assert!(result.is_err(), "eval of invalid JS must return an error");
         }

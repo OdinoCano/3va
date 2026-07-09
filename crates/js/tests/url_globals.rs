@@ -15,7 +15,7 @@ async fn engine() -> JsEngine {
 
 #[tokio::test]
 async fn url_exists_as_global() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof URL === 'function')")
         .await
@@ -25,7 +25,7 @@ async fn url_exists_as_global() {
 
 #[tokio::test]
 async fn url_parses_basic_href() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -40,7 +40,7 @@ async fn url_parses_basic_href() {
 
 #[tokio::test]
 async fn url_host_includes_port() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -55,7 +55,7 @@ async fn url_host_includes_port() {
 
 #[tokio::test]
 async fn url_origin_strips_default_port() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("new URL('https://example.com:443/x').origin")
         .await
@@ -65,7 +65,7 @@ async fn url_origin_strips_default_port() {
 
 #[tokio::test]
 async fn url_search_params_from_url() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -80,7 +80,7 @@ async fn url_search_params_from_url() {
 
 #[tokio::test]
 async fn url_relative_resolution() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -95,7 +95,7 @@ async fn url_relative_resolution() {
 
 #[tokio::test]
 async fn url_can_parse_static() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -109,7 +109,7 @@ async fn url_can_parse_static() {
 
 #[tokio::test]
 async fn url_to_string_returns_href() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("new URL('https://example.com/path').toString()")
         .await
@@ -119,7 +119,7 @@ async fn url_to_string_returns_href() {
 
 #[tokio::test]
 async fn url_invalid_throws() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -135,7 +135,7 @@ async fn url_invalid_throws() {
 
 #[tokio::test]
 async fn urlsearchparams_from_string() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -150,7 +150,7 @@ async fn urlsearchparams_from_string() {
 
 #[tokio::test]
 async fn urlsearchparams_from_object() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -165,7 +165,7 @@ async fn urlsearchparams_from_object() {
 
 #[tokio::test]
 async fn urlsearchparams_append_and_get_all() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -182,7 +182,7 @@ async fn urlsearchparams_append_and_get_all() {
 
 #[tokio::test]
 async fn urlsearchparams_set_replaces_all() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -198,7 +198,7 @@ async fn urlsearchparams_set_replaces_all() {
 
 #[tokio::test]
 async fn urlsearchparams_delete_and_has() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -215,7 +215,7 @@ async fn urlsearchparams_delete_and_has() {
 
 #[tokio::test]
 async fn urlsearchparams_to_string() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -232,7 +232,7 @@ async fn urlsearchparams_to_string() {
 
 #[tokio::test]
 async fn urlsearchparams_iteration() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -249,7 +249,7 @@ async fn urlsearchparams_iteration() {
 
 #[tokio::test]
 async fn urlsearchparams_size_property() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -266,7 +266,7 @@ async fn urlsearchparams_size_property() {
 
 #[tokio::test]
 async fn filereader_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof FileReader === 'function')")
         .await
@@ -276,7 +276,7 @@ async fn filereader_exists() {
 
 #[tokio::test]
 async fn filereader_initial_state() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -291,7 +291,7 @@ async fn filereader_initial_state() {
 
 #[tokio::test]
 async fn filereader_reads_blob_as_text() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -311,7 +311,7 @@ async fn filereader_reads_blob_as_text() {
 
 #[tokio::test]
 async fn filereader_abort() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -329,7 +329,7 @@ async fn filereader_abort() {
 
 #[tokio::test]
 async fn filereader_constants() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"

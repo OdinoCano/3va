@@ -144,7 +144,7 @@ fn start_fake_sshd() -> u16 {
 
 #[tokio::test]
 async fn ssh_global_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof ssh === 'object')")
         .await
@@ -154,7 +154,7 @@ async fn ssh_global_exists() {
 
 #[tokio::test]
 async fn ssh_client_constructor_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof ssh.Client === 'function')")
         .await
@@ -164,7 +164,7 @@ async fn ssh_client_constructor_exists() {
 
 #[tokio::test]
 async fn ssh_client_has_expected_methods() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -190,7 +190,7 @@ async fn ssh_client_has_expected_methods() {
 
 #[tokio::test]
 async fn ssh_client_has_event_emitter() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -213,7 +213,7 @@ async fn ssh_client_has_event_emitter() {
 
 #[tokio::test]
 async fn ssh_connect_blocked_without_net_grant() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -234,7 +234,7 @@ async fn ssh_connect_blocked_without_net_grant() {
 
 #[tokio::test]
 async fn ssh_constructor_options() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -255,7 +255,7 @@ async fn ssh_constructor_options() {
 
 #[tokio::test]
 async fn ssh_exec_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -277,7 +277,7 @@ async fn ssh_exec_api() {
 
 #[tokio::test]
 async fn ssh_sftp_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -299,7 +299,7 @@ async fn ssh_sftp_api() {
 
 #[tokio::test]
 async fn ssh_readfile_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -321,7 +321,7 @@ async fn ssh_readfile_api() {
 
 #[tokio::test]
 async fn ssh_writefile_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -343,7 +343,7 @@ async fn ssh_writefile_api() {
 
 #[tokio::test]
 async fn ssh_stat_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -365,7 +365,7 @@ async fn ssh_stat_api() {
 
 #[tokio::test]
 async fn ssh_mkdir_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -387,7 +387,7 @@ async fn ssh_mkdir_api() {
 
 #[tokio::test]
 async fn ssh_rmdir_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -409,7 +409,7 @@ async fn ssh_rmdir_api() {
 
 #[tokio::test]
 async fn ssh_unlink_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -431,7 +431,7 @@ async fn ssh_unlink_api() {
 
 #[tokio::test]
 async fn ssh_rename_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -453,7 +453,7 @@ async fn ssh_rename_api() {
 
 #[tokio::test]
 async fn ssh_readdir_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -475,7 +475,7 @@ async fn ssh_readdir_api() {
 
 #[tokio::test]
 async fn ssh_events_registerable() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -501,7 +501,7 @@ async fn ssh_events_registerable() {
 #[tokio::test]
 async fn ssh_real_connect_and_exec_over_the_wire() {
     let port = start_fake_sshd();
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
     e.eval(
         format!(
             r#"
@@ -566,7 +566,7 @@ async fn ssh_real_connect_and_exec_over_the_wire() {
 #[tokio::test]
 async fn ssh_real_sftp_stat_returns_real_attrs_not_fallback_zeros() {
     let port = start_fake_sshd();
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
     e.eval(
         format!(
             r#"

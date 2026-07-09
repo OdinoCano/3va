@@ -9,7 +9,7 @@
 | `vvva_core` | Tokio async event loop and task scheduler |
 | `vvva_cli` | `clap`-based CLI entrypoint |
 | `vvva_permissions` | Capability-based deny-by-default permission engine |
-| `vvva_js` | QuickJS engine via `rquickjs`; ESM loader, TypeScript transpiler, async/await, Promise microtask loop |
+| `vvva_js` | V8 engine via `v8` crate; ESM loader, TypeScript transpiler, async/await, Promise microtask loop |
 | `vvva_pm` | Package manager, malware scanner, secrets scanner, OSV auditor |
 | `vvva_bundler` | Bundler with tree shaking, code splitting, and watch mode |
 | `vvva_test` | Test runner, matchers, snapshot engine, and coverage reporting |
@@ -17,7 +17,7 @@
 
 ## JavaScript engine
 
-`vvva_js` embeds [QuickJS](https://bellard.org/quickjs/) via `rquickjs` and provides:
+`vvva_js` embeds [V8](https://v8.dev/) via the `v8` crate and provides:
 
 - Full ESM support: `import`/`export`, named and default exports, re-export chains
 - TypeScript transpilation before execution (no separate compile step)

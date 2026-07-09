@@ -16,7 +16,7 @@
     <tags>javascript typescript runtime sandbox security cli developer-tools</tags>
     <summary>Secure-by-default JavaScript and TypeScript runtime.</summary>
     <description>
-3va is a secure-by-default JavaScript and TypeScript runtime built on QuickJS with post-quantum cryptography and capability-based sandboxing.
+3va is a secure-by-default JavaScript and TypeScript runtime built on V8 with post-quantum cryptography and capability-based sandboxing.
 
 Key properties:
 - Deny-by-default permission model — filesystem, network, env, and subprocess access must be explicitly granted per script

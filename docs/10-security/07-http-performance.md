@@ -2,7 +2,7 @@
 
 ## 7.1 Overview
 
-3va's HTTP server is built on top of the QuickJS event loop and Tokio. At high concurrency, the server applies connection-level rate limiting to protect the process from resource exhaustion. This document covers baseline benchmarks, the rate-limiting strategy, and the DoS protections built into the HTTP layer.
+3va's HTTP server is built on top of the V8 event loop and Tokio. At high concurrency, the server applies connection-level rate limiting to protect the process from resource exhaustion. This document covers baseline benchmarks, the rate-limiting strategy, and the DoS protections built into the HTTP layer.
 
 ---
 

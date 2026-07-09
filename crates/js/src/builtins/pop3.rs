@@ -1,10 +1,5 @@
 //! POP3 (Post Office Protocol v3) client built-in module
 //!
-//! Provides: `require('pop3')` with `Client` class, backed by a real TCP (or TLS)
-//! socket — connect/send/read all do genuine network I/O over the POP3 line
-//! protocol (RFC 1939), following the same connection-pool + non-blocking
-//! poll pattern as `tcp.rs`'s `net.Socket`.
-//!
 //! Native functions:
 //! - `__pop3Create()` -> id
 //! - `__pop3Connect(id, host, port, useTls)` -> throws on failure
@@ -12,12 +7,13 @@
 //! - `__pop3Read(id, maxBytes)` -> Vec<u8> | throws EAGAIN | throws EOF
 //! - `__pop3Close(id)`
 
+use crate::builtins::v8_compat::uint8array_from_bytes;
 use native_tls::TlsStream;
-use rquickjs::{Ctx, Function, Result};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex, OnceLock};
+use v8::{FunctionCallbackArguments, PinScope, ReturnValue};
 use vvva_permissions::{Capability, PermissionState};
 
 type Pop3Id = u32;
@@ -64,118 +60,213 @@ fn next_pop3_id() -> Pop3Id {
     C.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-fn js_code_err(ctx: &Ctx<'_>, code: &str, msg: String) -> rquickjs::Error {
-    let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    let src = format!(
-        "(function(){{var e=new Error(\"{msg}\");e.code=\"{code}\";return e;}})()",
-        msg = escaped_msg,
-        code = code
+pub fn inject_pop3(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    permissions: Arc<PermissionState>,
+) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let _perms = permissions.clone();
+    let _perms2 = permissions.clone();
+    let _perms3 = permissions.clone();
+    let _perms4 = permissions.clone();
+
+    let create_fn = v8::Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              _args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let id = next_pop3_id();
+            rv.set(v8::Number::new(scope, id as f64).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__pop3Create").unwrap().into(),
+        create_fn.into(),
     );
-    match ctx.eval::<rquickjs::Value<'_>, _>(src) {
-        Ok(v) => ctx.throw(v),
-        Err(e) => e,
-    }
-}
 
-pub fn inject_pop3(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    let globals = ctx.globals();
+    let perms_ptr = Arc::into_raw(permissions.clone()) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, perms_ptr);
+    let connect_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let perms = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const PermissionState)
+            };
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as Pop3Id;
+            let host = args.get(1).to_rust_string_lossy(scope);
+            let port = args.get(2).uint32_value(scope).unwrap_or(110) as u16;
+            let use_tls = args.get(3).boolean_value(scope);
 
-    // __pop3Create() -> id
-    let create_fn = Function::new(ctx.clone(), move || -> Pop3Id { next_pop3_id() })?;
-    globals.set("__pop3Create", create_fn)?;
-
-    // __pop3Connect(id, host, port, useTls) -> undefined | throws
-    let perms = permissions.clone();
-    let connect_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: Pop3Id, host: String, port: u16, use_tls: bool| -> Result<()> {
             if !perms.check(&Capability::Network(host.clone())) {
-                return Err(js_code_err(
-                    &ctx,
-                    "EACCES",
-                    format!("Network access denied. Run with --allow-net={}", host),
-                ));
+                let msg = v8::String::new(
+                    scope,
+                    &format!("Network access denied. Run with --allow-net={}", host),
+                )
+                .unwrap();
+                let err = v8::Exception::error(scope, msg);
+                rv.set(err);
+                return;
             }
 
-            let tcp = TcpStream::connect(format!("{host}:{port}"))
-                .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
+            match TcpStream::connect(format!("{}:{}", host, port)) {
+                Ok(tcp) => {
+                    let conn = if use_tls {
+                        match native_tls::TlsConnector::new() {
+                            Ok(connector) => {
+                                let fallback = tcp.try_clone().ok();
+                                match connector.connect(&host, tcp) {
+                                    Ok(tls) => {
+                                        if tls.get_ref().set_nonblocking(true).is_ok() {
+                                            Pop3Conn::Tls(tls)
+                                        } else if let Some(tcp) = fallback {
+                                            Pop3Conn::Plain(tcp)
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        if let Some(tcp) = fallback {
+                                            Pop3Conn::Plain(tcp)
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => Pop3Conn::Plain(tcp),
+                        }
+                    } else {
+                        let _ = tcp.set_nonblocking(true);
+                        Pop3Conn::Plain(tcp)
+                    };
 
-            let conn = if use_tls {
-                let connector = native_tls::TlsConnector::new()
-                    .map_err(|e| js_code_err(&ctx, "EIO", format!("TLS init failed: {e}")))?;
-                let tls = connector.connect(&host, tcp).map_err(|e| {
-                    js_code_err(&ctx, "ECONNRESET", format!("TLS handshake failed: {e}"))
-                })?;
-                tls.get_ref()
-                    .set_nonblocking(true)
-                    .map_err(|e| js_code_err(&ctx, "EIO", e.to_string()))?;
-                Pop3Conn::Tls(tls)
-            } else {
-                tcp.set_nonblocking(true)
-                    .map_err(|e| js_code_err(&ctx, "EIO", e.to_string()))?;
-                Pop3Conn::Plain(tcp)
-            };
-
-            pop3_registry().lock().unwrap().insert(id, conn);
-            Ok(())
+                    pop3_registry().lock().unwrap().insert(id, conn);
+                    rv.set(v8::undefined(scope).into());
+                }
+                Err(e) => {
+                    let msg = v8::String::new(scope, &format!("Connection failed: {}", e)).unwrap();
+                    let err = v8::Exception::error(scope, msg);
+                    rv.set(err);
+                }
+            }
         },
-    )?;
-    globals.set("__pop3Connect", connect_fn)?;
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__pop3Connect").unwrap().into(),
+        connect_fn.into(),
+    );
 
-    // __pop3Send(id, line) -> throws on failure
-    let send_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: Pop3Id, line: String| -> Result<()> {
+    let send_fn = v8::Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as Pop3Id;
+            let line = args.get(1).to_rust_string_lossy(scope);
+
             let mut reg = pop3_registry().lock().unwrap();
-            let conn = reg
-                .get_mut(&id)
-                .ok_or_else(|| js_code_err(&ctx, "ENOTCONN", "not connected".to_string()))?;
-            conn.write_all(format!("{line}\r\n").as_bytes())
-                .map_err(|e| js_code_err(&ctx, "EPIPE", e.to_string()))
+            match reg.get_mut(&id) {
+                Some(conn) => match conn.write_all(format!("{}\r\n", line).as_bytes()) {
+                    Ok(_) => rv.set(v8::undefined(scope).into()),
+                    Err(e) => {
+                        let msg = v8::String::new(scope, &e.to_string()).unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                },
+                None => {
+                    let msg = v8::String::new(scope, "not connected").unwrap();
+                    let err = v8::Exception::error(scope, msg);
+                    rv.set(err);
+                }
+            }
         },
-    )?;
-    globals.set("__pop3Send", send_fn)?;
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__pop3Send").unwrap().into(),
+        send_fn.into(),
+    );
 
-    // __pop3Read(id, maxBytes) -> Vec<u8> | throws EAGAIN | throws EOF
-    let read_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: Pop3Id, max_bytes: u32| -> Result<Vec<u8>> {
-            let max = (max_bytes as usize).min(65536);
+    let read_fn = v8::Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as Pop3Id;
+            let max_bytes = args.get(1).uint32_value(scope).unwrap_or(65536) as usize;
+            let max = max_bytes.min(65536);
+
             let mut buf = vec![0u8; max];
             let mut reg = pop3_registry().lock().unwrap();
-            let conn = reg
-                .get_mut(&id)
-                .ok_or_else(|| js_code_err(&ctx, "ENOTCONN", "not connected".to_string()))?;
-
-            match conn.read(&mut buf) {
-                Ok(0) => Err(js_code_err(&ctx, "EOF", "connection closed".into())),
-                Ok(n) => {
-                    buf.truncate(n);
-                    Ok(buf)
+            match reg.get_mut(&id) {
+                Some(conn) => match conn.read(&mut buf) {
+                    Ok(0) => {
+                        let msg = v8::String::new(scope, "connection closed").unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                    Ok(n) => {
+                        buf.truncate(n);
+                        rv.set(uint8array_from_bytes(scope, &buf).into());
+                    }
+                    Err(ref e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::TimedOut =>
+                    {
+                        let msg = v8::String::new(scope, "no data available").unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                    Err(e) => {
+                        let msg = v8::String::new(scope, &e.to_string()).unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                },
+                None => {
+                    let msg = v8::String::new(scope, "not connected").unwrap();
+                    let err = v8::Exception::error(scope, msg);
+                    rv.set(err);
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    Err(js_code_err(&ctx, "EAGAIN", "no data available".into()))
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    Err(js_code_err(&ctx, "EAGAIN", "no data available".into()))
-                }
-                Err(e) => Err(js_code_err(&ctx, "EIO", e.to_string())),
             }
         },
-    )?;
-    globals.set("__pop3Read", read_fn)?;
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__pop3Read").unwrap().into(),
+        read_fn.into(),
+    );
 
-    // __pop3Close(id)
-    let close_fn = Function::new(ctx.clone(), move |id: Pop3Id| -> bool {
-        if let Some(mut conn) = pop3_registry().lock().unwrap().remove(&id) {
-            conn.shutdown();
-        }
-        true
-    })?;
-    globals.set("__pop3Close", close_fn)?;
+    let close_fn = v8::Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as Pop3Id;
+            if let Some(mut conn) = pop3_registry().lock().unwrap().remove(&id) {
+                conn.shutdown();
+            }
+            rv.set(v8::Boolean::new(scope, true).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__pop3Close").unwrap().into(),
+        close_fn.into(),
+    );
 
-    ctx.eval::<(), _>(
-        r#"
+    let js_code = r#"
     (function() {
         function Client(options) {
             options = options || {};
@@ -205,10 +296,6 @@ pub fn inject_pop3(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                     __pop3Connect(self._id, self.host, self.port, self.tls);
                     self._connected = true;
                     self._startPoll();
-                    // The server sends its greeting banner unsolicited, right
-                    // after accept — wait for it (marking pending state with
-                    // nothing to send) so it can't be misread as the response
-                    // to whatever command runs first (e.g. login()'s USER).
                     self._pendingCmd = 'GREETING';
                     self._pendingCallback = function(err) {
                         if (err) { self.emit('error', err); return; }
@@ -263,10 +350,6 @@ pub fn inject_pop3(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             if (cb) cb(err, data);
         };
 
-        // RFC 1939 §3: the status line (+OK/-ERR) is the first line of every
-        // response. Only RETR/TOP and argument-less LIST/UIDL continue with a
-        // multiline body terminated by a lone '.' — STAT, DELE, RSET, NOOP, and
-        // LIST/UIDL with a specific message number resolve on that first line.
         Client.prototype._handleLine = function(line) {
             this.emit('raw', line);
             if (line.indexOf('+OK') === 0 || line.indexOf('+ ') === 0) {
@@ -275,8 +358,6 @@ pub fn inject_pop3(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                     if (!this._pendingMultiline) {
                         this._resolvePending(null, line);
                     }
-                    // else: status line for a multiline response — the body
-                    // follows as subsequent non-status lines (see below).
                 }
             } else if (line.indexOf('-ERR') === 0) {
                 this.emit('error', new Error(line));
@@ -285,19 +366,12 @@ pub fn inject_pop3(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 if (line === '.') {
                     this._resolvePending(null, this._pendingData || '');
                 } else {
-                    // Undo RFC 1939 dot-stuffing: a body line that legitimately
-                    // starts with '.' is sent on the wire as '..'.
                     var body = line.indexOf('..') === 0 ? line.slice(1) : line;
                     this._pendingData = (this._pendingData || '') + body + '\n';
                 }
             }
         };
 
-        // Sends one command and waits for its real single-line +OK/-ERR before
-        // resolving — used by login() so USER/PASS are properly lock-stepped
-        // instead of firing both before either response is read, which used to
-        // let unrelated buffered lines (the server greeting, USER's own +OK)
-        // get misattributed to whatever command ran next (e.g. stat()).
         Client.prototype._sendAwait = function(cmd, callback) {
             this._pendingCmd = cmd;
             this._pendingCallback = callback;
@@ -358,8 +432,6 @@ pub fn inject_pop3(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             this._pendingCmd = 'LIST';
             this._pendingCallback = callback;
             this._pendingData = '';
-            // A specific message number gets a single-line reply; no argument
-            // lists every message and gets a multiline reply (RFC 1939 §7).
             this._pendingMultiline = (msgNumber === undefined);
             try {
                 if (msgNumber !== undefined) {
@@ -514,8 +586,10 @@ pub fn inject_pop3(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         globalThis.__requireCache['node:pop3'] = { Client: Client };
         globalThis.pop3 = { Client: Client };
     })();
-    "#,
-    )?;
+    "#;
 
-    Ok(())
+    let source = v8::String::new(scope, js_code).unwrap();
+    if let Some(script) = v8::Script::compile(scope, source, None) {
+        let _ = script.run(scope);
+    }
 }

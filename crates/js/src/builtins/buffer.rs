@@ -1,60 +1,57 @@
-use rquickjs::Ctx;
+use v8::{ContextScope, HandleScope};
 
-pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
-    // ── TextEncoder / TextDecoder ─────────────────────────────────────────────
-    ctx.eval::<(), _>(r#"
-        if (typeof globalThis.TextEncoder === 'undefined') {
-            globalThis.TextEncoder = function TextEncoder() { this.encoding = 'utf-8'; };
-            globalThis.TextEncoder.prototype.encode = function(str) {
-                str = String(str || '');
-                var bytes = [];
-                for (var i = 0; i < str.length; i++) {
-                    var c = str.charCodeAt(i);
-                    if (c < 0x80) {
-                        bytes.push(c);
-                    } else if (c < 0x800) {
-                        bytes.push((c >> 6) | 0xC0, (c & 0x3F) | 0x80);
-                    } else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length) {
-                        var c2 = str.charCodeAt(++i);
-                        var cp = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00);
-                        bytes.push((cp>>18)|0xF0,((cp>>12)&0x3F)|0x80,((cp>>6)&0x3F)|0x80,(cp&0x3F)|0x80);
-                    } else {
-                        bytes.push((c>>12)|0xE0,((c>>6)&0x3F)|0x80,(c&0x3F)|0x80);
-                    }
-                }
-                return new Uint8Array(bytes);
-            };
+pub fn inject_buffer(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> {
+    let text_encoder_decoder_code = r#"
+if (typeof globalThis.TextEncoder === 'undefined') {
+    globalThis.TextEncoder = function TextEncoder() { this.encoding = 'utf-8'; };
+    globalThis.TextEncoder.prototype.encode = function(str) {
+        str = String(str || '');
+        var bytes = [];
+        for (var i = 0; i < str.length; i++) {
+            var c = str.charCodeAt(i);
+            if (c < 0x80) {
+                bytes.push(c);
+            } else if (c < 0x800) {
+                bytes.push((c >> 6) | 0xC0, (c & 0x3F) | 0x80);
+            } else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length) {
+                var c2 = str.charCodeAt(++i);
+                var cp = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00);
+                bytes.push((cp>>18)|0xF0,((cp>>12)&0x3F)|0x80,((cp>>6)&0x3F)|0x80,(cp&0x3F)|0x80);
+            } else {
+                bytes.push((c>>12)|0xE0,((c>>6)&0x3F)|0x80,(c&0x3F)|0x80);
+            }
         }
-        if (typeof globalThis.TextDecoder === 'undefined') {
-            globalThis.TextDecoder = function TextDecoder(enc) { this.encoding = enc || 'utf-8'; };
-            globalThis.TextDecoder.prototype.decode = function(buf) {
-                if (!buf) return '';
-                var bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-                var str = '', i = 0;
-                while (i < bytes.length) {
-                    var b = bytes[i++];
-                    if (b < 0x80) { str += String.fromCharCode(b); }
-                    else if ((b & 0xE0) === 0xC0) { str += String.fromCharCode(((b&0x1F)<<6)|(bytes[i++]&0x3F)); }
-                    else if ((b & 0xF0) === 0xE0) { str += String.fromCharCode(((b&0x0F)<<12)|((bytes[i++]&0x3F)<<6)|(bytes[i++]&0x3F)); }
-                    else { i += 3; str += '�'; }
-                }
-                return str;
-            };
+        return new Uint8Array(bytes);
+    };
+}
+if (typeof globalThis.TextDecoder === 'undefined') {
+    globalThis.TextDecoder = function TextDecoder(enc) { this.encoding = enc || 'utf-8'; };
+    globalThis.TextDecoder.prototype.decode = function(buf) {
+        if (!buf) return '';
+        var bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+        var str = '', i = 0;
+        while (i < bytes.length) {
+            var b = bytes[i++];
+            if (b < 0x80) { str += String.fromCharCode(b); }
+            else if ((b & 0xE0) === 0xC0) { str += String.fromCharCode(((b&0x1F)<<6)|(bytes[i++]&0x3F)); }
+            else if ((b & 0xF0) === 0xE0) { str += String.fromCharCode(((b&0x0F)<<12)|((bytes[i++]&0x3F)<<6)|(bytes[i++]&0x3F)); }
+            else { i += 3; str += '�'; }
         }
-    "#)?;
+        return str;
+    };
+}
+"#;
 
-    // ── Buffer — real Uint8Array subclass via prototype swap ──────────────────
-    //
-    // Strategy: construct a real Uint8Array, then swap its prototype to
-    // Buffer.prototype (which itself inherits from Uint8Array.prototype).
-    // This gives:
-    //   buf instanceof Uint8Array  → true   (prototype chain)
-    //   buf instanceof Buffer      → true
-    //   buf[0]                     → correct byte value (native TypedArray proxy)
-    //   buf.readUInt8(0)           → works (Buffer method)
-    ctx.eval::<(), _>(r#"
+    let script = v8::Script::compile(
+        scope,
+        v8::String::new(scope, text_encoder_decoder_code).unwrap(),
+        None,
+    )
+    .ok_or_else(|| anyhow::anyhow!("compile error"))?;
+    let _ = script.run(scope);
+
+    let buffer_code = r#"
 (function() {
-  // ── string ↔ bytes helpers ─────────────────────────────────────────────────
   function _encodeString(str, enc) {
     enc = (enc || 'utf8').toLowerCase().replace(/[^a-z0-9]/g, '');
     if (enc === 'hex') {
@@ -69,13 +66,11 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
       for (var i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
       return b;
     }
-    // latin1 / binary / ascii — byte-preserving: each char maps to its low byte
     if (enc === 'latin1' || enc === 'binary' || enc === 'ascii') {
       var b = new Uint8Array(str.length);
       for (var i = 0; i < str.length; i++) b[i] = str.charCodeAt(i) & 0xFF;
       return b;
     }
-    // utf8 (default)
     if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(str);
     var b = new Uint8Array(str.length);
     for (var i = 0; i < str.length; i++) b[i] = str.charCodeAt(i) & 0xFF;
@@ -108,15 +103,13 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
     return s;
   }
 
-  // ── Buffer constructor ─────────────────────────────────────────────────────
-  // Returns a real Uint8Array with Buffer.prototype in its chain.
   function Buffer(arg, enc) {
     if (!(this instanceof Buffer)) return new Buffer(arg, enc);
     var bytes;
     if (typeof arg === 'number') {
       bytes = new Uint8Array(arg < 0 ? 0 : arg);
     } else if (arg instanceof Uint8Array) {
-      bytes = new Uint8Array(arg); // copy
+      bytes = new Uint8Array(arg);
     } else if (arg instanceof ArrayBuffer) {
       bytes = new Uint8Array(arg);
     } else if (Array.isArray(arg)) {
@@ -128,17 +121,13 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
     } else {
       bytes = new Uint8Array(0);
     }
-    // Swap prototype so the resulting object is a Buffer AND a Uint8Array
     Object.setPrototypeOf(bytes, Buffer.prototype);
     return bytes;
   }
 
-  // Buffer.prototype inherits from Uint8Array.prototype so:
-  //   new Buffer(n) instanceof Uint8Array  → true
   Object.setPrototypeOf(Buffer.prototype, Uint8Array.prototype);
   Buffer.prototype.constructor = Buffer;
 
-  // ── Static factory methods ─────────────────────────────────────────────────
   Buffer.from = function(data, enc, len) {
     if (typeof data === 'string') return new Buffer(_encodeString(data, enc || 'utf8'));
     if (data instanceof Uint8Array) return new Buffer(new Uint8Array(data));
@@ -178,7 +167,6 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
     var result = new Uint8Array(len);
     var offset = 0;
     for (var i = 0; i < list.length; i++) {
-      // Accept Buffer (which IS a Uint8Array now) or plain Uint8Array
       var src = list[i] instanceof Uint8Array ? list[i] : new Uint8Array(list[i]);
       var chunk = Math.min(src.length, len - offset);
       result.set(src.subarray(0, chunk), offset);
@@ -190,9 +178,6 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
 
   Buffer.compare = function(a, b) { return a.compare(b); };
 
-  // ── Instance methods ───────────────────────────────────────────────────────
-  // `this` IS the Uint8Array — no ._b indirection needed.
-
   Buffer.prototype.toString = function(enc, start, end) {
     return _decodeBytes(this, enc || 'utf8', start, end);
   };
@@ -200,7 +185,6 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
   Buffer.prototype.slice = function(s, e) {
     return new Buffer(this.subarray(s || 0, e !== undefined ? e : this.length));
   };
-  // Override Uint8Array.subarray to return a Buffer
   Buffer.prototype.subarray = function(s, e) {
     return new Buffer(Uint8Array.prototype.subarray.call(this, s, e));
   };
@@ -298,7 +282,6 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
     return this;
   };
 
-  // ── Integer reads (using `this` as Uint8Array) ─────────────────────────────
   Buffer.prototype.readUInt8    = function(o) { return this[o] >>> 0; };
   Buffer.prototype.readInt8     = function(o) { var v = this[o]; return v >= 0x80 ? v - 0x100 : v; };
   Buffer.prototype.readUInt16LE = function(o) { return (this[o] | (this[o+1] << 8)) >>> 0; };
@@ -330,7 +313,6 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
     return v >= BigInt('9223372036854775808') ? v - BigInt('18446744073709551616') : v;
   };
 
-  // ── Integer writes ─────────────────────────────────────────────────────────
   Buffer.prototype.writeUInt8    = function(v,o) { this[o] = v & 0xFF; return o+1; };
   Buffer.prototype.writeInt8     = function(v,o) { this[o] = (v < 0 ? v + 0x100 : v) & 0xFF; return o+1; };
   Buffer.prototype.writeUInt16LE = function(v,o) { this[o] = v & 0xFF; this[o+1] = (v>>8) & 0xFF; return o+2; };
@@ -354,7 +336,6 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
   Buffer.prototype.writeBigInt64LE = Buffer.prototype.writeBigUInt64LE;
   Buffer.prototype.writeBigInt64BE = Buffer.prototype.writeBigUInt64BE;
 
-  // Int aliases (Node.js compatibility)
   Buffer.prototype.readUInt8 = Buffer.prototype.readUint8 = Buffer.prototype.readUInt8;
   Buffer.prototype.readUInt16LE = Buffer.prototype.readUint16LE = Buffer.prototype.readUInt16LE;
   Buffer.prototype.readUInt16BE = Buffer.prototype.readUint16BE = Buffer.prototype.readUInt16BE;
@@ -363,7 +344,11 @@ pub fn inject_buffer(ctx: &Ctx) -> rquickjs::Result<()> {
 
   globalThis.Buffer = Buffer;
 })();
-    "#)?;
+"#;
+
+    let script = v8::Script::compile(scope, v8::String::new(scope, buffer_code).unwrap(), None)
+        .ok_or_else(|| anyhow::anyhow!("compile error"))?;
+    let _ = script.run(scope);
 
     Ok(())
 }

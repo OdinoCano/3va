@@ -18,7 +18,7 @@ async fn engine_with_read(path: &str) -> JsEngine {
     JsEngine::new(Arc::new(perms)).await.unwrap()
 }
 
-async fn eval_async(e: &JsEngine, setup: &str, result_global: &str) -> String {
+async fn eval_async(e: &mut JsEngine, setup: &str, result_global: &str) -> String {
     e.eval(setup).await.unwrap();
     for _ in 0..100 {
         e.idle().await;
@@ -45,9 +45,9 @@ async fn fs_promises_readfile() {
     let tmp = std::env::temp_dir().join("3va_test_fsp.txt");
     std::fs::write(&tmp, "hello promises").unwrap();
     let path = tmp.to_str().unwrap().to_string();
-    let e = engine_with_read(&path).await;
+    let mut e = engine_with_read(&path).await;
     let r = eval_async(
-        &e,
+        &mut e,
         &format!(
             r#"
         globalThis.__result = undefined;
@@ -67,7 +67,7 @@ async fn fs_promises_readfile() {
 
 #[tokio::test]
 async fn fs_promises_module_has_all_methods() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -83,7 +83,7 @@ async fn fs_promises_module_has_all_methods() {
 
 #[tokio::test]
 async fn node_fs_promises_prefix() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -101,7 +101,7 @@ async fn node_fs_promises_prefix() {
 
 #[tokio::test]
 async fn url_file_url_to_path() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -116,7 +116,7 @@ async fn url_file_url_to_path() {
 
 #[tokio::test]
 async fn url_path_to_file_url() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -132,7 +132,7 @@ async fn url_path_to_file_url() {
 
 #[tokio::test]
 async fn url_file_url_roundtrip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -152,7 +152,7 @@ async fn url_file_url_roundtrip() {
 
 #[tokio::test]
 async fn stream_writable_write_hook() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -178,7 +178,7 @@ async fn stream_writable_write_hook() {
 
 #[tokio::test]
 async fn stream_transform_hook() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -204,7 +204,7 @@ async fn stream_transform_hook() {
 
 #[tokio::test]
 async fn stream_transform_flush_hook() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -229,7 +229,7 @@ async fn stream_transform_flush_hook() {
 
 #[tokio::test]
 async fn stream_passthrough_works() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -249,7 +249,7 @@ async fn stream_passthrough_works() {
 
 #[tokio::test]
 async fn stream_options_constructor() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -272,7 +272,7 @@ async fn stream_options_constructor() {
 
 #[tokio::test]
 async fn crypto_pbkdf2_sync() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -288,7 +288,7 @@ async fn crypto_pbkdf2_sync() {
 
 #[tokio::test]
 async fn crypto_create_cipheriv_aes_gcm() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"

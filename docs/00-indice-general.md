@@ -30,7 +30,7 @@
 
 ## Volume 5: JavaScript Engine
 
-- [01-quickjs-integration.md](05-js-engine/01-quickjs-integration.md) - QuickJS integration
+- [01-v8-integration.md](05-js-engine/01-v8-integration.md) - V8 integration
 - [02-modulo-loader.md](05-js-engine/02-modulo-loader.md) - Module loading
 - [03-polyfills.md](05-js-engine/03-polyfills.md) - Polyfills and shims
 - [04-web-apis.md](05-js-engine/04-web-apis.md) - Compatible web APIs

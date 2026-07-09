@@ -62,7 +62,7 @@ Load Module: Reads the file and checks read permissions
 5. 
 Check Permission: Compares the operation against granted capabilities
 6. 
-Execute Code: Executes in QuickJS with polyfills
+Execute Code: Executes in V8 with polyfills
 7. 
 Output: Writes result to stdout/stderr
 ## 4.2 Flow: Package Installation

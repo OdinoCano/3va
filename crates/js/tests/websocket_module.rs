@@ -73,7 +73,7 @@ fn start_persistent_server(n: usize) -> u16 {
 
 #[tokio::test]
 async fn websocket_global_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof WebSocket === 'function')")
         .await
@@ -83,7 +83,7 @@ async fn websocket_global_exists() {
 
 #[tokio::test]
 async fn websocket_ready_state_constants() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             "String(WebSocket.CONNECTING) + ',' + \
@@ -100,7 +100,7 @@ async fn websocket_ready_state_constants() {
 
 #[tokio::test]
 async fn websocket_connect_blocked_without_net_grant() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -119,7 +119,7 @@ async fn websocket_connect_blocked_without_net_grant() {
 #[tokio::test]
 async fn websocket_connect_allowed_with_net_grant() {
     let port = start_echo_server();
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
 
     let js = format!(
         r#"
@@ -144,7 +144,7 @@ async fn websocket_connect_allowed_with_net_grant() {
 #[tokio::test]
 async fn websocket_send_recv_echo() {
     let port = start_echo_server();
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
 
     let js = format!(
         r#"
@@ -167,7 +167,7 @@ async fn websocket_send_recv_echo() {
 
 #[tokio::test]
 async fn websocket_send_on_closed_throws() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -186,7 +186,7 @@ async fn websocket_send_on_closed_throws() {
 
 #[tokio::test]
 async fn websocket_recv_on_closed_returns_null() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -205,7 +205,7 @@ async fn websocket_recv_on_closed_returns_null() {
 #[tokio::test]
 async fn websocket_close_fires_onclose() {
     let port = start_echo_server();
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
 
     let js = format!(
         r#"
@@ -225,7 +225,7 @@ async fn websocket_close_fires_onclose() {
 #[tokio::test]
 async fn websocket_close_sets_ready_state() {
     let port = start_echo_server();
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
 
     let js = format!(
         r#"
@@ -294,7 +294,7 @@ fn drain_ws_pool_noop_on_empty_pool() {
 #[tokio::test]
 async fn drain_ws_connections_empties_engine_pool_via_js() {
     let port = start_persistent_server(2);
-    let engine = engine_with_net("127.0.0.1").await;
+    let mut engine = engine_with_net("127.0.0.1").await;
 
     // Open 2 WebSocket connections from JS so they land in the engine's pool.
     let js = format!(

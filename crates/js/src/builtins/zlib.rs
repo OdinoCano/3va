@@ -1,10 +1,10 @@
+use crate::builtins::v8_compat::{uint8array_from_bytes, uint8array_to_vec};
 use brotli::enc::BrotliEncoderParams;
 use flate2::Compression;
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
-use rquickjs::function::Async;
-use rquickjs::{Ctx, Function, Result};
 use std::io::{Read, Write};
+use v8::{ContextScope, Function, HandleScope, Script, String};
 
 fn gzip_compress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     let mut enc = GzEncoder::new(Vec::new(), Compression::default());
@@ -57,63 +57,518 @@ fn brotli_decompress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-macro_rules! inject_async_fn {
-    ($ctx:expr, $name:expr, $fn:expr) => {
-        $ctx.globals().set(
-            $name,
-            Function::new(
-                $ctx.clone(),
-                Async(move |data: Vec<u8>| async move {
-                    tokio::task::spawn_blocking(move || $fn(data))
-                        .await
-                        .map_err(|e| {
-                            rquickjs::Error::new_from_js_message("zlib", "spawn", e.to_string())
-                        })?
-                        .map_err(|e| {
-                            rquickjs::Error::new_from_js_message("zlib", "zlib", e.to_string())
-                        })
-                }),
-            )?,
-        )?;
-    };
+fn run_compress_async<F>(data: Vec<u8>, f: F) -> std::result::Result<Vec<u8>, std::string::String>
+where
+    F: FnOnce(Vec<u8>) -> anyhow::Result<Vec<u8>> + Send,
+{
+    tokio::task::block_in_place(|| f(data)).map_err(|e| e.to_string())
 }
 
-fn inject_sync_fn(
-    ctx: &Ctx,
-    name: &'static str,
-    f: fn(Vec<u8>) -> anyhow::Result<Vec<u8>>,
-) -> Result<()> {
-    ctx.globals().set(
-        name,
-        Function::new(ctx.clone(), move |data: Vec<u8>| {
-            f(data).map_err(|e| rquickjs::Error::new_from_js_message("zlib", "sync", e.to_string()))
-        })?,
+pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+
+    let gzip_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match run_compress_async(data, gzip_compress) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
     )
-}
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibGzip").unwrap().into(),
+        gzip_fn.into(),
+    );
 
-pub fn inject_zlib(ctx: &Ctx) -> Result<()> {
-    inject_async_fn!(ctx, "__zlibGzip", gzip_compress);
-    inject_async_fn!(ctx, "__zlibGunzip", gzip_decompress);
-    inject_async_fn!(ctx, "__zlibDeflate", deflate_compress);
-    inject_async_fn!(ctx, "__zlibInflate", deflate_decompress);
-    inject_async_fn!(ctx, "__zlibRawDeflate", raw_deflate_compress);
-    inject_async_fn!(ctx, "__zlibRawInflate", raw_deflate_decompress);
+    let gunzip_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
 
-    inject_sync_fn(ctx, "__zlibGzipSync", gzip_compress)?;
-    inject_sync_fn(ctx, "__zlibGunzipSync", gzip_decompress)?;
-    inject_sync_fn(ctx, "__zlibDeflateSync", deflate_compress)?;
-    inject_sync_fn(ctx, "__zlibInflateSync", deflate_decompress)?;
-    inject_sync_fn(ctx, "__zlibRawDeflateSync", raw_deflate_compress)?;
-    inject_sync_fn(ctx, "__zlibRawInflateSync", raw_deflate_decompress)?;
+            match run_compress_async(data, gzip_decompress) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibGunzip").unwrap().into(),
+        gunzip_fn.into(),
+    );
 
-    inject_async_fn!(ctx, "__zlibBrotliCompress", brotli_compress);
-    inject_async_fn!(ctx, "__zlibBrotliDecompress", brotli_decompress);
-    inject_sync_fn(ctx, "__zlibBrotliCompressSync", brotli_compress)?;
-    inject_sync_fn(ctx, "__zlibBrotliDecompressSync", brotli_decompress)?;
+    let deflate_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
 
-    // JS wrapper: replaces the stub in modules.rs
-    ctx.eval::<(), _>(
-        r#"
+            match run_compress_async(data, deflate_compress) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibDeflate").unwrap().into(),
+        deflate_fn.into(),
+    );
+
+    let inflate_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match run_compress_async(data, deflate_decompress) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibInflate").unwrap().into(),
+        inflate_fn.into(),
+    );
+
+    let raw_deflate_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match run_compress_async(data, raw_deflate_compress) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibRawDeflate").unwrap().into(),
+        raw_deflate_fn.into(),
+    );
+
+    let raw_inflate_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match run_compress_async(data, raw_deflate_decompress) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibRawInflate").unwrap().into(),
+        raw_inflate_fn.into(),
+    );
+
+    let brotli_compress_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match run_compress_async(data, brotli_compress) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibBrotliCompress").unwrap().into(),
+        brotli_compress_fn.into(),
+    );
+
+    let brotli_decompress_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match run_compress_async(data, brotli_decompress) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibBrotliDecompress").unwrap().into(),
+        brotli_decompress_fn.into(),
+    );
+
+    let gzip_sync_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match gzip_compress(data) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e.to_string()).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibGzipSync").unwrap().into(),
+        gzip_sync_fn.into(),
+    );
+
+    let gunzip_sync_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match gzip_decompress(data) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e.to_string()).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibGunzipSync").unwrap().into(),
+        gunzip_sync_fn.into(),
+    );
+
+    let deflate_sync_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match deflate_compress(data) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e.to_string()).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibDeflateSync").unwrap().into(),
+        deflate_sync_fn.into(),
+    );
+
+    let inflate_sync_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match deflate_decompress(data) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e.to_string()).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibInflateSync").unwrap().into(),
+        inflate_sync_fn.into(),
+    );
+
+    let raw_deflate_sync_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match raw_deflate_compress(data) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e.to_string()).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibRawDeflateSync").unwrap().into(),
+        raw_deflate_sync_fn.into(),
+    );
+
+    let raw_inflate_sync_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match raw_deflate_decompress(data) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e.to_string()).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibRawInflateSync").unwrap().into(),
+        raw_inflate_sync_fn.into(),
+    );
+
+    let brotli_compress_sync_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match brotli_compress(data) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e.to_string()).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibBrotliCompressSync")
+            .unwrap()
+            .into(),
+        brotli_compress_sync_fn.into(),
+    );
+
+    let brotli_decompress_sync_fn = Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let data_arg = args.get(0);
+            let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                uint8array_to_vec(_scope, arr)
+            } else {
+                vec![]
+            };
+
+            match brotli_decompress(data) {
+                Ok(result) => {
+                    let result_arr = uint8array_from_bytes(_scope, &result);
+                    rv.set(result_arr.into());
+                }
+                Err(e) => {
+                    let err_str = String::new(_scope, &e.to_string()).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        String::new(scope, "__zlibBrotliDecompressSync")
+            .unwrap()
+            .into(),
+        brotli_decompress_sync_fn.into(),
+    );
+
+    let js_code = r#"
         (function() {
             function bufToUint8(buf) {
                 if (buf instanceof Uint8Array) return buf;
@@ -138,7 +593,6 @@ pub fn inject_zlib(ctx: &Ctx) -> Result<()> {
             }
 
             function makeSync(rustFn) {
-                // No true sync available in async runtime; throw if called sync
                 return function() { throw new Error('zlib sync methods not available in async context'); };
             }
 
@@ -150,16 +604,16 @@ pub fn inject_zlib(ctx: &Ctx) -> Result<()> {
                 deflateRaw:  makeCallback(__zlibRawDeflate, 'deflateRaw'),
                 inflateRaw:  makeCallback(__zlibRawInflate, 'inflateRaw'),
 
-                gzipSync:       function(buf) { return Buffer.from(__zlibGzipSync(Array.from(bufToUint8(buf)))); },
-                gunzipSync:     function(buf) { return Buffer.from(__zlibGunzipSync(Array.from(bufToUint8(buf)))); },
-                deflateSync:    function(buf) { return Buffer.from(__zlibDeflateSync(Array.from(bufToUint8(buf)))); },
-                inflateSync:    function(buf) { return Buffer.from(__zlibInflateSync(Array.from(bufToUint8(buf)))); },
-                deflateRawSync: function(buf) { return Buffer.from(__zlibRawDeflateSync(Array.from(bufToUint8(buf)))); },
-                inflateRawSync: function(buf) { return Buffer.from(__zlibRawInflateSync(Array.from(bufToUint8(buf)))); },
+                gzipSync:       function(buf) { return new Uint8Array(__zlibGzipSync(Array.from(bufToUint8(buf)))); },
+                gunzipSync:     function(buf) { return new Uint8Array(__zlibGunzipSync(Array.from(bufToUint8(buf)))); },
+                deflateSync:    function(buf) { return new Uint8Array(__zlibDeflateSync(Array.from(bufToUint8(buf)))); },
+                inflateSync:    function(buf) { return new Uint8Array(__zlibInflateSync(Array.from(bufToUint8(buf)))); },
+                deflateRawSync: function(buf) { return new Uint8Array(__zlibRawDeflateSync(Array.from(bufToUint8(buf)))); },
+                inflateRawSync: function(buf) { return new Uint8Array(__zlibRawInflateSync(Array.from(bufToUint8(buf)))); },
                 brotliCompress:     makeCallback(__zlibBrotliCompress, 'brotliCompress'),
                 brotliDecompress:   makeCallback(__zlibBrotliDecompress, 'brotliDecompress'),
-                brotliCompressSync: function(buf) { return Buffer.from(__zlibBrotliCompressSync(Array.from(bufToUint8(buf)))); },
-                brotliDecompressSync: function(buf) { return Buffer.from(__zlibBrotliDecompressSync(Array.from(bufToUint8(buf)))); },
+                brotliCompressSync: function(buf) { return new Uint8Array(__zlibBrotliCompressSync(Array.from(bufToUint8(buf)))); },
+                brotliDecompressSync: function(buf) { return new Uint8Array(__zlibBrotliDecompressSync(Array.from(bufToUint8(buf)))); },
 
                 createGzip:    function(opts) { return zlib._makeTransform(__zlibGzip,      __zlibGunzip,      opts); },
                 createGunzip:  function(opts) { return zlib._makeTransform(__zlibGunzip,    __zlibGzip,        opts); },
@@ -272,8 +726,9 @@ pub fn inject_zlib(ctx: &Ctx) -> Result<()> {
                 globalThis.__requireCache['node:zlib'] = zlib;
             }
         })();
-        "#,
-    )?;
+    "#;
+    let source = String::new(scope, js_code).unwrap();
+    let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
 
     Ok(())
 }

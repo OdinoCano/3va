@@ -3,7 +3,7 @@
 ## Philosophy
 
 Security is prioritized over compatibility. We assume:
-- QuickJS will have bugs
+- V8 will have bugs
 - crates will have CVEs
 - sandbox escapes will exist
 - parser bugs will be found
@@ -151,7 +151,7 @@ Full documentation: `docs/10-security/04-fuzzing.md`.
 
 ### Level 4 - Sanitizers
 
-**VERY IMPORTANT**: QuickJS uses C internally, you need ASAN.
+**VERY IMPORTANT**: V8 is written in C++, memory safety is enforced but ASAN is still recommended for development.
 
 ```bash
 # Instalar Rust nightly
@@ -279,7 +279,7 @@ jobs:
 
 ## Critical Security Points
 
-### 1. Rust ↔ QuickJS Boundary (MOST RISKY)
+### 1. Rust ↔ V8 Boundary (MOST RISKY)
 - Each API exposed to JS is an attack surface
 - Validate ALL type conversions
 - Do not trust unvalidated JS values

@@ -21,9 +21,9 @@ if (isMainThread) {
 }
 ```
 
-**Implementation:** Each `Worker` spawns a new OS thread with its own `JsEngine` instance (QuickJS is not thread-safe; isolation is enforced). `MessageChannel` passes data via `serde_json` serialization over a `tokio::sync::mpsc` channel bridged across the thread boundary with `std::sync::mpsc`.
+**Implementation:** Each `Worker` spawns a new OS thread with its own `JsEngine` instance (V8 isolates are not thread-safe; isolation is enforced). `MessageChannel` passes data via `serde_json` serialization over a `tokio::sync::mpsc` channel bridged across the thread boundary with `std::sync::mpsc`.
 
-**Shared Memory Limitation:** Since QuickJS runs in isolated OS threads with independent heaps, `SharedArrayBuffer` and `Atomics` (sharing raw memory directly between workers) are **not supported** and are declared a *Non-Goal* for v2.0.0. All data sharing must go through message passing.
+**Shared Memory Limitation:** Since V8 runs in isolated OS threads with independent heaps, `SharedArrayBuffer` and `Atomics` (sharing raw memory directly between workers) are **not supported** and are declared a *Non-Goal* for v2.0.0. All data sharing must go through message passing.
 
 **Permission model:** Workers inherit a read-only copy of the parent's `PermissionState`. The parent cannot grant new permissions to a worker after creation. Optionally, a parent can restrict a worker further during instantiation by passing a restricted permission map in the `Worker` constructor option keys.
 

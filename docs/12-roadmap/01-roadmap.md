@@ -14,7 +14,7 @@
 |--------|--------|-------|
 | CLI with granular permissions | ✅ | `run`, `install`, `reinstall`, `update`, `bundle`, `test`, `audit`, `doctor`, `sandbox`, `dev`, `start`, `stop`, `restart`, `status`, `logs`, `delete` — complete |
 | Accessible mode (`--accessible`) | ✅ | EN 301 549 compliant |
-| JS Engine (QuickJS) | ✅ | Automatic TS transpilation |
+| JS Engine (V8) | ✅ | Automatic TS transpilation |
 | CommonJS + ESM Modules | ✅ | `EsmResolver` + `EsmLoader`; static and dynamic import/export |
 | async/await and Promise chains | ✅ | Complete microtask loop |
 | Permission system (deny-by-default) | ✅ | `FileRead`, `FileWrite`, `Network`, `EnvAccess`, `SpawnProcess`, `FFI` |
@@ -52,7 +52,7 @@
 |----------|--------|
 | Full CLI with permissions | ✅ |
 | Core runtime (Tokio event loop) | ✅ |
-| QuickJS JS engine integrated | ✅ |
+| V8 JS engine integrated | ✅ |
 | TypeScript transpilation | ✅ |
 | CommonJS + ESM Modules | ✅ |
 | async/await and Promise chains | ✅ |

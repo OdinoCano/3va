@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use vvva_permissions::PermissionState;
 
-/// JS test framework injected into each test file's QuickJS context.
+/// JS test framework injected into each test file's V8 context.
 /// Provides describe/it/test/expect with full matcher support, then
 /// `__3va_run_tests()` executes all registered cases and returns JSON.
 const TEST_FRAMEWORK_JS: &str = r#"
@@ -373,7 +373,7 @@ impl TestRunner {
             perms.grant(vvva_permissions::Capability::FileWrite(canonical));
         }
 
-        let engine = vvva_js::JsEngine::new(Arc::new(perms))
+        let mut engine = vvva_js::JsEngine::new(Arc::new(perms))
             .await
             .map_err(|e| anyhow::anyhow!("Failed to init JS engine for {}: {}", display, e))?;
 
@@ -507,17 +507,24 @@ impl TestRunner {
             for file in chunk {
                 let cfg = config.clone();
                 let results_ref = all_results.clone();
-                let task = tokio::spawn(async move {
-                    let mut runner = TestRunner::new(cfg);
-                    if let Err(e) = runner.run_file(&file).await {
-                        eprintln!("[test runner] error in {}: {e}", file.display());
-                    }
-                    results_ref.lock().unwrap().extend(runner.results);
+                // vvva_js::JsEngine wraps a v8::Isolate, which is not Send, so each
+                // test file's engine must live and run entirely on its own OS thread
+                // rather than as a task on the shared tokio runtime.
+                let handle = std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    rt.block_on(async move {
+                        let mut runner = TestRunner::new(cfg);
+                        if let Err(e) = runner.run_file(&file).await {
+                            eprintln!("[test runner] error in {}: {e}", file.display());
+                        }
+                        results_ref.lock().unwrap().extend(runner.results);
+                    });
                 });
-                tasks.push(task);
+                tasks.push(handle);
             }
             for t in tasks {
-                let _ = t.await;
+                let _ = t.join();
             }
         }
 

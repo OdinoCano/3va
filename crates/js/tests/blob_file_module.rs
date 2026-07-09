@@ -11,7 +11,7 @@ async fn engine() -> JsEngine {
         .unwrap()
 }
 
-async fn eval_async_result(e: &JsEngine, setup: &str, result_global: &str) -> String {
+async fn eval_async_result(e: &mut JsEngine, setup: &str, result_global: &str) -> String {
     e.eval(setup).await.unwrap();
     for _ in 0..50 {
         e.idle().await;
@@ -33,7 +33,7 @@ async fn eval_async_result(e: &JsEngine, setup: &str, result_global: &str) -> St
 
 #[tokio::test]
 async fn blob_global_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof Blob === 'function')")
         .await
@@ -43,7 +43,7 @@ async fn blob_global_exists() {
 
 #[tokio::test]
 async fn blob_size_from_string() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(new Blob(['hello']).size)")
         .await
@@ -53,7 +53,7 @@ async fn blob_size_from_string() {
 
 #[tokio::test]
 async fn blob_size_multiple_parts() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(new Blob(['hello', ' world']).size)")
         .await
@@ -63,14 +63,14 @@ async fn blob_size_multiple_parts() {
 
 #[tokio::test]
 async fn blob_empty_has_size_zero() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e.eval_to_string("String(new Blob([]).size)").await.unwrap();
     assert_eq!(r, "0");
 }
 
 #[tokio::test]
 async fn blob_type_defaults_to_empty_string() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("JSON.stringify(new Blob(['x']).type)")
         .await
@@ -80,7 +80,7 @@ async fn blob_type_defaults_to_empty_string() {
 
 #[tokio::test]
 async fn blob_type_option_is_set() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"new Blob(['x'], { type: 'text/plain' }).type"#)
         .await
@@ -92,9 +92,9 @@ async fn blob_type_option_is_set() {
 
 #[tokio::test]
 async fn blob_text_resolves_with_content() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._blob_text = null;
         new Blob(['hello blob']).text().then(function(t) {
@@ -111,9 +111,9 @@ async fn blob_text_resolves_with_content() {
 
 #[tokio::test]
 async fn blob_array_buffer_correct_length() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._ab_len = null;
         new Blob(['abc']).arrayBuffer().then(function(buf) {
@@ -128,9 +128,9 @@ async fn blob_array_buffer_correct_length() {
 
 #[tokio::test]
 async fn blob_array_buffer_correct_bytes() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._ab_bytes = null;
         new Blob(['ABC']).arrayBuffer().then(function(buf) {
@@ -149,9 +149,9 @@ async fn blob_array_buffer_correct_bytes() {
 
 #[tokio::test]
 async fn blob_bytes_returns_uint8array() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._bytes_type = null;
         new Blob(['hi']).bytes().then(function(b) {
@@ -166,9 +166,9 @@ async fn blob_bytes_returns_uint8array() {
 
 #[tokio::test]
 async fn blob_bytes_correct_values() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._bytes_vals = null;
         new Blob(['hi']).bytes().then(function(b) {
@@ -186,7 +186,7 @@ async fn blob_bytes_correct_values() {
 
 #[tokio::test]
 async fn blob_slice_returns_new_blob() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -202,9 +202,9 @@ async fn blob_slice_returns_new_blob() {
 
 #[tokio::test]
 async fn blob_slice_content_is_correct() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._slice_text = null;
         var b = new Blob(['hello world']);
@@ -220,7 +220,7 @@ async fn blob_slice_content_is_correct() {
 
 #[tokio::test]
 async fn blob_slice_preserves_type() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -237,7 +237,7 @@ async fn blob_slice_preserves_type() {
 
 #[tokio::test]
 async fn blob_stream_returns_readable_stream() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -252,9 +252,9 @@ async fn blob_stream_returns_readable_stream() {
 
 #[tokio::test]
 async fn blob_stream_readable_content() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._stream_content = null;
         var rs = new Blob(['streamed']).stream();
@@ -273,7 +273,7 @@ async fn blob_stream_readable_content() {
 
 #[tokio::test]
 async fn file_global_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof File === 'function')")
         .await
@@ -283,7 +283,7 @@ async fn file_global_exists() {
 
 #[tokio::test]
 async fn file_has_name() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"new File(['content'], 'test.txt').name"#)
         .await
@@ -293,7 +293,7 @@ async fn file_has_name() {
 
 #[tokio::test]
 async fn file_has_size() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(new File(['hello'], 'f.txt').size)")
         .await
@@ -303,7 +303,7 @@ async fn file_has_size() {
 
 #[tokio::test]
 async fn file_has_type() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"new File(['x'], 'f.txt', { type: 'text/html' }).type"#)
         .await
@@ -313,7 +313,7 @@ async fn file_has_type() {
 
 #[tokio::test]
 async fn file_has_last_modified() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof new File(['x'], 'f.txt').lastModified === 'number')")
         .await
@@ -323,7 +323,7 @@ async fn file_has_last_modified() {
 
 #[tokio::test]
 async fn file_last_modified_option() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             "String(new File(['x'], 'f.txt', { lastModified: 1234567890 }).lastModified)",
@@ -335,7 +335,7 @@ async fn file_last_modified_option() {
 
 #[tokio::test]
 async fn file_is_blob_instance() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(new File(['x'], 'f.txt') instanceof Blob)")
         .await
@@ -345,9 +345,9 @@ async fn file_is_blob_instance() {
 
 #[tokio::test]
 async fn file_text_inherits_from_blob() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._file_text = null;
         new File(['file content'], 'f.txt').text().then(function(t) {

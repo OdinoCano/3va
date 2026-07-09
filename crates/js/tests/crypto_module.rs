@@ -12,7 +12,7 @@ async fn engine() -> JsEngine {
 }
 
 /// Drive the engine's event loop until a global variable is set or we time out.
-async fn eval_async_result(e: &JsEngine, setup: &str, result_global: &str) -> String {
+async fn eval_async_result(e: &mut JsEngine, setup: &str, result_global: &str) -> String {
     e.eval(setup).await.unwrap();
     for _ in 0..50 {
         e.idle().await;
@@ -34,7 +34,7 @@ async fn eval_async_result(e: &JsEngine, setup: &str, result_global: &str) -> St
 
 #[tokio::test]
 async fn crypto_module_loads() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof require('crypto').createHash === 'function')")
         .await
@@ -44,7 +44,7 @@ async fn crypto_module_loads() {
 
 #[tokio::test]
 async fn hash_sha256_hex() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"require('crypto').createHash('sha256').update('abc').digest('hex')"#)
         .await
@@ -58,7 +58,7 @@ async fn hash_sha256_hex() {
 
 #[tokio::test]
 async fn hash_sha256_empty_string() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"require('crypto').createHash('sha256').update('').digest('hex')"#)
         .await
@@ -71,7 +71,7 @@ async fn hash_sha256_empty_string() {
 
 #[tokio::test]
 async fn hash_sha512_hex() {
-    let e = engine().await;
+    let mut e = engine().await;
     // Verified: echo -n "abc" | sha512sum
     let r = e
         .eval_to_string(r#"require('crypto').createHash('sha512').update('abc').digest('hex')"#)
@@ -86,7 +86,7 @@ async fn hash_sha512_hex() {
 
 #[tokio::test]
 async fn hash_chained_updates() {
-    let e = engine().await;
+    let mut e = engine().await;
     // hash("hello" + " " + "world") == hash("hello world")
     let r = e
         .eval_to_string(
@@ -104,7 +104,7 @@ async fn hash_chained_updates() {
 
 #[tokio::test]
 async fn hash_sha256_base64() {
-    let e = engine().await;
+    let mut e = engine().await;
     // Verified: echo -n "abc" | openssl dgst -sha256 -binary | base64
     let r = e
         .eval_to_string(r#"require('crypto').createHash('sha256').update('abc').digest('base64')"#)
@@ -115,7 +115,7 @@ async fn hash_sha256_base64() {
 
 #[tokio::test]
 async fn hash_sha256_base64url() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"require('crypto').createHash('sha256').update('abc').digest('base64url')"#,
@@ -128,7 +128,7 @@ async fn hash_sha256_base64url() {
 
 #[tokio::test]
 async fn hash_shorthand() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"require('crypto').hash('sha256', 'abc')"#)
         .await
@@ -142,7 +142,7 @@ async fn hash_shorthand() {
 #[tokio::test]
 async fn hash_md5_now_supported() {
     // MD5 was unsupported before; it's now enabled for fingerprinting/compat use.
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"require('crypto').createHash('md5').update('x').digest('hex')"#)
         .await
@@ -153,7 +153,7 @@ async fn hash_md5_now_supported() {
 
 #[tokio::test]
 async fn hash_truly_unsupported_algorithm_throws() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -172,7 +172,7 @@ async fn hash_truly_unsupported_algorithm_throws() {
 
 #[tokio::test]
 async fn hmac_sha256_hex() {
-    let e = engine().await;
+    let mut e = engine().await;
     // Verified: echo -n "The quick brown fox..." | openssl dgst -sha256 -hmac "key"
     let r = e
         .eval_to_string(
@@ -193,7 +193,7 @@ async fn hmac_sha256_hex() {
 
 #[tokio::test]
 async fn hmac_sha512_hex() {
-    let e = engine().await;
+    let mut e = engine().await;
     // Verified: echo -n "message" | openssl dgst -sha512 -hmac "key"
     let r = e
         .eval_to_string(
@@ -217,7 +217,7 @@ async fn hmac_sha512_hex() {
 
 #[tokio::test]
 async fn random_bytes_correct_length() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"String(require('crypto').randomBytes(32).length)"#)
         .await
@@ -227,7 +227,7 @@ async fn random_bytes_correct_length() {
 
 #[tokio::test]
 async fn random_bytes_returns_uint8array() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"String(require('crypto').randomBytes(8) instanceof Uint8Array)"#)
         .await
@@ -237,7 +237,7 @@ async fn random_bytes_returns_uint8array() {
 
 #[tokio::test]
 async fn random_bytes_are_random() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -254,7 +254,7 @@ async fn random_bytes_are_random() {
 
 #[tokio::test]
 async fn random_uuid_format() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -272,7 +272,7 @@ async fn random_uuid_format() {
 
 #[tokio::test]
 async fn timing_safe_equal_matching_buffers() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -287,7 +287,7 @@ async fn timing_safe_equal_matching_buffers() {
 
 #[tokio::test]
 async fn timing_safe_equal_different_buffers() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -302,7 +302,7 @@ async fn timing_safe_equal_different_buffers() {
 
 #[tokio::test]
 async fn timing_safe_equal_different_lengths_throws() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -321,10 +321,10 @@ async fn timing_safe_equal_different_lengths_throws() {
 
 #[tokio::test]
 async fn pbkdf2_sha256_known_vector() {
-    let e = engine().await;
+    let mut e = engine().await;
     // Verified: python3 -c "import hashlib; k=hashlib.pbkdf2_hmac('sha256',b'password',b'salt',1,32); print(k.hex())"
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._pbkdf2_result = null;
         require('crypto').pbkdf2('password', 'salt', 1, 32, 'sha256', function(err, key) {
@@ -348,9 +348,9 @@ async fn pbkdf2_sha256_known_vector() {
 
 #[tokio::test]
 async fn scrypt_produces_correct_length() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._scrypt_len = null;
         require('crypto').scrypt('password', 'salt', 32, { N: 1024, r: 8, p: 1 }, function(err, key) {
@@ -365,10 +365,10 @@ async fn scrypt_produces_correct_length() {
 
 #[tokio::test]
 async fn scrypt_known_vector() {
-    let e = engine().await;
+    let mut e = engine().await;
     // Verified: python3 -c "import hashlib; k=hashlib.scrypt(b'',salt=b'',n=16,r=1,p=1,dklen=64); print(k.hex())"
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._scrypt_vec = null;
         require('crypto').scrypt('', '', 64, { N: 16, r: 1, p: 1 }, function(err, key) {

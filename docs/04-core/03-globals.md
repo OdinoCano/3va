@@ -122,7 +122,7 @@ URLSearchParams  // Query parameters
 ### 3.4.1 fetch API
 
 ```javascript
-// fetch polyfill (implemented in QuickJS)
+// fetch polyfill (implemented in V8)
 const response = await fetch('https://api.example.com/data');
 const data = await response.json();
 

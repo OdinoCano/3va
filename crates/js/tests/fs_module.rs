@@ -25,7 +25,7 @@ fn path_str(dir: &TempDir, name: &str) -> String {
 }
 
 /// Drive async Promises to completion.
-async fn eval_async(e: &JsEngine, setup: &str, result_global: &str) -> String {
+async fn eval_async(e: &mut JsEngine, setup: &str, result_global: &str) -> String {
     e.eval(setup).await.unwrap();
     for _ in 0..50 {
         e.idle().await;
@@ -49,7 +49,7 @@ async fn eval_async(e: &JsEngine, setup: &str, result_global: &str) -> String {
 #[tokio::test]
 async fn fs_write_and_read_sync() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "hello.txt");
 
     let r = e
@@ -70,7 +70,7 @@ async fn fs_write_and_read_sync() {
 #[tokio::test]
 async fn fs_append_file_sync() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "append.txt");
 
     let r = e
@@ -92,7 +92,7 @@ async fn fs_append_file_sync() {
 #[tokio::test]
 async fn fs_stat_sync_file() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "stat.txt");
 
     let r = e
@@ -112,7 +112,7 @@ async fn fs_stat_sync_file() {
 #[tokio::test]
 async fn fs_stat_sync_directory() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = dir.path().to_string_lossy().replace('\\', "\\\\");
 
     let r = e
@@ -133,7 +133,7 @@ async fn fs_stat_sync_directory() {
 #[tokio::test]
 async fn fs_exists_sync() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let exists = path_str(&dir, "exists.txt");
     let missing = path_str(&dir, "missing.txt");
 
@@ -155,7 +155,7 @@ async fn fs_exists_sync() {
 #[tokio::test]
 async fn fs_rename_sync() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let src = path_str(&dir, "before.txt");
     let dst = path_str(&dir, "after.txt");
 
@@ -178,7 +178,7 @@ async fn fs_rename_sync() {
 #[tokio::test]
 async fn fs_copy_file_sync() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let src = path_str(&dir, "orig.txt");
     let dst = path_str(&dir, "copy.txt");
 
@@ -201,7 +201,7 @@ async fn fs_copy_file_sync() {
 #[tokio::test]
 async fn fs_unlink_sync() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "todelete.txt");
 
     let r = e
@@ -223,7 +223,7 @@ async fn fs_unlink_sync() {
 #[tokio::test]
 async fn fs_mkdir_and_readdir_sync() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let sub = path_str(&dir, "mydir");
     let f = path_str(&dir, "mydir/file.txt");
 
@@ -245,7 +245,7 @@ async fn fs_mkdir_and_readdir_sync() {
 #[tokio::test]
 async fn fs_readdir_with_file_types() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let sub = path_str(&dir, "typed");
     let f = path_str(&dir, "typed/a.txt");
 
@@ -270,7 +270,7 @@ async fn fs_readdir_with_file_types() {
 #[tokio::test]
 async fn fs_realpath_sync() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "real.txt");
     let canonical = std::fs::canonicalize(dir.path()).unwrap();
     let expected = canonical.join("real.txt").to_string_lossy().into_owned();
@@ -293,7 +293,7 @@ async fn fs_realpath_sync() {
 #[tokio::test]
 async fn fs_access_sync_existing_file() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "access.txt");
 
     let r = e
@@ -314,7 +314,7 @@ async fn fs_access_sync_existing_file() {
 #[tokio::test]
 async fn fs_access_sync_missing_throws() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "nope.txt");
 
     let r = e
@@ -338,7 +338,7 @@ async fn fs_access_sync_missing_throws() {
 #[tokio::test]
 async fn fs_symlink_and_lstat() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let target = path_str(&dir, "target.txt");
     let link = path_str(&dir, "link.txt");
 
@@ -363,11 +363,11 @@ async fn fs_symlink_and_lstat() {
 #[tokio::test]
 async fn fs_promises_readfile_writefile() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "promise.txt");
 
     let r = eval_async(
-        &e,
+        &mut e,
         &format!(
             r#"
             var fs = require('fs');
@@ -387,11 +387,11 @@ async fn fs_promises_readfile_writefile() {
 #[tokio::test]
 async fn fs_promises_stat() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "stat2.txt");
 
     let r = eval_async(
-        &e,
+        &mut e,
         &format!(
             r#"
             var fs = require('fs');
@@ -413,11 +413,11 @@ async fn fs_promises_stat() {
 #[tokio::test]
 async fn fs_create_read_stream() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "stream.txt");
 
     let r = eval_async(
-        &e,
+        &mut e,
         &format!(
             r#"
             var fs = require('fs');
@@ -443,7 +443,7 @@ async fn fs_create_read_stream() {
 #[tokio::test]
 async fn fs_create_write_stream() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "writestream.txt");
 
     let r = e
@@ -467,7 +467,7 @@ async fn fs_create_write_stream() {
 #[tokio::test]
 async fn fs_create_write_stream_sync() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "writestream2.txt");
 
     let r = e
@@ -491,7 +491,7 @@ async fn fs_create_write_stream_sync() {
 #[tokio::test]
 async fn fs_create_read_stream_instanceof() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let p = path_str(&dir, "istest.txt");
     std::fs::write(&p, "data").unwrap();
 
@@ -515,7 +515,7 @@ async fn fs_create_read_stream_instanceof() {
 #[tokio::test]
 async fn fs_constants() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
 
     let r = e
         .eval_to_string(
@@ -534,7 +534,7 @@ async fn fs_constants() {
 #[tokio::test]
 async fn fs_node_prefix_alias() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
 
     let r = e
         .eval_to_string(
@@ -554,7 +554,7 @@ async fn fs_node_prefix_alias() {
 #[tokio::test]
 async fn fs_fd_open_read_close() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let file_path = path_str(&dir, "test_fd.txt");
     std::fs::write(&file_path, "hello world").unwrap();
 
@@ -578,7 +578,7 @@ async fn fs_fd_open_read_close() {
 #[tokio::test]
 async fn fs_fd_write_sync() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let file_path = path_str(&dir, "test_fd_write.txt");
 
     let r = e
@@ -602,7 +602,7 @@ async fn fs_fd_write_sync() {
 #[tokio::test]
 async fn fs_mkdtemp_creates_directory() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let prefix = path_str(&dir, "tmp-");
 
     let r = e
@@ -622,7 +622,7 @@ async fn fs_mkdtemp_creates_directory() {
 #[tokio::test]
 async fn fs_opendir_iterates_entries() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     std::fs::write(dir.path().join("a.txt"), "").unwrap();
     std::fs::write(dir.path().join("b.txt"), "").unwrap();
     let dir_path = dir.path().to_string_lossy().into_owned();
@@ -650,7 +650,7 @@ async fn fs_opendir_iterates_entries() {
 #[tokio::test]
 async fn fs_cp_sync_file() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let src = path_str(&dir, "src.txt");
     let dst = path_str(&dir, "dst.txt");
 
@@ -671,7 +671,7 @@ async fn fs_cp_sync_file() {
 #[tokio::test]
 async fn fs_cp_sync_directory_recursive() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let src_dir = path_str(&dir, "mydir");
     let dst_dir = path_str(&dir, "copydir");
 
@@ -697,13 +697,13 @@ async fn fs_cp_sync_directory_recursive() {
 #[tokio::test]
 async fn fs_cp_async_file() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let src = path_str(&dir, "async_src.txt");
     let dst = path_str(&dir, "async_dst.txt");
     std::fs::write(&src, "async_copy").unwrap();
 
     let r = eval_async(
-        &e,
+        &mut e,
         &format!(
             r#"
             var fs = require('fs');

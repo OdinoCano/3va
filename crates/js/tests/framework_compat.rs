@@ -33,7 +33,7 @@ globalThis.__test_meta_url = import.meta.url;
     )
     .unwrap();
 
-    let e = engine_with_read(dir.path().to_str().unwrap()).await;
+    let mut e = engine_with_read(dir.path().to_str().unwrap()).await;
     e.eval_file(&script).await.unwrap();
 
     let url = e
@@ -65,7 +65,7 @@ globalThis.__test_dir_url = dirUrl.href;
     )
     .unwrap();
 
-    let e = engine_with_read(dir.path().to_str().unwrap()).await;
+    let mut e = engine_with_read(dir.path().to_str().unwrap()).await;
     e.eval_file(&script).await.unwrap();
 
     let href = e.eval_to_string("globalThis.__test_dir_url").await.unwrap();
@@ -92,7 +92,7 @@ globalThis.__test_mode = import.meta.env.MODE;
     )
     .unwrap();
 
-    let e = engine_with_read(dir.path().to_str().unwrap()).await;
+    let mut e = engine_with_read(dir.path().to_str().unwrap()).await;
     e.eval_file(&script).await.unwrap();
 
     let ssr = e
@@ -118,7 +118,7 @@ globalThis.__test_base = import.meta.env.BASE_URL;
     )
     .unwrap();
 
-    let e = engine_with_read(dir.path().to_str().unwrap()).await;
+    let mut e = engine_with_read(dir.path().to_str().unwrap()).await;
     e.eval_file(&script).await.unwrap();
 
     let base = e.eval_to_string("globalThis.__test_base").await.unwrap();
@@ -145,7 +145,7 @@ globalThis.__test_hot = typeof import.meta.hot;
     )
     .unwrap();
 
-    let e = engine_with_read(dir.path().to_str().unwrap()).await;
+    let mut e = engine_with_read(dir.path().to_str().unwrap()).await;
     e.eval_file(&script).await.unwrap();
 
     let hot = e.eval_to_string("globalThis.__test_hot").await.unwrap();
@@ -187,7 +187,7 @@ globalThis.__test_entry_url = import.meta.url;
     )
     .unwrap();
 
-    let e = engine_with_read(dir.path().to_str().unwrap()).await;
+    let mut e = engine_with_read(dir.path().to_str().unwrap()).await;
     e.eval_file(&entry_path).await.unwrap();
 
     let module_url = e
@@ -263,7 +263,7 @@ globalThis.__test_boot = JSON.stringify({
     )
     .unwrap();
 
-    let e = engine_with_read(dir.path().to_str().unwrap()).await;
+    let mut e = engine_with_read(dir.path().to_str().unwrap()).await;
     // Must not throw
     e.eval_file(&script).await.unwrap();
 

@@ -44,7 +44,7 @@ fn redirect_stdin_to_devnull() {
 
 #[tokio::test]
 async fn timers_promises_module_loads() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             "var t = require('timers/promises'); String(typeof t.setTimeout === 'function')",
@@ -56,7 +56,7 @@ async fn timers_promises_module_loads() {
 
 #[tokio::test]
 async fn timers_promises_set_timeout_resolves() {
-    let e = engine().await;
+    let mut e = engine().await;
     e.eval("var done = null; require('timers/promises').setTimeout(1, 'ok').then(function(v){ done = v; });")
         .await
         .unwrap();
@@ -68,7 +68,7 @@ async fn timers_promises_set_timeout_resolves() {
 
 #[tokio::test]
 async fn timers_promises_set_immediate_resolves() {
-    let e = engine().await;
+    let mut e = engine().await;
     e.eval(
         "var done = null; require('timers/promises').setImmediate('immediate').then(function(v){ done = v; });",
     )
@@ -85,7 +85,7 @@ async fn timers_promises_set_immediate_resolves() {
 
 #[tokio::test]
 async fn timers_promises_node_prefix_alias() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             "var t = require('node:timers/promises'); String(typeof t.setInterval === 'function')",
@@ -97,7 +97,7 @@ async fn timers_promises_node_prefix_alias() {
 
 #[tokio::test]
 async fn timers_promises_abort_signal_rejects() {
-    let e = engine().await;
+    let mut e = engine().await;
     e.eval(
         r#"
         var result = null;
@@ -122,7 +122,7 @@ async fn timers_promises_abort_signal_rejects() {
 
 #[tokio::test]
 async fn dns_module_loads() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             "var d = require('dns'); String(typeof d.lookup === 'function' && typeof d.resolve === 'function')",
@@ -134,7 +134,7 @@ async fn dns_module_loads() {
 
 #[tokio::test]
 async fn dns_promises_namespace_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             "var d = require('dns'); String(typeof d.promises === 'object' && typeof d.promises.lookup === 'function')",
@@ -146,7 +146,7 @@ async fn dns_promises_namespace_exists() {
 
 #[tokio::test]
 async fn dns_lookup_localhost_resolves() {
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
     e.eval(
         r#"
         var result = null;
@@ -174,7 +174,7 @@ async fn dns_lookup_localhost_resolves() {
 
 #[tokio::test]
 async fn dns_promises_lookup_localhost() {
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
     e.eval(
         r#"
         var result = null;
@@ -199,7 +199,7 @@ async fn dns_promises_lookup_localhost() {
 
 #[tokio::test]
 async fn dns_resolve4_callback_form() {
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
     e.eval(
         r#"
         var result = null;
@@ -231,7 +231,7 @@ async fn dns_resolve_mx_uses_real_query() {
     // Exercises the hickory-resolver-backed __dnsQuery path (previously a stub
     // that always returned []). Tolerant of no network/DNS in the sandbox —
     // the point is that a real query round-trip happens, not a hardcoded [].
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
     e.eval(
         r#"
         var result = null;
@@ -259,7 +259,7 @@ async fn dns_resolve_mx_uses_real_query() {
 
 #[tokio::test]
 async fn dns_resolve_soa_returns_object_not_stub_array() {
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
     e.eval(
         r#"
         var result = null;
@@ -294,7 +294,7 @@ async fn dns_resolve_soa_returns_object_not_stub_array() {
 
 #[tokio::test]
 async fn readline_module_loads() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             "var rl = require('readline'); String(typeof rl.createInterface === 'function')",
@@ -306,7 +306,7 @@ async fn readline_module_loads() {
 
 #[tokio::test]
 async fn readline_interface_created() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -322,7 +322,7 @@ async fn readline_interface_created() {
 
 #[tokio::test]
 async fn readline_async_iterator_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -338,7 +338,7 @@ async fn readline_async_iterator_exists() {
 
 #[tokio::test]
 async fn readline_promises_namespace_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             "var rl = require('readline'); String(typeof rl.promises === 'object' && typeof rl.promises.createInterface === 'function')",
@@ -350,7 +350,7 @@ async fn readline_promises_namespace_exists() {
 
 #[tokio::test]
 async fn readline_set_prompt_survives() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -369,7 +369,7 @@ async fn readline_set_prompt_survives() {
 
 #[tokio::test]
 async fn heap_snapshot_is_valid_json() {
-    let e = engine().await;
+    let mut e = engine().await;
     e.eval("var x = { a: 1, b: [1,2,3] }; var s = 'hello world';")
         .await
         .unwrap();
@@ -384,7 +384,7 @@ async fn heap_snapshot_is_valid_json() {
 
 #[tokio::test]
 async fn heap_snapshot_has_required_meta_fields() {
-    let e = engine().await;
+    let mut e = engine().await;
     let snap = e.take_heap_snapshot().await.unwrap();
     let v: serde_json::Value = serde_json::from_str(&snap).unwrap();
     let meta = v["snapshot"]["meta"]
@@ -398,7 +398,7 @@ async fn heap_snapshot_has_required_meta_fields() {
 
 #[tokio::test]
 async fn heap_snapshot_has_nodes_and_strings() {
-    let e = engine().await;
+    let mut e = engine().await;
     e.eval("var obj = {}; for (var i = 0; i < 10; i++) obj['k'+i] = i;")
         .await
         .unwrap();
@@ -431,7 +431,7 @@ async fn stdin_read_native_binding_resolves() {
     // of hanging the event loop.
     #[cfg(unix)]
     redirect_stdin_to_devnull();
-    let e = engine().await;
+    let mut e = engine().await;
     e.eval(
         r#"
         var done = false;
@@ -466,7 +466,7 @@ async fn readline_over_process_stdin_reaches_close_on_eof() {
     // immediately and emit 'close' — proving the Node-style 'data'/'end'
     // wiring in the Interface constructor actually drives the stream instead
     // of sitting inert (the old stub never emitted 'close' on its own).
-    let e = engine().await;
+    let mut e = engine().await;
     e.eval(
         r#"
         var closed = false;

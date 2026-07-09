@@ -11,7 +11,7 @@ async fn engine() -> JsEngine {
         .unwrap()
 }
 
-async fn eval_async_result(e: &JsEngine, setup: &str, result_global: &str) -> String {
+async fn eval_async_result(e: &mut JsEngine, setup: &str, result_global: &str) -> String {
     e.eval(setup).await.unwrap();
     for _ in 0..50 {
         e.idle().await;
@@ -33,7 +33,7 @@ async fn eval_async_result(e: &JsEngine, setup: &str, result_global: &str) -> St
 
 #[tokio::test]
 async fn stream_module_loads() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e.eval_to_string("typeof require('stream')").await.unwrap();
     // Node.js returns a Stream constructor (function), so typeof is "function".
     // Accept both "function" and "object" — just not "undefined".
@@ -45,7 +45,7 @@ async fn stream_module_loads() {
 
 #[tokio::test]
 async fn stream_has_readable_writable_transform() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -65,7 +65,7 @@ async fn stream_has_readable_writable_transform() {
 
 #[tokio::test]
 async fn readable_push_emits_data_event() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -85,7 +85,7 @@ async fn readable_push_emits_data_event() {
 
 #[tokio::test]
 async fn readable_push_null_emits_end() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -106,7 +106,7 @@ async fn readable_push_null_emits_end() {
 
 #[tokio::test]
 async fn writable_write_returns_true() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -122,7 +122,7 @@ async fn writable_write_returns_true() {
 
 #[tokio::test]
 async fn writable_end_emits_finish() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -143,7 +143,7 @@ async fn writable_end_emits_finish() {
 
 #[tokio::test]
 async fn pipe_connects_readable_to_writable() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -167,7 +167,7 @@ async fn pipe_connects_readable_to_writable() {
 
 #[tokio::test]
 async fn transform_passes_data_through() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -189,7 +189,7 @@ async fn transform_passes_data_through() {
 
 #[tokio::test]
 async fn readable_stream_global_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof ReadableStream === 'function')")
         .await
@@ -199,9 +199,9 @@ async fn readable_stream_global_exists() {
 
 #[tokio::test]
 async fn readable_stream_reader_reads_chunks() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._rs_result = null;
         var rs = new ReadableStream({
@@ -230,9 +230,9 @@ async fn readable_stream_reader_reads_chunks() {
 
 #[tokio::test]
 async fn readable_stream_reader_done_after_close() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._done_flag = null;
         var rs = new ReadableStream({ start: function(c) { c.close(); } });
@@ -250,7 +250,7 @@ async fn readable_stream_reader_done_after_close() {
 
 #[tokio::test]
 async fn writable_stream_global_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof WritableStream === 'function')")
         .await
@@ -260,9 +260,9 @@ async fn writable_stream_global_exists() {
 
 #[tokio::test]
 async fn writable_stream_writer_write_resolves() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._ws_result = null;
         var written = [];
@@ -286,7 +286,7 @@ async fn writable_stream_writer_write_resolves() {
 
 #[tokio::test]
 async fn transform_stream_global_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof TransformStream === 'function')")
         .await
@@ -296,9 +296,9 @@ async fn transform_stream_global_exists() {
 
 #[tokio::test]
 async fn transform_stream_pipes_through_transform() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._ts_result = null;
         var ts = new TransformStream({
@@ -333,9 +333,9 @@ async fn transform_stream_pipes_through_transform() {
 
 #[tokio::test]
 async fn readable_stream_pipe_to_writable_stream() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         globalThis._pipe_result = null;
         var received = [];
@@ -359,7 +359,7 @@ async fn readable_stream_pipe_to_writable_stream() {
 
 #[tokio::test]
 async fn writable_backpressure_returns_false() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -377,7 +377,7 @@ async fn writable_backpressure_returns_false() {
 
 #[tokio::test]
 async fn writable_write_after_end_returns_false() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -395,7 +395,7 @@ async fn writable_write_after_end_returns_false() {
 
 #[tokio::test]
 async fn writable_cork_delays_write() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -418,7 +418,7 @@ async fn writable_cork_delays_write() {
 
 #[tokio::test]
 async fn writable_drain_emitted_after_backpressure() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"

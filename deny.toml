@@ -64,8 +64,6 @@ skip = [
     # windows-sys: 0.48 from mio 0.8 (notify), 0.52 from cap-std, 0.60/0.61 from wasmtime
     { name = "windows-sys",   version = "0.48" },
     { name = "windows-sys",   version = "0.52" },
-    # winnow: 0.5 from toml_edit 0.19 (rquickjs-macro via proc-macro-crate), 0.7 from toml 0.8
-    { name = "winnow",        version = "0.5" },
 ]
 skip-tree = []
 

@@ -31,7 +31,7 @@ async fn engine_ffi_all() -> JsEngine {
 
 #[tokio::test]
 async fn ffi_require_exposes_dlopen_and_types() {
-    let e = engine_no_perms().await;
+    let mut e = engine_no_perms().await;
     let r = e
         .eval_to_string(
             "const ffi = require('ffi');
@@ -44,7 +44,7 @@ async fn ffi_require_exposes_dlopen_and_types() {
 
 #[tokio::test]
 async fn ffi_ffitypes_has_expected_keys() {
-    let e = engine_no_perms().await;
+    let mut e = engine_no_perms().await;
     let r = e
         .eval_to_string(
             "const t = require('ffi').FFIType;
@@ -57,7 +57,7 @@ async fn ffi_ffitypes_has_expected_keys() {
 
 #[tokio::test]
 async fn ffi_node_prefix_alias_works() {
-    let e = engine_no_perms().await;
+    let mut e = engine_no_perms().await;
     let r = e
         .eval_to_string(
             "const a = require('ffi'); const b = require('node:ffi'); a === b ? 'same' : 'diff'",
@@ -71,7 +71,7 @@ async fn ffi_node_prefix_alias_works() {
 
 #[tokio::test]
 async fn dlopen_denied_without_allow_ffi() {
-    let e = engine_no_perms().await;
+    let mut e = engine_no_perms().await;
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -91,7 +91,7 @@ async fn dlopen_denied_without_allow_ffi() {
 
 #[tokio::test]
 async fn dlopen_denied_when_path_not_in_grant() {
-    let e = engine_with_ffi("/opt/custom").await;
+    let mut e = engine_with_ffi("/opt/custom").await;
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -112,7 +112,7 @@ async fn dlopen_denied_when_path_not_in_grant() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn dlopen_allowed_with_exact_path_grant() {
-    let e = engine_with_ffi(LIBM).await;
+    let mut e = engine_with_ffi(LIBM).await;
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -139,7 +139,7 @@ async fn dlopen_allowed_with_prefix_grant() {
     perms.grant(Capability::FFI(std::path::PathBuf::from(
         "/lib/x86_64-linux-gnu",
     )));
-    let e = JsEngine::new(perms).await.unwrap();
+    let mut e = JsEngine::new(perms).await.unwrap();
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -161,7 +161,7 @@ async fn dlopen_allowed_with_prefix_grant() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_call_sqrt_f64() {
-    let e = engine_with_ffi(LIBM).await;
+    let mut e = engine_with_ffi(LIBM).await;
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -183,7 +183,7 @@ async fn ffi_call_sqrt_f64() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_call_abs_i32() {
-    let e = engine_with_ffi(LIBC).await;
+    let mut e = engine_with_ffi(LIBC).await;
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -206,7 +206,7 @@ async fn ffi_call_abs_i32() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_call_strlen_cstring() {
-    let e = engine_with_ffi(LIBC).await;
+    let mut e = engine_with_ffi(LIBC).await;
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -228,7 +228,7 @@ async fn ffi_call_strlen_cstring() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_call_pow_two_f64_args() {
-    let e = engine_with_ffi(LIBM).await;
+    let mut e = engine_with_ffi(LIBM).await;
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -251,7 +251,7 @@ async fn ffi_call_pow_two_f64_args() {
 #[tokio::test]
 async fn ffi_call_void_return() {
     // free(NULL) is a no-op — tests that void return works without crashing
-    let e = engine_with_ffi(LIBC).await;
+    let mut e = engine_with_ffi(LIBC).await;
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -274,7 +274,7 @@ async fn ffi_call_void_return() {
 
 #[tokio::test]
 async fn dlopen_nonexistent_library_throws() {
-    let e = engine_ffi_all().await;
+    let mut e = engine_ffi_all().await;
     let r = e
         .eval_to_string(
             r#"(function() {
@@ -297,7 +297,7 @@ async fn dlopen_nonexistent_library_throws() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_unknown_symbol_throws() {
-    let e = engine_with_ffi(LIBM).await;
+    let mut e = engine_with_ffi(LIBM).await;
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -323,7 +323,7 @@ async fn ffi_unknown_symbol_throws() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ffi_close_makes_handle_invalid() {
-    let e = engine_with_ffi(LIBM).await;
+    let mut e = engine_with_ffi(LIBM).await;
     let r = e
         .eval_to_string(&format!(
             r#"(function() {{
@@ -356,7 +356,7 @@ async fn ffi_close_makes_handle_invalid() {
 async fn ffi_multiple_libs_open_simultaneously() {
     let perms = Arc::new(PermissionState::new());
     perms.grant(Capability::FFI(std::path::PathBuf::from("/")));
-    let e = JsEngine::new(perms).await.unwrap();
+    let mut e = JsEngine::new(perms).await.unwrap();
 
     let r = e
         .eval_to_string(&format!(

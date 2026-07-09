@@ -25,7 +25,7 @@
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Nivel 2: Runtime JS                     │
-│              (QuickJS isolate, permisos 3va)                   │
+│              (V8 isolate, permisos 3va)                          │
 │    - Memory limits                                            │
 │    - Execution time limits                                    │
 │    - Capability-based access                                  │
