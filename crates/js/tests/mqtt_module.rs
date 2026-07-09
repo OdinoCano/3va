@@ -96,7 +96,7 @@ fn start_fake_broker() -> u16 {
 #[tokio::test]
 async fn mqtt_real_publish_parses_topic_and_payload_correctly() {
     let port = start_fake_broker();
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
     e.eval(
         format!(
             r#"
@@ -139,7 +139,7 @@ async fn mqtt_real_publish_parses_topic_and_payload_correctly() {
 
 #[tokio::test]
 async fn mqtt_global_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof mqtt === 'object')")
         .await
@@ -149,7 +149,7 @@ async fn mqtt_global_exists() {
 
 #[tokio::test]
 async fn mqtt_client_constructor_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof mqtt.Client === 'function')")
         .await
@@ -159,7 +159,7 @@ async fn mqtt_client_constructor_exists() {
 
 #[tokio::test]
 async fn mqtt_client_has_expected_methods() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -184,7 +184,7 @@ async fn mqtt_client_has_expected_methods() {
 
 #[tokio::test]
 async fn mqtt_client_has_event_emitter() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -207,7 +207,7 @@ async fn mqtt_client_has_event_emitter() {
 
 #[tokio::test]
 async fn mqtt_connect_blocked_without_net_grant() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -228,7 +228,7 @@ async fn mqtt_connect_blocked_without_net_grant() {
 
 #[tokio::test]
 async fn mqtt_constructor_options() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -249,7 +249,7 @@ async fn mqtt_constructor_options() {
 
 #[tokio::test]
 async fn mqtt_subscribe_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -274,7 +274,7 @@ async fn mqtt_subscribe_api() {
 
 #[tokio::test]
 async fn mqtt_unsubscribe_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -297,7 +297,7 @@ async fn mqtt_unsubscribe_api() {
 
 #[tokio::test]
 async fn mqtt_publish_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -321,7 +321,7 @@ async fn mqtt_publish_api() {
 
 #[tokio::test]
 async fn mqtt_end_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -343,7 +343,7 @@ async fn mqtt_end_api() {
 
 #[tokio::test]
 async fn mqtt_events_registerable() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -369,7 +369,7 @@ async fn mqtt_events_registerable() {
 
 #[tokio::test]
 async fn mqtt_qos_options() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"

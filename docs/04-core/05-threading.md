@@ -9,9 +9,9 @@
 | Runtime | Default workers | Mechanism |
 |---------|----------------|-----------|
 | **Tokio** (async I/O) | One per logical CPU | `#[tokio::main]` |
-| **QuickJS** (JS execution) | Single-threaded per engine | `rquickjs` w/ `parallel` feature |
+| **V8** (JS execution) | Single-threaded per isolate | Full isolate-per-thread model |
 
-Tokio's worker pool handles all I/O, timers, and async tasks. QuickJS executes JavaScript on the thread that calls it — the `rquickjs` `parallel` feature only enables stack reset for cross-thread safety, not concurrent JS evaluation.
+Tokio's worker pool handles all I/O, timers, and async tasks. V8 executes JavaScript on the thread that calls it — each isolate is independent with its own heap.
 
 ## 5.3 Controlling Tokio Worker Threads
 

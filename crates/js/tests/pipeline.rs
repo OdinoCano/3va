@@ -18,7 +18,7 @@ async fn engine_with_read(dir: &TempDir) -> JsEngine {
 }
 
 // Drain Promise microtasks by polling idle() until the given global is set.
-async fn wait_global(engine: &JsEngine, global: &str) -> String {
+async fn wait_global(engine: &mut JsEngine, global: &str) -> String {
     for _ in 0..50 {
         engine.idle().await;
         tokio::task::yield_now().await;
@@ -39,7 +39,7 @@ async fn write_and_eval(content: &str, filename: &str) -> (TempDir, anyhow::Resu
     let temp = TempDir::new().unwrap();
     let path = temp.path().join(filename);
     std::fs::write(&path, content).unwrap();
-    let engine = engine_with_read(&temp).await;
+    let mut engine = engine_with_read(&temp).await;
     let result = engine.eval_file(&path).await;
     (temp, result)
 }
@@ -59,7 +59,7 @@ async fn ts_type_annotations_stripped_and_evaluated() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&path)
@@ -92,7 +92,7 @@ async fn ts_interface_stripped_without_error() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&path)
@@ -125,7 +125,7 @@ async fn ts_class_with_typed_members_evaluates() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&path)
@@ -153,7 +153,7 @@ async fn ts_as_cast_stripped_correctly() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&path)
@@ -178,7 +178,7 @@ async fn ts_generics_stripped_and_evaluated() {
     std::fs::write(&path, ts).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
         .await
@@ -214,7 +214,7 @@ async fn js_file_with_require_like_pattern_evaluates() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
         .await
@@ -269,7 +269,7 @@ async fn filename_and_dirname_injected_in_cjs_mode() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
         .await
@@ -332,7 +332,7 @@ async fn console_log_multiple_args_joined_with_space() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
         .await
@@ -361,7 +361,7 @@ async fn console_log_object_serialized_as_json() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
         .await
@@ -391,7 +391,7 @@ async fn console_variants_do_not_throw() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
         .await
@@ -418,7 +418,7 @@ async fn process_platform_is_set() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine.eval_file(&path).await.unwrap();
     let ok = engine
         .eval_to_string("String(globalThis._platform)")
@@ -437,7 +437,7 @@ async fn process_env_is_object() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine.eval_file(&path).await.unwrap();
     let ok = engine
         .eval_to_string("String(globalThis._env_ok)")
@@ -456,7 +456,7 @@ async fn process_argv_is_array() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine.eval_file(&path).await.unwrap();
     let ok = engine
         .eval_to_string("String(globalThis._argv_ok)")
@@ -477,7 +477,7 @@ async fn process_hrtime_returns_two_numbers() {
     std::fs::write(&path, js).unwrap();
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine.eval_file(&path).await.unwrap();
     let ok = engine
         .eval_to_string("String(globalThis._hrtime_ok)")
@@ -499,7 +499,7 @@ async fn eval_file_blocked_without_read_permission() {
 
     // Engine sin permiso de lectura para el directorio
     let state = PermissionState::new();
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     // eval_file hace std::fs::read_to_string directamente (sin permission check),
     // pero el OS permitirá leer el archivo — el permission check es en runtime JS.
@@ -537,13 +537,13 @@ async fn async_function_with_await_resolves() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
         .await
         .expect("async/await debe ejecutar sin error");
 
-    let result = wait_global(&engine, "globalThis._async_result").await;
+    let result = wait_global(&mut engine, "globalThis._async_result").await;
     assert_eq!(result, "42", "await debe resolver el valor de la promesa");
 }
 
@@ -566,13 +566,13 @@ async fn async_await_with_promise_chain() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
         .await
         .expect("await sobre Promise.resolve debe funcionar");
 
-    let result = wait_global(&engine, "globalThis._chain_result").await;
+    let result = wait_global(&mut engine, "globalThis._chain_result").await;
     assert_eq!(result, "42", "await chain debe sumar 10 + 32 = 42");
 }
 
@@ -599,13 +599,13 @@ async fn async_await_error_propagates_as_rejection() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval_file(&path)
         .await
         .expect("try/catch en async debe capturar el error");
 
-    let caught = wait_global(&engine, "globalThis._caught").await;
+    let caught = wait_global(&mut engine, "globalThis._caught").await;
     assert_eq!(caught, "true", "el catch async debe ejecutarse");
 
     let msg = engine
@@ -636,7 +636,7 @@ async fn esm_named_export_import() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&entry)
@@ -675,7 +675,7 @@ async fn esm_default_export_import() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&entry)
@@ -710,7 +710,7 @@ async fn esm_reexport_chain() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&entry)
@@ -743,7 +743,7 @@ async fn esm_ts_module_imported_from_js() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&entry)
@@ -777,7 +777,7 @@ async fn esm_import_blocked_without_read_permission() {
     // Solo otorgamos permiso de lectura al directorio padre, no al temp
     let state = PermissionState::new();
     // Sin grant: sin permisos → el loader debe rechazar la importación
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     let result = engine.eval_file(&entry).await;
     assert!(
@@ -813,7 +813,7 @@ async fn esm_import_from_node_modules_main_field() {
     )
     .unwrap();
 
-    let engine = engine_with_read(&temp).await;
+    let mut engine = engine_with_read(&temp).await;
     engine
         .eval_file(&entry)
         .await
@@ -851,7 +851,7 @@ async fn esm_import_from_node_modules_exports_field() {
     )
     .unwrap();
 
-    let engine = engine_with_read(&temp).await;
+    let mut engine = engine_with_read(&temp).await;
     engine
         .eval_file(&entry)
         .await
@@ -893,7 +893,7 @@ async fn esm_import_from_scoped_node_modules() {
     )
     .unwrap();
 
-    let engine = engine_with_read(&temp).await;
+    let mut engine = engine_with_read(&temp).await;
     engine
         .eval_file(&entry)
         .await
@@ -932,7 +932,7 @@ async fn esm_import_from_parent_node_modules() {
 
     let state = PermissionState::new();
     state.grant(Capability::FileRead(temp.path().to_path_buf()));
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
 
     engine
         .eval_file(&entry)
@@ -952,7 +952,7 @@ async fn esm_import_from_parent_node_modules() {
 #[tokio::test]
 async fn websocket_constants_are_defined() {
     let state = PermissionState::new();
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval(
             "
@@ -971,7 +971,7 @@ async fn websocket_denied_without_network_permission() {
     let state = PermissionState::new();
     // No network permission granted — constructor must not throw (mirrors browser behavior)
     // but onerror must fire and readyState must be CLOSED.
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval(
             "
@@ -996,7 +996,7 @@ async fn websocket_denied_without_network_permission() {
 #[tokio::test]
 async fn websocket_readystate_closed_on_denied() {
     let state = PermissionState::new();
-    let engine = JsEngine::new(Arc::new(state)).await.unwrap();
+    let mut engine = JsEngine::new(Arc::new(state)).await.unwrap();
     engine
         .eval(
             "

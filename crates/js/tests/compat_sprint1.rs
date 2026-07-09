@@ -18,7 +18,7 @@ async fn engine() -> JsEngine {
         .unwrap()
 }
 
-async fn eval_async_result(e: &JsEngine, setup: &str, var: &str) -> String {
+async fn eval_async_result(e: &mut JsEngine, setup: &str, var: &str) -> String {
     e.eval(setup).await.unwrap();
     for _ in 0..200 {
         e.idle().await;
@@ -40,7 +40,7 @@ async fn eval_async_result(e: &JsEngine, setup: &str, var: &str) -> String {
 
 #[tokio::test]
 async fn buffer_is_instanceof_uint8array() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(Buffer.from('hello') instanceof Uint8Array)")
         .await
@@ -50,7 +50,7 @@ async fn buffer_is_instanceof_uint8array() {
 
 #[tokio::test]
 async fn buffer_index_access_works() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -65,7 +65,7 @@ async fn buffer_index_access_works() {
 
 #[tokio::test]
 async fn buffer_length_correct() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -80,7 +80,7 @@ async fn buffer_length_correct() {
 
 #[tokio::test]
 async fn buffer_write_index_and_read_back() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -97,7 +97,7 @@ async fn buffer_write_index_and_read_back() {
 
 #[tokio::test]
 async fn buffer_set_works_as_uint8array() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -113,7 +113,7 @@ async fn buffer_set_works_as_uint8array() {
 
 #[tokio::test]
 async fn buffer_slice_is_buffer() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -129,7 +129,7 @@ async fn buffer_slice_is_buffer() {
 
 #[tokio::test]
 async fn buffer_spread_into_uint8array() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -145,7 +145,7 @@ async fn buffer_spread_into_uint8array() {
 
 #[tokio::test]
 async fn buffer_read_write_uint32() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -161,7 +161,7 @@ async fn buffer_read_write_uint32() {
 
 #[tokio::test]
 async fn buffer_to_json_round_trip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -179,7 +179,7 @@ async fn buffer_to_json_round_trip() {
 
 #[tokio::test]
 async fn crypto_hash_md5() {
-    let e = engine().await;
+    let mut e = engine().await;
     // md5('') = d41d8cd98f00b204e9800998ecf8427e
     let r = e
         .eval_to_string(r#"require('crypto').createHash('md5').update('').digest('hex')"#)
@@ -190,7 +190,7 @@ async fn crypto_hash_md5() {
 
 #[tokio::test]
 async fn crypto_hash_md5_nonempty() {
-    let e = engine().await;
+    let mut e = engine().await;
     // md5('hello') = 5d41402abc4b2a76b9719d911017c592
     let r = e
         .eval_to_string(r#"require('crypto').createHash('md5').update('hello').digest('hex')"#)
@@ -201,7 +201,7 @@ async fn crypto_hash_md5_nonempty() {
 
 #[tokio::test]
 async fn crypto_get_hashes_includes_md5() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"String(require('crypto').getHashes().indexOf('md5') !== -1)"#)
         .await
@@ -213,7 +213,7 @@ async fn crypto_get_hashes_includes_md5() {
 
 #[tokio::test]
 async fn create_private_key_from_pem() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -231,7 +231,7 @@ async fn create_private_key_from_pem() {
 
 #[tokio::test]
 async fn create_public_key_from_pem() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -249,7 +249,7 @@ async fn create_public_key_from_pem() {
 
 #[tokio::test]
 async fn create_secret_key() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -267,7 +267,7 @@ async fn create_secret_key() {
 
 #[tokio::test]
 async fn rsa_sign_and_verify_sha256() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -288,7 +288,7 @@ async fn rsa_sign_and_verify_sha256() {
 
 #[tokio::test]
 async fn rsa_sign_and_verify_sha512() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -306,7 +306,7 @@ async fn rsa_sign_and_verify_sha512() {
 
 #[tokio::test]
 async fn rsa_verify_fails_on_tampered_data() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -324,7 +324,7 @@ async fn rsa_verify_fails_on_tampered_data() {
 
 #[tokio::test]
 async fn rsa_sign_with_pem_string_directly() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -346,7 +346,7 @@ async fn rsa_sign_with_pem_string_directly() {
 
 #[tokio::test]
 async fn ecdsa_p256_sign_and_verify() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -365,7 +365,7 @@ async fn ecdsa_p256_sign_and_verify() {
 
 #[tokio::test]
 async fn ecdsa_p384_sign_and_verify() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -383,7 +383,7 @@ async fn ecdsa_p384_sign_and_verify() {
 
 #[tokio::test]
 async fn ecdsa_verify_fails_wrong_data() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -403,7 +403,7 @@ async fn ecdsa_verify_fails_wrong_data() {
 
 #[tokio::test]
 async fn crypto_sign_one_shot() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -423,7 +423,7 @@ async fn crypto_sign_one_shot() {
 
 #[tokio::test]
 async fn assert_deep_strict_equal_objects() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -439,7 +439,7 @@ async fn assert_deep_strict_equal_objects() {
 
 #[tokio::test]
 async fn assert_deep_strict_equal_arrays() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -454,7 +454,7 @@ async fn assert_deep_strict_equal_arrays() {
 
 #[tokio::test]
 async fn assert_deep_strict_equal_typed_array() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -470,7 +470,7 @@ async fn assert_deep_strict_equal_typed_array() {
 
 #[tokio::test]
 async fn assert_deep_strict_equal_fails_type_mismatch() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -485,7 +485,7 @@ async fn assert_deep_strict_equal_fails_type_mismatch() {
 
 #[tokio::test]
 async fn assert_deep_strict_equal_fails_deep_mismatch() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -500,7 +500,7 @@ async fn assert_deep_strict_equal_fails_deep_mismatch() {
 
 #[tokio::test]
 async fn assert_deep_strict_equal_handles_undefined() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -518,7 +518,7 @@ async fn assert_deep_strict_equal_handles_undefined() {
 
 #[tokio::test]
 async fn assert_deep_strict_equal_date() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -534,7 +534,7 @@ async fn assert_deep_strict_equal_date() {
 
 #[tokio::test]
 async fn assert_not_deep_strict_equal() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -549,7 +549,7 @@ async fn assert_not_deep_strict_equal() {
 
 #[tokio::test]
 async fn assert_if_error_passes_on_null() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -564,7 +564,7 @@ async fn assert_if_error_passes_on_null() {
 
 #[tokio::test]
 async fn assert_if_error_throws_on_error() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -581,7 +581,7 @@ async fn assert_if_error_throws_on_error() {
 
 #[tokio::test]
 async fn http_incoming_message_is_exported() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("typeof require('http').IncomingMessage")
         .await
@@ -591,7 +591,7 @@ async fn http_incoming_message_is_exported() {
 
 #[tokio::test]
 async fn http_server_response_is_exported() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("typeof require('http').ServerResponse")
         .await
@@ -601,7 +601,7 @@ async fn http_server_response_is_exported() {
 
 #[tokio::test]
 async fn http_incoming_message_instanceof_readable() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -618,7 +618,7 @@ async fn http_incoming_message_instanceof_readable() {
 
 #[tokio::test]
 async fn http_server_response_instanceof_writable() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -636,7 +636,7 @@ async fn http_server_response_instanceof_writable() {
 
 #[tokio::test]
 async fn http_prototype_extension_works() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -654,7 +654,7 @@ async fn http_prototype_extension_works() {
 
 #[tokio::test]
 async fn http_server_response_writehead_works() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -672,7 +672,7 @@ async fn http_server_response_writehead_works() {
 
 #[tokio::test]
 async fn http_incoming_message_properties() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -690,7 +690,7 @@ async fn http_incoming_message_properties() {
 
 #[tokio::test]
 async fn http_server_response_status_code_default() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -709,9 +709,9 @@ async fn http_server_response_status_code_default() {
 
 #[tokio::test]
 async fn subtle_rsa_pkcs1_sign_verify() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         var crypto = require('crypto');
         var encoder = new TextEncoder();
@@ -736,9 +736,9 @@ async fn subtle_rsa_pkcs1_sign_verify() {
 
 #[tokio::test]
 async fn subtle_rsa_pss_sign_verify() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         var crypto = require('crypto');
         var encoder = new TextEncoder();
@@ -763,9 +763,9 @@ async fn subtle_rsa_pss_sign_verify() {
 
 #[tokio::test]
 async fn subtle_ecdsa_p256_sign_verify() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         var crypto = require('crypto');
         var encoder = new TextEncoder();
@@ -791,9 +791,9 @@ async fn subtle_ecdsa_p256_sign_verify() {
 
 #[tokio::test]
 async fn subtle_ecdsa_p384_sign_verify() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         var crypto = require('crypto');
         var encoder = new TextEncoder();
@@ -819,9 +819,9 @@ async fn subtle_ecdsa_p384_sign_verify() {
 
 #[tokio::test]
 async fn subtle_rsa_wrong_data_fails_verify() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async_result(
-        &e,
+        &mut e,
         r#"
         var crypto = require('crypto');
         var encoder = new TextEncoder();
@@ -849,7 +849,7 @@ async fn subtle_rsa_wrong_data_fails_verify() {
 
 #[tokio::test]
 async fn process_stdout_is_writable() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -864,7 +864,7 @@ async fn process_stdout_is_writable() {
 
 #[tokio::test]
 async fn process_stderr_is_writable() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -879,7 +879,7 @@ async fn process_stderr_is_writable() {
 
 #[tokio::test]
 async fn process_stdout_fd_is_1() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(process.stdout.fd === 1)")
         .await
@@ -889,7 +889,7 @@ async fn process_stdout_fd_is_1() {
 
 #[tokio::test]
 async fn process_stderr_fd_is_2() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(process.stderr.fd === 2)")
         .await
@@ -901,7 +901,7 @@ async fn process_stderr_fd_is_2() {
 
 #[tokio::test]
 async fn process_env_is_proxy() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(process.env.__isProxy === true)")
         .await
@@ -911,7 +911,7 @@ async fn process_env_is_proxy() {
 
 #[tokio::test]
 async fn process_env_set_get_delete() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -932,7 +932,7 @@ async fn process_env_set_get_delete() {
 
 #[tokio::test]
 async fn process_env_own_keys_works() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -955,7 +955,7 @@ async fn process_env_own_keys_works() {
 
 #[tokio::test]
 async fn socket_instanceof_duplex() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -972,7 +972,7 @@ async fn socket_instanceof_duplex() {
 
 #[tokio::test]
 async fn socket_instanceof_readable_writable() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -991,7 +991,7 @@ async fn socket_instanceof_readable_writable() {
 
 #[tokio::test]
 async fn socket_has_readable_writable_state() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -1011,7 +1011,7 @@ async fn socket_has_readable_writable_state() {
 
 #[tokio::test]
 async fn socket_set_timeout_no_delay_keep_alive() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -1030,7 +1030,7 @@ async fn socket_set_timeout_no_delay_keep_alive() {
 
 #[tokio::test]
 async fn tls_socket_instanceof_duplex() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"

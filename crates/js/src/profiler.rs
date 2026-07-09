@@ -1,8 +1,7 @@
 //! CPU sampling profiler for the JS engine.
 //!
 //! Sampling is performed inside JS via `setInterval` + `new Error().stack`, so it is accurate
-//! for async and I/O-bound programs. Tight CPU loops with no Tokio yield points will show
-//! reduced sample fidelity — this is a known QuickJS constraint (no C-level stack walk API).
+//! for async and I/O-bound programs.
 //!
 //! Output formats:
 //! - `.cpuprofile` — V8-compatible JSON, loadable in Chrome DevTools / speedscope.app
@@ -54,7 +53,7 @@ impl Profiler {
 
     /// Push a raw sample parsed from a JS `Error().stack` string.
     pub fn push_raw(&self, timestamp_ms: u64, stack_str: &str, label: Option<String>) {
-        let frames = parse_quickjs_stack(stack_str);
+        let frames = parse_v8_stack(stack_str);
         let mut state = self.0.lock().unwrap();
         if state.start_time_ms == 0 {
             state.start_time_ms = timestamp_ms;
@@ -155,14 +154,14 @@ impl Profiler {
     }
 }
 
-// ── QuickJS stack string parser ───────────────────────────────────────────────
+// ── V8 stack string parser ────────────────────────────────────────────────────
 //
-// QuickJS `Error().stack` looks like:
+// V8 `Error().stack` looks like:
 //   at functionName (file.js:10:5)
 //   at (eval):3:1
 //   at <anonymous> (file.js:1:1)
 //
-fn parse_quickjs_stack(stack: &str) -> Vec<ProfileFrame> {
+fn parse_v8_stack(stack: &str) -> Vec<ProfileFrame> {
     let mut frames = Vec::new();
     for line in stack.lines() {
         let line = line.trim();
@@ -446,9 +445,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_quickjs_stack_basic() {
+    fn parse_v8_stack_basic() {
         let stack = "Error: __3va_prof__\n    at foo (app.js:10:5)\n    at bar (app.js:5:1)\n    at <anonymous> (app.js:1:1)";
-        let frames = parse_quickjs_stack(stack);
+        let frames = parse_v8_stack(stack);
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].function_name, "foo");
         assert_eq!(frames[0].url, "app.js");

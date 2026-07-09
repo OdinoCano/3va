@@ -15,7 +15,7 @@ async fn engine() -> JsEngine {
 
 #[tokio::test]
 async fn session_storage_set_get() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -30,7 +30,7 @@ async fn session_storage_set_get() {
 
 #[tokio::test]
 async fn session_storage_remove() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -46,7 +46,7 @@ async fn session_storage_remove() {
 
 #[tokio::test]
 async fn session_storage_clear_and_length() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -64,7 +64,7 @@ async fn session_storage_clear_and_length() {
 
 #[tokio::test]
 async fn session_storage_key() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -82,7 +82,7 @@ async fn session_storage_key() {
 
 #[tokio::test]
 async fn local_storage_set_get() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -97,7 +97,7 @@ async fn local_storage_set_get() {
 
 #[tokio::test]
 async fn local_storage_remove() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -119,7 +119,7 @@ async fn local_storage_remove() {
 
 #[tokio::test]
 async fn url_pattern_constructor_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof URLPattern === 'function')")
         .await
@@ -129,7 +129,7 @@ async fn url_pattern_constructor_exists() {
 
 #[tokio::test]
 async fn url_pattern_test_api_surface() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -144,7 +144,7 @@ async fn url_pattern_test_api_surface() {
 
 #[tokio::test]
 async fn url_pattern_pathname_match() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -159,7 +159,7 @@ async fn url_pattern_pathname_match() {
 
 #[tokio::test]
 async fn url_pattern_pathname_no_match() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -174,7 +174,7 @@ async fn url_pattern_pathname_no_match() {
 
 #[tokio::test]
 async fn url_pattern_exec_extracts_groups() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -190,7 +190,7 @@ async fn url_pattern_exec_extracts_groups() {
 
 #[tokio::test]
 async fn url_pattern_wildcard_matches_any() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -207,7 +207,7 @@ async fn url_pattern_wildcard_matches_any() {
 
 #[tokio::test]
 async fn url_pattern_hostname_match() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -223,7 +223,7 @@ async fn url_pattern_hostname_match() {
 
 #[tokio::test]
 async fn url_pattern_relative_pathname_exec() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -239,7 +239,7 @@ async fn url_pattern_relative_pathname_exec() {
 
 #[tokio::test]
 async fn url_pattern_string_init_full_url() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -257,7 +257,7 @@ async fn url_pattern_string_init_full_url() {
 
 #[tokio::test]
 async fn event_source_constructor_and_constants() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -271,7 +271,7 @@ async fn event_source_constructor_and_constants() {
 
 #[tokio::test]
 async fn event_source_close_does_not_throw() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -287,7 +287,7 @@ async fn event_source_close_does_not_throw() {
 
 #[tokio::test]
 async fn event_source_add_event_listener() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"

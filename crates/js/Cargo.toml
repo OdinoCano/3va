@@ -3,10 +3,10 @@ name = "vvva_js"
 version = "2.1.3"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "QuickJS-based JavaScript/TypeScript engine for the 3va runtime — ESM, TypeScript, async/await, NAPI, CDP inspector, profiler"
+description = "V8-based JavaScript/TypeScript engine for the 3va runtime — ESM, TypeScript, async/await, NAPI, CDP inspector, profiler"
 repository = "https://github.com/OdinoCano/3va"
 homepage = "https://github.com/OdinoCano/3va"
-keywords = ["javascript", "typescript", "quickjs", "runtime", "3va"]
+keywords = ["javascript", "typescript", "v8", "runtime", "3va"]
 categories = ["api-bindings"]
 
 [dev-dependencies]
@@ -14,9 +14,6 @@ tempfile.workspace = true
 tungstenite = { workspace = true }
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 vvva_firewall = { version = "2.1.3", path = "../firewall" }
-# russh 0.62 depends on rand 0.10 internally (distinct from the workspace's
-# rand 0.8) — needed only in tests, to generate a throwaway server host key
-# for the fake sshd used by ssh_module.rs's real end-to-end tests.
 rand10 = { package = "rand", version = "0.10" }
 
 [[test]]
@@ -124,8 +121,7 @@ name = "imap_module"
 path = "tests/imap_module.rs"
 
 [dependencies]
-rquickjs.workspace = true
-rquickjs-sys = { version = "0.6.4", package = "vvva-rquickjs-sys", path = "../../vendor/rquickjs-sys" }
+v8.workspace = true
 anyhow.workspace = true
 sha2 = { workspace = true }
 sha1 = { workspace = true }

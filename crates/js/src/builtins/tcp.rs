@@ -1,25 +1,14 @@
 //! Raw TCP and TLS socket backend for the `net` and `tls` Node.js modules.
-//!
-//! Architecture mirrors `websocket.rs`: connections are held in a
-//! `Arc<Mutex<HashMap<u32, TcpConn>>>` pool.  The JS side polls for data via
-//! `__tcpRead`; writes and closes are synchronous.
-//!
-//! Read semantics:
-//!   - Returns `Vec<u8>` with data when bytes are available.
-//!   - Throws an error with `message == "EAGAIN"` when no data is ready.
-//!   - Throws an error with `message == "EOF"` when the peer has closed.
 
+use crate::builtins::v8_compat::{uint8array_from_bytes, uint8array_to_vec};
 use native_tls::TlsStream;
-use rquickjs::function::Async;
-use rquickjs::{Ctx, Function, Result, function::Rest};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
+use v8::{ContextScope, Function, HandleScope, PinScope, Script, String as V8String};
 use vvva_crypto;
 use vvva_permissions::{Capability, PermissionState};
-
-// ── Connection type ───────────────────────────────────────────────────────────
 
 #[allow(clippy::large_enum_variant)]
 enum TcpConn {
@@ -52,42 +41,30 @@ impl TcpConn {
     }
 }
 
-// ── Error helpers ─────────────────────────────────────────────────────────────
-
-fn js_err(ctx: &Ctx<'_>, msg: String) -> rquickjs::Error {
-    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    match ctx.eval::<rquickjs::Value<'_>, _>(format!("new Error(\"{}\")", escaped)) {
-        Ok(v) => ctx.throw(v),
-        Err(e) => e,
-    }
+fn js_err<'s>(scope: &mut PinScope<'s, '_>, msg: &str) -> v8::Local<'s, v8::Value> {
+    V8String::new(scope, msg).unwrap().into()
 }
 
-fn js_code_err(ctx: &Ctx<'_>, code: &str, msg: String) -> rquickjs::Error {
-    let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
+fn js_code_err<'s>(
+    scope: &mut PinScope<'s, '_>,
+    code: &str,
+    msg: impl AsRef<str>,
+) -> v8::Local<'s, v8::Value> {
+    let msg = msg.as_ref();
     let src = format!(
-        "(function(){{var e=new Error(\"{msg}\");e.code=\"{code}\";return e;}})()",
-        msg = escaped_msg,
-        code = code
+        "(function(){{var e=new Error(\"{}\");e.code=\"{}\";return e;}})()",
+        msg, code
     );
-    match ctx.eval::<rquickjs::Value<'_>, _>(src) {
-        Ok(v) => ctx.throw(v),
-        Err(e) => e,
-    }
+    let source = V8String::new(scope, &src).unwrap();
+    Script::compile(scope, source, None)
+        .and_then(|s| s.run(scope))
+        .unwrap_or_else(|| v8::undefined(scope).into())
 }
 
-// ── PQ-TLS blocking helper ────────────────────────────────────────────────────
-
-/// Perform the full TCP connect → TLS handshake → ML-KEM-768 key exchange on
-/// the calling (blocking) thread.  Returns the ready-to-use TLS stream and the
-/// hex-encoded 32-byte shared secret, or an error message string.
-///
-/// Callers **must** run this inside `tokio::task::spawn_blocking` so the JS
-/// event loop is not stalled during network I/O.
 fn pq_tls_connect_blocking(
     host: &str,
     port: u16,
 ) -> std::result::Result<(TlsStream<TcpStream>, String), String> {
-    // Classical TLS handshake (blocking).
     let connector = native_tls::TlsConnector::new().map_err(|e| format!("TLS init: {e}"))?;
     let tcp =
         TcpStream::connect(format!("{host}:{port}")).map_err(|e| format!("ECONNREFUSED: {e}"))?;
@@ -95,17 +72,14 @@ fn pq_tls_connect_blocking(
         .connect(host, tcp)
         .map_err(|e| format!("TLS handshake failed: {e}"))?;
 
-    // ML-KEM-768 ephemeral key exchange: client initiates.
     let kp = vvva_crypto::kem::MlKemKeypair::generate();
     let ek_bytes = kp.encapsulation_key_bytes();
 
-    // Send [4-byte big-endian length][encapsulation key].
     let ek_len = (ek_bytes.len() as u32).to_be_bytes();
     tls.write_all(&ek_len)
         .and_then(|_| tls.write_all(&ek_bytes))
         .map_err(|e| format!("PQ TLS send ek: {e}"))?;
 
-    // Receive [4-byte big-endian length][ML-KEM-768 ciphertext = 1088 B].
     let mut ct_len_buf = [0u8; 4];
     tls.read_exact(&mut ct_len_buf)
         .map_err(|e| format!("PQ TLS recv ct len: {e}"))?;
@@ -117,13 +91,11 @@ fn pq_tls_connect_blocking(
     tls.read_exact(&mut ct_bytes)
         .map_err(|e| format!("PQ TLS recv ct: {e}"))?;
 
-    // Decode raw bytes directly — no hex round-trip needed.
     let ct = vvva_crypto::MlKemCiphertext::from_bytes(&ct_bytes)
         .map_err(|e| format!("PQ TLS ct decode: {e}"))?;
     let ss = vvva_crypto::decapsulate(&kp.dk, &ct);
     let ss_hex = hex::encode(ss.0);
 
-    // Switch to non-blocking for subsequent reads through the connection pool.
     tls.get_ref()
         .set_nonblocking(true)
         .map_err(|e| format!("set_nonblocking: {e}"))?;
@@ -131,11 +103,37 @@ fn pq_tls_connect_blocking(
     Ok((tls, ss_hex))
 }
 
-// ── Injection ─────────────────────────────────────────────────────────────────
+static TCP_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
+fn permissions() -> &'static Arc<PermissionState> {
+    TCP_PERMISSIONS.get().unwrap()
+}
+static TCP_POOL: std::sync::OnceLock<Arc<Mutex<HashMap<u32, TcpConn>>>> =
+    std::sync::OnceLock::new();
+fn pool() -> &'static Arc<Mutex<HashMap<u32, TcpConn>>> {
+    TCP_POOL.get().unwrap()
+}
+static TCP_NEXT_ID: std::sync::OnceLock<Arc<Mutex<u32>>> = std::sync::OnceLock::new();
+fn next_id() -> &'static Arc<Mutex<u32>> {
+    TCP_NEXT_ID.get().unwrap()
+}
+#[allow(clippy::type_complexity)]
+static TCP_LISTENERS: std::sync::OnceLock<Arc<Mutex<HashMap<u32, Arc<std::net::TcpListener>>>>> =
+    std::sync::OnceLock::new();
+fn listeners() -> &'static Arc<Mutex<HashMap<u32, Arc<std::net::TcpListener>>>> {
+    TCP_LISTENERS.get().unwrap()
+}
+static TCP_NEXT_LISTENER_ID: std::sync::OnceLock<Arc<Mutex<u32>>> = std::sync::OnceLock::new();
+fn next_listener_id() -> &'static Arc<Mutex<u32>> {
+    TCP_NEXT_LISTENER_ID.get().unwrap()
+}
 
-pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    let pool: Arc<Mutex<HashMap<u32, TcpConn>>> = Arc::new(Mutex::new(HashMap::new()));
-    let next_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+pub fn inject_tcp(
+    scope: &mut ContextScope<HandleScope>,
+    permissions_param: Arc<PermissionState>,
+) -> anyhow::Result<()> {
+    TCP_PERMISSIONS.set(permissions_param).ok();
+    TCP_POOL.set(Arc::new(Mutex::new(HashMap::new()))).ok();
+    TCP_NEXT_ID.set(Arc::new(Mutex::new(0))).ok();
 
     let alloc_id =
         |pool: &Arc<Mutex<HashMap<u32, TcpConn>>>, nid: &Arc<Mutex<u32>>, conn: TcpConn| -> u32 {
@@ -149,353 +147,437 @@ pub fn inject_tcp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             id
         };
 
-    // __tcpConnect(host, port) -> id
-    {
-        let perms = permissions.clone();
-        let pool = pool.clone();
-        let nid = next_id.clone();
-        ctx.globals().set(
-            "__tcpConnect",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, args: Rest<String>| -> Result<u32> {
-                    let mut it = args.0.into_iter();
-                    let host = it.next().unwrap_or_default();
-                    let port: u16 = it
-                        .next()
-                        .and_then(|s| s.parse().ok())
-                        .ok_or_else(|| js_err(&ctx, "tcpConnect: invalid port".into()))?;
+    let context = scope.get_current_context();
+    let global = context.global(scope);
 
-                    if !perms.check(&Capability::Network(host.clone())) {
-                        return Err(js_code_err(
-                            &ctx,
-                            "EACCES",
-                            format!("Network access denied. Run with --allow-net={}", host),
-                        ));
+    {
+        let tcp_connect_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let host_arg = args.get(0);
+                let host = host_arg.to_rust_string_lossy(_scope);
+                let port_arg = args.get(1);
+                let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
+
+                if !permissions().check(&Capability::Network(host.clone())) {
+                    let err = js_code_err(
+                        _scope,
+                        "EACCES",
+                        format!("Network access denied. Run with --allow-net={}", host),
+                    );
+                    rv.set(err);
+                    return;
+                }
+
+                match TcpStream::connect(format!("{}:{}", host, port)) {
+                    Ok(stream) => {
+                        if let Err(e) = stream.set_nonblocking(true) {
+                            let err = js_err(_scope, &e.to_string());
+                            rv.set(err);
+                            return;
+                        }
+                        let id = alloc_id(pool(), next_id(), TcpConn::Plain(stream));
+                        rv.set(v8::Integer::new_from_unsigned(_scope, id).into());
                     }
-
-                    let stream = TcpStream::connect(format!("{}:{}", host, port))
-                        .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
-                    stream
-                        .set_nonblocking(true)
-                        .map_err(|e| js_err(&ctx, e.to_string()))?;
-
-                    Ok(alloc_id(&pool, &nid, TcpConn::Plain(stream)))
-                },
-            ),
-        )?;
-    }
-
-    // __tcpConnectTls(host, port) -> id
-    {
-        let perms = permissions.clone();
-        let pool = pool.clone();
-        let nid = next_id.clone();
-        ctx.globals().set(
-            "__tcpConnectTls",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, args: Rest<String>| -> Result<u32> {
-                    let mut it = args.0.into_iter();
-                    let host = it.next().unwrap_or_default();
-                    let port: u16 = it
-                        .next()
-                        .and_then(|s| s.parse().ok())
-                        .ok_or_else(|| js_err(&ctx, "tcpConnectTls: invalid port".into()))?;
-
-                    if !perms.check(&Capability::Network(host.clone())) {
-                        return Err(js_code_err(
-                            &ctx,
-                            "EACCES",
-                            format!("Network access denied. Run with --allow-net={}", host),
-                        ));
+                    Err(e) => {
+                        let err = js_code_err(_scope, "ECONNREFUSED", e.to_string());
+                        rv.set(err);
                     }
-
-                    let connector = native_tls::TlsConnector::new()
-                        .map_err(|e| js_err(&ctx, format!("TLS init failed: {}", e)))?;
-                    let tcp = TcpStream::connect(format!("{}:{}", host, port))
-                        .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
-                    // TLS handshake is blocking — keep the stream blocking during handshake,
-                    // then switch to non-blocking for data reads.
-                    let tls = connector.connect(&host, tcp).map_err(|e| {
-                        js_code_err(&ctx, "ECONNRESET", format!("TLS handshake failed: {}", e))
-                    })?;
-                    tls.get_ref()
-                        .set_nonblocking(true)
-                        .map_err(|e| js_err(&ctx, e.to_string()))?;
-
-                    Ok(alloc_id(&pool, &nid, TcpConn::Tls(tls)))
-                },
-            ),
-        )?;
+                }
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__tcpConnect").unwrap().into(),
+            tcp_connect_fn.into(),
+        );
     }
 
-    // __tcpWrite(id, data) -> undefined | throws
     {
-        let pool = pool.clone();
-        ctx.globals().set(
-            "__tcpWrite",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, id: u32, data: Vec<u8>| -> Result<()> {
-                    let mut guard = pool.lock().unwrap();
-                    let conn = guard
-                        .get_mut(&id)
-                        .ok_or_else(|| js_err(&ctx, format!("tcpWrite: unknown socket {}", id)))?;
-                    conn.write_all(&data)
-                        .map_err(|e| js_code_err(&ctx, "EPIPE", e.to_string()))
-                },
-            ),
-        )?;
+        let tcp_connect_tls_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let host_arg = args.get(0);
+                let host = host_arg.to_rust_string_lossy(_scope);
+                let port_arg = args.get(1);
+                let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
+
+                if !permissions().check(&Capability::Network(host.clone())) {
+                    let err = js_code_err(
+                        _scope,
+                        "EACCES",
+                        format!("Network access denied. Run with --allow-net={}", host),
+                    );
+                    rv.set(err);
+                    return;
+                }
+
+                let connector = match native_tls::TlsConnector::new() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let err = js_err(_scope, &format!("TLS init failed: {}", e));
+                        rv.set(err);
+                        return;
+                    }
+                };
+
+                match TcpStream::connect(format!("{}:{}", host, port)) {
+                    Ok(tcp) => match connector.connect(&host, tcp) {
+                        Ok(tls) => {
+                            if let Err(e) = tls.get_ref().set_nonblocking(true) {
+                                let err = js_err(_scope, &e.to_string());
+                                rv.set(err);
+                                return;
+                            }
+                            let id = alloc_id(pool(), next_id(), TcpConn::Tls(tls));
+                            rv.set(v8::Integer::new_from_unsigned(_scope, id).into());
+                        }
+                        Err(e) => {
+                            let err = js_code_err(
+                                _scope,
+                                "ECONNRESET",
+                                format!("TLS handshake failed: {}", e),
+                            );
+                            rv.set(err);
+                        }
+                    },
+                    Err(e) => {
+                        let err = js_code_err(_scope, "ECONNREFUSED", e.to_string());
+                        rv.set(err);
+                    }
+                }
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__tcpConnectTls").unwrap().into(),
+            tcp_connect_tls_fn.into(),
+        );
     }
 
-    // __tcpRead(id, maxBytes) -> Vec<u8> | throws EAGAIN | throws EOF
     {
-        let pool = pool.clone();
-        ctx.globals().set(
-            "__tcpRead",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, id: u32, max_bytes: u32| -> Result<Vec<u8>> {
-                    let max = (max_bytes as usize).min(65536);
-                    let mut buf = vec![0u8; max];
-                    let mut guard = pool.lock().unwrap();
-                    let conn = guard
-                        .get_mut(&id)
-                        .ok_or_else(|| js_err(&ctx, format!("tcpRead: unknown socket {}", id)))?;
+        let tcp_write_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let id_arg = args.get(0);
+                let id = id_arg.uint32_value(_scope).unwrap_or(0);
+                let data_arg = args.get(1);
+                let data: Vec<u8> = if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg)
+                {
+                    uint8array_to_vec(_scope, arr)
+                } else {
+                    vec![]
+                };
 
-                    match conn.read(&mut buf) {
-                        Ok(0) => Err(js_code_err(&ctx, "EOF", "connection closed".into())),
+                let mut guard = pool().lock().unwrap();
+                match guard.get_mut(&id) {
+                    Some(conn) => {
+                        if let Err(e) = conn.write_all(&data) {
+                            let err = js_code_err(_scope, "EPIPE", e.to_string());
+                            rv.set(err);
+                        } else {
+                            rv.set(v8::undefined(_scope).into());
+                        }
+                    }
+                    None => {
+                        let err = js_err(_scope, &format!("tcpWrite: unknown socket {}", id));
+                        rv.set(err);
+                    }
+                }
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__tcpWrite").unwrap().into(),
+            tcp_write_fn.into(),
+        );
+    }
+
+    {
+        let tcp_read_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let id_arg = args.get(0);
+                let id = id_arg.uint32_value(_scope).unwrap_or(0);
+                let max_bytes_arg = args.get(1);
+                let max_bytes: u32 = max_bytes_arg.uint32_value(_scope).unwrap_or(65536);
+
+                let max = (max_bytes as usize).min(65536);
+                let mut buf = vec![0u8; max];
+                let mut guard = pool().lock().unwrap();
+
+                match guard.get_mut(&id) {
+                    Some(conn) => match conn.read(&mut buf) {
+                        Ok(0) => {
+                            let err = js_code_err(_scope, "EOF", "connection closed");
+                            rv.set(err);
+                        }
                         Ok(n) => {
                             buf.truncate(n);
-                            Ok(buf)
+                            let result = uint8array_from_bytes(_scope, &buf);
+                            rv.set(result.into());
                         }
                         Err(ref e)
                             if e.kind() == io::ErrorKind::WouldBlock
                                 || e.kind() == io::ErrorKind::TimedOut =>
                         {
-                            Err(js_code_err(&ctx, "EAGAIN", "no data available".into()))
+                            let err = js_code_err(_scope, "EAGAIN", "no data available");
+                            rv.set(err);
                         }
-                        Err(e) => Err(js_code_err(&ctx, "EIO", e.to_string())),
+                        Err(e) => {
+                            let err = js_code_err(_scope, "EIO", e.to_string());
+                            rv.set(err);
+                        }
+                    },
+                    None => {
+                        let err = js_err(_scope, &format!("tcpRead: unknown socket {}", id));
+                        rv.set(err);
                     }
-                },
-            ),
-        )?;
+                }
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__tcpRead").unwrap().into(),
+            tcp_read_fn.into(),
+        );
     }
 
-    // __tcpSetTimeout(id, ms) — no-op: sockets must stay non-blocking so the
-    // JS event loop poll (_startPoll) doesn't block Tokio. Socket-level timeouts
-    // are handled at the JS layer via setTimeout() in Socket.prototype.setTimeout.
     {
-        let _pool = pool.clone();
-        ctx.globals().set(
-            "__tcpSetTimeout",
-            Function::new(
-                ctx.clone(),
-                move |_ctx: Ctx<'_>, _id: u32, _ms: u32| -> Result<()> {
-                    // Intentionally no-op: switching to blocking mode would cause
-                    // __tcpRead to block the Tokio thread and freeze all JS timers.
-                    Ok(())
-                },
-            ),
-        )?;
+        let tcp_set_timeout_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  _args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                rv.set(v8::undefined(_scope).into());
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__tcpSetTimeout").unwrap().into(),
+            tcp_set_timeout_fn.into(),
+        );
     }
 
-    // __tcpClose(id)
     {
-        let pool = pool.clone();
-        ctx.globals().set(
-            "__tcpClose",
-            Function::new(ctx.clone(), move |_ctx: Ctx<'_>, id: u32| -> Result<()> {
-                if let Some(mut conn) = pool.lock().unwrap().remove(&id) {
+        let tcp_close_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let id_arg = args.get(0);
+                let id = id_arg.uint32_value(_scope).unwrap_or(0);
+                if let Some(mut conn) = pool().lock().unwrap().remove(&id) {
                     conn.shutdown();
                 }
-                Ok(())
-            }),
-        )?;
+                rv.set(v8::undefined(_scope).into());
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__tcpClose").unwrap().into(),
+            tcp_close_fn.into(),
+        );
     }
 
-    // ── Raw TCP server ─────────────────────────────────────────────────────────
-    // __netListen(port, host) → server_id   (sync; port bound immediately)
-    // __netAcceptAsync(server_id) → Promise<conn_id>  (awaits next connection,
-    //   then inserts the accepted stream into the shared tcp pool so __tcpRead /
-    //   __tcpWrite / __tcpClose work on it without any extra plumbing)
-    // __netClose(server_id) → void  (drops the listener)
-
-    let listeners: Arc<Mutex<HashMap<u32, Arc<tokio::net::TcpListener>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let next_listener_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+    TCP_LISTENERS.set(Arc::new(Mutex::new(HashMap::new()))).ok();
+    TCP_NEXT_LISTENER_ID.set(Arc::new(Mutex::new(0))).ok();
 
     {
-        let perms = permissions.clone();
-        let listeners = listeners.clone();
-        let nid = next_listener_id.clone();
-        ctx.globals().set(
-            "__netListen",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, port: u16, host: String| -> Result<u32> {
-                    if !perms.check_bind(&host) {
-                        return Err(js_code_err(
-                            &ctx,
-                            "EACCES",
-                            format!("Network access denied. Run with --allow-net={}", host),
-                        ));
-                    }
+        let net_listen_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let port_arg = args.get(0);
+                let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
+                let host_arg = args.get(1);
+                let host = host_arg.to_rust_string_lossy(_scope);
 
-                    let std_l = std::net::TcpListener::bind(format!("{}:{}", host, port))
-                        .map_err(|e| js_code_err(&ctx, "EADDRINUSE", e.to_string()))?;
-                    std_l
-                        .set_nonblocking(true)
-                        .map_err(|e| js_err(&ctx, e.to_string()))?;
-                    let tokio_l = tokio::net::TcpListener::from_std(std_l)
-                        .map_err(|e| js_err(&ctx, e.to_string()))?;
+                if !permissions().check_bind(&host) {
+                    let err = js_code_err(
+                        _scope,
+                        "EACCES",
+                        format!("Network access denied. Run with --allow-net={}", host),
+                    );
+                    rv.set(err);
+                    return;
+                }
 
-                    let id = {
-                        let mut n = nid.lock().unwrap();
-                        let id = *n;
-                        *n = n.wrapping_add(1);
-                        id
-                    };
-                    listeners.lock().unwrap().insert(id, Arc::new(tokio_l));
-                    Ok(id)
-                },
-            ),
-        )?;
-    }
-
-    {
-        let listeners = listeners.clone();
-        let pool = pool.clone();
-        let next_id = next_id.clone();
-        ctx.globals().set(
-            "__netAcceptAsync",
-            Function::new(
-                ctx.clone(),
-                Async(move |server_id: u32| {
-                    let listeners = listeners.clone();
-                    let pool = pool.clone();
-                    let next_id = next_id.clone();
-                    async move {
-                        let listener = {
-                            let g = listeners.lock().unwrap();
-                            g.get(&server_id).cloned()
-                        };
-                        let listener = listener.ok_or_else(|| {
-                            rquickjs::Error::new_from_js_message(
-                                "ENOENT",
-                                "ENOENT",
-                                "unknown server id".to_string(),
-                            )
-                        })?;
-
-                        let (tokio_stream, _addr) = listener.accept().await.map_err(|e| {
-                            rquickjs::Error::new_from_js_message(
-                                "ECONNRESET",
-                                "ECONNRESET",
-                                e.to_string(),
-                            )
-                        })?;
-
-                        // Convert to std for the existing non-blocking pool
-                        let std_stream = tokio_stream.into_std().map_err(|e| {
-                            rquickjs::Error::new_from_js_message("EIO", "EIO", e.to_string())
-                        })?;
-                        std_stream.set_nonblocking(true).map_err(|e| {
-                            rquickjs::Error::new_from_js_message("EIO", "EIO", e.to_string())
-                        })?;
-
-                        let conn_id = {
-                            let mut n = next_id.lock().unwrap();
+                match std::net::TcpListener::bind(format!("{}:{}", host, port)) {
+                    Ok(std_l) => {
+                        if let Err(e) = std_l.set_nonblocking(true) {
+                            let err = js_err(_scope, &e.to_string());
+                            rv.set(err);
+                            return;
+                        }
+                        let id = {
+                            let mut n = next_listener_id().lock().unwrap();
                             let id = *n;
                             *n = n.wrapping_add(1);
                             id
                         };
-                        pool.lock()
+                        listeners().lock().unwrap().insert(id, Arc::new(std_l));
+                        rv.set(v8::Integer::new_from_unsigned(_scope, id).into());
+                    }
+                    Err(e) => {
+                        let err = js_code_err(_scope, "EADDRINUSE", e.to_string());
+                        rv.set(err);
+                    }
+                }
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__netListen").unwrap().into(),
+            net_listen_fn.into(),
+        );
+    }
+
+    {
+        let net_accept_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let server_id_arg = args.get(0);
+                let server_id = server_id_arg.uint32_value(_scope).unwrap_or(0);
+
+                let listener = {
+                    let g = listeners().lock().unwrap();
+                    g.get(&server_id).cloned()
+                };
+                let listener = match listener {
+                    Some(l) => l,
+                    None => {
+                        let err_str = V8String::new(_scope, "unknown server id").unwrap();
+                        rv.set(err_str.into());
+                        return;
+                    }
+                };
+
+                // The listener is nonblocking (set at bind time in __netListen), so
+                // this is a single non-blocking accept attempt — same polling model
+                // as __tcpRead: WouldBlock maps to an EAGAIN-coded error the JS side
+                // retries on a timer instead of a call that blocks the whole engine.
+                match listener.accept() {
+                    Ok((std_stream, _addr)) => {
+                        if let Err(e) = std_stream.set_nonblocking(true) {
+                            let err = js_err(_scope, &e.to_string());
+                            rv.set(err);
+                            return;
+                        }
+                        let conn_id = {
+                            let mut n = next_id().lock().unwrap();
+                            let id = *n;
+                            *n = n.wrapping_add(1);
+                            id
+                        };
+                        pool()
+                            .lock()
                             .unwrap()
                             .insert(conn_id, TcpConn::Plain(std_stream));
-                        Ok::<u32, rquickjs::Error>(conn_id)
+                        rv.set(v8::Integer::new_from_unsigned(_scope, conn_id).into());
                     }
-                }),
-            ),
-        )?;
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        let err = js_code_err(_scope, "EAGAIN", "no pending connection");
+                        rv.set(err);
+                    }
+                    Err(e) => {
+                        let err = js_code_err(_scope, "EIO", e.to_string());
+                        rv.set(err);
+                    }
+                }
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__netAcceptAsync").unwrap().into(),
+            net_accept_fn.into(),
+        );
     }
 
     {
-        let listeners = listeners.clone();
-        ctx.globals().set(
-            "__netClose",
-            Function::new(
-                ctx.clone(),
-                move |_ctx: Ctx<'_>, server_id: u32| -> Result<()> {
-                    listeners.lock().unwrap().remove(&server_id);
-                    Ok(())
-                },
-            ),
-        )?;
+        let net_close_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let server_id_arg = args.get(0);
+                let server_id = server_id_arg.uint32_value(_scope).unwrap_or(0);
+                listeners().lock().unwrap().remove(&server_id);
+                rv.set(v8::undefined(_scope).into());
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__netClose").unwrap().into(),
+            net_close_fn.into(),
+        );
     }
 
-    // ── Hybrid PQ-TLS connect ─────────────────────────────────────────────────
-    //
-    // __pqTlsConnect(host, port) → { connId: number, pqSharedSecret: hex }
-    //
-    // Establishes a classical TLS connection then performs an ML-KEM-768
-    // ephemeral key encapsulation exchange over the secured channel:
-    //   client → server: [4-byte length][ML-KEM encapsulation key]
-    //   client ← server: [4-byte length][ML-KEM ciphertext]
-    //   Both sides derive a 32-byte PQ shared secret.
-    //
-    // The resulting `pqSharedSecret` can be combined with the TLS session key
-    // (e.g. via HKDF) to achieve hybrid classical+PQ forward secrecy.
-    //
-    // All blocking I/O (TCP connect, TLS handshake, ML-KEM round-trip) runs in
-    // a `spawn_blocking` thread so the JS event loop is never stalled.
     {
-        let pool = pool.clone();
-        let nid = next_id.clone();
-        let perms = permissions.clone();
-        ctx.globals().set(
-            "__pqTlsConnect",
-            Function::new(
-                ctx.clone(),
-                Async(move |host: String, port: u16| {
-                    let perms = perms.clone();
-                    let pool = pool.clone();
-                    let nid = nid.clone();
-                    async move {
-                        if !perms.check(&Capability::Network(host.clone())) {
-                            return Err(rquickjs::Error::new_from_js_message(
-                                "EACCES",
-                                "EACCES",
-                                format!("Network access denied. Run with --allow-net={}", host),
-                            ));
-                        }
+        let pq_tls_connect_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let host_arg = args.get(0);
+                let host = host_arg.to_rust_string_lossy(_scope);
+                let port_arg = args.get(1);
+                let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
 
-                        // All blocking I/O runs off the JS thread.
-                        let (tls, ss_hex) = tokio::task::spawn_blocking(move || {
-                            pq_tls_connect_blocking(&host, port)
-                        })
-                        .await
-                        .map_err(|e| {
-                            rquickjs::Error::new_from_js_message(
-                                "EIO",
-                                "EIO",
-                                format!("PQ TLS task panicked: {e}"),
-                            )
-                        })?
-                        .map_err(|e| {
-                            rquickjs::Error::new_from_js_message("ECONNRESET", "ECONNRESET", e)
-                        })?;
+                if !permissions().check(&Capability::Network(host.clone())) {
+                    let err = js_code_err(
+                        _scope,
+                        "EACCES",
+                        format!("Network access denied. Run with --allow-net={}", host),
+                    );
+                    rv.set(err);
+                    return;
+                }
 
-                        let conn_id = alloc_id(&pool, &nid, TcpConn::Tls(tls));
-                        Ok::<String, rquickjs::Error>(
+                let result = tokio::task::block_in_place(|| pq_tls_connect_blocking(&host, port));
+
+                match result {
+                    Ok((tls, ss_hex)) => {
+                        let conn_id = alloc_id(pool(), next_id(), TcpConn::Tls(tls));
+                        let json =
                             serde_json::json!({ "connId": conn_id, "pqSharedSecret": ss_hex })
-                                .to_string(),
-                        )
+                                .to_string();
+                        let result_str = V8String::new(_scope, &json).unwrap();
+                        rv.set(result_str.into());
                     }
-                }),
-            ),
-        )?;
+                    Err(e) => {
+                        let err_str = V8String::new(_scope, &e).unwrap();
+                        rv.set(err_str.into());
+                    }
+                }
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__pqTlsConnect").unwrap().into(),
+            pq_tls_connect_fn.into(),
+        );
     }
 
     Ok(())

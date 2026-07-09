@@ -1,22 +1,16 @@
+use libffi::middle::{Cif, CodePtr, Type, arg};
+use libloading::Library;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-use libffi::middle::{Cif, CodePtr, Type, arg};
-use libloading::Library;
-use rquickjs::{Ctx, Function, Result, function::Rest};
+use v8::{
+    Function, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, Script,
+    String as V8String,
+};
 use vvva_permissions::{Capability, PermissionState};
-
-fn js_err(ctx: &Ctx<'_>, msg: String) -> rquickjs::Error {
-    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    match ctx.eval::<rquickjs::Value, _>(format!("new Error(\"{}\")", escaped).as_str()) {
-        Ok(v) => ctx.throw(v),
-        Err(e) => e,
-    }
-}
 
 static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -24,8 +18,6 @@ struct FfiLib {
     _lib: Library,
 }
 
-// Safety: the raw pointers obtained from dlsym are valid as long as _lib is alive.
-// We never move _lib out of FfiLib, and FfiLib lives in the thread-local map.
 unsafe impl Send for FfiLib {}
 
 thread_local! {
@@ -51,8 +43,6 @@ fn ffi_type_from_str(s: &str) -> anyhow::Result<Type> {
     })
 }
 
-/// Storage for a single native argument.
-/// Box ensures the value doesn't move between construction and the libffi call.
 enum ArgStorage {
     I8(Box<i8>),
     I16(Box<i16>),
@@ -64,9 +54,7 @@ enum ArgStorage {
     U64(Box<u64>),
     F32(Box<f32>),
     F64(Box<f64>),
-    /// Pointer value (stored as usize to keep it FFI-safe).
     Ptr(Box<usize>),
-    /// `_cs` keeps the CString buffer alive while `ptr` is passed to libffi.
     CStr {
         _cs: CString,
         ptr: Box<*const c_char>,
@@ -121,12 +109,6 @@ fn js_value_to_arg(typ: &str, val: &serde_json::Value) -> anyhow::Result<ArgStor
     })
 }
 
-/// Invoke a native function through libffi.
-///
-/// # Safety
-/// `fn_ptr` must be a valid function pointer whose ABI matches the declared signature.
-/// The caller is responsible for ensuring this invariant through the permission system
-/// and the user-supplied type declarations.
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn call_native(
     fn_ptr: *mut c_void,
@@ -213,184 +195,243 @@ unsafe fn call_native(
     })
 }
 
-pub fn inject_ffi(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    let globals = ctx.globals();
+static INJECT_FFI_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> =
+    std::sync::OnceLock::new();
+fn permissions() -> &'static Arc<PermissionState> {
+    INJECT_FFI_PERMISSIONS.get().unwrap()
+}
 
-    // ── __ffiDlopen(path: string) -> string (handle_id) ─────────────────────
-    let perms = permissions.clone();
-    globals.set(
-        "__ffiDlopen",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args
-                    .0
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "dlopen() requires a library path".into()))?;
+pub fn inject_ffi(
+    scope: &mut v8::ContextScope<HandleScope>,
+    permissions_param: Arc<PermissionState>,
+) -> anyhow::Result<()> {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
 
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FFI(path.clone())) {
-                    return Err(js_err(
-                        &ctx,
-                        format!(
-                            "Permission denied: --allow-ffi={} is required",
-                            path.display()
-                        ),
-                    ));
+    INJECT_FFI_PERMISSIONS.set(permissions_param).ok();
+    let ffi_dlopen_fn = Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments<'_>,
+              mut rv: ReturnValue<'_>| {
+            let path_arg = args.get(0);
+            let path_str = path_arg.to_rust_string_lossy(scope);
+
+            let path = PathBuf::from(&path_str);
+            if !permissions().check(&Capability::FFI(path.clone())) {
+                let err_str = V8String::new(
+                    scope,
+                    &format!(
+                        "Permission denied: --allow-ffi={} is required",
+                        path.display()
+                    ),
+                )
+                .unwrap();
+                rv.set(err_str.into());
+                return;
+            }
+
+            let lib = unsafe {
+                match Library::new(&path_str) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        let err_str =
+                            V8String::new(scope, &format!("dlopen failed: {}", e)).unwrap();
+                        rv.set(err_str.into());
+                        return;
+                    }
                 }
+            };
 
-                let lib = unsafe {
-                    Library::new(&path_str)
-                        .map_err(|e| js_err(&ctx, format!("dlopen failed: {e}")))?
+            let handle_id = NEXT_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
+            FFI_LIBS.with(|libs| {
+                libs.borrow_mut().insert(handle_id, FfiLib { _lib: lib });
+            });
+
+            rv.set(V8String::new(scope, &handle_id.to_string()).unwrap().into());
+        },
+    );
+    global.set(
+        scope,
+        V8String::new(scope, "__ffiDlopen").unwrap().into(),
+        ffi_dlopen_fn.unwrap().into(),
+    );
+
+    let ffi_call_fn = Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments<'_>,
+              mut rv: ReturnValue<'_>| {
+            let handle_str_arg = args.get(0);
+            let handle_str = handle_str_arg.to_rust_string_lossy(scope);
+            let symbol_name_arg = args.get(1);
+            let symbol_name = symbol_name_arg.to_rust_string_lossy(scope);
+            let ret_type_arg = args.get(2);
+            let ret_type = ret_type_arg.to_rust_string_lossy(scope);
+            let arg_types_json_arg = args.get(3);
+            let arg_types_json = arg_types_json_arg.to_rust_string_lossy(scope);
+            let args_json_arg = args.get(4);
+            let args_json = args_json_arg.to_rust_string_lossy(scope);
+
+            let handle_id: u64 = match handle_str.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    let err_str = V8String::new(scope, "Invalid FFI handle").unwrap();
+                    rv.set(err_str.into());
+                    return;
+                }
+            };
+
+            let arg_types: Vec<String> = match serde_json::from_str(&arg_types_json) {
+                Ok(t) => t,
+                Err(e) => {
+                    let err_str =
+                        V8String::new(scope, &format!("Invalid arg types JSON: {}", e)).unwrap();
+                    rv.set(err_str.into());
+                    return;
+                }
+            };
+
+            let js_args: Vec<serde_json::Value> = match serde_json::from_str(&args_json) {
+                Ok(a) => a,
+                Err(e) => {
+                    let err_str =
+                        V8String::new(scope, &format!("Invalid args JSON: {}", e)).unwrap();
+                    rv.set(err_str.into());
+                    return;
+                }
+            };
+
+            let result = FFI_LIBS.with(|libs| {
+                let libs = libs.borrow();
+                let handle = match libs.get(&handle_id) {
+                    Some(h) => h,
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "Invalid or closed FFI handle: {}",
+                            handle_id
+                        ));
+                    }
                 };
 
-                let handle_id = NEXT_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
-                FFI_LIBS.with(|libs| {
-                    libs.borrow_mut().insert(handle_id, FfiLib { _lib: lib });
-                });
+                let fn_ptr: *mut c_void = unsafe {
+                    let sym: libloading::Symbol<*mut c_void> =
+                        match handle._lib.get(symbol_name.as_bytes()) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return Err(anyhow::anyhow!(
+                                    "Symbol '{}' not found: {}",
+                                    symbol_name,
+                                    e
+                                ));
+                            }
+                        };
+                    *sym
+                };
 
-                Ok(handle_id.to_string())
-            },
-        )?,
-    )?;
+                unsafe { call_native(fn_ptr, &ret_type, &arg_types, &js_args) }
+            });
 
-    // ── __ffiCall(handle_id, symbol, ret_type, arg_types_json, args_json) -> string ──
-    globals.set(
-        "__ffiCall",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let mut it = args.0.into_iter();
-                let handle_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__ffiCall: missing handle_id".into()))?;
-                let symbol_name = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__ffiCall: missing symbol name".into()))?;
-                let ret_type = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__ffiCall: missing return type".into()))?;
-                let arg_types_json = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__ffiCall: missing arg types".into()))?;
-                let args_json = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__ffiCall: missing args".into()))?;
-
-                let handle_id: u64 = handle_str
-                    .parse()
-                    .map_err(|_| js_err(&ctx, format!("Invalid FFI handle: {handle_str}")))?;
-
-                let arg_types: Vec<String> = serde_json::from_str(&arg_types_json)
-                    .map_err(|e| js_err(&ctx, format!("Invalid arg types JSON: {e}")))?;
-
-                let js_args: Vec<serde_json::Value> = serde_json::from_str(&args_json)
-                    .map_err(|e| js_err(&ctx, format!("Invalid args JSON: {e}")))?;
-
-                // Look up the symbol and call — done inside the thread_local borrow
-                // so the Library stays alive for the duration of the call.
-                let result = FFI_LIBS.with(|libs| {
-                    let libs = libs.borrow();
-                    let handle = libs.get(&handle_id).ok_or_else(|| {
-                        anyhow::anyhow!("Invalid or closed FFI handle: {handle_id}")
-                    })?;
-
-                    let fn_ptr: *mut c_void = unsafe {
-                        let sym: libloading::Symbol<*mut c_void> =
-                            handle._lib.get(symbol_name.as_bytes()).map_err(|e| {
-                                anyhow::anyhow!("Symbol '{}' not found: {}", symbol_name, e)
-                            })?;
-                        *sym
-                    };
-
-                    unsafe { call_native(fn_ptr, &ret_type, &arg_types, &js_args) }
-                });
-
-                match result {
-                    Ok(val) => Ok(val.to_string()),
-                    Err(e) => Err(js_err(&ctx, e.to_string())),
+            match result {
+                Ok(val) => {
+                    let result_str = V8String::new(scope, &val.to_string()).unwrap();
+                    rv.set(result_str.into());
                 }
-            },
-        )?,
-    )?;
+                Err(e) => {
+                    let err_str = V8String::new(scope, &e.to_string()).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    );
+    global.set(
+        scope,
+        V8String::new(scope, "__ffiCall").unwrap().into(),
+        ffi_call_fn.unwrap().into(),
+    );
 
-    // ── __ffiClose(handle_id: string) ────────────────────────────────────────
-    globals.set(
-        "__ffiClose",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let handle_str = args
-                    .0
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__ffiClose: missing handle_id".into()))?;
-                let handle_id: u64 = handle_str
-                    .parse()
-                    .map_err(|_| js_err(&ctx, format!("Invalid FFI handle: {handle_str}")))?;
-                FFI_LIBS.with(|libs| {
-                    libs.borrow_mut().remove(&handle_id);
-                });
-                Ok(())
-            },
-        )?,
-    )?;
+    let ffi_close_fn = Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments<'_>,
+              mut rv: ReturnValue<'_>| {
+            let handle_str_arg = args.get(0);
+            let handle_str = handle_str_arg.to_rust_string_lossy(scope);
 
-    // ── Inject the JS-facing `ffi` module ────────────────────────────────────
-    ctx.eval::<(), _>(
-        r#"(function() {
-  var FFIType = {
-    void:    'void',
-    i8:      'i8',
-    i16:     'i16',
-    i32:     'i32',
-    i64:     'i64',
-    u8:      'u8',
-    u16:     'u16',
-    u32:     'u32',
-    u64:     'u64',
-    f32:     'f32',
-    f64:     'f64',
-    pointer: 'pointer',
-    cstring: 'cstring',
-    buffer:  'buffer'
-  };
+            let handle_id: u64 = match handle_str.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    let err_str = V8String::new(scope, "Invalid FFI handle").unwrap();
+                    rv.set(err_str.into());
+                    return;
+                }
+            };
 
-  function dlopen(libPath, symbolDefs) {
-    var handleId = __ffiDlopen(libPath);
-    var symbols = {};
+            FFI_LIBS.with(|libs| {
+                libs.borrow_mut().remove(&handle_id);
+            });
+            rv.set(v8::undefined(scope).into());
+        },
+    );
+    global.set(
+        scope,
+        V8String::new(scope, "__ffiClose").unwrap().into(),
+        ffi_close_fn.unwrap().into(),
+    );
 
-    Object.keys(symbolDefs).forEach(function(name) {
-      var def = symbolDefs[name];
-      var argTypes = def.args || [];
-      var retType  = def.returns || 'void';
+    let js_code = r#"(function() {
+        var FFIType = {
+            void:    'void',
+            i8:      'i8',
+            i16:     'i16',
+            i32:     'i32',
+            i64:     'i64',
+            u8:      'u8',
+            u16:     'u16',
+            u32:     'u32',
+            u64:     'u64',
+            f32:     'f32',
+            f64:     'f64',
+            pointer: 'pointer',
+            cstring: 'cstring',
+            buffer:  'buffer'
+        };
 
-      symbols[name] = function() {
-        var jsArgs = Array.prototype.slice.call(arguments);
-        var resultJson = __ffiCall(
-          handleId,
-          name,
-          retType,
-          JSON.stringify(argTypes),
-          JSON.stringify(jsArgs)
-        );
-        var parsed = JSON.parse(resultJson);
-        return (parsed === null && retType === 'void') ? undefined : parsed;
-      };
-    });
+        function dlopen(libPath, symbolDefs) {
+            var handleId = __ffiDlopen(libPath);
+            var symbols = {};
 
-    return {
-      symbols: symbols,
-      close: function() { __ffiClose(handleId); }
-    };
-  }
+            Object.keys(symbolDefs).forEach(function(name) {
+                var def = symbolDefs[name];
+                var argTypes = def.args || [];
+                var retType  = def.returns || 'void';
 
-  var mod = { dlopen: dlopen, FFIType: FFIType };
-  globalThis.__requireCache['ffi']      = mod;
-  globalThis.__requireCache['node:ffi'] = mod;
-})();"#,
-    )?;
+                symbols[name] = function() {
+                    var jsArgs = Array.prototype.slice.call(arguments);
+                    var resultJson = __ffiCall(
+                        handleId,
+                        name,
+                        retType,
+                        JSON.stringify(argTypes),
+                        JSON.stringify(jsArgs)
+                    );
+                    var parsed = JSON.parse(resultJson);
+                    return (parsed === null && retType === 'void') ? undefined : parsed;
+                };
+            });
+
+            return {
+                symbols: symbols,
+                close: function() { __ffiClose(handleId); }
+            };
+        }
+
+        var mod = { dlopen: dlopen, FFIType: FFIType };
+        globalThis.__requireCache['ffi']      = mod;
+        globalThis.__requireCache['node:ffi'] = mod;
+    })();"#;
+    let source = V8String::new(scope, js_code).unwrap();
+    let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
 
     Ok(())
 }

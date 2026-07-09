@@ -73,7 +73,7 @@ impl PermissionState {
 
 ```rust
 // crates/js/src/lib.rs
-pub struct JsEngine { /* internal — QuickJS runtime + context */ }
+pub struct JsEngine { /* internal — V8 isolate + context */ }
 
 impl JsEngine {
     /// Create a new engine with the given permission state.

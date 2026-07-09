@@ -272,9 +272,6 @@ jobs:
             return 1
           }
 
-          publish_crate vvva-rquickjs-sys  && sleep 60
-          publish_crate vvva-rquickjs-core && sleep 60
-          publish_crate vvva-rquickjs      && sleep 60
           publish_crate vvva_permissions   && sleep 60
           publish_crate vvva_config        && sleep 60
           publish_crate vvva_core          && sleep 60

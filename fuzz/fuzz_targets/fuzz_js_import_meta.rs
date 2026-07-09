@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 // ── Re-implementations of the pure byte-level scanners in crates/js/src/transpiler.rs ──
 //
 // We re-implement the exact same logic instead of pulling in `vvva_js` (which
-// depends on rquickjs + oxc + a full async runtime) so the fuzzer builds fast
+// depends on v8 + oxc + a full async runtime) so the fuzzer builds fast
 // and can iterate at full speed. The goal is to find panics / infinite loops /
 // out-of-bounds reads in the scanners, which only depend on the input bytes.
 

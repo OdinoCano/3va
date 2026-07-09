@@ -1,7 +1,5 @@
 //! WebRTC (Web Real-Time Communication) built-in module
 //!
-//! Provides peer-to-peer data channels using RTCPeerConnection
-//!
 //! Native functions:
 //! - `__rtcCreatePeerConnection(config)` -> id
 //! - `__rtcCreateOffer(id)` -> sdp JSON
@@ -15,7 +13,6 @@
 //! - `__rtcClosePeerConnection(id)`
 //! - `__rtcGetConnectionState(id)` -> state string
 
-use rquickjs::{Ctx, Function, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use vvva_permissions::PermissionState;
@@ -34,20 +31,18 @@ enum RtcState {
     Closed,
 }
 
+#[allow(dead_code)]
 struct RtcPeerConnection {
-    #[allow(dead_code)]
     ice_servers: Vec<String>,
     state: RtcState,
     local_description: Option<(String, String)>,
     remote_description: Option<(String, String)>,
 }
 
+#[allow(dead_code)]
 struct RtcDataChannel {
-    #[allow(dead_code)]
     rtc_id: RtcId,
-    #[allow(dead_code)]
     label: String,
-    #[allow(dead_code)]
     ordered: bool,
     ready_state: String,
 }
@@ -84,127 +79,203 @@ fn rtc_state_to_string(state: RtcState) -> &'static str {
     }
 }
 
-pub fn inject_webrtc(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    let globals = ctx.globals();
-    let _perms = permissions.clone();
+pub fn inject_webrtc(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    permissions: Arc<PermissionState>,
+) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let _perms = permissions;
 
-    let create_fn = Function::new(ctx.clone(), move |config_str: String| -> RtcId {
-        let id = next_rtc_id();
-        let servers: Vec<String> = if config_str.is_empty() {
-            vec!["stun:stun.l.google.com:19302".to_string()]
-        } else {
-            vec![config_str]
-        };
-        rtc_registry().lock().unwrap().insert(
-            id,
-            RtcPeerConnection {
-                ice_servers: servers,
-                state: RtcState::New,
-                local_description: None,
-                remote_description: None,
-            },
-        );
-        id
-    })?;
-    globals.set("__rtcCreatePeerConnection", create_fn)?;
+    let create_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let config_str = args.get(0).to_rust_string_lossy(_scope);
+            let id = next_rtc_id();
+            let servers: Vec<String> = if config_str.is_empty() {
+                vec!["stun:stun.l.google.com:19302".to_string()]
+            } else {
+                vec![config_str]
+            };
+            rtc_registry().lock().unwrap().insert(
+                id,
+                RtcPeerConnection {
+                    ice_servers: servers,
+                    state: RtcState::New,
+                    local_description: None,
+                    remote_description: None,
+                },
+            );
+            rv.set(v8::Number::new(_scope, id as f64).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcCreatePeerConnection")
+            .unwrap()
+            .into(),
+        create_fn.into(),
+    );
 
-    let create_offer_fn = Function::new(ctx.clone(), move |id: RtcId| -> Option<String> {
-        let mut reg = rtc_registry().lock().unwrap();
-        if let Some(state) = reg.get_mut(&id) {
-            state.state = RtcState::Connecting;
-            state.local_description = Some((
-                "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string(),
-                "offer".to_string(),
-            ));
-            Some(
-                serde_json::json!({
+    let create_offer_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as RtcId;
+            let mut reg = rtc_registry().lock().unwrap();
+            if let Some(state) = reg.get_mut(&id) {
+                state.state = RtcState::Connecting;
+                state.local_description = Some((
+                    "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string(),
+                    "offer".to_string(),
+                ));
+                let result = serde_json::json!({
                     "type": "offer",
                     "sdp": "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
                 })
-                .to_string(),
-            )
-        } else {
-            None
-        }
-    })?;
-    globals.set("__rtcCreateOffer", create_offer_fn)?;
+                .to_string();
+                rv.set(v8::String::new(_scope, &result).unwrap().into());
+            } else {
+                rv.set(v8::undefined(_scope).into());
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcCreateOffer").unwrap().into(),
+        create_offer_fn.into(),
+    );
 
-    let create_answer_fn = Function::new(ctx.clone(), move |id: RtcId| -> Option<String> {
-        let mut reg = rtc_registry().lock().unwrap();
-        if let Some(state) = reg.get_mut(&id) {
-            state.state = RtcState::Connecting;
-            state.remote_description = Some((
-                "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string(),
-                "answer".to_string(),
-            ));
-            Some(
-                serde_json::json!({
+    let create_answer_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as RtcId;
+            let mut reg = rtc_registry().lock().unwrap();
+            if let Some(state) = reg.get_mut(&id) {
+                state.state = RtcState::Connecting;
+                state.remote_description = Some((
+                    "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string(),
+                    "answer".to_string(),
+                ));
+                let result = serde_json::json!({
                     "type": "answer",
                     "sdp": "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
                 })
-                .to_string(),
-            )
-        } else {
-            None
-        }
-    })?;
-    globals.set("__rtcCreateAnswer", create_answer_fn)?;
+                .to_string();
+                rv.set(v8::String::new(_scope, &result).unwrap().into());
+            } else {
+                rv.set(v8::undefined(_scope).into());
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcCreateAnswer").unwrap().into(),
+        create_answer_fn.into(),
+    );
 
-    let set_local_fn = Function::new(
-        ctx.clone(),
-        move |id: RtcId, sdp: String, type_: String| -> Option<String> {
+    let set_local_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as RtcId;
+            let sdp = args.get(1).to_rust_string_lossy(_scope);
+            let type_ = args.get(2).to_rust_string_lossy(_scope);
+
             let mut reg = rtc_registry().lock().unwrap();
             if let Some(state) = reg.get_mut(&id) {
                 state.local_description = Some((sdp, type_));
-                None
+                rv.set(v8::null(_scope).into());
             } else {
-                Some("Invalid RTC ID".to_string())
+                rv.set(v8::String::new(_scope, "Invalid RTC ID").unwrap().into());
             }
         },
-    )?;
-    globals.set("__rtcSetLocalDescription", set_local_fn)?;
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcSetLocalDescription")
+            .unwrap()
+            .into(),
+        set_local_fn.into(),
+    );
 
-    let set_remote_fn = Function::new(
-        ctx.clone(),
-        move |id: RtcId, sdp: String, type_: String| -> Option<String> {
+    let set_remote_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as RtcId;
+            let sdp = args.get(1).to_rust_string_lossy(_scope);
+            let type_ = args.get(2).to_rust_string_lossy(_scope);
+
             let mut reg = rtc_registry().lock().unwrap();
             if let Some(state) = reg.get_mut(&id) {
                 state.remote_description = Some((sdp, type_));
                 if state.local_description.is_some() {
                     state.state = RtcState::Connected;
                 }
-                None
+                rv.set(v8::null(_scope).into());
             } else {
-                Some("Invalid RTC ID".to_string())
+                rv.set(v8::String::new(_scope, "Invalid RTC ID").unwrap().into());
             }
         },
-    )?;
-    globals.set("__rtcSetRemoteDescription", set_remote_fn)?;
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcSetRemoteDescription")
+            .unwrap()
+            .into(),
+        set_remote_fn.into(),
+    );
 
-    let add_ice_fn = Function::new(
-        ctx.clone(),
-        move |id: RtcId, _candidate: String| -> Option<String> {
+    let add_ice_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as RtcId;
+            let _candidate = args.get(1).to_rust_string_lossy(_scope);
+
             let mut reg = rtc_registry().lock().unwrap();
             if let Some(state) = reg.get_mut(&id) {
                 if state.local_description.is_some() && state.remote_description.is_some() {
                     state.state = RtcState::Connected;
                 }
-                None
+                rv.set(v8::null(_scope).into());
             } else {
-                Some("Invalid RTC ID".to_string())
+                rv.set(v8::String::new(_scope, "Invalid RTC ID").unwrap().into());
             }
         },
-    )?;
-    globals.set("__rtcAddIceCandidate", add_ice_fn)?;
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcAddIceCandidate")
+            .unwrap()
+            .into(),
+        add_ice_fn.into(),
+    );
 
-    let create_dc_fn = Function::new(
-        ctx.clone(),
-        move |id: RtcId,
-              label: String,
-              ordered: bool,
-              _max_retransmits: Option<u16>,
-              _max_packet_life_time: Option<u16>|
-              -> Option<String> {
+    let create_dc_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as RtcId;
+            let label = args.get(1).to_rust_string_lossy(_scope);
+            let ordered = args.get(2).boolean_value(_scope);
+
             let reg = rtc_registry().lock().unwrap();
             if reg.contains_key(&id) {
                 let channel_id = next_channel_id();
@@ -217,55 +288,131 @@ pub fn inject_webrtc(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()>
                         ready_state: "open".to_string(),
                     },
                 );
-                Some(channel_id.to_string())
+                rv.set(
+                    v8::String::new(_scope, &channel_id.to_string())
+                        .unwrap()
+                        .into(),
+                );
             } else {
-                Some("Invalid RTC ID".to_string())
+                rv.set(v8::String::new(_scope, "Invalid RTC ID").unwrap().into());
             }
         },
-    )?;
-    globals.set("__rtcCreateDataChannel", create_dc_fn)?;
-
-    let dc_send_fn = Function::new(ctx.clone(), move |id: ChannelId, _data: String| -> bool {
-        let reg = channel_registry().lock().unwrap();
-        reg.get(&id)
-            .map(|ch| ch.ready_state == "open")
-            .unwrap_or(false)
-    })?;
-    globals.set("__rtcDataChannelSend", dc_send_fn)?;
-
-    let dc_close_fn = Function::new(ctx.clone(), move |id: ChannelId| -> Option<String> {
-        let mut reg = channel_registry().lock().unwrap();
-        if let Some(state) = reg.get_mut(&id) {
-            state.ready_state = "closed".to_string();
-            None
-        } else {
-            Some("Invalid Channel ID".to_string())
-        }
-    })?;
-    globals.set("__rtcDataChannelClose", dc_close_fn)?;
-
-    let close_fn = Function::new(ctx.clone(), move |id: RtcId| -> Option<String> {
-        let mut reg = rtc_registry().lock().unwrap();
-        if let Some(state) = reg.get_mut(&id) {
-            state.state = RtcState::Closed;
-            reg.remove(&id);
-            None
-        } else {
-            Some("Invalid RTC ID".to_string())
-        }
-    })?;
-    globals.set("__rtcClosePeerConnection", close_fn)?;
-
-    let state_fn = Function::new(ctx.clone(), move |id: RtcId| -> Option<String> {
-        rtc_registry()
-            .lock()
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcCreateDataChannel")
             .unwrap()
-            .get(&id)
-            .map(|state| rtc_state_to_string(state.state).to_string())
-    })?;
-    globals.set("__rtcGetConnectionState", state_fn)?;
+            .into(),
+        create_dc_fn.into(),
+    );
 
-    ctx.eval::<(), _>(r#"
+    let dc_send_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as ChannelId;
+            let _data = args.get(1).to_rust_string_lossy(_scope);
+
+            let reg = channel_registry().lock().unwrap();
+            let result = reg
+                .get(&id)
+                .map(|ch| ch.ready_state == "open")
+                .unwrap_or(false);
+            rv.set(v8::Boolean::new(_scope, result).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcDataChannelSend")
+            .unwrap()
+            .into(),
+        dc_send_fn.into(),
+    );
+
+    let dc_close_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as ChannelId;
+
+            let mut reg = channel_registry().lock().unwrap();
+            if let Some(state) = reg.get_mut(&id) {
+                state.ready_state = "closed".to_string();
+                rv.set(v8::null(_scope).into());
+            } else {
+                rv.set(
+                    v8::String::new(_scope, "Invalid Channel ID")
+                        .unwrap()
+                        .into(),
+                );
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcDataChannelClose")
+            .unwrap()
+            .into(),
+        dc_close_fn.into(),
+    );
+
+    let close_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as RtcId;
+
+            let mut reg = rtc_registry().lock().unwrap();
+            if let Some(state) = reg.get_mut(&id) {
+                state.state = RtcState::Closed;
+                reg.remove(&id);
+                rv.set(v8::null(_scope).into());
+            } else {
+                rv.set(v8::String::new(_scope, "Invalid RTC ID").unwrap().into());
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcClosePeerConnection")
+            .unwrap()
+            .into(),
+        close_fn.into(),
+    );
+
+    let state_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as RtcId;
+
+            let result = rtc_registry()
+                .lock()
+                .unwrap()
+                .get(&id)
+                .map(|state| rtc_state_to_string(state.state).to_string())
+                .unwrap_or_else(|| "closed".to_string());
+            rv.set(v8::String::new(_scope, &result).unwrap().into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__rtcGetConnectionState")
+            .unwrap()
+            .into(),
+        state_fn.into(),
+    );
+
+    let js_code = r#"
     (function() {
         function RTCPeerConnection(configuration) {
             configuration = configuration || {};
@@ -467,7 +614,10 @@ pub fn inject_webrtc(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()>
             RTCDataChannel: RTCDataChannel
         };
     })();
-    "#)?;
+    "#;
 
-    Ok(())
+    let source = v8::String::new(scope, js_code).unwrap();
+    if let Some(script) = v8::Script::compile(scope, source, None) {
+        let _ = script.run(scope);
+    }
 }

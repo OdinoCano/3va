@@ -26,7 +26,7 @@ fn path_str(dir: &TempDir, name: &str) -> String {
 #[tokio::test]
 async fn sqlite_open_and_close() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let db = path_str(&dir, "test.db");
 
     let r = e
@@ -47,7 +47,7 @@ async fn sqlite_open_and_close() {
 #[tokio::test]
 async fn sqlite_insert_and_get() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let db = path_str(&dir, "test2.db");
 
     let r = e
@@ -72,7 +72,7 @@ async fn sqlite_insert_and_get() {
 #[tokio::test]
 async fn sqlite_statement_all() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let db = path_str(&dir, "test3.db");
 
     let r = e
@@ -99,7 +99,7 @@ async fn sqlite_statement_all() {
 #[tokio::test]
 async fn sqlite_statement_run_returns_changes() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let db = path_str(&dir, "test4.db");
 
     let r = e
@@ -125,7 +125,7 @@ async fn sqlite_statement_run_returns_changes() {
 #[tokio::test]
 async fn sqlite_get_returns_undefined_for_missing() {
     let dir = TempDir::new().unwrap();
-    let e = engine_rw(&dir).await;
+    let mut e = engine_rw(&dir).await;
     let db = path_str(&dir, "test5.db");
 
     let r = e

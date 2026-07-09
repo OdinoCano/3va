@@ -30,7 +30,7 @@ fn free_port() -> u16 {
 ///
 /// The problem: `idle()` suspends on pending accepts (Poll::Pending) while we need timers
 /// to fire concurrently.  Using tokio::select! with a short timeout breaks the deadlock.
-async fn drive_forever(e: &JsEngine) -> ! {
+async fn drive_forever(e: &mut JsEngine) -> ! {
     loop {
         // Drive spawner Promises (with 2ms cap so pending accepts don't block timers)
         tokio::select! {
@@ -46,10 +46,10 @@ async fn drive_forever(e: &JsEngine) -> ! {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn net_server_accepts_connection() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -77,17 +77,17 @@ async fn net_server_accepts_connection() {
     });
 
     let response = tokio::select! {
-        _ = drive_forever(&e) => unreachable!("engine event loop terminated unexpectedly"),
+        _ = drive_forever(&mut e) => unreachable!("engine event loop terminated unexpectedly"),
         r = task => r.unwrap(),
     };
 
     assert_eq!(response.trim(), "hello");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn net_server_receives_data() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -121,7 +121,7 @@ async fn net_server_receives_data() {
     // The task completes only after the server reads data, fires 'data' callback,
     // and calls socket.end() — which means __received is already set.
     tokio::select! {
-        _ = drive_forever(&e) => unreachable!("engine event loop terminated unexpectedly"),
+        _ = drive_forever(&mut e) => unreachable!("engine event loop terminated unexpectedly"),
         _ = task => {},
     }
 
@@ -129,10 +129,10 @@ async fn net_server_receives_data() {
     assert_eq!(result, "ping");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn net_server_handles_multiple_connections() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -161,7 +161,7 @@ async fn net_server_handles_multiple_connections() {
             buf
         });
         let resp = tokio::select! {
-            _ = drive_forever(&e) => unreachable!("engine event loop terminated unexpectedly"),
+            _ = drive_forever(&mut e) => unreachable!("engine event loop terminated unexpectedly"),
             r = task => r.unwrap(),
         };
         responses.push(resp);
@@ -170,10 +170,10 @@ async fn net_server_handles_multiple_connections() {
     assert_eq!(responses, vec!["1", "2", "3"]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn net_server_listening_flag() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     let result = e
         .eval_to_string(&format!(

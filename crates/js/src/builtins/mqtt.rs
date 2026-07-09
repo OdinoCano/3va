@@ -1,8 +1,5 @@
 //! MQTT (Message Queuing Telemetry Transport) client built-in module
 //!
-//! Provides: `require('mqtt')` with `connect()` function, backed by real TCP (or TLS)
-//! sockets implementing MQTT 3.1.1 protocol (QoS 0 only).
-//!
 //! Native functions:
 //! - `__mqttCreate(clientId)` -> id
 //! - `__mqttConnect(id, host, port, useTls)` -> throws on failure
@@ -10,8 +7,8 @@
 //! - `__mqttRead(id, maxBytes)` -> Vec<u8> | throws EAGAIN | throws EOF
 //! - `__mqttClose(id)`
 
+use crate::builtins::v8_compat::{uint8array_from_bytes, uint8array_to_vec};
 use native_tls::TlsStream;
-use rquickjs::{Ctx, Function, Result};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -80,23 +77,8 @@ fn generate_client_id() -> String {
     format!("3va_mqtt_{}", millis)
 }
 
-fn js_code_err(ctx: &Ctx<'_>, code: &str, msg: String) -> rquickjs::Error {
-    let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    let src = format!(
-        "(function(){{var e=new Error(\"{msg}\");e.code=\"{code}\";return e;}})()",
-        msg = escaped_msg,
-        code = code
-    );
-    match ctx.eval::<rquickjs::Value<'_>, _>(src) {
-        Ok(v) => ctx.throw(v),
-        Err(e) => e,
-    }
-}
-
-// MQTT packet types
 const MQTT_DISCONNECT: u8 = 0xe0;
 
-// Encode remaining length in MQTT variable length format
 fn encode_remaining_length(len: usize) -> Vec<u8> {
     let mut result = Vec::new();
     let mut x = len;
@@ -114,82 +96,134 @@ fn encode_remaining_length(len: usize) -> Vec<u8> {
     result
 }
 
-pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    let globals = ctx.globals();
+static MQTT_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
+fn perms() -> &'static Arc<PermissionState> {
+    MQTT_PERMISSIONS.get().unwrap()
+}
 
-    // __mqttCreate(clientId) -> id
-    let create_fn = Function::new(ctx.clone(), move |client_id: Option<String>| -> MqttId {
-        let id = next_mqtt_id();
-        mqtt_registry().lock().unwrap().insert(
-            id,
-            MqttState {
-                conn: None,
-                client_id: client_id.unwrap_or_else(generate_client_id),
-                use_tls: false,
-                connected: false,
-                subscriptions: vec![],
-            },
-        );
-        id
-    })?;
-    globals.set("__mqttCreate", create_fn)?;
+pub fn inject_mqtt(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    permissions: Arc<PermissionState>,
+) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    MQTT_PERMISSIONS.set(permissions).ok();
 
-    // __mqttConnect(id, host, port, useTls) -> undefined | throws
-    let perms = permissions.clone();
-    let connect_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: MqttId, host: String, port: u16, use_tls: bool| -> Result<()> {
+    let create_fn = v8::Function::new(
+        scope,
+        move |scope: &mut v8::PinScope<'_, '_>,
+              args: v8::FunctionCallbackArguments<'_>,
+              mut rv: v8::ReturnValue<'_>| {
+            let client_id_arg = args.get(0);
+            let client_id = if client_id_arg.is_undefined() {
+                None
+            } else {
+                Some(client_id_arg.to_rust_string_lossy(scope))
+            };
+            let id = next_mqtt_id();
+            mqtt_registry().lock().unwrap().insert(
+                id,
+                MqttState {
+                    conn: None,
+                    client_id: client_id.unwrap_or_else(generate_client_id),
+                    use_tls: false,
+                    connected: false,
+                    subscriptions: vec![],
+                },
+            );
+            rv.set(v8::Number::new(scope, id as f64).into());
+        },
+    )
+    .unwrap();
+    let key = v8::String::new(scope, "__mqttCreate").unwrap().into();
+    global.set(scope, key, create_fn.into());
+
+    let connect_fn = v8::Function::new(
+        scope,
+        move |scope: &mut v8::PinScope<'_, '_>,
+              args: v8::FunctionCallbackArguments<'_>,
+              mut rv: v8::ReturnValue<'_>| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as MqttId;
+            let host = args.get(1).to_rust_string_lossy(scope);
+            let port = args.get(2).uint32_value(scope).unwrap_or(1883) as u16;
+            let use_tls = args.get(3).boolean_value(scope);
+
+            let perms = perms().clone();
+
             if !perms.check(&Capability::Network(host.clone())) {
-                return Err(js_code_err(
-                    &ctx,
-                    "EACCES",
-                    format!("Network access denied. Run with --allow-net={}", host),
-                ));
+                let msg = v8::String::new(
+                    scope,
+                    &format!("Network access denied. Run with --allow-net={}", host),
+                )
+                .unwrap();
+                let err = v8::Exception::error(scope, msg);
+                rv.set(err);
+                return;
             }
 
-            let tcp = TcpStream::connect(format!("{host}:{port}"))
-                .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
+            match TcpStream::connect(format!("{}:{}", host, port)) {
+                Ok(tcp) => {
+                    let conn = if use_tls {
+                        match native_tls::TlsConnector::new() {
+                            Ok(connector) => {
+                                let fallback = tcp.try_clone().ok();
+                                match connector.connect(&host, tcp) {
+                                    Ok(tls) => {
+                                        if tls.get_ref().set_nonblocking(true).is_ok() {
+                                            MqttConn::Tls(tls)
+                                        } else if let Some(tcp) = fallback {
+                                            MqttConn::Plain(tcp)
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        if let Some(tcp) = fallback {
+                                            MqttConn::Plain(tcp)
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => MqttConn::Plain(tcp),
+                        }
+                    } else {
+                        let _ = tcp.set_nonblocking(true);
+                        MqttConn::Plain(tcp)
+                    };
 
-            let conn = if use_tls {
-                let connector = native_tls::TlsConnector::new()
-                    .map_err(|e| js_code_err(&ctx, "EIO", format!("TLS init failed: {e}")))?;
-                let tls = connector.connect(&host, tcp).map_err(|e| {
-                    js_code_err(&ctx, "ECONNRESET", format!("TLS handshake failed: {e}"))
-                })?;
-                tls.get_ref()
-                    .set_nonblocking(true)
-                    .map_err(|e| js_code_err(&ctx, "EIO", e.to_string()))?;
-                MqttConn::Tls(tls)
-            } else {
-                tcp.set_nonblocking(true)
-                    .map_err(|e| js_code_err(&ctx, "EIO", e.to_string()))?;
-                MqttConn::Plain(tcp)
-            };
-
-            let mut reg = mqtt_registry().lock().unwrap();
-            if let Some(state) = reg.get_mut(&id) {
-                state.conn = Some(conn);
-                state.use_tls = use_tls;
-                state.connected = true;
-                Ok(())
-            } else {
-                Err(js_code_err(&ctx, "ENOTCONN", "Invalid MQTT ID".to_string()))
+                    let mut reg = mqtt_registry().lock().unwrap();
+                    if let Some(state) = reg.get_mut(&id) {
+                        state.conn = Some(conn);
+                        state.use_tls = use_tls;
+                        state.connected = true;
+                    }
+                    rv.set(v8::undefined(scope).into());
+                }
+                Err(e) => {
+                    let msg = v8::String::new(scope, &format!("Connection failed: {}", e)).unwrap();
+                    let err = v8::Exception::error(scope, msg);
+                    rv.set(err);
+                }
             }
         },
-    )?;
-    globals.set("__mqttConnect", connect_fn)?;
+    )
+    .unwrap();
+    let key = v8::String::new(scope, "__mqttConnect").unwrap().into();
+    global.set(scope, key, connect_fn.into());
 
-    // __mqttSend(id, packetType, data) -> throws on failure
-    let send_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: MqttId, packet_type: u8, data: Vec<u8>| -> Result<()> {
-            let mut reg = mqtt_registry().lock().unwrap();
-            let conn = reg
-                .get_mut(&id)
-                .and_then(|s| s.conn.as_mut())
-                .ok_or_else(|| js_code_err(&ctx, "ENOTCONN", "not connected".to_string()))?;
+    let send_fn = v8::Function::new(
+        scope,
+        move |scope: &mut v8::PinScope<'_, '_>,
+              args: v8::FunctionCallbackArguments<'_>,
+              mut rv: v8::ReturnValue<'_>| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as MqttId;
+            let packet_type = args.get(1).uint32_value(scope).unwrap_or(0) as u8;
+            let data = v8::Local::<v8::Uint8Array>::try_from(args.get(2))
+                .map(|arr| uint8array_to_vec(scope, arr))
+                .unwrap_or_default();
 
-            // Build packet: packet_type + remaining_length + payload
             let remaining_len = data.len();
             let len_bytes = encode_remaining_length(remaining_len);
 
@@ -198,84 +232,135 @@ pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             packet.extend_from_slice(&len_bytes);
             packet.extend_from_slice(&data);
 
-            conn.write_all(&packet)
-                .map_err(|e| js_code_err(&ctx, "EPIPE", e.to_string()))
-        },
-    )?;
-    globals.set("__mqttSend", send_fn)?;
-
-    // __mqttRead(id, maxBytes) -> Vec<u8> | throws EAGAIN | throws EOF
-    let read_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: MqttId, max_bytes: u32| -> Result<Vec<u8>> {
-            let max = (max_bytes as usize).min(65536);
-            let mut buf = vec![0u8; max];
             let mut reg = mqtt_registry().lock().unwrap();
-            let conn = reg
-                .get_mut(&id)
-                .and_then(|s| s.conn.as_mut())
-                .ok_or_else(|| js_code_err(&ctx, "ENOTCONN", "not connected".to_string()))?;
-
-            match conn.read(&mut buf) {
-                Ok(0) => Err(js_code_err(&ctx, "EOF", "connection closed".into())),
-                Ok(n) => {
-                    buf.truncate(n);
-                    Ok(buf)
+            match reg.get_mut(&id).and_then(|s| s.conn.as_mut()) {
+                Some(conn) => match conn.write_all(&packet) {
+                    Ok(_) => rv.set(v8::undefined(scope).into()),
+                    Err(e) => {
+                        let msg = v8::String::new(scope, &e.to_string()).unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                },
+                None => {
+                    let msg = v8::String::new(scope, "not connected").unwrap();
+                    let err = v8::Exception::error(scope, msg);
+                    rv.set(err);
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    Err(js_code_err(&ctx, "EAGAIN", "no data available".into()))
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    Err(js_code_err(&ctx, "EAGAIN", "no data available".into()))
-                }
-                Err(e) => Err(js_code_err(&ctx, "EIO", e.to_string())),
             }
         },
-    )?;
-    globals.set("__mqttRead", read_fn)?;
+    )
+    .unwrap();
+    let key = v8::String::new(scope, "__mqttSend").unwrap().into();
+    global.set(scope, key, send_fn.into());
 
-    // __mqttIsConnected(id) -> bool
-    let is_connected_fn = Function::new(ctx.clone(), move |id: MqttId| -> bool {
-        mqtt_registry()
-            .lock()
-            .unwrap()
-            .get(&id)
-            .map(|s| s.connected)
-            .unwrap_or(false)
-    })?;
-    globals.set("__mqttIsConnected", is_connected_fn)?;
+    let read_fn = v8::Function::new(
+        scope,
+        move |scope: &mut v8::PinScope<'_, '_>,
+              args: v8::FunctionCallbackArguments<'_>,
+              mut rv: v8::ReturnValue<'_>| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as MqttId;
+            let max_bytes = args.get(1).uint32_value(scope).unwrap_or(65536) as usize;
+            let max = max_bytes.min(65536);
 
-    // __mqttDisconnect(id)
-    let disconnect_fn = Function::new(
-        ctx.clone(),
-        move |_ctx: Ctx<'_>, id: MqttId| -> Result<()> {
+            let mut buf = vec![0u8; max];
+            let mut reg = mqtt_registry().lock().unwrap();
+            match reg.get_mut(&id).and_then(|s| s.conn.as_mut()) {
+                Some(conn) => match conn.read(&mut buf) {
+                    Ok(0) => {
+                        let msg = v8::String::new(scope, "connection closed").unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                    Ok(n) => {
+                        buf.truncate(n);
+                        rv.set(uint8array_from_bytes(scope, &buf).into());
+                    }
+                    Err(ref e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::TimedOut =>
+                    {
+                        let msg = v8::String::new(scope, "no data available").unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                    Err(e) => {
+                        let msg = v8::String::new(scope, &e.to_string()).unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                },
+                None => {
+                    let msg = v8::String::new(scope, "not connected").unwrap();
+                    let err = v8::Exception::error(scope, msg);
+                    rv.set(err);
+                }
+            }
+        },
+    )
+    .unwrap();
+    let key = v8::String::new(scope, "__mqttRead").unwrap().into();
+    global.set(scope, key, read_fn.into());
+
+    let is_connected_fn = v8::Function::new(
+        scope,
+        move |scope: &mut v8::PinScope<'_, '_>,
+              args: v8::FunctionCallbackArguments<'_>,
+              mut rv: v8::ReturnValue<'_>| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as MqttId;
+            let connected = mqtt_registry()
+                .lock()
+                .unwrap()
+                .get(&id)
+                .map(|s| s.connected)
+                .unwrap_or(false);
+            rv.set(v8::Boolean::new(scope, connected).into());
+        },
+    )
+    .unwrap();
+    let key = v8::String::new(scope, "__mqttIsConnected").unwrap().into();
+    global.set(scope, key, is_connected_fn.into());
+
+    let disconnect_fn = v8::Function::new(
+        scope,
+        move |scope: &mut v8::PinScope<'_, '_>,
+              args: v8::FunctionCallbackArguments<'_>,
+              mut rv: v8::ReturnValue<'_>| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as MqttId;
             let mut reg = mqtt_registry().lock().unwrap();
             if let Some(state) = reg.get_mut(&id) {
                 if let Some(conn) = state.conn.as_mut() {
-                    // Send DISCONNECT packet
                     let packet = vec![MQTT_DISCONNECT, 0x00];
                     let _ = conn.write_all(&packet);
                 }
                 state.connected = false;
             }
-            Ok(())
+            rv.set(v8::undefined(scope).into());
         },
-    )?;
-    globals.set("__mqttDisconnect", disconnect_fn)?;
+    )
+    .unwrap();
+    let key = v8::String::new(scope, "__mqttDisconnect").unwrap().into();
+    global.set(scope, key, disconnect_fn.into());
 
-    // __mqttClose(id)
-    let close_fn = Function::new(ctx.clone(), move |id: MqttId| -> bool {
-        if let Some(mut state) = mqtt_registry().lock().unwrap().remove(&id)
-            && let Some(mut conn) = state.conn.take()
-        {
-            conn.shutdown();
-        }
-        true
-    })?;
-    globals.set("__mqttClose", close_fn)?;
+    let close_fn = v8::Function::new(
+        scope,
+        move |scope: &mut v8::PinScope<'_, '_>,
+              args: v8::FunctionCallbackArguments<'_>,
+              mut rv: v8::ReturnValue<'_>| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as MqttId;
+            if let Some(mut state) = mqtt_registry().lock().unwrap().remove(&id)
+                && let Some(mut conn) = state.conn.take()
+            {
+                conn.shutdown();
+            }
+            rv.set(v8::Boolean::new(scope, true).into());
+        },
+    )
+    .unwrap();
+    let key = v8::String::new(scope, "__mqttClose").unwrap().into();
+    global.set(scope, key, close_fn.into());
 
-    ctx.eval::<(), _>(
-        r#"
+    let js_code = r#"
     (function() {
         function MqttClient(urlOrOptions, options) {
             var opts;
@@ -328,29 +413,24 @@ pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         MqttClient.prototype._sendConnect = function() {
             if (!this._id) return;
             var clientId = this.clientId || ('3va_' + Math.floor(Math.random() * 1000000));
-            // Build CONNECT packet
             var protocol = 'MQTT';
-            var protocolLevel = 0x04; // MQTT 3.1.1
-            var connectFlags = 0x02; // Clean session
+            var protocolLevel = 0x04;
+            var connectFlags = 0x02;
             if (this.username) connectFlags |= 0x80;
             if (this.password) connectFlags |= 0x40;
 
-            // Variable header
             var variableHeader = [];
-            // Protocol name
-            variableHeader.push(0x00); // Length MSB
-            variableHeader.push(protocol.length); // Length LSB
+            variableHeader.push(0x00);
+            variableHeader.push(protocol.length);
             for (var i = 0; i < protocol.length; i++) {
                 variableHeader.push(protocol.charCodeAt(i));
             }
-            variableHeader.push(protocolLevel); // Protocol level
-            variableHeader.push(connectFlags); // Connect flags
-            variableHeader.push((this.keepalive >> 8) & 0xFF); // Keepalive MSB
-            variableHeader.push(this.keepalive & 0xFF); // Keepalive LSB
+            variableHeader.push(protocolLevel);
+            variableHeader.push(connectFlags);
+            variableHeader.push((this.keepalive >> 8) & 0xFF);
+            variableHeader.push(this.keepalive & 0xFF);
 
-            // Payload
             var payload = [];
-            // Client ID
             var clientIdBytes = [];
             clientIdBytes.push((clientId.length >> 8) & 0xFF);
             clientIdBytes.push(clientId.length & 0xFF);
@@ -359,7 +439,6 @@ pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             }
             payload = payload.concat(clientIdBytes);
 
-            // Username
             if (this.username) {
                 var usernameBytes = [0x00, 0x00];
                 var usernameLen = this.username.length;
@@ -371,7 +450,6 @@ pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                 payload = payload.concat(usernameBytes);
             }
 
-            // Password
             if (this.password) {
                 var passwordBytes = [0x00, 0x00];
                 var passwordLen = this.password.length;
@@ -419,7 +497,6 @@ pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             while (offset < data.length) {
                 var packetType = data[offset];
                 offset++;
-                // Read remaining length
                 var multiplier = 1;
                 var remainingLength = 0;
                 var encodedByte;
@@ -440,7 +517,7 @@ pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         MqttClient.prototype._processPacket = function(packetType, data) {
             var packetTypeName = packetType & 0xF0;
             switch (packetTypeName) {
-                case 0x20: // CONNACK
+                case 0x20:
                     this.emit('connect');
                     if (data.length >= 2) {
                         var rc = data[1];
@@ -451,36 +528,31 @@ pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                         }
                     }
                     break;
-                case 0x30: // PUBLISH
+                case 0x30:
                     this._handlePublish(data);
                     break;
-                case 0x40: // PUBACK
+                case 0x40:
                     this.emit('puback', data);
                     break;
-                case 0x90: // SUBACK
+                case 0x90:
                     this.emit('suback', data);
                     break;
-                case 0xb0: // UNSUBACK
+                case 0xb0:
                     this.emit('unsuback', data);
                     break;
-                case 0xd0: // PINGRESP
-                    // Heartbeat response, ignore
-                    break;
-                default:
+                case 0xd0:
                     break;
             }
         };
 
         MqttClient.prototype._handlePublish = function(data) {
             var offset = 0;
-            // Read topic length
             var topicLen = (data[offset] << 8) | data[offset + 1];
             offset += 2;
             var topic = '';
             for (var i = 0; i < topicLen; i++) {
                 topic += String.fromCharCode(data[offset++]);
             }
-            // Skip packet identifier if QoS > 0 (not implemented here)
             if (data.length > offset) {
                 var payloadLen = data.length - offset;
                 var payload = '';
@@ -496,18 +568,14 @@ pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             var qos = (options && options.qos) || 0;
             var self = this;
             if (this._id && this._connected) {
-                // Build SUBSCRIBE packet
-                var variableHeader = [0x00, 0x01]; // Packet identifier
+                var variableHeader = [0x00, 0x01];
                 var payload = [];
                 for (var i = 0; i < topic.length; i++) {
-                    // Topic name length
                     payload.push((topic[i].length >> 8) & 0xFF);
                     payload.push(topic[i].length & 0xFF);
-                    // Topic name
                     for (var j = 0; j < topic[i].length; j++) {
                         payload.push(topic[i].charCodeAt(j));
                     }
-                    // QoS
                     payload.push(qos);
                     self._subscriptions.push({ topic: topic[i], qos: qos });
                 }
@@ -545,10 +613,8 @@ pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             if (this._id && this._connected) {
                 var header = [0x00];
                 if (retain) header[0] |= 0x01;
-                // For simplicity, QoS 0 only in this implementation
                 header[0] |= (qos << 1);
 
-                // Topic length
                 var topicBytes = [(topic.length >> 8) & 0xFF, topic.length & 0xFF];
                 var topicData = [];
                 for (var i = 0; i < topic.length; i++) {
@@ -648,8 +714,10 @@ pub fn inject_mqtt(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         globalThis.__requireCache['node:mqtt'] = { Client: MqttClient, connect: connect };
         globalThis.mqtt = { Client: MqttClient, connect: connect };
     })();
-    "#,
-    )?;
+    "#;
 
-    Ok(())
+    let source = v8::String::new(scope, js_code).unwrap();
+    if let Some(script) = v8::Script::compile(scope, source, None) {
+        let _ = script.run(scope);
+    }
 }

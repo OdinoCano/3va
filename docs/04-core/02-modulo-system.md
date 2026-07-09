@@ -29,7 +29,7 @@
 | `child_process` | Process spawning | Rust builtin (`builtins/child_process.rs`) — real exec via `tokio`, requires `--allow-child-process` |
 | `http2` | HTTP/2 client | JS client backed by `__fetchAsync` — `connect()`, `request()`, NGHTTP2 constants |
 
-**Rust builtins** are implemented as native Rust functions exposed to QuickJS via `rquickjs`. This includes `zlib` (real compression via `flate2`) and `child_process` (real subprocess execution via `tokio`).
+**Rust builtins** are implemented as native Rust functions exposed to V8. This includes `zlib` (real compression via `flate2`) and `child_process` (real subprocess execution via `tokio`).
 
 **Rust builtins** include `http_server.rs`: `__httpListenAsync` / `__httpAcceptAsync` / `__httpRespond` / `__httpClose` expose a Tokio-backed HTTP/1.1 server to JS. The JS `http.createServer(handler)` API is fully Node.js-compatible — `IncomingMessage` and `ServerResponse` objects with `req.method`, `req.url`, `req.headers`, `req._body`, `res.writeHead()`, `res.write()`, `res.end()`.
 
@@ -113,7 +113,7 @@ Respaldados por `Arc<Mutex<FdTable>>` en Rust con `std::fs::File` reales.
 
 ### 2.3.3 Module Cache
 
-All loaded modules are cached in `globalThis.__requireCache` (for CJS stubs) and via QuickJS's internal module registry (for ESM). This prevents double-evaluation and ensures singleton semantics.
+All loaded modules are cached in `globalThis.__requireCache` (for CJS stubs) and via V8's internal module registry (for ESM). This prevents double-evaluation and ensures singleton semantics.
 
 ---
 

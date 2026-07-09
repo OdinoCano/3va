@@ -13,7 +13,7 @@ To scale up testing for complex enterprise applications and Monorepos, v2.0.0 in
 
 In v1.0.0, test files were executed sequentially on a single thread. v2.0.0 implements an isolated parallel runner:
 
-- Each test file is loaded and run in its own OS thread with a clean `JsEngine` instance (QuickJS context isolation).
+- Each test file is loaded and run in its own OS thread with a clean `JsEngine` instance (V8 isolate isolation).
 - Concurrency levels default to the system's logical CPU core count (via `os.availableParallelism()`).
 
 ```bash

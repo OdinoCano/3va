@@ -18,7 +18,7 @@ async fn engine() -> JsEngine {
 
 #[tokio::test]
 async fn abort_controller_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"String(typeof AbortController === 'function' && typeof AbortSignal === 'function')"#,
@@ -30,7 +30,7 @@ async fn abort_controller_exists() {
 
 #[tokio::test]
 async fn abort_controller_initial_state() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -45,7 +45,7 @@ async fn abort_controller_initial_state() {
 
 #[tokio::test]
 async fn abort_controller_abort_sets_flag() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -61,7 +61,7 @@ async fn abort_controller_abort_sets_flag() {
 
 #[tokio::test]
 async fn abort_signal_fires_listeners() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -79,7 +79,7 @@ async fn abort_signal_fires_listeners() {
 
 #[tokio::test]
 async fn abort_signal_abort_static() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(r#"String(AbortSignal.abort('reason').aborted)"#)
         .await
@@ -91,7 +91,7 @@ async fn abort_signal_abort_static() {
 
 #[tokio::test]
 async fn blob_exists_and_has_size() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -106,7 +106,7 @@ async fn blob_exists_and_has_size() {
 
 #[tokio::test]
 async fn blob_text_returns_content() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -125,7 +125,7 @@ async fn blob_text_returns_content() {
 
 #[tokio::test]
 async fn blob_slice_creates_sub_blob() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -141,7 +141,7 @@ async fn blob_slice_creates_sub_blob() {
 
 #[tokio::test]
 async fn file_extends_blob() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -158,7 +158,7 @@ async fn file_extends_blob() {
 
 #[tokio::test]
 async fn formdata_append_and_get() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -174,7 +174,7 @@ async fn formdata_append_and_get() {
 
 #[tokio::test]
 async fn formdata_set_overrides() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -192,7 +192,7 @@ async fn formdata_set_overrides() {
 
 #[tokio::test]
 async fn formdata_has_and_delete() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -211,7 +211,7 @@ async fn formdata_has_and_delete() {
 
 #[tokio::test]
 async fn formdata_foreach_iterates() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -232,7 +232,7 @@ async fn formdata_foreach_iterates() {
 
 #[tokio::test]
 async fn readable_stream_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(r#"String(typeof ReadableStream === 'function')"#)
         .await
@@ -242,7 +242,7 @@ async fn readable_stream_exists() {
 
 #[tokio::test]
 async fn readable_stream_locked_flag() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"
@@ -259,7 +259,7 @@ async fn readable_stream_locked_flag() {
 
 #[tokio::test]
 async fn writable_stream_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(r#"String(typeof WritableStream === 'function')"#)
         .await
@@ -271,7 +271,7 @@ async fn writable_stream_exists() {
 
 #[tokio::test]
 async fn transform_stream_has_readable_and_writable() {
-    let e = engine().await;
+    let mut e = engine().await;
     let result = e
         .eval_to_string(
             r#"

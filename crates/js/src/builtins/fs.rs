@@ -1,11 +1,30 @@
-use rquickjs::{Ctx, Function, Result, function::Rest};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use v8::{ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue};
 use vvva_permissions::{Capability, PermissionState};
+
+static FS_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
+fn perms() -> &'static Arc<PermissionState> {
+    FS_PERMISSIONS.get().unwrap()
+}
+
+static FS_FD_TABLE: std::sync::OnceLock<Arc<Mutex<FdTable>>> = std::sync::OnceLock::new();
+fn fdt() -> &'static Arc<Mutex<FdTable>> {
+    FS_FD_TABLE.get().unwrap()
+}
+
+/// Each live watcher: holds the notify handle (dropping it stops watching)
+/// and an async receiver for incoming events.
+struct WatcherEntry {
+    _watcher: notify::RecommendedWatcher,
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
+}
+type WatchTable = Arc<Mutex<HashMap<u32, Arc<WatcherEntry>>>>;
+static FS_WATCH_TABLE: std::sync::OnceLock<WatchTable> = std::sync::OnceLock::new();
 
 /// Shared file-descriptor table: fd → open file handle.
 /// fd numbers start at 3 (0/1/2 = stdin/stdout/stderr).
@@ -76,17 +95,22 @@ fn flags_to_open_options(flags: &str) -> std::fs::OpenOptions {
     opts
 }
 
-fn js_err<'js>(ctx: &Ctx<'js>, msg: String) -> rquickjs::Error {
-    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    match ctx.eval::<rquickjs::Value, _>(format!("new Error(\"{}\")", escaped).as_str()) {
-        Ok(v) => ctx.throw(v),
-        Err(e) => e,
-    }
+fn js_err<'s>(scope: &mut PinScope<'s, '_>, msg: impl AsRef<str>) -> v8::Local<'s, v8::Value> {
+    let escaped = msg.as_ref().replace('\\', "\\\\").replace('"', "\\\"");
+    let src = format!("new Error(\"{}\")", escaped);
+    let source = v8::String::new(scope, &src).unwrap();
+    v8::Script::compile(scope, source, None)
+        .and_then(|s| s.run(scope))
+        .unwrap_or_else(|| v8::undefined(scope).into())
 }
 
 /// Create a Node.js-style filesystem error with a `.code` property so that
 /// callers (e.g. Prisma) can distinguish ENOENT from other errors.
-fn fs_err<'js>(ctx: &Ctx<'js>, io_err: &std::io::Error, path: &str) -> rquickjs::Error {
+fn fs_err<'s>(
+    scope: &mut PinScope<'s, '_>,
+    io_err: &std::io::Error,
+    path: &str,
+) -> v8::Local<'s, v8::Value> {
     let code = match io_err.kind() {
         std::io::ErrorKind::NotFound => "ENOENT",
         std::io::ErrorKind::PermissionDenied => "EACCES",
@@ -103,17 +127,21 @@ fn fs_err<'js>(ctx: &Ctx<'js>, io_err: &std::io::Error, path: &str) -> rquickjs:
     );
     let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
     let escaped_path = path.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
+    let src = format!(
         "(function(){{var e=new Error(\"{}\");e.code=\"{}\";e.path=\"{}\";return e;}})()",
         escaped_msg, code, escaped_path
     );
-    match ctx.eval::<rquickjs::Value, _>(script.as_str()) {
-        Ok(v) => ctx.throw(v),
-        Err(e) => e,
-    }
+    let source = v8::String::new(scope, &src).unwrap();
+    v8::Script::compile(scope, source, None)
+        .and_then(|s| s.run(scope))
+        .unwrap_or_else(|| v8::undefined(scope).into())
 }
 
-fn perm_err<'js>(ctx: &Ctx<'js>, flag: &str, path: &std::path::Path) -> rquickjs::Error {
+fn perm_err<'s>(
+    scope: &mut PinScope<'s, '_>,
+    flag: &str,
+    path: &std::path::Path,
+) -> v8::Local<'s, v8::Value> {
     let msg = format!(
         "Permission denied: --allow-{}={} is required",
         flag,
@@ -125,14 +153,25 @@ fn perm_err<'js>(ctx: &Ctx<'js>, flag: &str, path: &std::path::Path) -> rquickjs
         .to_string()
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
-    let script = format!(
+    let src = format!(
         "(function(){{var e=new Error(\"{}\");e.code=\"EACCES\";e.path=\"{}\";return e;}})()",
         escaped_msg, escaped_path
     );
-    match ctx.eval::<rquickjs::Value, _>(script.as_str()) {
-        Ok(v) => ctx.throw(v),
-        Err(_) => js_err(ctx, msg),
-    }
+    let source = v8::String::new(scope, &src).unwrap();
+    v8::Script::compile(scope, source, None)
+        .and_then(|s| s.run(scope))
+        .unwrap_or_else(|| v8::undefined(scope).into())
+}
+
+fn set_fn(
+    scope: &mut ContextScope<HandleScope>,
+    obj: v8::Local<v8::Object>,
+    name: &str,
+    f: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let func = v8::Function::new(scope, f).unwrap();
+    let key = v8::String::new(scope, name).unwrap().into();
+    obj.set(scope, key, func.into());
 }
 
 fn stat_meta_to_json(meta: &std::fs::Metadata) -> String {
@@ -179,632 +218,707 @@ fn stat_meta_to_json(meta: &std::fs::Metadata) -> String {
     )
 }
 
-pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    let globals = ctx.globals();
-    let fd_table: Arc<Mutex<FdTable>> = Arc::new(Mutex::new(FdTable::new()));
+pub fn inject_fs(
+    scope: &mut ContextScope<HandleScope>,
+    permissions: Arc<PermissionState>,
+) -> anyhow::Result<()> {
+    FS_PERMISSIONS.set(permissions).ok();
+    FS_FD_TABLE.set(Arc::new(Mutex::new(FdTable::new()))).ok();
+    let context = scope.get_current_context();
+    let globals = context.global(scope);
 
     // ── __fsFdOpen(path, flags_str) -> fd ─────────────────────────────────────
-    {
-        let perms = permissions.clone();
-        let fdt = fd_table.clone();
-        globals.set(
-            "__fsFdOpen",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>,
-                      path_str: String,
-                      flags: String,
-                      _mode: Option<i32>|
-                      -> Result<i32> {
-                    let path = PathBuf::from(&path_str);
-                    let needs_write = matches!(
-                        flags.as_str(),
-                        "w" | "w+" | "wx" | "wx+" | "a" | "a+" | "ax" | "ax+" | "r+" | "rs+"
-                    );
-                    if needs_write {
-                        if !perms.check(&Capability::FileWrite(path.clone())) {
-                            return Err(perm_err(&ctx, "write", &path));
-                        }
-                    } else if !perms.check(&Capability::FileRead(path.clone())) {
-                        return Err(perm_err(&ctx, "read", &path));
-                    }
-                    let file = flags_to_open_options(&flags)
-                        .open(&path)
-                        .map_err(|e| js_err(&ctx, format!("ENOENT: open '{}': {}", path_str, e)))?;
-                    Ok(fdt.lock().unwrap().insert(file))
-                },
-            )?,
-        )?;
-    }
+    set_fn(
+        scope,
+        globals,
+        "__fsFdOpen",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let flags = args.get(1).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            let needs_write = matches!(
+                flags.as_str(),
+                "w" | "w+" | "wx" | "wx+" | "a" | "a+" | "ax" | "ax+" | "r+" | "rs+"
+            );
+            if needs_write {
+                if !perms().check(&Capability::FileWrite(path.clone())) {
+                    let err = perm_err(scope, "write", &path);
+                    scope.throw_exception(err);
+                    return;
+                }
+            } else if !perms().check(&Capability::FileRead(path.clone())) {
+                let err = perm_err(scope, "read", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            match flags_to_open_options(&flags).open(&path) {
+                Ok(file) => {
+                    let fd = fdt().lock().unwrap().insert(file);
+                    rv.set(v8::Integer::new(scope, fd).into());
+                }
+                Err(e) => {
+                    let err = js_err(scope, format!("ENOENT: open '{}': {}", path_str, e));
+                    scope.throw_exception(err);
+                }
+            }
+        },
+    );
 
     // ── __fsFdClose(fd) ───────────────────────────────────────────────────────
-    {
-        let fdt = fd_table.clone();
-        globals.set(
-            "__fsFdClose",
-            Function::new(ctx.clone(), move |ctx: Ctx<'_>, fd: i32| -> Result<()> {
-                if !fdt.lock().unwrap().remove(fd) {
-                    return Err(js_err(&ctx, format!("EBADF: bad file descriptor {fd}")));
-                }
-                Ok(())
-            })?,
-        )?;
-    }
+    set_fn(
+        scope,
+        globals,
+        "__fsFdClose",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let fd = args.get(0).int32_value(scope).unwrap_or(0);
+            if !fdt().lock().unwrap().remove(fd) {
+                let err = js_err(scope, format!("EBADF: bad file descriptor {fd}"));
+                scope.throw_exception(err);
+            }
+        },
+    );
 
     // ── __fsFdRead(fd, length, position) -> Vec<u8> ───────────────────────────
-    {
-        let fdt = fd_table.clone();
-        globals.set(
-            "__fsFdRead",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>,
-                      fd: i32,
-                      length: usize,
-                      position: Option<i64>|
-                      -> Result<Vec<u8>> {
-                    let mut table = fdt.lock().unwrap();
-                    let file = table
-                        .get_mut(fd)
-                        .ok_or_else(|| js_err(&ctx, format!("EBADF: bad file descriptor {fd}")))?;
-                    if let Some(pos) = position {
-                        file.seek(SeekFrom::Start(pos as u64))
-                            .map_err(|e| js_err(&ctx, e.to_string()))?;
-                    }
-                    let mut buf = vec![0u8; length.min(65536)];
-                    let n = file
-                        .read(&mut buf)
-                        .map_err(|e| js_err(&ctx, e.to_string()))?;
+    set_fn(
+        scope,
+        globals,
+        "__fsFdRead",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let fd = args.get(0).int32_value(scope).unwrap_or(0);
+            let length = args.get(1).uint32_value(scope).unwrap_or(0) as usize;
+            let position_arg = args.get(2);
+            let position = if position_arg.is_null_or_undefined() {
+                None
+            } else {
+                position_arg.integer_value(scope)
+            };
+
+            let mut table = fdt().lock().unwrap();
+            let file = match table.get_mut(fd) {
+                Some(f) => f,
+                None => {
+                    let err = js_err(scope, format!("EBADF: bad file descriptor {fd}"));
+                    scope.throw_exception(err);
+                    return;
+                }
+            };
+            if let Some(pos) = position
+                && let Err(e) = file.seek(SeekFrom::Start(pos as u64))
+            {
+                let err = js_err(scope, e.to_string());
+                scope.throw_exception(err);
+                return;
+            }
+            let mut buf = vec![0u8; length.min(65536)];
+            match file.read(&mut buf) {
+                Ok(n) => {
                     buf.truncate(n);
-                    Ok(buf)
-                },
-            )?,
-        )?;
-    }
+                    rv.set(crate::builtins::v8_compat::uint8array_from_bytes(scope, &buf).into());
+                }
+                Err(e) => {
+                    let err = js_err(scope, e.to_string());
+                    scope.throw_exception(err);
+                }
+            }
+        },
+    );
 
     // ── __fsFdWrite(fd, data, position) -> bytes_written ─────────────────────
-    {
-        let fdt = fd_table.clone();
-        globals.set(
-            "__fsFdWrite",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>,
-                      fd: i32,
-                      data: Vec<u8>,
-                      position: Option<i64>|
-                      -> Result<usize> {
-                    let mut table = fdt.lock().unwrap();
-                    let file = table
-                        .get_mut(fd)
-                        .ok_or_else(|| js_err(&ctx, format!("EBADF: bad file descriptor {fd}")))?;
-                    if let Some(pos) = position {
-                        file.seek(SeekFrom::Start(pos as u64))
-                            .map_err(|e| js_err(&ctx, e.to_string()))?;
-                    }
-                    file.write_all(&data)
-                        .map_err(|e| js_err(&ctx, e.to_string()))?;
-                    Ok(data.len())
-                },
-            )?,
-        )?;
-    }
+    set_fn(
+        scope,
+        globals,
+        "__fsFdWrite",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let fd = args.get(0).int32_value(scope).unwrap_or(0);
+            let data = v8::Local::<v8::Uint8Array>::try_from(args.get(1))
+                .map(|arr| crate::builtins::v8_compat::uint8array_to_vec(scope, arr))
+                .unwrap_or_default();
+            let position_arg = args.get(2);
+            let position = if position_arg.is_null_or_undefined() {
+                None
+            } else {
+                position_arg.integer_value(scope)
+            };
+
+            let mut table = fdt().lock().unwrap();
+            let file = match table.get_mut(fd) {
+                Some(f) => f,
+                None => {
+                    let err = js_err(scope, format!("EBADF: bad file descriptor {fd}"));
+                    scope.throw_exception(err);
+                    return;
+                }
+            };
+            if let Some(pos) = position
+                && let Err(e) = file.seek(SeekFrom::Start(pos as u64))
+            {
+                let err = js_err(scope, e.to_string());
+                scope.throw_exception(err);
+                return;
+            }
+            match file.write_all(&data) {
+                Ok(()) => rv.set(v8::Integer::new_from_unsigned(scope, data.len() as u32).into()),
+                Err(e) => {
+                    let err = js_err(scope, e.to_string());
+                    scope.throw_exception(err);
+                }
+            }
+        },
+    );
 
     // ── __fsFdStat(fd) -> JSON stat ───────────────────────────────────────────
-    {
-        let fdt = fd_table.clone();
-        globals.set(
-            "__fsFdStat",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, fd: i32| -> Result<String> {
-                    let mut table = fdt.lock().unwrap();
-                    let file = table
-                        .get_mut(fd)
-                        .ok_or_else(|| js_err(&ctx, format!("EBADF: bad file descriptor {fd}")))?;
-                    let meta = file.metadata().map_err(|e| js_err(&ctx, e.to_string()))?;
-                    let json = stat_meta_to_json(&meta);
-                    Ok(json)
-                },
-            )?,
-        )?;
-    }
+    set_fn(
+        scope,
+        globals,
+        "__fsFdStat",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let fd = args.get(0).int32_value(scope).unwrap_or(0);
+            let mut table = fdt().lock().unwrap();
+            let file = match table.get_mut(fd) {
+                Some(f) => f,
+                None => {
+                    let err = js_err(scope, format!("EBADF: bad file descriptor {fd}"));
+                    scope.throw_exception(err);
+                    return;
+                }
+            };
+            match file.metadata() {
+                Ok(meta) => rv.set(
+                    v8::String::new(scope, &stat_meta_to_json(&meta))
+                        .unwrap()
+                        .into(),
+                ),
+                Err(e) => {
+                    let err = js_err(scope, e.to_string());
+                    scope.throw_exception(err);
+                }
+            }
+        },
+    );
 
     // ── __fsMkdtemp(prefix) -> String ─────────────────────────────────────────
-    {
-        let perms = permissions.clone();
-        globals.set(
-            "__fsMkdtemp",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, prefix: String| -> Result<String> {
-                    let path = PathBuf::from(&prefix);
-                    let parent = path.parent().unwrap_or(std::path::Path::new("/tmp"));
-                    if !perms.check(&Capability::FileWrite(parent.to_path_buf())) {
-                        return Err(perm_err(&ctx, "write", parent));
-                    }
-                    // Create a temp dir with a random suffix
-                    let unique = format!("{}{}", prefix, std::process::id());
-                    std::fs::create_dir_all(&unique).map_err(|e| js_err(&ctx, e.to_string()))?;
-                    Ok(unique)
-                },
-            )?,
-        )?;
-    }
+    set_fn(
+        scope,
+        globals,
+        "__fsMkdtemp",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let prefix = args.get(0).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&prefix);
+            let parent = path.parent().unwrap_or(std::path::Path::new("/tmp"));
+            if !perms().check(&Capability::FileWrite(parent.to_path_buf())) {
+                let err = perm_err(scope, "write", parent);
+                scope.throw_exception(err);
+                return;
+            }
+            // Create a temp dir with a random suffix
+            let unique = format!("{}{}", prefix, std::process::id());
+            match std::fs::create_dir_all(&unique) {
+                Ok(()) => rv.set(v8::String::new(scope, &unique).unwrap().into()),
+                Err(e) => {
+                    let err = js_err(scope, e.to_string());
+                    scope.throw_exception(err);
+                }
+            }
+        },
+    );
 
     // ── __fsReadFileSync(path) -> String ──────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsReadFileSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args
-                    .0
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsReadFileSync() requires a path".into()))?;
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileRead(path.clone())) {
-                    return Err(perm_err(&ctx, "read", &path));
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileRead(path.clone())) {
+                let err = perm_err(scope, "read", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(content) => rv.set(v8::String::new(scope, &content).unwrap().into()),
+                Err(e) => {
+                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    scope.throw_exception(err);
                 }
-                std::fs::read_to_string(&path)
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
-            },
-        )?,
-    )?;
+            }
+        },
+    );
 
     // ── __fsWriteFileBytesSync(path, bytes: Vec<u8>) ──────────────────────────
-    {
-        let perms = permissions.clone();
-        globals.set(
-            "__fsWriteFileBytesSync",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, path_str: String, data: Vec<u8>| -> Result<()> {
-                    let path = PathBuf::from(&path_str);
-                    if !perms.check(&Capability::FileWrite(path.clone())) {
-                        return Err(perm_err(&ctx, "write", &path));
-                    }
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-                    std::fs::write(&path, &data)
-                        .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
-                },
-            )?,
-        )?;
-    }
+    set_fn(
+        scope,
+        globals,
+        "__fsWriteFileBytesSync",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let data = v8::Local::<v8::Uint8Array>::try_from(args.get(1))
+                .map(|arr| crate::builtins::v8_compat::uint8array_to_vec(scope, arr))
+                .unwrap_or_default();
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            if let Err(e) = std::fs::write(&path, &data) {
+                let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                scope.throw_exception(err);
+            }
+        },
+    );
 
     // ── __fsReadFileBytesSync(path) -> JSON array of byte values ──────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsReadFileBytesSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args.0.into_iter().next().ok_or_else(|| {
-                    js_err(&ctx, "__fsReadFileBytesSync() requires a path".into())
-                })?;
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileRead(path.clone())) {
-                    return Err(perm_err(&ctx, "read", &path));
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileRead(path.clone())) {
+                let err = perm_err(scope, "read", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let json = serde_json::to_string(&bytes).unwrap_or_else(|_| "[]".to_string());
+                    rv.set(v8::String::new(scope, &json).unwrap().into());
                 }
-                let bytes = std::fs::read(&path)
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
-                let arr: Vec<u8> = bytes;
-                Ok(serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string()))
-            },
-        )?,
-    )?;
+                Err(e) => {
+                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    scope.throw_exception(err);
+                }
+            }
+        },
+    );
 
     // ── __fsWriteFileSync(path, content) ──────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsWriteFileSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let mut it = args.0.into_iter();
-                let path_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsWriteFileSync() requires a path".into()))?;
-                let content = it.next().unwrap_or_default();
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileWrite(path.clone())) {
-                    return Err(perm_err(&ctx, "write", &path));
-                }
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                std::fs::write(&path, content)
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
-            },
-        )?,
-    )?;
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let content = args.get(1).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            if let Err(e) = std::fs::write(&path, content) {
+                let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                scope.throw_exception(err);
+            }
+        },
+    );
 
     // ── __fsAppendFileSync(path, content) ─────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsAppendFileSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let mut it = args.0.into_iter();
-                let path_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsAppendFileSync() requires a path".into()))?;
-                let content = it.next().unwrap_or_default();
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileWrite(path.clone())) {
-                    return Err(perm_err(&ctx, "write", &path));
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let content = args.get(1).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path);
+            match file {
+                Ok(mut file) => {
+                    if let Err(e) = file.write_all(content.as_bytes()) {
+                        let err = js_err(scope, format!("{}: '{}'", e, path_str));
+                        scope.throw_exception(err);
+                    }
                 }
-                use std::io::Write;
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
-                file.write_all(content.as_bytes())
-                    .map_err(|e| js_err(&ctx, format!("{}: '{}'", e, path_str)))
-            },
-        )?,
-    )?;
+                Err(e) => {
+                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    scope.throw_exception(err);
+                }
+            }
+        },
+    );
 
     // ── __fsExistsSync(path) -> bool ──────────────────────────────────────────
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsExistsSync",
-        Function::new(ctx.clone(), |args: Rest<String>| -> bool {
-            args.0
-                .into_iter()
-                .next()
-                .map(|p| PathBuf::from(p).exists())
-                .unwrap_or(false)
-        })?,
-    )?;
+        |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            rv.set(v8::Boolean::new(scope, PathBuf::from(path_str).exists()).into());
+        },
+    );
 
     // ── __fsStatSync(path, follow_symlinks) -> JSON ───────────────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsStatSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let mut it = args.0.into_iter();
-                let path_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsStatSync() requires a path".into()))?;
-                let follow = it.next().map(|s| s != "false").unwrap_or(true);
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileRead(path.clone())) {
-                    return Err(perm_err(&ctx, "read", &path));
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let follow_arg = args.get(1);
+            let follow = if follow_arg.is_undefined() {
+                true
+            } else {
+                follow_arg.to_rust_string_lossy(scope) != "false"
+            };
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileRead(path.clone())) {
+                let err = perm_err(scope, "read", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            let meta = if follow {
+                std::fs::metadata(&path)
+            } else {
+                std::fs::symlink_metadata(&path)
+            };
+            match meta {
+                Ok(meta) => rv.set(
+                    v8::String::new(scope, &stat_meta_to_json(&meta))
+                        .unwrap()
+                        .into(),
+                ),
+                Err(e) => {
+                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    scope.throw_exception(err);
                 }
-                let meta = if follow {
-                    std::fs::metadata(&path)
-                } else {
-                    std::fs::symlink_metadata(&path)
-                }
-                .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
-                Ok(stat_meta_to_json(&meta))
-            },
-        )?,
-    )?;
+            }
+        },
+    );
 
     // ── __fsAccessSync(path, mode) -> "ok" | error message ───────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsAccessSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let mut it = args.0.into_iter();
-                let path_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsAccessSync() requires a path".into()))?;
-                let mode_str = it.next().unwrap_or_else(|| "0".to_string());
-                let mode: u32 = mode_str.parse().unwrap_or(0);
-                let path = PathBuf::from(&path_str);
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let mode = args.get(1).uint32_value(scope).unwrap_or(0);
+            let path = PathBuf::from(&path_str);
 
-                if !path.exists() {
-                    return Ok(format!("ENOENT: no such file or directory: '{}'", path_str));
-                }
-                // R_OK = 4, W_OK = 2 — check sandbox permissions
-                if mode & 4 != 0 && !perms.check(&Capability::FileRead(path.clone())) {
-                    return Ok(format!("EACCES: permission denied: '{}'", path_str));
-                }
-                if mode & 2 != 0 && !perms.check(&Capability::FileWrite(path.clone())) {
-                    return Ok(format!("EACCES: permission denied: '{}'", path_str));
-                }
-                Ok("ok".to_string())
-            },
-        )?,
-    )?;
+            let result = if !path.exists() {
+                format!("ENOENT: no such file or directory: '{}'", path_str)
+            } else if (mode & 4 != 0 && !perms().check(&Capability::FileRead(path.clone())))
+                || (mode & 2 != 0 && !perms().check(&Capability::FileWrite(path.clone())))
+            {
+                format!("EACCES: permission denied: '{}'", path_str)
+            } else {
+                "ok".to_string()
+            };
+            rv.set(v8::String::new(scope, &result).unwrap().into());
+        },
+    );
 
     // ── __fsRealpathSync(path) -> String ──────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsRealpathSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args
-                    .0
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsRealpathSync() requires a path".into()))?;
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileRead(path.clone())) {
-                    return Err(perm_err(&ctx, "read", &path));
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileRead(path.clone())) {
+                let err = perm_err(scope, "read", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            match std::fs::canonicalize(&path) {
+                Ok(p) => rv.set(v8::String::new(scope, &p.to_string_lossy()).unwrap().into()),
+                Err(e) => {
+                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    scope.throw_exception(err);
                 }
-                std::fs::canonicalize(&path)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
-            },
-        )?,
-    )?;
+            }
+        },
+    );
 
     // ── __fsReaddirSync(path) -> String (JSON array of filenames) ─────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsReaddirSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<String> {
-                let path_str = args
-                    .0
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsReaddirSync() requires a path".into()))?;
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileRead(path.clone())) {
-                    return Err(perm_err(&ctx, "read", &path));
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileRead(path.clone())) {
+                let err = perm_err(scope, "read", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            match std::fs::read_dir(&path) {
+                Ok(entries) => {
+                    let names: Vec<String> = entries
+                        .flatten()
+                        .filter_map(|e| e.file_name().into_string().ok())
+                        .collect();
+                    let json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string());
+                    rv.set(v8::String::new(scope, &json).unwrap().into());
                 }
-                let entries = std::fs::read_dir(&path).map_err(|e| fs_err(&ctx, &e, &path_str))?;
-                let names: Vec<String> = entries
-                    .flatten()
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .collect();
-                Ok(serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string()))
-            },
-        )?,
-    )?;
+                Err(e) => {
+                    let err = fs_err(scope, &e, &path_str);
+                    scope.throw_exception(err);
+                }
+            }
+        },
+    );
 
     // ── __fsMkdirSync(path) ───────────────────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsMkdirSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let path_str = args
-                    .0
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsMkdirSync() requires a path".into()))?;
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileWrite(path.clone())) {
-                    return Err(perm_err(&ctx, "write", &path));
-                }
-                std::fs::create_dir_all(&path)
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
-            },
-        )?,
-    )?;
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            if let Err(e) = std::fs::create_dir_all(&path) {
+                let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                scope.throw_exception(err);
+            }
+        },
+    );
 
     // ── __fsRmSync(path) ──────────────────────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsRmSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let path_str = args
-                    .0
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsRmSync() requires a path".into()))?;
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileWrite(path.clone())) {
-                    return Err(perm_err(&ctx, "write", &path));
-                }
-                let result = if path.is_dir() {
-                    std::fs::remove_dir_all(&path)
-                } else {
-                    std::fs::remove_file(&path)
-                };
-                result.map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
-            },
-        )?,
-    )?;
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            let result = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(e) = result {
+                let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                scope.throw_exception(err);
+            }
+        },
+    );
 
     // ── __fsUnlinkSync(path) ──────────────────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsUnlinkSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let path_str = args
-                    .0
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsUnlinkSync() requires a path".into()))?;
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileWrite(path.clone())) {
-                    return Err(perm_err(&ctx, "write", &path));
-                }
-                std::fs::remove_file(&path)
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))
-            },
-        )?,
-    )?;
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            if let Err(e) = std::fs::remove_file(&path) {
+                let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                scope.throw_exception(err);
+            }
+        },
+    );
 
     // ── __fsRenameSync(from, to) ──────────────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsRenameSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let mut it = args.0.into_iter();
-                let from_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsRenameSync() requires from, to".into()))?;
-                let to_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsRenameSync() requires to path".into()))?;
-                let from = PathBuf::from(&from_str);
-                let to = PathBuf::from(&to_str);
-                if !perms.check(&Capability::FileWrite(from.clone())) {
-                    return Err(perm_err(&ctx, "write", &from));
-                }
-                if !perms.check(&Capability::FileWrite(to.clone())) {
-                    return Err(perm_err(&ctx, "write", &to));
-                }
-                std::fs::rename(&from, &to).map_err(|e| js_err(&ctx, format!("ENOENT: {}", e)))
-            },
-        )?,
-    )?;
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let from_str = args.get(0).to_rust_string_lossy(scope);
+            let to_str = args.get(1).to_rust_string_lossy(scope);
+            let from = PathBuf::from(&from_str);
+            let to = PathBuf::from(&to_str);
+            if !perms().check(&Capability::FileWrite(from.clone())) {
+                let err = perm_err(scope, "write", &from);
+                scope.throw_exception(err);
+                return;
+            }
+            if !perms().check(&Capability::FileWrite(to.clone())) {
+                let err = perm_err(scope, "write", &to);
+                scope.throw_exception(err);
+                return;
+            }
+            if let Err(e) = std::fs::rename(&from, &to) {
+                let err = js_err(scope, format!("ENOENT: {}", e));
+                scope.throw_exception(err);
+            }
+        },
+    );
 
     // ── __fsCpSync(src, dest) — recursive copy (Node 16+ fs.cp) ─────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsCpSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let mut it = args.0.into_iter();
-                let src_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsCpSync() requires src, dest".into()))?;
-                let dest_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsCpSync() requires dest path".into()))?;
-                let src = PathBuf::from(&src_str);
-                let dest = PathBuf::from(&dest_str);
-                if !perms.check(&Capability::FileRead(src.clone())) {
-                    return Err(perm_err(&ctx, "read", &src));
-                }
-                if !perms.check(&Capability::FileWrite(dest.clone())) {
-                    return Err(perm_err(&ctx, "write", &dest));
-                }
-                fn copy_all(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
-                    if src.is_dir() {
-                        std::fs::create_dir_all(dst)?;
-                        for entry in std::fs::read_dir(src)? {
-                            let entry = entry?;
-                            copy_all(&entry.path(), &dst.join(entry.file_name()))?;
-                        }
-                    } else {
-                        if let Some(parent) = dst.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::copy(src, dst)?;
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let src_str = args.get(0).to_rust_string_lossy(scope);
+            let dest_str = args.get(1).to_rust_string_lossy(scope);
+            let src = PathBuf::from(&src_str);
+            let dest = PathBuf::from(&dest_str);
+            if !perms().check(&Capability::FileRead(src.clone())) {
+                let err = perm_err(scope, "read", &src);
+                scope.throw_exception(err);
+                return;
+            }
+            if !perms().check(&Capability::FileWrite(dest.clone())) {
+                let err = perm_err(scope, "write", &dest);
+                scope.throw_exception(err);
+                return;
+            }
+            fn copy_all(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
+                if src.is_dir() {
+                    std::fs::create_dir_all(dst)?;
+                    for entry in std::fs::read_dir(src)? {
+                        let entry = entry?;
+                        copy_all(&entry.path(), &dst.join(entry.file_name()))?;
                     }
-                    Ok(())
-                }
-                copy_all(&src, &dest).map_err(|e| js_err(&ctx, format!("ENOENT: {e}")))
-            },
-        )?,
-    )?;
-
-    // ── __fsCopyFileSync(src, dest) ───────────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
-        "__fsCopyFileSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let mut it = args.0.into_iter();
-                let src_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsCopyFileSync() requires src, dest".into()))?;
-                let dest_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsCopyFileSync() requires dest path".into()))?;
-                let src = PathBuf::from(&src_str);
-                let dest = PathBuf::from(&dest_str);
-                if !perms.check(&Capability::FileRead(src.clone())) {
-                    return Err(perm_err(&ctx, "read", &src));
-                }
-                if !perms.check(&Capability::FileWrite(dest.clone())) {
-                    return Err(perm_err(&ctx, "write", &dest));
-                }
-                std::fs::copy(&src, &dest)
-                    .map(|_| ())
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}", e)))
-            },
-        )?,
-    )?;
-
-    // ── __fsChmodSync(path, mode) ─────────────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
-        "__fsChmodSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let mut it = args.0.into_iter();
-                let path_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsChmodSync() requires a path".into()))?;
-                let mode_str = it.next().unwrap_or_else(|| "0o644".to_string());
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileWrite(path.clone())) {
-                    return Err(perm_err(&ctx, "write", &path));
-                }
-                let mode = u32::from_str_radix(mode_str.trim_start_matches("0o"), 8)
-                    .or_else(|_| mode_str.parse::<u32>())
-                    .unwrap_or(0o644);
-                #[cfg(unix)]
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
-                    .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
-                #[cfg(not(unix))]
-                {
-                    let mut perms_obj = std::fs::metadata(&path)
-                        .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?
-                        .permissions();
-                    perms_obj.set_readonly(mode & 0o200 == 0);
-                    std::fs::set_permissions(&path, perms_obj)
-                        .map_err(|e| js_err(&ctx, format!("ENOENT: {}: '{}'", e, path_str)))?;
+                } else {
+                    if let Some(parent) = dst.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::copy(src, dst)?;
                 }
                 Ok(())
-            },
-        )?,
-    )?;
+            }
+            if let Err(e) = copy_all(&src, &dest) {
+                let err = js_err(scope, format!("ENOENT: {e}"));
+                scope.throw_exception(err);
+            }
+        },
+    );
+
+    // ── __fsCopyFileSync(src, dest) ───────────────────────────────────────────
+    set_fn(
+        scope,
+        globals,
+        "__fsCopyFileSync",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let src_str = args.get(0).to_rust_string_lossy(scope);
+            let dest_str = args.get(1).to_rust_string_lossy(scope);
+            let src = PathBuf::from(&src_str);
+            let dest = PathBuf::from(&dest_str);
+            if !perms().check(&Capability::FileRead(src.clone())) {
+                let err = perm_err(scope, "read", &src);
+                scope.throw_exception(err);
+                return;
+            }
+            if !perms().check(&Capability::FileWrite(dest.clone())) {
+                let err = perm_err(scope, "write", &dest);
+                scope.throw_exception(err);
+                return;
+            }
+            if let Err(e) = std::fs::copy(&src, &dest) {
+                let err = js_err(scope, format!("ENOENT: {}", e));
+                scope.throw_exception(err);
+            }
+        },
+    );
+
+    // ── __fsChmodSync(path, mode) ─────────────────────────────────────────────
+    set_fn(
+        scope,
+        globals,
+        "__fsChmodSync",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let mode_arg = args.get(1);
+            let mode_str = if mode_arg.is_undefined() {
+                "0o644".to_string()
+            } else {
+                mode_arg.to_rust_string_lossy(scope)
+            };
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            let mode = u32::from_str_radix(mode_str.trim_start_matches("0o"), 8)
+                .or_else(|_| mode_str.parse::<u32>())
+                .unwrap_or(0o644);
+            #[cfg(unix)]
+            {
+                if let Err(e) =
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                {
+                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    scope.throw_exception(err);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                match std::fs::metadata(&path) {
+                    Ok(meta) => {
+                        let mut perms_obj = meta.permissions();
+                        perms_obj.set_readonly(mode & 0o200 == 0);
+                        if let Err(e) = std::fs::set_permissions(&path, perms_obj) {
+                            let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                            scope.throw_exception(err);
+                        }
+                    }
+                    Err(e) => {
+                        let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                        scope.throw_exception(err);
+                    }
+                }
+            }
+        },
+    );
 
     // ── __fsSymlinkSync(target, path) ─────────────────────────────────────────
-    let perms = permissions.clone();
-    globals.set(
+    set_fn(
+        scope,
+        globals,
         "__fsSymlinkSync",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, args: Rest<String>| -> Result<()> {
-                let mut it = args.0.into_iter();
-                let target_str = it.next().ok_or_else(|| {
-                    js_err(&ctx, "__fsSymlinkSync() requires target, path".into())
-                })?;
-                let path_str = it
-                    .next()
-                    .ok_or_else(|| js_err(&ctx, "__fsSymlinkSync() requires path".into()))?;
-                let path = PathBuf::from(&path_str);
-                if !perms.check(&Capability::FileWrite(path.clone())) {
-                    return Err(perm_err(&ctx, "write", &path));
-                }
-                #[cfg(unix)]
-                return std::os::unix::fs::symlink(&target_str, &path)
-                    .map_err(|e| js_err(&ctx, format!("EEXIST: {}: '{}'", e, path_str)));
-                #[cfg(windows)]
-                return std::os::windows::fs::symlink_file(&target_str, &path)
-                    .map_err(|e| js_err(&ctx, format!("EEXIST: {}: '{}'", e, path_str)));
-                #[cfg(not(any(unix, windows)))]
-                return Err(js_err(
-                    &ctx,
-                    "symlink not supported on this platform".into(),
-                ));
-            },
-        )?,
-    )?;
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let target_str = args.get(0).to_rust_string_lossy(scope);
+            let path_str = args.get(1).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            #[cfg(unix)]
+            let result = std::os::unix::fs::symlink(&target_str, &path);
+            #[cfg(windows)]
+            let result = std::os::windows::fs::symlink_file(&target_str, &path);
+            #[cfg(not(any(unix, windows)))]
+            let result: std::io::Result<()> = Err(std::io::Error::other(
+                "symlink not supported on this platform",
+            ));
+            if let Err(e) = result {
+                let err = js_err(scope, format!("EEXIST: {}: '{}'", e, path_str));
+                scope.throw_exception(err);
+            }
+        },
+    );
 
     // ── fs.watch backend (inotify / kqueue / FSEvents via notify crate) ──────────
     {
@@ -812,184 +926,184 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         use std::sync::atomic::{AtomicU32, Ordering};
         use tokio::sync::mpsc;
 
-        /// Each live watcher: holds the notify handle (dropping it stops watching)
-        /// and an async receiver for incoming events.
-        struct WatcherEntry {
-            _watcher: RecommendedWatcher,
-            rx: tokio::sync::Mutex<mpsc::Receiver<notify::Result<notify::Event>>>,
-        }
-
-        type WatchTable = Arc<Mutex<HashMap<u32, Arc<WatcherEntry>>>>;
         static NEXT_WATCHER_ID: AtomicU32 = AtomicU32::new(1);
 
-        let watch_table: WatchTable = Arc::new(Mutex::new(HashMap::new()));
+        FS_WATCH_TABLE
+            .set(Arc::new(Mutex::new(HashMap::new())))
+            .ok();
+        fn watch_table() -> &'static WatchTable {
+            FS_WATCH_TABLE.get().unwrap()
+        }
 
         // __fsWatchCreate(path, recursive) → watcher_id  (synchronous)
-        {
-            let table = watch_table.clone();
-            let perms = permissions.clone();
-            globals.set(
-                "__fsWatchCreate",
-                Function::new(
-                    ctx.clone(),
-                    move |ctx: Ctx<'_>, path_str: String, recursive: bool| -> Result<u32> {
-                        let path = PathBuf::from(&path_str);
-                        if !perms.check(&Capability::FileRead(path.clone())) {
-                            return Err(perm_err(&ctx, "watch", &path));
-                        }
+        set_fn(
+            scope,
+            globals,
+            "__fsWatchCreate",
+            move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let path_str = args.get(0).to_rust_string_lossy(scope);
+                let recursive = args.get(1).boolean_value(scope);
+                let path = PathBuf::from(&path_str);
+                if !perms().check(&Capability::FileRead(path.clone())) {
+                    let err = perm_err(scope, "watch", &path);
+                    scope.throw_exception(err);
+                    return;
+                }
 
-                        let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>(256);
-                        let mut watcher = RecommendedWatcher::new(
-                            move |res: notify::Result<notify::Event>| {
-                                let _ = tx.blocking_send(res);
-                            },
-                            Config::default(),
-                        )
-                        .map_err(|e| js_err(&ctx, format!("fs.watch: {e}")))?;
-
-                        let mode = if recursive {
-                            RecursiveMode::Recursive
-                        } else {
-                            RecursiveMode::NonRecursive
-                        };
-                        watcher
-                            .watch(&path, mode)
-                            .map_err(|e| js_err(&ctx, format!("fs.watch '{}': {e}", path_str)))?;
-
-                        let id = NEXT_WATCHER_ID.fetch_add(1, Ordering::Relaxed);
-                        table.lock().unwrap().insert(
-                            id,
-                            Arc::new(WatcherEntry {
-                                _watcher: watcher,
-                                rx: tokio::sync::Mutex::new(rx),
-                            }),
-                        );
-                        Ok(id)
+                let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>(256);
+                let watcher = RecommendedWatcher::new(
+                    move |res: notify::Result<notify::Event>| {
+                        let _ = tx.blocking_send(res);
                     },
-                )?,
-            )?;
-        }
+                    Config::default(),
+                );
+                let mut watcher = match watcher {
+                    Ok(w) => w,
+                    Err(e) => {
+                        let err = js_err(scope, format!("fs.watch: {e}"));
+                        scope.throw_exception(err);
+                        return;
+                    }
+                };
 
-        // __fsWatchNext(id) → Promise<JSON>  awaits the next event
-        //   JSON: {"eventType":"change"|"rename","filename":"foo.txt"}
-        //   Rejects with ECLOSED when the watcher has been removed.
-        {
-            let table = watch_table.clone();
-            globals.set(
-                "__fsWatchNext",
-                Function::new(
-                    ctx.clone(),
-                    rquickjs::function::Async(move |id: u32| {
-                        let table = table.clone();
-                        async move {
-                            let entry = {
-                                let guard = table.lock().unwrap();
-                                guard.get(&id).cloned()
-                            };
-                            let entry = entry.ok_or_else(|| {
-                                rquickjs::Error::new_from_js_message(
-                                    "ECLOSED",
-                                    "ECLOSED",
-                                    "watcher closed".to_string(),
-                                )
-                            })?;
+                let mode = if recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                if let Err(e) = watcher.watch(&path, mode) {
+                    let err = js_err(scope, format!("fs.watch '{}': {e}", path_str));
+                    scope.throw_exception(err);
+                    return;
+                }
 
-                            let event = {
-                                let mut rx = entry.rx.lock().await;
-                                rx.recv().await
-                            };
-
-                            match event {
-                                None => Err(rquickjs::Error::new_from_js_message(
-                                    "ECLOSED",
-                                    "ECLOSED",
-                                    "watcher channel closed".to_string(),
-                                )),
-                                Some(Err(e)) => Err(rquickjs::Error::new_from_js_message(
-                                    "EIO",
-                                    "EIO",
-                                    e.to_string(),
-                                )),
-                                Some(Ok(ev)) => {
-                                    use notify::event::{
-                                        EventKind, ModifyKind, RenameMode,
-                                    };
-                                    let event_type = match ev.kind {
-                                        EventKind::Create(_) => "rename",
-                                        EventKind::Remove(_) => "rename",
-                                        EventKind::Modify(ModifyKind::Name(
-                                            RenameMode::From | RenameMode::To | RenameMode::Both,
-                                        )) => "rename",
-                                        _ => "change",
-                                    };
-                                    // Pick the first path; fall back to empty string.
-                                    let filename = ev
-                                        .paths
-                                        .first()
-                                        .and_then(|p| {
-                                            p.file_name()
-                                                .and_then(|n| n.to_str())
-                                                .map(|s| s.to_string())
-                                        })
-                                        .unwrap_or_default();
-                                    Ok(format!(
-                                        "{{\"eventType\":\"{event_type}\",\"filename\":\"{filename}\"}}",
-                                    ))
-                                }
-                            }
-                        }
+                let id = NEXT_WATCHER_ID.fetch_add(1, Ordering::Relaxed);
+                watch_table().lock().unwrap().insert(
+                    id,
+                    Arc::new(WatcherEntry {
+                        _watcher: watcher,
+                        rx: tokio::sync::Mutex::new(rx),
                     }),
-                )?,
-            )?;
-        }
+                );
+                rv.set(v8::Integer::new_from_unsigned(scope, id).into());
+            },
+        );
+
+        // __fsWatchNext(id) → JSON  blocks for the next event
+        //   JSON: {"eventType":"change"|"rename","filename":"foo.txt"}
+        //   Throws ECLOSED when the watcher has been removed.
+        set_fn(
+            scope,
+            globals,
+            "__fsWatchNext",
+            move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let entry = {
+                    let guard = watch_table().lock().unwrap();
+                    guard.get(&id).cloned()
+                };
+                let entry = match entry {
+                    Some(e) => e,
+                    None => {
+                        let err = js_err(scope, "ECLOSED: watcher closed");
+                        scope.throw_exception(err);
+                        return;
+                    }
+                };
+
+                let event = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let mut rx = entry.rx.lock().await;
+                        rx.recv().await
+                    })
+                });
+
+                match event {
+                    None => {
+                        let err = js_err(scope, "ECLOSED: watcher channel closed");
+                        scope.throw_exception(err);
+                    }
+                    Some(Err(e)) => {
+                        let err = js_err(scope, format!("EIO: {e}"));
+                        scope.throw_exception(err);
+                    }
+                    Some(Ok(ev)) => {
+                        use notify::event::{EventKind, ModifyKind, RenameMode};
+                        let event_type = match ev.kind {
+                            EventKind::Create(_) => "rename",
+                            EventKind::Remove(_) => "rename",
+                            EventKind::Modify(ModifyKind::Name(
+                                RenameMode::From | RenameMode::To | RenameMode::Both,
+                            )) => "rename",
+                            _ => "change",
+                        };
+                        let filename = ev
+                            .paths
+                            .first()
+                            .and_then(|p| {
+                                p.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .unwrap_or_default();
+                        let json = format!(
+                            "{{\"eventType\":\"{event_type}\",\"filename\":\"{filename}\"}}"
+                        );
+                        rv.set(v8::String::new(scope, &json).unwrap().into());
+                    }
+                }
+            },
+        );
 
         // __fsWatchClose(id) → void  (synchronous; drops the watcher entry)
-        {
-            let table = watch_table.clone();
-            globals.set(
-                "__fsWatchClose",
-                Function::new(ctx.clone(), move |id: u32| {
-                    table.lock().unwrap().remove(&id);
-                })?,
-            )?;
-        }
+        set_fn(
+            scope,
+            globals,
+            "__fsWatchClose",
+            move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+                let id = args.get(0).uint32_value(scope).unwrap_or(0);
+                watch_table().lock().unwrap().remove(&id);
+            },
+        );
     }
 
-    // ── __fsWatchPollStat(path, interval_ms) → Promise<stat JSON> ─────────────
-    // Tokio-async stat poller for fs.watchFile.  Sleeps `interval_ms`, then
-    // returns the current stat as JSON so the JS layer can detect changes.
-    // Uses rquickjs::function::Async — no Ctx<'_> in the closure, matching
-    // the pattern used by all other async bindings (e.g. __cryptoPbkdf2).
-    {
-        let perms = permissions.clone();
-        globals.set(
-            "__fsWatchPollStat",
-            Function::new(
-                ctx.clone(),
-                rquickjs::function::Async(move |path_str: String, interval_ms: u64| {
-                    let perms = perms.clone();
-                    async move {
-                        let path = PathBuf::from(&path_str);
-                        if !perms.check(&Capability::FileRead(path.clone())) {
-                            return Err(rquickjs::Error::new_from_js_message(
-                                "EACCES",
-                                "EACCES",
-                                format!("permission denied: '{path_str}'"),
-                            ));
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
-                        let meta = std::fs::metadata(&path).map_err(|e| {
-                            rquickjs::Error::new_from_js_message("ENOENT", "ENOENT", e.to_string())
-                        })?;
-                        Ok::<String, rquickjs::Error>(stat_meta_to_json(&meta))
-                    }
-                }),
-            )?,
-        )?;
-    }
+    // ── __fsWatchPollStat(path, interval_ms) → stat JSON (blocking) ─────────────
+    // Sleeps `interval_ms`, then returns the current stat as JSON so the JS
+    // layer can detect changes.
+    set_fn(
+        scope,
+        globals,
+        "__fsWatchPollStat",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let interval_ms = args.get(1).uint32_value(scope).unwrap_or(0) as u64;
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileRead(path.clone())) {
+                let err = js_err(scope, format!("EACCES: permission denied: '{path_str}'"));
+                scope.throw_exception(err);
+                return;
+            }
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+                });
+            });
+            match std::fs::metadata(&path) {
+                Ok(meta) => rv.set(
+                    v8::String::new(scope, &stat_meta_to_json(&meta))
+                        .unwrap()
+                        .into(),
+                ),
+                Err(e) => {
+                    let err = js_err(scope, format!("ENOENT: {e}"));
+                    scope.throw_exception(err);
+                }
+            }
+        },
+    );
 
     // ── JS wrapper: globalThis.fs ─────────────────────────────────────────────
-    ctx.eval::<(), _>(r#"
+    let js_src = r#"
     (function() {
         var F_OK = 0, R_OK = 4, W_OK = 2, X_OK = 1;
 
@@ -1581,7 +1695,10 @@ pub fn inject_fs(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             globalThis.__requireCache['node:fs/promises'] = fs.promises;
         }
     })();
-    "#)?;
+    "#;
+    let source = v8::String::new(scope, js_src).unwrap();
+    let script = v8::Script::compile(scope, source, None).unwrap();
+    let _ = script.run(scope);
 
     Ok(())
 }

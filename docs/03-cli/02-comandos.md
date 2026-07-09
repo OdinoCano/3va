@@ -85,7 +85,7 @@ process.argv[2+]  →  arguments passed after --
 2. Initializes `PermissionState` with the granted permissions.
 3. Transpiles the source according to the rules above.
 4. Sets `process.argv[1]` to the absolute script path; appends `SCRIPT_ARGS` to `process.argv`.
-5. Executes the file in the QuickJS engine.
+5. Executes the file in the V8 engine.
 6. Runs the event loop until pending timers, microtasks, and callbacks complete.
 
 **Examples:**

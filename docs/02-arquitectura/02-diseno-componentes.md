@@ -105,7 +105,7 @@ pub struct PermissionState { /* internal, thread-safe */ }
 ## 2.4 Component: vvva_js
 
 ### 2.4.1 Description
-Embeds QuickJS via `rquickjs`. Provides JavaScript/TypeScript execution with built-in Node.js-compatible APIs and an integrated event loop.
+Embeds V8 via the `v8` crate. Provides JavaScript/TypeScript execution with built-in Node.js-compatible APIs and an integrated event loop.
 
 ### 2.4.2 Built-in APIs
 

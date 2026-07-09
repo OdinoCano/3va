@@ -9,7 +9,7 @@
     "sandbox",
     "security",
     "deno-alternative",
-    "quickjs",
+    "v8",
     "wasm"
   ],
   "homepage": "https://github.com/OdinoCano/3va",

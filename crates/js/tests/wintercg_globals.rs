@@ -17,7 +17,7 @@ async fn engine() -> JsEngine {
 
 #[tokio::test]
 async fn self_equals_globalthis() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(self === globalThis)")
         .await
@@ -27,7 +27,7 @@ async fn self_equals_globalthis() {
 
 #[tokio::test]
 async fn navigator_user_agent() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e.eval_to_string("navigator.userAgent").await.unwrap();
     assert!(
         r.contains("3va"),
@@ -37,7 +37,7 @@ async fn navigator_user_agent() {
 
 #[tokio::test]
 async fn navigator_online_true() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e.eval_to_string("String(navigator.onLine)").await.unwrap();
     assert_eq!(r, "true");
 }
@@ -46,7 +46,7 @@ async fn navigator_online_true() {
 
 #[tokio::test]
 async fn structured_clone_primitives() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -61,7 +61,7 @@ async fn structured_clone_primitives() {
 
 #[tokio::test]
 async fn structured_clone_plain_object() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -78,7 +78,7 @@ async fn structured_clone_plain_object() {
 
 #[tokio::test]
 async fn structured_clone_date() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -94,7 +94,7 @@ async fn structured_clone_date() {
 
 #[tokio::test]
 async fn structured_clone_regexp() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -110,7 +110,7 @@ async fn structured_clone_regexp() {
 
 #[tokio::test]
 async fn structured_clone_map() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -127,7 +127,7 @@ async fn structured_clone_map() {
 
 #[tokio::test]
 async fn structured_clone_set() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -144,7 +144,7 @@ async fn structured_clone_set() {
 
 #[tokio::test]
 async fn structured_clone_array_buffer() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -162,7 +162,7 @@ async fn structured_clone_array_buffer() {
 
 #[tokio::test]
 async fn structured_clone_uint8array() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -179,7 +179,7 @@ async fn structured_clone_uint8array() {
 
 #[tokio::test]
 async fn structured_clone_throws_on_function() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -196,7 +196,7 @@ async fn structured_clone_throws_on_function() {
 
 #[tokio::test]
 async fn structured_clone_throws_on_circular() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -216,7 +216,7 @@ async fn structured_clone_throws_on_circular() {
 
 #[tokio::test]
 async fn headers_class_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof Headers === 'function')")
         .await
@@ -226,7 +226,7 @@ async fn headers_class_exists() {
 
 #[tokio::test]
 async fn headers_get_is_case_insensitive() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -241,7 +241,7 @@ async fn headers_get_is_case_insensitive() {
 
 #[tokio::test]
 async fn headers_has_set_delete() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -259,7 +259,7 @@ async fn headers_has_set_delete() {
 
 #[tokio::test]
 async fn headers_append_joins_values() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -276,7 +276,7 @@ async fn headers_append_joins_values() {
 
 #[tokio::test]
 async fn headers_get_set_cookie_preserves_separate_values() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -293,7 +293,7 @@ async fn headers_get_set_cookie_preserves_separate_values() {
 
 #[tokio::test]
 async fn headers_iterable_via_for_of() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -310,7 +310,7 @@ async fn headers_iterable_via_for_of() {
 
 #[tokio::test]
 async fn headers_constructed_from_another_headers() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -329,7 +329,7 @@ async fn headers_constructed_from_another_headers() {
 
 #[tokio::test]
 async fn request_class_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof Request === 'function')")
         .await
@@ -339,7 +339,7 @@ async fn request_class_exists() {
 
 #[tokio::test]
 async fn request_url_and_method() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -354,7 +354,7 @@ async fn request_url_and_method() {
 
 #[tokio::test]
 async fn request_headers_is_headers_instance() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(r#"
             var req = new Request('https://x.com', { headers: { 'content-type': 'text/plain' } });
@@ -367,7 +367,7 @@ async fn request_headers_is_headers_instance() {
 
 #[tokio::test]
 async fn request_clone_is_independent() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -385,7 +385,7 @@ async fn request_clone_is_independent() {
 
 #[tokio::test]
 async fn response_class_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string("String(typeof Response === 'function')")
         .await
@@ -395,7 +395,7 @@ async fn response_class_exists() {
 
 #[tokio::test]
 async fn response_ok_and_status() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -411,7 +411,7 @@ async fn response_ok_and_status() {
 
 #[tokio::test]
 async fn response_headers_is_headers_instance() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -426,7 +426,7 @@ async fn response_headers_is_headers_instance() {
 
 #[tokio::test]
 async fn response_json_static_sets_content_type() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -441,7 +441,7 @@ async fn response_json_static_sets_content_type() {
 
 #[tokio::test]
 async fn response_error_static() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -456,7 +456,7 @@ async fn response_error_static() {
 
 #[tokio::test]
 async fn response_redirect_static() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -471,7 +471,7 @@ async fn response_redirect_static() {
 
 #[tokio::test]
 async fn response_clone_is_independent() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -487,7 +487,7 @@ async fn response_clone_is_independent() {
 
 #[tokio::test]
 async fn response_redirect_throws_on_invalid_status() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"

@@ -22,7 +22,7 @@ async fn engine_no_net() -> JsEngine {
 
 #[tokio::test]
 async fn imap_global_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof imap === 'object')")
         .await
@@ -32,7 +32,7 @@ async fn imap_global_exists() {
 
 #[tokio::test]
 async fn imap_client_constructor_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof imap.Client === 'function')")
         .await
@@ -42,7 +42,7 @@ async fn imap_client_constructor_exists() {
 
 #[tokio::test]
 async fn imap_client_has_expected_methods() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -72,7 +72,7 @@ async fn imap_client_has_expected_methods() {
 
 #[tokio::test]
 async fn imap_connect_blocked_without_net_grant() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -93,7 +93,7 @@ async fn imap_connect_blocked_without_net_grant() {
 
 #[tokio::test]
 async fn imap_client_event_emitter() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -114,7 +114,7 @@ async fn imap_client_event_emitter() {
 
 #[tokio::test]
 async fn imap_fetch_returns_stream() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -136,7 +136,7 @@ async fn imap_fetch_returns_stream() {
 
 #[tokio::test]
 async fn imap_search_criteria_formatting() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -159,7 +159,7 @@ async fn imap_search_criteria_formatting() {
 
 #[tokio::test]
 async fn imap_append_options() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -183,7 +183,7 @@ async fn imap_append_options() {
 
 #[tokio::test]
 async fn imap_flags_handling() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -203,7 +203,7 @@ async fn imap_flags_handling() {
 
 #[tokio::test]
 async fn imap_openbox_readonly_option() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -222,7 +222,7 @@ async fn imap_openbox_readonly_option() {
 
 #[tokio::test]
 async fn imap_status_without_select() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -240,7 +240,7 @@ async fn imap_status_without_select() {
 
 #[tokio::test]
 async fn imap_rename_box() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -258,7 +258,7 @@ async fn imap_rename_box() {
 
 #[tokio::test]
 async fn imap_copy_move_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -276,7 +276,7 @@ async fn imap_copy_move_api() {
 
 #[tokio::test]
 async fn imap_expunge_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -294,7 +294,7 @@ async fn imap_expunge_api() {
 
 #[tokio::test]
 async fn imap_close_box_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -312,7 +312,7 @@ async fn imap_close_box_api() {
 
 #[tokio::test]
 async fn imap_end_vs_disconnect() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -330,7 +330,7 @@ async fn imap_end_vs_disconnect() {
 
 #[tokio::test]
 async fn imap_constructor_options() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -352,7 +352,7 @@ async fn imap_constructor_options() {
 
 #[tokio::test]
 async fn imap_list_boxes_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -370,7 +370,7 @@ async fn imap_list_boxes_api() {
 
 #[tokio::test]
 async fn imap_subscribe_box_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -388,7 +388,7 @@ async fn imap_subscribe_box_api() {
 
 #[tokio::test]
 async fn imap_fetch_options() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -410,7 +410,7 @@ async fn imap_fetch_options() {
 
 #[tokio::test]
 async fn imap_range_formats() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"

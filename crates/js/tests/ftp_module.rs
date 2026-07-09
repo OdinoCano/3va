@@ -95,7 +95,7 @@ fn start_fake_ftpd() -> (u16, std::thread::JoinHandle<Vec<u8>>) {
 #[tokio::test]
 async fn ftp_real_login_get_and_put_over_the_wire() {
     let (port, server) = start_fake_ftpd();
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
     e.eval(
         format!(
             r#"
@@ -173,7 +173,7 @@ async fn ftp_control_reply_times_out_instead_of_hanging_the_engine() {
         std::thread::sleep(std::time::Duration::from_secs(10));
     });
 
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
     e.eval(
         format!(
             r#"
@@ -216,7 +216,7 @@ async fn ftp_control_reply_times_out_instead_of_hanging_the_engine() {
 
 #[tokio::test]
 async fn ftp_global_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof ftp === 'object')")
         .await
@@ -226,7 +226,7 @@ async fn ftp_global_exists() {
 
 #[tokio::test]
 async fn ftp_client_constructor_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof ftp.Client === 'function')")
         .await
@@ -236,7 +236,7 @@ async fn ftp_client_constructor_exists() {
 
 #[tokio::test]
 async fn ftp_client_has_expected_methods() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -262,7 +262,7 @@ async fn ftp_client_has_expected_methods() {
 
 #[tokio::test]
 async fn ftp_client_has_event_emitter() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -285,7 +285,7 @@ async fn ftp_client_has_event_emitter() {
 
 #[tokio::test]
 async fn ftp_connect_blocked_without_net_grant() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -306,7 +306,7 @@ async fn ftp_connect_blocked_without_net_grant() {
 
 #[tokio::test]
 async fn ftp_constructor_options() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -327,7 +327,7 @@ async fn ftp_constructor_options() {
 
 #[tokio::test]
 async fn ftp_list_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -349,7 +349,7 @@ async fn ftp_list_api() {
 
 #[tokio::test]
 async fn ftp_get_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -371,7 +371,7 @@ async fn ftp_get_api() {
 
 #[tokio::test]
 async fn ftp_put_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -393,7 +393,7 @@ async fn ftp_put_api() {
 
 #[tokio::test]
 async fn ftp_mkdir_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -416,7 +416,7 @@ async fn ftp_mkdir_api() {
 
 #[tokio::test]
 async fn ftp_rmdir_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -438,7 +438,7 @@ async fn ftp_rmdir_api() {
 
 #[tokio::test]
 async fn ftp_delete_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -460,7 +460,7 @@ async fn ftp_delete_api() {
 
 #[tokio::test]
 async fn ftp_rename_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -482,7 +482,7 @@ async fn ftp_rename_api() {
 
 #[tokio::test]
 async fn ftp_pwd_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"

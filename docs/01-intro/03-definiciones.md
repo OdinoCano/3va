@@ -34,7 +34,7 @@
 
 **JSX**: A syntax extension for JavaScript that allows writing HTML in JavaScript files.
 
-**QuickJS**: A JavaScript implementation written in C with an MIT license.
+**V8**: Google's high-performance JavaScript engine written in C++, used in Chrome and Node.js.
 
 **Tokio**: An asynchronous runtime for Rust.
 
@@ -167,8 +167,8 @@ Identifier	Title	Description
 Resource	URL	Purpose
 Rust	https://rustup.rs/ (https://rustup.rs/)	Implementation language
 Tokio	https://tokio.rs/ (https://tokio.rs/)	Asynchronous runtime
-QuickJS	https://bellard.org/quickjs/ (https://bellard.org/quickjs/)	JavaScript engine
-rquickjs	https://github.com/Delakroa/rquickjs (https://github.com/Delakroa/rquickjs)	QuickJS bindings
+V8	https://v8.dev/	JavaScript engine
+v8 crate	https://crates.io/crates/v8	Official V8 Rust bindings
 Clap	https://clap.rs/ (https://clap.rs/)	CLI parsing
 tracing	https://tokio.rs/recipes/tracing (https://tokio.rs/recipes/tracing)	Logging
 ### 4.4.2 Security References

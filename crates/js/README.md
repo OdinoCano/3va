@@ -1,6 +1,6 @@
 # vvva_js
 
-JavaScript/TypeScript engine crate. Wraps QuickJS via [rquickjs](https://github.com/DelSkayn/rquickjs) and exposes `JsEngine` plus all built-in modules.
+JavaScript/TypeScript engine crate. Wraps [V8](https://v8.dev/) via the [`v8`](https://docs.rs/v8) crate and exposes `JsEngine` plus all built-in modules.
 
 ## Key types
 

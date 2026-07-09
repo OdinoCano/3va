@@ -124,7 +124,7 @@ fn response_body(resp: &str) -> &str {
 
 /// Drive the JS event loop forever (for use in tokio::select! left branch).
 /// Never returns — cancelled by tokio::select! when the right branch completes.
-async fn drive_forever(e: &JsEngine) -> ! {
+async fn drive_forever(e: &mut JsEngine) -> ! {
     loop {
         e.idle().await;
         tokio::task::yield_now().await;
@@ -132,7 +132,7 @@ async fn drive_forever(e: &JsEngine) -> ! {
 }
 
 /// Drive the JS event loop until the client future completes.
-async fn drive_until<T>(e: &JsEngine, client: impl std::future::Future<Output = T>) -> T {
+async fn drive_until<T>(e: &mut JsEngine, client: impl std::future::Future<Output = T>) -> T {
     tokio::pin!(client);
     tokio::select! {
         _ = drive_forever(e) => unreachable!("engine event loop terminated unexpectedly"),
@@ -165,7 +165,7 @@ async fn raw_http_with_claimed_length(port: u16, claimed_content_length: usize, 
 #[tokio::test]
 async fn server_responds_200() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -185,7 +185,7 @@ async fn server_responds_200() {
     // Give engine a moment to start the accept loop.
     wait_for_port(port).await;
 
-    let resp = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+    let resp = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
 
     assert_eq!(response_status(&resp), 200, "full response:\n{}", resp);
     assert_eq!(response_body(&resp), "hello");
@@ -194,7 +194,7 @@ async fn server_responds_200() {
 #[tokio::test]
 async fn server_reads_method_and_url() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -214,7 +214,7 @@ async fn server_reads_method_and_url() {
 
     wait_for_port(port).await;
 
-    drive_until(&e, raw_http(port, "POST", "/test-path", "")).await;
+    drive_until(&mut e, raw_http(port, "POST", "/test-path", "")).await;
 
     let result = e.eval_to_string("globalThis.__lastReq").await.unwrap();
     assert_eq!(result, "POST /test-path");
@@ -223,7 +223,7 @@ async fn server_reads_method_and_url() {
 #[tokio::test]
 async fn server_reads_request_body() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -243,7 +243,7 @@ async fn server_reads_request_body() {
 
     wait_for_port(port).await;
 
-    drive_until(&e, raw_http(port, "POST", "/", "hello body")).await;
+    drive_until(&mut e, raw_http(port, "POST", "/", "hello body")).await;
 
     let result = e.eval_to_string("globalThis.__lastBody").await.unwrap();
     assert_eq!(result, "hello body");
@@ -252,7 +252,7 @@ async fn server_reads_request_body() {
 #[tokio::test]
 async fn server_responds_with_custom_status() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -271,7 +271,7 @@ async fn server_responds_with_custom_status() {
 
     wait_for_port(port).await;
 
-    let resp = drive_until(&e, raw_http(port, "GET", "/missing", "")).await;
+    let resp = drive_until(&mut e, raw_http(port, "GET", "/missing", "")).await;
 
     assert_eq!(response_status(&resp), 404);
     assert_eq!(response_body(&resp), "not found");
@@ -280,7 +280,7 @@ async fn server_responds_with_custom_status() {
 #[tokio::test]
 async fn server_handles_multiple_requests() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -301,7 +301,7 @@ async fn server_handles_multiple_requests() {
     wait_for_port(port).await;
 
     for _ in 0..3u32 {
-        drive_until(&e, raw_http(port, "GET", "/", "")).await;
+        drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
     }
 
     let count = e
@@ -320,7 +320,7 @@ async fn server_handles_multiple_requests() {
 #[tokio::test]
 async fn content_length_header_matches_allocated_body_bytes() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -341,7 +341,7 @@ async fn content_length_header_matches_allocated_body_bytes() {
     wait_for_port(port).await;
 
     let body = "hello world";
-    drive_until(&e, raw_http(port, "POST", "/", body)).await;
+    drive_until(&mut e, raw_http(port, "POST", "/", body)).await;
 
     // JS must see the exact Content-Length that was sent (no capping occurs here
     // since the body is well below the 100 MiB limit).
@@ -361,7 +361,7 @@ async fn content_length_header_matches_allocated_body_bytes() {
 #[tokio::test]
 async fn server_survives_oversized_content_length_with_early_close() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -384,13 +384,13 @@ async fn server_survives_oversized_content_length_with_early_close() {
     // Send a request claiming 200 MiB but providing 0 bytes then closing —
     // the server should handle the EOF gracefully without panicking.
     let oversized = 200 * 1024 * 1024usize; // 200 MiB — beyond the 100 MiB cap.
-    drive_until(&e, raw_http_with_claimed_length(port, oversized, "")).await;
+    drive_until(&mut e, raw_http_with_claimed_length(port, oversized, "")).await;
 
     // Allow the server to process the (failed) request and reset.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // A legitimate follow-up request must still succeed.
-    let resp = drive_until(&e, raw_http(port, "GET", "/health", "")).await;
+    let resp = drive_until(&mut e, raw_http(port, "GET", "/health", "")).await;
     assert_eq!(response_status(&resp), 200);
 }
 
@@ -401,7 +401,7 @@ async fn server_survives_oversized_content_length_with_early_close() {
 #[tokio::test]
 async fn request_exposes_remote_address() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -420,7 +420,7 @@ async fn request_exposes_remote_address() {
     .unwrap();
 
     wait_for_port(port).await;
-    drive_until(&e, raw_http(port, "GET", "/", "")).await;
+    drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
 
     let addr = e.eval_to_string("globalThis.__remoteAddr").await.unwrap();
     assert_eq!(addr, "127.0.0.1");
@@ -433,7 +433,7 @@ async fn request_exposes_remote_address() {
 #[tokio::test]
 async fn firewall_rate_limits_after_burst_exhausted() {
     let port = free_port();
-    let e = engine_with_firewall(FirewallConfig {
+    let mut e = engine_with_firewall(FirewallConfig {
         rate_limit_rps: 1,
         rate_limit_burst: 2,
         auto_block_threshold: 100, // don't auto-block during this test
@@ -456,14 +456,14 @@ async fn firewall_rate_limits_after_burst_exhausted() {
     wait_for_port(port).await;
 
     // First two requests consume the burst — must succeed.
-    let r1 = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+    let r1 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
     assert_eq!(response_status(&r1), 200, "request 1 should be allowed");
 
-    let r2 = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+    let r2 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
     assert_eq!(response_status(&r2), 200, "request 2 should be allowed");
 
     // Third request with no time to refill → rate limited.
-    let r3 = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+    let r3 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
     assert_eq!(
         response_status(&r3),
         429,
@@ -480,7 +480,7 @@ async fn firewall_rate_limits_after_burst_exhausted() {
 #[tokio::test]
 async fn firewall_auto_blocks_after_threshold() {
     let port = free_port();
-    let e = engine_with_firewall(FirewallConfig {
+    let mut e = engine_with_firewall(FirewallConfig {
         rate_limit_rps: 1,
         rate_limit_burst: 2,
         auto_block_threshold: 3,
@@ -505,7 +505,7 @@ async fn firewall_auto_blocks_after_threshold() {
 
     let mut statuses = Vec::new();
     for _ in 0..5 {
-        let resp = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+        let resp = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
         statuses.push(response_status(&resp));
     }
 
@@ -524,7 +524,7 @@ async fn firewall_auto_blocks_after_threshold() {
 #[tokio::test]
 async fn firewall_rejects_header_flood_and_continues() {
     let port = free_port();
-    let e = engine_with_firewall(FirewallConfig {
+    let mut e = engine_with_firewall(FirewallConfig {
         max_header_count: 5,
         ..FirewallConfig::default()
     })
@@ -549,7 +549,7 @@ async fn firewall_rejects_header_flood_and_continues() {
     wait_for_port(port).await;
 
     // Send a request with 10 headers (exceeds limit of 5) — server should drop it.
-    drive_until(&e, async move {
+    drive_until(&mut e, async move {
         if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port)).await {
             let mut req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n".to_string();
             for i in 0..10 {
@@ -568,7 +568,7 @@ async fn firewall_rejects_header_flood_and_continues() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // A normal request must still succeed.
-    let resp = drive_until(&e, raw_http(port, "GET", "/", "")).await;
+    let resp = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
     assert_eq!(
         response_status(&resp),
         200,
@@ -587,7 +587,7 @@ async fn firewall_rejects_header_flood_and_continues() {
 #[tokio::test]
 async fn firewall_slowloris_timeout_and_recovery() {
     let port = free_port();
-    let e = engine_with_firewall(FirewallConfig {
+    let mut e = engine_with_firewall(FirewallConfig {
         header_timeout_ms: 300, // very tight: 300 ms
         ..FirewallConfig::default()
     })
@@ -614,7 +614,7 @@ async fn firewall_slowloris_timeout_and_recovery() {
     // Simulate Slowloris: connect and send only the request line, then stall.
     // Never send the blank line that ends the headers, so the server's read_line
     // call will time out after header_timeout_ms.
-    drive_until(&e, async move {
+    drive_until(&mut e, async move {
         if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port)).await {
             // Send the request line but never the header-terminating \r\n.
             let _ = stream
@@ -627,7 +627,7 @@ async fn firewall_slowloris_timeout_and_recovery() {
     .await;
 
     // A normal request after the timeout must succeed.
-    let resp = drive_until(&e, raw_http(port, "GET", "/ok", "")).await;
+    let resp = drive_until(&mut e, raw_http(port, "GET", "/ok", "")).await;
     assert_eq!(
         response_status(&resp),
         200,

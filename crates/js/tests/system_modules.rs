@@ -21,7 +21,7 @@ async fn engine_with_spawn() -> JsEngine {
 
 #[tokio::test]
 async fn zlib_module_loads() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -36,7 +36,7 @@ async fn zlib_module_loads() {
 
 #[tokio::test]
 async fn zlib_gzip_roundtrip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -54,7 +54,7 @@ async fn zlib_gzip_roundtrip() {
 
 #[tokio::test]
 async fn zlib_constants_exist() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -69,7 +69,7 @@ async fn zlib_constants_exist() {
 
 #[tokio::test]
 async fn zlib_node_prefix_alias() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -87,7 +87,7 @@ async fn zlib_node_prefix_alias() {
 
 #[tokio::test]
 async fn child_process_module_loads() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -102,7 +102,7 @@ async fn child_process_module_loads() {
 
 #[tokio::test]
 async fn child_process_exec_denied_without_permission() {
-    let e = engine().await;
+    let mut e = engine().await;
     // execSync is synchronous — permission denial throws immediately and is catchable.
     let r = e
         .eval_to_string(
@@ -124,7 +124,7 @@ async fn child_process_exec_denied_without_permission() {
 
 #[tokio::test]
 async fn child_process_exec_with_permission() {
-    let e = engine_with_spawn().await;
+    let mut e = engine_with_spawn().await;
     // execSync with permission must not throw and must return the command output.
     let r = e
         .eval_to_string(
@@ -141,7 +141,7 @@ async fn child_process_exec_with_permission() {
 
 #[tokio::test]
 async fn child_process_spawn_returns_child_object() {
-    let e = engine_with_spawn().await;
+    let mut e = engine_with_spawn().await;
     let r = e
         .eval_to_string(
             r#"
@@ -163,7 +163,7 @@ async fn child_process_spawn_returns_child_object() {
 
 #[tokio::test]
 async fn child_process_execsync_throws() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -178,7 +178,7 @@ async fn child_process_execsync_throws() {
 
 #[tokio::test]
 async fn child_process_node_prefix_alias() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -195,7 +195,7 @@ async fn child_process_node_prefix_alias() {
 
 #[tokio::test]
 async fn http_module_loads() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -214,7 +214,7 @@ async fn http_module_loads() {
 
 #[tokio::test]
 async fn https_module_loads() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -229,7 +229,7 @@ async fn https_module_loads() {
 
 #[tokio::test]
 async fn http_status_codes_have_entries() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -244,7 +244,7 @@ async fn http_status_codes_have_entries() {
 
 #[tokio::test]
 async fn http_request_returns_object_with_end() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -265,7 +265,7 @@ async fn http_request_returns_object_with_end() {
 
 #[tokio::test]
 async fn http_create_server_returns_object() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -283,7 +283,7 @@ async fn http_create_server_returns_object() {
 
 #[tokio::test]
 async fn path_relative_works() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -302,7 +302,7 @@ async fn path_relative_works() {
 
 #[tokio::test]
 async fn path_posix_and_win32_exist() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -318,7 +318,7 @@ async fn path_posix_and_win32_exist() {
 
 #[tokio::test]
 async fn path_normalize_collapses_dots() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -333,7 +333,7 @@ async fn path_normalize_collapses_dots() {
 
 #[tokio::test]
 async fn path_normalize_edge_cases() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -360,7 +360,7 @@ async fn path_normalize_edge_cases() {
 
 #[tokio::test]
 async fn path_resolve_edge_cases() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -382,7 +382,7 @@ async fn path_resolve_edge_cases() {
 
 #[tokio::test]
 async fn os_returns_real_hostname() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -397,7 +397,7 @@ async fn os_returns_real_hostname() {
 
 #[tokio::test]
 async fn os_memory_values_are_positive() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -412,7 +412,7 @@ async fn os_memory_values_are_positive() {
 
 #[tokio::test]
 async fn os_path_submodules_exist() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -432,7 +432,7 @@ async fn os_path_submodules_exist() {
 
 #[tokio::test]
 async fn eventemitter_prepend_listener() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -452,7 +452,7 @@ async fn eventemitter_prepend_listener() {
 
 #[tokio::test]
 async fn eventemitter_event_names_and_raw_listeners() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -474,7 +474,7 @@ async fn eventemitter_event_names_and_raw_listeners() {
 
 #[tokio::test]
 async fn eventemitter_get_max_listeners() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -491,7 +491,7 @@ async fn eventemitter_get_max_listeners() {
 
 #[tokio::test]
 async fn crypto_create_hash_is_synchronous() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -511,7 +511,7 @@ async fn crypto_create_hash_is_synchronous() {
 
 #[tokio::test]
 async fn crypto_create_hmac_is_synchronous() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -530,7 +530,7 @@ async fn crypto_create_hmac_is_synchronous() {
 
 #[tokio::test]
 async fn crypto_hash_shorthand() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -547,7 +547,7 @@ async fn crypto_hash_shorthand() {
 
 #[tokio::test]
 async fn os_cpus_has_model_and_times() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -572,7 +572,7 @@ async fn os_cpus_has_model_and_times() {
 
 #[tokio::test]
 async fn os_network_interfaces_returns_object() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -590,7 +590,7 @@ async fn os_network_interfaces_returns_object() {
 
 #[tokio::test]
 async fn child_process_spawnsync_with_input() {
-    let e = engine_with_spawn().await;
+    let mut e = engine_with_spawn().await;
     let r = e
         .eval_to_string(
             r#"
@@ -609,7 +609,7 @@ async fn child_process_spawnsync_with_input() {
 
 #[tokio::test]
 async fn child_process_spawn_stdin_write_end() {
-    let e = engine_with_spawn().await;
+    let mut e = engine_with_spawn().await;
     // eval_to_string doesn't await Promises, so we store the result in a global
     // and drive the event loop with idle() before reading it.
     e.eval_to_string(
@@ -640,7 +640,7 @@ async fn child_process_spawn_stdin_write_end() {
 
 #[tokio::test]
 async fn crypto_diffie_hellman_key_exchange() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -664,7 +664,7 @@ async fn crypto_diffie_hellman_key_exchange() {
 
 #[tokio::test]
 async fn crypto_dh_get_public_key_encoding() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -684,7 +684,7 @@ async fn crypto_dh_get_public_key_encoding() {
 
 #[tokio::test]
 async fn cluster_is_registered_in_require_cache() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -699,7 +699,7 @@ async fn cluster_is_registered_in_require_cache() {
 
 #[tokio::test]
 async fn cluster_is_primary_true() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -717,7 +717,7 @@ async fn cluster_is_primary_true() {
 
 #[tokio::test]
 async fn cluster_fork_returns_worker_object() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -736,7 +736,7 @@ async fn cluster_fork_returns_worker_object() {
 
 #[tokio::test]
 async fn cluster_node_prefix_alias() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -757,7 +757,7 @@ async fn cluster_node_prefix_alias() {
 
 #[tokio::test]
 async fn worker_threads_is_main_thread() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -772,7 +772,7 @@ async fn worker_threads_is_main_thread() {
 
 #[tokio::test]
 async fn worker_threads_message_channel_roundtrip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -792,7 +792,7 @@ async fn worker_threads_message_channel_roundtrip() {
 
 #[tokio::test]
 async fn worker_threads_worker_constructor_exists() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -812,7 +812,7 @@ async fn worker_threads_worker_constructor_exists() {
 
 #[tokio::test]
 async fn https_create_server_returns_full_server_object() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -836,7 +836,7 @@ async fn https_create_server_returns_full_server_object() {
 
 #[tokio::test]
 async fn http_create_server_returns_full_server_object() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -857,7 +857,7 @@ async fn http_create_server_returns_full_server_object() {
 
 #[tokio::test]
 async fn crypto_hash_copy_returns_independent_clone() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -879,7 +879,7 @@ async fn crypto_hash_copy_returns_independent_clone() {
 
 #[tokio::test]
 async fn crypto_wrapkey_throws_not_supported() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -900,7 +900,7 @@ async fn tty_isatty_returns_boolean() {
     // isatty() now calls the real __isatty Rust primitive — returns true when fd is
     // connected to a terminal, false otherwise. CI runs without a TTY so the result
     // is false in the test environment; the important invariant is that it is a boolean.
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -917,7 +917,7 @@ async fn tty_isatty_returns_boolean() {
 
 #[tokio::test]
 async fn v8_heap_statistics_returns_zeroed_object() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -937,7 +937,7 @@ async fn v8_heap_statistics_returns_zeroed_object() {
 
 #[tokio::test]
 async fn vm_run_in_new_context_evaluates_code() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -953,7 +953,7 @@ async fn vm_run_in_new_context_evaluates_code() {
 
 #[tokio::test]
 async fn vm_sandbox_vars_accessible_in_code() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -973,7 +973,7 @@ async fn vm_sandbox_vars_accessible_in_code() {
 
 #[tokio::test]
 async fn vm_sandbox_mutations_reflected_back() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -993,7 +993,7 @@ async fn vm_sandbox_mutations_reflected_back() {
 
 #[tokio::test]
 async fn vm_create_context_marks_object() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -1012,7 +1012,7 @@ async fn vm_create_context_marks_object() {
 
 #[tokio::test]
 async fn vm_run_in_this_context_expression() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -1028,7 +1028,7 @@ async fn vm_run_in_this_context_expression() {
 
 #[tokio::test]
 async fn vm_script_run_in_new_context() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -1051,7 +1051,7 @@ async fn vm_script_run_in_new_context() {
 
 #[tokio::test]
 async fn dns_resolve_mx_returns_enotsup() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -1071,7 +1071,7 @@ async fn dns_resolve_mx_returns_enotsup() {
 
 #[tokio::test]
 async fn dns_lookup_service_returns_enotsup() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"

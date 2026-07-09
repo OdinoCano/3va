@@ -1,14 +1,5 @@
 //! FTP (File Transfer Protocol) client built-in module
 //!
-//! Provides: `require('ftp')` with `Client` class, backed by real TCP (or TLS)
-//! sockets for both control and data connections (RFC 959).
-//!
-//! Control-connection commands (USER/PASS/CWD/PWD/PASV/MKD/...) are all
-//! fire-and-forget natives; response parsing and per-command correlation
-//! happens JS-side via the same non-blocking poll + `_pendingCmd`/
-//! `_pendingCallback` pattern used by `pop3.rs`, instead of blocking the
-//! whole engine in a native retry loop waiting for the server.
-//!
 //! Native functions:
 //! - `__ftpCreate()` -> id
 //! - `__ftpConnect(id, host, port, useTls)` -> throws on failure
@@ -21,12 +12,17 @@
 //! - `__ftpDataClose(id)`
 
 use native_tls::TlsStream;
-use rquickjs::{Ctx, Function, Result};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex, OnceLock};
 use vvva_permissions::{Capability, PermissionState};
+
+static FTP_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
+fn permissions() -> &'static Arc<PermissionState> {
+    FTP_PERMISSIONS.get().unwrap()
+}
+use crate::builtins::v8_compat::{uint8array_from_bytes, uint8array_to_vec};
 
 type FtpId = u32;
 
@@ -78,248 +74,411 @@ fn next_ftp_id() -> FtpId {
     C.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-fn js_code_err(ctx: &Ctx<'_>, code: &str, msg: String) -> rquickjs::Error {
-    let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    let src = format!(
-        "(function(){{var e=new Error(\"{msg}\");e.code=\"{code}\";return e;}})()",
-        msg = escaped_msg,
-        code = code
+pub fn inject_ftp(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    permissions_param: Arc<PermissionState>,
+) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    FTP_PERMISSIONS.set(permissions_param).ok();
+
+    let create_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              _args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = next_ftp_id();
+            ftp_registry().lock().unwrap().insert(
+                id,
+                FtpState {
+                    control: None,
+                    data: None,
+                    use_tls: false,
+                },
+            );
+            rv.set(v8::Number::new(_scope, id as f64).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ftpCreate").unwrap().into(),
+        create_fn.into(),
     );
-    match ctx.eval::<rquickjs::Value<'_>, _>(src) {
-        Ok(v) => ctx.throw(v),
-        Err(e) => e,
-    }
-}
 
-pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    let globals = ctx.globals();
+    let connect_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
+            let host = args.get(1).to_rust_string_lossy(_scope);
+            let port = args.get(2).uint32_value(_scope).unwrap_or(21) as u16;
+            let use_tls = args.get(3).boolean_value(_scope);
 
-    // __ftpCreate() -> id
-    let create_fn = Function::new(ctx.clone(), move || -> FtpId {
-        let id = next_ftp_id();
-        ftp_registry().lock().unwrap().insert(
-            id,
-            FtpState {
-                control: None,
-                data: None,
-                use_tls: false,
-            },
-        );
-        id
-    })?;
-    globals.set("__ftpCreate", create_fn)?;
-
-    // __ftpConnect(id, host, port, useTls) -> undefined | throws
-    let perms = permissions.clone();
-    let connect_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: FtpId, host: String, port: u16, use_tls: bool| -> Result<()> {
-            if !perms.check(&Capability::Network(host.clone())) {
-                return Err(js_code_err(
-                    &ctx,
-                    "EACCES",
-                    format!("Network access denied. Run with --allow-net={}", host),
-                ));
+            if !permissions().check(&Capability::Network(host.clone())) {
+                let msg = v8::String::new(
+                    _scope,
+                    &format!("Network access denied. Run with --allow-net={}", host),
+                )
+                .unwrap();
+                let err = v8::Exception::error(_scope, msg);
+                rv.set(err);
+                return;
             }
 
-            let tcp = TcpStream::connect(format!("{host}:{port}"))
-                .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
+            match TcpStream::connect(format!("{}:{}", host, port)) {
+                Ok(tcp) => {
+                    let conn = if use_tls {
+                        match native_tls::TlsConnector::new() {
+                            Ok(connector) => {
+                                let fallback = tcp.try_clone().ok();
+                                match connector.connect(&host, tcp) {
+                                    Ok(tls) => {
+                                        if tls.get_ref().set_nonblocking(true).is_ok() {
+                                            FtpConn::Tls(tls)
+                                        } else if let Some(tcp) = fallback {
+                                            FtpConn::Plain(tcp)
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        if let Some(tcp) = fallback {
+                                            FtpConn::Plain(tcp)
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => FtpConn::Plain(tcp),
+                        }
+                    } else {
+                        let _ = tcp.set_nonblocking(true);
+                        FtpConn::Plain(tcp)
+                    };
 
-            let conn = if use_tls {
-                let connector = native_tls::TlsConnector::new()
-                    .map_err(|e| js_code_err(&ctx, "EIO", format!("TLS init failed: {e}")))?;
-                let tls = connector.connect(&host, tcp).map_err(|e| {
-                    js_code_err(&ctx, "ECONNRESET", format!("TLS handshake failed: {e}"))
-                })?;
-                tls.get_ref()
-                    .set_nonblocking(true)
-                    .map_err(|e| js_code_err(&ctx, "EIO", e.to_string()))?;
-                FtpConn::Tls(tls)
-            } else {
-                tcp.set_nonblocking(true)
-                    .map_err(|e| js_code_err(&ctx, "EIO", e.to_string()))?;
-                FtpConn::Plain(tcp)
-            };
-
-            let mut reg = ftp_registry().lock().unwrap();
-            if let Some(state) = reg.get_mut(&id) {
-                state.control = Some(conn);
-                state.use_tls = use_tls;
-                Ok(())
-            } else {
-                Err(js_code_err(&ctx, "ENOTCONN", "Invalid FTP ID".to_string()))
+                    let mut reg = ftp_registry().lock().unwrap();
+                    if let Some(state) = reg.get_mut(&id) {
+                        state.control = Some(conn);
+                        state.use_tls = use_tls;
+                    }
+                    rv.set(v8::undefined(_scope).into());
+                }
+                Err(e) => {
+                    let msg =
+                        v8::String::new(_scope, &format!("Connection failed: {}", e)).unwrap();
+                    let err = v8::Exception::error(_scope, msg);
+                    rv.set(err);
+                }
             }
         },
-    )?;
-    globals.set("__ftpConnect", connect_fn)?;
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ftpConnect").unwrap().into(),
+        connect_fn.into(),
+    );
 
-    // __ftpSend(id, line) -> throws on failure
-    let send_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: FtpId, line: String| -> Result<()> {
+    let send_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
+            let line = args.get(1).to_rust_string_lossy(_scope);
+
             let mut reg = ftp_registry().lock().unwrap();
-            let conn = reg
-                .get_mut(&id)
-                .and_then(|s| s.control.as_mut())
-                .ok_or_else(|| js_code_err(&ctx, "ENOTCONN", "not connected".to_string()))?;
-            conn.write_all(format!("{line}\r\n").as_bytes())
-                .map_err(|e| js_code_err(&ctx, "EPIPE", e.to_string()))
+            match reg.get_mut(&id).and_then(|s| s.control.as_mut()) {
+                Some(conn) => match conn.write_all(format!("{}\r\n", line).as_bytes()) {
+                    Ok(_) => rv.set(v8::undefined(_scope).into()),
+                    Err(e) => {
+                        let msg = v8::String::new(_scope, &e.to_string()).unwrap();
+                        let err = v8::Exception::error(_scope, msg);
+                        rv.set(err);
+                    }
+                },
+                None => {
+                    let msg = v8::String::new(_scope, "not connected").unwrap();
+                    let err = v8::Exception::error(_scope, msg);
+                    rv.set(err);
+                }
+            }
         },
-    )?;
-    globals.set("__ftpSend", send_fn)?;
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ftpSend").unwrap().into(),
+        send_fn.into(),
+    );
 
-    // __ftpRead(id, maxBytes) -> Vec<u8> | throws EAGAIN | throws EOF
-    let read_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: FtpId, max_bytes: u32| -> Result<Vec<u8>> {
-            let max = (max_bytes as usize).min(65536);
+    let read_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
+            let max_bytes = args.get(1).uint32_value(_scope).unwrap_or(65536) as usize;
+            let max = max_bytes.min(65536);
+
             let mut buf = vec![0u8; max];
             let mut reg = ftp_registry().lock().unwrap();
-            let conn = reg
-                .get_mut(&id)
-                .and_then(|s| s.control.as_mut())
-                .ok_or_else(|| js_code_err(&ctx, "ENOTCONN", "not connected".to_string()))?;
-
-            match conn.read(&mut buf) {
-                Ok(0) => Err(js_code_err(&ctx, "EOF", "connection closed".into())),
-                Ok(n) => {
-                    buf.truncate(n);
-                    Ok(buf)
+            match reg.get_mut(&id).and_then(|s| s.control.as_mut()) {
+                Some(conn) => match conn.read(&mut buf) {
+                    Ok(0) => {
+                        let msg = v8::String::new(_scope, "connection closed").unwrap();
+                        let err = v8::Exception::error(_scope, msg);
+                        rv.set(err);
+                    }
+                    Ok(n) => {
+                        buf.truncate(n);
+                        rv.set(uint8array_from_bytes(_scope, &buf).into());
+                    }
+                    Err(ref e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::TimedOut =>
+                    {
+                        let msg = v8::String::new(_scope, "no data available").unwrap();
+                        let err = v8::Exception::error(_scope, msg);
+                        rv.set(err);
+                    }
+                    Err(e) => {
+                        let msg = v8::String::new(_scope, &e.to_string()).unwrap();
+                        let err = v8::Exception::error(_scope, msg);
+                        rv.set(err);
+                    }
+                },
+                None => {
+                    let msg = v8::String::new(_scope, "not connected").unwrap();
+                    let err = v8::Exception::error(_scope, msg);
+                    rv.set(err);
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    Err(js_code_err(&ctx, "EAGAIN", "no data available".into()))
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    Err(js_code_err(&ctx, "EAGAIN", "no data available".into()))
-                }
-                Err(e) => Err(js_code_err(&ctx, "EIO", e.to_string())),
             }
         },
-    )?;
-    globals.set("__ftpRead", read_fn)?;
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ftpRead").unwrap().into(),
+        read_fn.into(),
+    );
 
-    // __ftpDataConnect(id, host, port) -> throws on failure
-    let perms_data = permissions.clone();
-    let data_connect_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: FtpId, host: String, port: u16| -> Result<()> {
-            if !perms_data.check(&Capability::Network(host.clone())) {
-                return Err(js_code_err(
-                    &ctx,
-                    "EACCES",
-                    format!("Network access denied. Run with --allow-net={}", host),
-                ));
+    let data_connect_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
+            let host = args.get(1).to_rust_string_lossy(_scope);
+            let port = args.get(2).uint32_value(_scope).unwrap_or(0) as u16;
+
+            if !permissions().check(&Capability::Network(host.clone())) {
+                let msg = v8::String::new(
+                    _scope,
+                    &format!("Network access denied. Run with --allow-net={}", host),
+                )
+                .unwrap();
+                let err = v8::Exception::error(_scope, msg);
+                rv.set(err);
+                return;
             }
 
-            let tcp = TcpStream::connect(format!("{host}:{port}"))
-                .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
+            match TcpStream::connect(format!("{}:{}", host, port)) {
+                Ok(tcp) => {
+                    let use_tls = ftp_registry()
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .map(|s| s.use_tls)
+                        .unwrap_or(false);
+                    let conn = if use_tls {
+                        match native_tls::TlsConnector::new() {
+                            Ok(connector) => {
+                                let fallback = tcp.try_clone().ok();
+                                match connector.connect(&host, tcp) {
+                                    Ok(tls) => {
+                                        if tls.get_ref().set_nonblocking(true).is_ok() {
+                                            FtpConn::Tls(tls)
+                                        } else if let Some(tcp) = fallback {
+                                            FtpConn::Plain(tcp)
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        if let Some(tcp) = fallback {
+                                            FtpConn::Plain(tcp)
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => FtpConn::Plain(tcp),
+                        }
+                    } else {
+                        let _ = tcp.set_nonblocking(true);
+                        FtpConn::Plain(tcp)
+                    };
 
-            let conn = if ftp_registry()
-                .lock()
-                .unwrap()
-                .get(&id)
-                .map(|s| s.use_tls)
-                .unwrap_or(false)
+                    let mut reg = ftp_registry().lock().unwrap();
+                    if let Some(state) = reg.get_mut(&id) {
+                        state.data = Some(conn);
+                    }
+                    rv.set(v8::undefined(_scope).into());
+                }
+                Err(e) => {
+                    let msg =
+                        v8::String::new(_scope, &format!("Connection failed: {}", e)).unwrap();
+                    let err = v8::Exception::error(_scope, msg);
+                    rv.set(err);
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ftpDataConnect").unwrap().into(),
+        data_connect_fn.into(),
+    );
+
+    let data_read_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
+            let max_bytes = args.get(1).uint32_value(_scope).unwrap_or(65536) as usize;
+            let max = max_bytes.min(65536);
+
+            let mut buf = vec![0u8; max];
+            let mut reg = ftp_registry().lock().unwrap();
+            match reg.get_mut(&id).and_then(|s| s.data.as_mut()) {
+                Some(conn) => match conn.read(&mut buf) {
+                    Ok(0) => {
+                        let msg = v8::String::new(_scope, "data connection closed").unwrap();
+                        let err = v8::Exception::error(_scope, msg);
+                        rv.set(err);
+                    }
+                    Ok(n) => {
+                        buf.truncate(n);
+                        rv.set(uint8array_from_bytes(_scope, &buf).into());
+                    }
+                    Err(ref e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::TimedOut =>
+                    {
+                        let msg = v8::String::new(_scope, "no data available").unwrap();
+                        let err = v8::Exception::error(_scope, msg);
+                        rv.set(err);
+                    }
+                    Err(e) => {
+                        let msg = v8::String::new(_scope, &e.to_string()).unwrap();
+                        let err = v8::Exception::error(_scope, msg);
+                        rv.set(err);
+                    }
+                },
+                None => {
+                    let msg = v8::String::new(_scope, "not connected").unwrap();
+                    let err = v8::Exception::error(_scope, msg);
+                    rv.set(err);
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ftpDataRead").unwrap().into(),
+        data_read_fn.into(),
+    );
+
+    let data_write_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
+            let data = v8::Local::<v8::Uint8Array>::try_from(args.get(1))
+                .map(|arr| uint8array_to_vec(_scope, arr))
+                .unwrap_or_default();
+
+            let mut reg = ftp_registry().lock().unwrap();
+            match reg.get_mut(&id).and_then(|s| s.data.as_mut()) {
+                Some(conn) => match conn.write_all(&data) {
+                    Ok(_) => rv.set(v8::undefined(_scope).into()),
+                    Err(e) => {
+                        let msg = v8::String::new(_scope, &e.to_string()).unwrap();
+                        let err = v8::Exception::error(_scope, msg);
+                        rv.set(err);
+                    }
+                },
+                None => {
+                    let msg = v8::String::new(_scope, "not connected").unwrap();
+                    let err = v8::Exception::error(_scope, msg);
+                    rv.set(err);
+                }
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ftpDataWrite").unwrap().into(),
+        data_write_fn.into(),
+    );
+
+    let data_close_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
+            if let Some(state) = ftp_registry().lock().unwrap().get_mut(&id)
+                && let Some(mut conn) = state.data.take()
             {
-                let connector = native_tls::TlsConnector::new()
-                    .map_err(|e| js_code_err(&ctx, "EIO", format!("TLS init failed: {e}")))?;
-                let tls = connector.connect(&host, tcp).map_err(|e| {
-                    js_code_err(&ctx, "ECONNRESET", format!("TLS handshake failed: {e}"))
-                })?;
-                tls.get_ref()
-                    .set_nonblocking(true)
-                    .map_err(|e| js_code_err(&ctx, "EIO", e.to_string()))?;
-                FtpConn::Tls(tls)
-            } else {
-                tcp.set_nonblocking(true)
-                    .map_err(|e| js_code_err(&ctx, "EIO", e.to_string()))?;
-                FtpConn::Plain(tcp)
-            };
-
-            let mut reg = ftp_registry().lock().unwrap();
-            if let Some(state) = reg.get_mut(&id) {
-                state.data = Some(conn);
-                Ok(())
-            } else {
-                Err(js_code_err(&ctx, "ENOTCONN", "Invalid FTP ID".to_string()))
-            }
-        },
-    )?;
-    globals.set("__ftpDataConnect", data_connect_fn)?;
-
-    // __ftpDataRead(id, maxBytes) -> Vec<u8> | throws EAGAIN | throws EOF
-    let data_read_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: FtpId, max_bytes: u32| -> Result<Vec<u8>> {
-            let max = (max_bytes as usize).min(65536);
-            let mut buf = vec![0u8; max];
-            let mut reg = ftp_registry().lock().unwrap();
-            let conn = reg
-                .get_mut(&id)
-                .and_then(|s| s.data.as_mut())
-                .ok_or_else(|| js_code_err(&ctx, "ENOTCONN", "not connected".to_string()))?;
-
-            match conn.read(&mut buf) {
-                Ok(0) => Err(js_code_err(&ctx, "EOF", "data connection closed".into())),
-                Ok(n) => {
-                    buf.truncate(n);
-                    Ok(buf)
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    Err(js_code_err(&ctx, "EAGAIN", "no data available".into()))
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    Err(js_code_err(&ctx, "EAGAIN", "no data available".into()))
-                }
-                Err(e) => Err(js_code_err(&ctx, "EIO", e.to_string())),
-            }
-        },
-    )?;
-    globals.set("__ftpDataRead", data_read_fn)?;
-
-    // __ftpDataWrite(id, data) -> throws on failure
-    let data_write_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: FtpId, data: Vec<u8>| -> Result<()> {
-            let mut reg = ftp_registry().lock().unwrap();
-            let conn = reg
-                .get_mut(&id)
-                .and_then(|s| s.data.as_mut())
-                .ok_or_else(|| js_code_err(&ctx, "ENOTCONN", "not connected".to_string()))?;
-            conn.write_all(&data)
-                .map_err(|e| js_code_err(&ctx, "EPIPE", e.to_string()))
-        },
-    )?;
-    globals.set("__ftpDataWrite", data_write_fn)?;
-
-    // __ftpDataClose(id)
-    let data_close_fn = Function::new(ctx.clone(), move |id: FtpId| -> bool {
-        if let Some(state) = ftp_registry().lock().unwrap().get_mut(&id)
-            && let Some(mut conn) = state.data.take()
-        {
-            conn.shutdown();
-        }
-        true
-    })?;
-    globals.set("__ftpDataClose", data_close_fn)?;
-
-    // __ftpClose(id)
-    let close_fn = Function::new(ctx.clone(), move |id: FtpId| -> bool {
-        if let Some(mut state) = ftp_registry().lock().unwrap().remove(&id) {
-            if let Some(mut conn) = state.control.take() {
-                let _ = conn.write_all(b"QUIT\r\n");
                 conn.shutdown();
             }
-            if let Some(mut conn) = state.data.take() {
-                conn.shutdown();
-            }
-        }
-        true
-    })?;
-    globals.set("__ftpClose", close_fn)?;
+            rv.set(v8::Boolean::new(_scope, true).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ftpDataClose").unwrap().into(),
+        data_close_fn.into(),
+    );
 
-    ctx.eval::<(), _>(
-        r#"
+    let close_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
+            if let Some(mut state) = ftp_registry().lock().unwrap().remove(&id) {
+                if let Some(mut conn) = state.control.take() {
+                    let _ = conn.write_all(b"QUIT\r\n");
+                    conn.shutdown();
+                }
+                if let Some(mut conn) = state.data.take() {
+                    conn.shutdown();
+                }
+            }
+            rv.set(v8::Boolean::new(_scope, true).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ftpClose").unwrap().into(),
+        close_fn.into(),
+    );
+
+    let js_code = r#"
     (function() {
         function Client() {
             this._id = __ftpCreate();
@@ -359,10 +518,6 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                     __ftpConnect(self._id, self._host, self._port, self._tls);
                     self._connected = true;
                     self._startPoll();
-                    // The server sends its greeting (220) unsolicited, right
-                    // after accept — wait for it before sending anything, or
-                    // it can race with (and be misattributed to) the first
-                    // real command, same class of bug fixed in pop3.rs.
                     self._awaitReply(false, function(err) {
                         if (err) { self.emit('error', err); return; }
                         self.emit('connect');
@@ -408,11 +563,6 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             self._pollTimer = setTimeout(poll, 0);
         };
 
-        // Marks the client as waiting for the next control-connection reply,
-        // resolving `_pendingCallback` from `_handleLine` once it arrives (or
-        // from the timer below if the server never answers — this replaces
-        // the old native retry loop that blocked the *entire* engine with no
-        // timeout at all when a server went quiet).
         Client.prototype._awaitReply = function(multiline, callback) {
             var self = this;
             this._pendingCmd = true;
@@ -439,9 +589,6 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             if (cb) cb(err, data);
         };
 
-        // Sends one command and waits for its real reply (RFC 959 §4.2:
-        // "CODE-text" starts/continues a multiline reply, "CODE text" ends it
-        // or is a complete single-line reply on its own).
         Client.prototype._sendAwait = function(cmd, multiline, callback) {
             this._awaitReply(multiline, callback);
             try {
@@ -464,9 +611,6 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             var isError = code.charAt(0) === '4' || code.charAt(0) === '5';
 
             if (!this._pendingCmd) {
-                // Unsolicited line (e.g. the async "226 Transfer complete"
-                // that follows a data transfer well after its control reply
-                // already resolved). Kept as events for compatibility.
                 if (code === '226') this.emit('dataend', line);
                 else if (code === '150' || code === '125') this.emit('data', line);
                 else if (isError) this.emit('error', new Error(line));
@@ -498,7 +642,6 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             this._sendAwait('USER ' + this._username, false, function(err, reply) {
                 if (err) { if (callback) callback(err); return; }
                 if (reply.code === '230') {
-                    // Server accepted the username alone (e.g. some anonymous setups).
                     self._authenticated = true;
                     self.emit('ready');
                     if (callback) callback();
@@ -567,8 +710,6 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             return this;
         };
 
-        // Requests a passive-mode data port (RFC 959 §4.1.2, PASV) and parses
-        // the "227 ... (h1,h2,h3,h4,p1,p2)" reply into a {host, port} pair.
         Client.prototype._pasv = function(callback) {
             this._sendAwait('PASV', false, function(err, reply) {
                 if (err) { callback(err); return; }
@@ -618,18 +759,12 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                             __ftpDataClose(self._id);
                             var lines = data.split('\n').filter(function(l) { return l.length > 0; });
                             var items = lines.map(function(line) {
-                                var parts = line.match(/^([drwx\-]{10})\s+\d+\s+\S+\s +\S+\s +(\d+)\s +\w+\s +[\d\s:]+[\d]\s +(.*)$/);
+                                var parts = line.match(/^([drwx\-]{10})\s +\d+\s +\S+\s +\S+\s +(\d+)\s +\w+\s +[\d\s:]+[\d]\s +(.*)$/);
                                 if (parts) {
                                     return { name: parts[3], size: parseInt(parts[2]), isDirectory: parts[1][0] === 'd' };
                                 }
                                 return { name: line, size: 0, isDirectory: false };
                             });
-                            // Consume the trailing "226 Transfer complete" (or
-                            // "426 ..." on failure) before returning control —
-                            // otherwise it lingers unconsumed on the control
-                            // channel and gets misattributed to whatever the
-                            // next command happens to be (the same class of
-                            // bug fixed in pop3.rs's login()/greeting race).
                             self._awaitReply(false, function() {
                                 if (callback) callback(null, items);
                             });
@@ -641,8 +776,6 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             return [];
         };
 
-        // Downloads `remotePath` over a real PASV data connection and resolves
-        // with its bytes (as a Buffer if available, else a Uint8Array).
         Client.prototype.get = function(remotePath, callback) {
             var self = this;
             if (!this._connected) {
@@ -685,8 +818,6 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                             var off = 0;
                             for (var i = 0; i < chunks.length; i++) { buf.set(chunks[i], off); off += chunks[i].length; }
                             var result = typeof Buffer !== 'undefined' ? Buffer.from(buf) : buf;
-                            // See list()'s comment above: consume the trailing
-                            // "226"/"426" control reply before returning.
                             self._awaitReply(false, function() {
                                 if (callback) callback(null, result);
                             });
@@ -698,10 +829,6 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             return this;
         };
 
-        // `input` is the data to upload (a string or Uint8Array/Buffer) — this
-        // module only speaks the FTP protocol, it doesn't read local files;
-        // callers wanting to upload a file read it themselves (e.g. via `fs`)
-        // and pass the bytes here.
         Client.prototype._upload = function(cmd, input, remotePath, callback) {
             var self = this;
             if (!this._connected) {
@@ -741,8 +868,6 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                         return;
                     }
                     __ftpDataClose(self._id);
-                    // See list()'s comment above: consume the trailing
-                    // "226"/"426" control reply before returning.
                     self._awaitReply(false, function() {
                         if (callback) callback();
                     });
@@ -859,8 +984,10 @@ pub fn inject_ftp(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         globalThis.__requireCache['node:ftp'] = { Client: Client };
         globalThis.ftp = { Client: Client };
     })();
-    "#,
-    )?;
+    "#;
 
-    Ok(())
+    let source = v8::String::new(scope, js_code).unwrap();
+    if let Some(script) = v8::Script::compile(scope, source, None) {
+        let _ = script.run(scope);
+    }
 }

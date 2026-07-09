@@ -11,7 +11,7 @@ LicenseUrl: https://github.com/OdinoCano/3va/blob/main/LICENSE
 Copyright: Copyright (c) OdinoCano
 ShortDescription: Secure-by-default JavaScript and TypeScript runtime.
 Description: |-
-  3va is a JavaScript and TypeScript runtime built on QuickJS with capability-based
+  3va is a JavaScript and TypeScript runtime built on V8 with capability-based
   sandboxing, post-quantum cryptography (ML-KEM / ML-DSA), and WebAssembly support.
 
   Every permission — filesystem, network, environment variables, subprocess execution —

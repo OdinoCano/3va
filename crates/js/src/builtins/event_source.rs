@@ -1,8 +1,8 @@
-use rquickjs::{Ctx, Function, Result};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::sync::{Arc, Mutex};
+use v8::{FunctionCallbackArguments, PinScope, ReturnValue};
 
 type EventQueue = Arc<Mutex<Vec<SseEvent>>>;
 type EsMap = Arc<Mutex<HashMap<u32, EsEntry>>>;
@@ -21,17 +21,29 @@ struct SseEvent {
     last_event_id: String,
 }
 
-pub fn inject_event_source(ctx: &Ctx) -> Result<()> {
-    let map: EsMap = Arc::new(Mutex::new(HashMap::new()));
-    let counter = Arc::new(Mutex::new(0u32));
+static ES_MAP: std::sync::OnceLock<EsMap> = std::sync::OnceLock::new();
+fn map() -> &'static EsMap {
+    ES_MAP.get().unwrap()
+}
+static ES_COUNTER: std::sync::OnceLock<Arc<Mutex<u32>>> = std::sync::OnceLock::new();
+fn counter() -> &'static Arc<Mutex<u32>> {
+    ES_COUNTER.get().unwrap()
+}
 
-    // __eventSourceOpen(url) → id
-    let map2 = map.clone();
-    let counter2 = counter.clone();
-    ctx.globals().set(
-        "__eventSourceOpen",
-        Function::new(ctx.clone(), move |url: String| -> rquickjs::Result<u32> {
-            let mut id_lock = counter2.lock().unwrap();
+pub fn inject_event_source(scope: &mut v8::ContextScope<v8::HandleScope>) {
+    ES_MAP.set(Arc::new(Mutex::new(HashMap::new()))).ok();
+    ES_COUNTER.set(Arc::new(Mutex::new(0u32))).ok();
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+
+    let open_fn = v8::Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let url = args.get(0).to_rust_string_lossy(scope);
+
+            let mut id_lock = counter().lock().unwrap();
             *id_lock += 1;
             let id = *id_lock;
             drop(id_lock);
@@ -43,7 +55,6 @@ pub fn inject_event_source(ctx: &Ctx) -> Result<()> {
             let c2 = cancel.clone();
             let url2 = url.clone();
 
-            // Spawn a blocking thread that streams the SSE response
             std::thread::spawn(move || {
                 let resp = match ureq::get(&url2)
                     .set("Accept", "text/event-stream")
@@ -76,7 +87,6 @@ pub fn inject_event_source(ctx: &Ctx) -> Result<()> {
                     };
 
                     if line.is_empty() {
-                        // Dispatch event
                         if !data_buf.is_empty() {
                             let data = if data_buf.ends_with('\n') {
                                 data_buf[..data_buf.len() - 1].to_string()
@@ -100,57 +110,79 @@ pub fn inject_event_source(ctx: &Ctx) -> Result<()> {
                     } else if let Some(val) = line.strip_prefix("id:") {
                         last_id = val.strip_prefix(' ').unwrap_or(val).to_string();
                     }
-                    // ignore retry: and comments (:)
                 }
             });
 
-            map2.lock().unwrap().insert(
+            map().lock().unwrap().insert(
                 id,
                 EsEntry {
                     events: queue,
                     cancel,
                 },
             );
-            Ok(id)
-        })?,
-    )?;
 
-    // __eventSourcePoll(id) → JSON string of pending events (or null)
-    let map2 = map.clone();
-    ctx.globals().set(
-        "__eventSourcePoll",
-        Function::new(
-            ctx.clone(),
-            move |id: u32| -> rquickjs::Result<Option<String>> {
-                let m = map2.lock().unwrap();
-                let entry = match m.get(&id) {
-                    Some(e) => e,
-                    None => return Ok(None),
-                };
-                let mut q = entry.events.lock().unwrap();
-                if q.is_empty() {
-                    return Ok(Some("[]".to_string()));
+            rv.set(v8::Number::new(scope, id as f64).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__eventSourceOpen").unwrap().into(),
+        open_fn.into(),
+    );
+
+    let poll_fn = v8::Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+
+            let m = map().lock().unwrap();
+            let entry = match m.get(&id) {
+                Some(e) => e,
+                None => {
+                    rv.set(v8::null(scope).into());
+                    return;
                 }
-                let drained: Vec<SseEvent> = q.drain(..).collect();
-                drop(q);
-                Ok(Some(
-                    serde_json::to_string(&drained).unwrap_or_else(|_| "[]".to_string()),
-                ))
-            },
-        )?,
-    )?;
+            };
 
-    // __eventSourceClose(id)
-    let map2 = map.clone();
-    ctx.globals().set(
-        "__eventSourceClose",
-        Function::new(ctx.clone(), move |id: u32| {
-            let mut m = map2.lock().unwrap();
+            let mut q = entry.events.lock().unwrap();
+            if q.is_empty() {
+                rv.set(v8::String::new(scope, "[]").unwrap().into());
+                return;
+            }
+
+            let drained: Vec<SseEvent> = q.drain(..).collect();
+            drop(q);
+
+            let json = serde_json::to_string(&drained).unwrap_or_else(|_| "[]".to_string());
+            rv.set(v8::String::new(scope, &json).unwrap().into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__eventSourcePoll").unwrap().into(),
+        poll_fn.into(),
+    );
+
+    let close_fn = v8::Function::new(
+        scope,
+        move |scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut _rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let mut m = map().lock().unwrap();
             if let Some(entry) = m.remove(&id) {
                 *entry.cancel.lock().unwrap() = true;
             }
-        })?,
-    )?;
-
-    Ok(())
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__eventSourceClose").unwrap().into(),
+        close_fn.into(),
+    );
 }

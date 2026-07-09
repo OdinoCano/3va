@@ -12,7 +12,7 @@ async fn engine() -> JsEngine {
 }
 
 /// Drive async callbacks (Promises) to completion — polls up to 50 iterations.
-async fn eval_async(e: &JsEngine, setup: &str, result_global: &str) -> String {
+async fn eval_async(e: &mut JsEngine, setup: &str, result_global: &str) -> String {
     e.eval(setup).await.unwrap();
     for _ in 0..50 {
         e.idle().await;
@@ -35,9 +35,9 @@ async fn eval_async(e: &JsEngine, setup: &str, result_global: &str) -> String {
 
 #[tokio::test]
 async fn zlib_gzip_gunzip_roundtrip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var z = require('zlib');
         globalThis.__result = undefined;
@@ -62,9 +62,9 @@ async fn zlib_gzip_gunzip_roundtrip() {
 
 #[tokio::test]
 async fn zlib_brotli_roundtrip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var z = require('zlib');
         globalThis.__result = undefined;
@@ -87,9 +87,9 @@ async fn zlib_brotli_roundtrip() {
 
 #[tokio::test]
 async fn zlib_brotli_produces_different_output_than_gzip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var z = require('zlib');
         globalThis.__result = undefined;
@@ -110,7 +110,7 @@ async fn zlib_brotli_produces_different_output_than_gzip() {
 
 #[tokio::test]
 async fn zlib_brotli_sync_roundtrip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -129,9 +129,9 @@ async fn zlib_brotli_sync_roundtrip() {
 
 #[tokio::test]
 async fn zlib_gzip_produces_uint8array() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var z = require('zlib');
         globalThis.__result = undefined;
@@ -149,9 +149,9 @@ async fn zlib_gzip_produces_uint8array() {
 
 #[tokio::test]
 async fn zlib_deflate_inflate_roundtrip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var z = require('zlib');
         globalThis.__result = undefined;
@@ -174,9 +174,9 @@ async fn zlib_deflate_inflate_roundtrip() {
 
 #[tokio::test]
 async fn zlib_deflate_compressed_is_smaller_than_repetitive_input() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var z = require('zlib');
         globalThis.__result = undefined;
@@ -196,9 +196,9 @@ async fn zlib_deflate_compressed_is_smaller_than_repetitive_input() {
 
 #[tokio::test]
 async fn zlib_deflate_raw_inflate_raw_roundtrip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var z = require('zlib');
         globalThis.__result = undefined;
@@ -223,9 +223,9 @@ async fn zlib_deflate_raw_inflate_raw_roundtrip() {
 
 #[tokio::test]
 async fn zlib_callback_without_opts() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var z = require('zlib');
         globalThis.__result = undefined;
@@ -243,7 +243,7 @@ async fn zlib_callback_without_opts() {
 
 #[tokio::test]
 async fn zlib_sync_methods_roundtrip() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -271,7 +271,7 @@ async fn zlib_sync_methods_roundtrip() {
 
 #[tokio::test]
 async fn zlib_constants_values() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -288,7 +288,7 @@ async fn zlib_constants_values() {
 
 #[tokio::test]
 async fn zlib_node_prefix_same_object() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -306,9 +306,9 @@ async fn zlib_node_prefix_same_object() {
 
 #[tokio::test]
 async fn create_gzip_stream_pipes_data() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         globalThis.__result = undefined;
         var zlib = require('zlib');
@@ -331,9 +331,9 @@ async fn create_gzip_stream_pipes_data() {
 
 #[tokio::test]
 async fn create_gunzip_decompresses_gzip_data() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         globalThis.__result = undefined;
         var zlib = require('zlib');

@@ -64,7 +64,7 @@ fn raw_http(
     resp
 }
 
-async fn drive_forever(e: &JsEngine) -> ! {
+async fn drive_forever(e: &mut JsEngine) -> ! {
     loop {
         e.idle().await;
         tokio::task::yield_now().await;
@@ -74,7 +74,7 @@ async fn drive_forever(e: &JsEngine) -> ! {
 #[tokio::test]
 async fn http_auth_end_to_end() {
     let port = free_port();
-    let e = engine_with_net().await;
+    let mut e = engine_with_net().await;
 
     e.eval_to_string(&format!(
         r#"
@@ -134,7 +134,7 @@ async fn http_auth_end_to_end() {
     let p = port;
     let h = tokio::task::spawn_blocking(move || raw_http(p, "GET", "/health", "", "", ""));
     let _ = tokio::select! {
-        _ = drive_forever(&e) => unreachable!("engine event loop terminated unexpectedly"),
+        _ = drive_forever(&mut e) => unreachable!("engine event loop terminated unexpectedly"),
         r = h => r.unwrap(),
     };
     let healthy = e
@@ -156,7 +156,7 @@ async fn http_auth_end_to_end() {
         )
     });
     let _ = tokio::select! {
-        _ = drive_forever(&e) => unreachable!("engine event loop terminated unexpectedly"),
+        _ = drive_forever(&mut e) => unreachable!("engine event loop terminated unexpectedly"),
         r = h => r.unwrap(),
     };
     let token = e
@@ -171,7 +171,7 @@ async fn http_auth_end_to_end() {
     let auth = format!("Bearer {}", token);
     let h = tokio::task::spawn_blocking(move || raw_http(p, "GET", "/profile", "", "", &auth));
     let _ = tokio::select! {
-        _ = drive_forever(&e) => unreachable!("engine event loop terminated unexpectedly"),
+        _ = drive_forever(&mut e) => unreachable!("engine event loop terminated unexpectedly"),
         r = h => r.unwrap(),
     };
     let user = e
@@ -190,7 +190,7 @@ async fn http_auth_end_to_end() {
     let p = port;
     let h = tokio::task::spawn_blocking(move || raw_http(p, "GET", "/profile", "", "", ""));
     let _ = tokio::select! {
-        _ = drive_forever(&e) => unreachable!("engine event loop terminated unexpectedly"),
+        _ = drive_forever(&mut e) => unreachable!("engine event loop terminated unexpectedly"),
         r = h => r.unwrap(),
     };
     let unauth = e

@@ -12,7 +12,7 @@ async fn engine() -> JsEngine {
 }
 
 /// Drive promises to completion polling up to 100 iterations.
-async fn eval_async(e: &JsEngine, setup: &str, result_global: &str) -> String {
+async fn eval_async(e: &mut JsEngine, setup: &str, result_global: &str) -> String {
     e.eval(setup).await.unwrap();
     for _ in 0..100 {
         e.idle().await;
@@ -35,7 +35,7 @@ async fn eval_async(e: &JsEngine, setup: &str, result_global: &str) -> String {
 
 #[tokio::test]
 async fn als_get_store_inside_run() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -56,7 +56,7 @@ async fn als_get_store_inside_run() {
 
 #[tokio::test]
 async fn als_get_store_outside_run_is_undefined() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -74,9 +74,9 @@ async fn als_get_store_outside_run_is_undefined() {
 
 #[tokio::test]
 async fn als_propagates_through_await() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var { AsyncLocalStorage } = require('async_hooks');
         var als = new AsyncLocalStorage();
@@ -99,9 +99,9 @@ async fn als_propagates_through_await() {
 
 #[tokio::test]
 async fn als_concurrent_chains_isolated() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var { AsyncLocalStorage } = require('async_hooks');
         var als = new AsyncLocalStorage();
@@ -142,7 +142,7 @@ async fn als_concurrent_chains_isolated() {
 
 #[tokio::test]
 async fn als_nested_run_inner_overrides() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -168,7 +168,7 @@ async fn als_nested_run_inner_overrides() {
 
 #[tokio::test]
 async fn als_exit_hides_store() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = e
         .eval_to_string(
             r#"
@@ -194,9 +194,9 @@ async fn als_exit_hides_store() {
 
 #[tokio::test]
 async fn two_als_instances_independent() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var { AsyncLocalStorage } = require('async_hooks');
         var alsA = new AsyncLocalStorage();
@@ -222,9 +222,9 @@ async fn two_als_instances_independent() {
 
 #[tokio::test]
 async fn async_resource_restores_context() {
-    let e = engine().await;
+    let mut e = engine().await;
     let r = eval_async(
-        &e,
+        &mut e,
         r#"
         var ah = require('async_hooks');
         var als = new ah.AsyncLocalStorage();

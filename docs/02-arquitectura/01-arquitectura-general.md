@@ -50,7 +50,7 @@ Multiple security layers protect the system:
 - Layer 4: Audit (operation logging)
 
 ### 1.2.4 Modularity
-Each crate is independent and can be replaced or updated without affecting other components. The integration with QuickJS, for example, is abstracted to allow future changes.
+Each crate is independent and can be replaced or updated without affecting other components. The integration with V8, for example, is abstracted to allow future changes.
 
 ## 1.3 Component Architecture
 

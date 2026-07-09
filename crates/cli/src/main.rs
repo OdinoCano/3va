@@ -180,7 +180,7 @@ fn check_system_info() -> anyhow::Result<()> {
     println!("  ✓ Sandbox enforcement available");
 
     println!("\n[4/5] JS Engine");
-    println!("  ✓ QuickJS integration available");
+    println!("  ✓ V8 integration available");
 
     println!("\n[5/5] Security Checks");
     println!("  ✓ Capabilities: Allow by default (denied)");
@@ -232,7 +232,7 @@ fn is_incomplete(src: &str) -> bool {
 
 /// Format the *current value* of a JS expression for REPL display.
 /// `code` is already evaluated — this only inspects its value.
-async fn format_repl_result(engine: &vvva_js::JsEngine, code: &str) -> Option<String> {
+async fn format_repl_result(engine: &mut vvva_js::JsEngine, code: &str) -> Option<String> {
     let type_tag = engine
         .eval_to_string(&format!("typeof ({})", code))
         .await
@@ -368,7 +368,7 @@ async fn run_sandbox_shell_impl(plugins: Vec<ReplPlugin>) -> anyhow::Result<()> 
             // EOF (^D or piped input exhausted)
             if !buffer.trim().is_empty() {
                 // flush remaining buffer
-                eval_and_print(&engine, buffer.trim(), is_tty).await;
+                eval_and_print(&mut engine, buffer.trim(), is_tty).await;
             }
             if is_tty {
                 println!("\nLeaving sandbox...");
@@ -459,7 +459,7 @@ async fn run_sandbox_shell_impl(plugins: Vec<ReplPlugin>) -> anyhow::Result<()> 
                             handler_src,
                             serde_json::to_string(cmd_args).unwrap_or_else(|_| "\"\"".into())
                         );
-                        eval_and_print(&engine, &call, is_tty).await;
+                        eval_and_print(&mut engine, &call, is_tty).await;
                         handled = true;
                         break;
                     }
@@ -487,14 +487,14 @@ async fn run_sandbox_shell_impl(plugins: Vec<ReplPlugin>) -> anyhow::Result<()> 
         buffer.clear();
 
         if !src.is_empty() {
-            eval_and_print(&engine, &src, is_tty).await;
+            eval_and_print(&mut engine, &src, is_tty).await;
         }
     }
 
     Ok(())
 }
 
-async fn eval_and_print(engine: &vvva_js::JsEngine, src: &str, is_tty: bool) {
+async fn eval_and_print(engine: &mut vvva_js::JsEngine, src: &str, is_tty: bool) {
     let trimmed = src.trim();
 
     // For object literals `{a:1}` at statement position, wrap in parens so the
@@ -580,7 +580,7 @@ fn try_run_package_script(name: &str) -> anyhow::Result<bool> {
     // This delegates to a real, un-sandboxed external process (the project's
     // package manager, running whatever `script_cmd` says — arbitrary shell).
     // 3va's capability model (`vvva_permissions`) only governs JS executed
-    // *inside* `vvva_js`'s own QuickJS engine; it has no hook into an
+    // *inside* `vvva_js`'s own V8 engine; it has no hook into an
     // already-compiled Node/pnpm/vite binary's syscalls, so there is no
     // `--allow-*` flag that could meaningfully restrict what this actually
     // does. What *is* in scope, and what was missing here, is the same
@@ -1450,7 +1450,7 @@ fn resolve_cjs_export_names(
     names
 }
 
-/// Executes the wrapped CJS body in a throwaway, sandboxed QuickJS context
+/// Executes the wrapped CJS body in a throwaway, sandboxed V8 context
 /// and asks the real engine for `Object.keys(module.exports)` afterward,
 /// rather than relying purely on static text scanning. This is what actually
 /// catches the extremely common tsc/Babel "barrel" re-export pattern —
@@ -1482,12 +1482,12 @@ fn resolve_cjs_export_names(
 /// losing every export name.
 /// Process-lifetime cache for `discover_cjs_export_names_dynamic`, keyed by
 /// file path and invalidated by mtime. Every request for a `node_modules`
-/// CJS dep otherwise re-runs the *entire* recursive QuickJS discovery tree
+/// CJS dep otherwise re-runs the *entire* recursive V8 discovery tree
 /// from scratch — for a `react-router-dom`-shaped barrel that's dozens of
 /// nested `require()` targets, each spinning up its own sandboxed
-/// `rquickjs::Runtime`, on every single page load/reload. This is checked at
+/// `vvva_js::JsEngine`, on every single page load/reload. This is checked at
 /// every recursion depth (not just the outermost per-request call), so a
-/// shared sub-dependency ("react") pays the QuickJS cost once total, not once
+/// shared sub-dependency ("react") pays the V8 cost once total, not once
 /// per file that requires it.
 ///
 /// ponytail: correctness relies on the discovered names for a given file's
@@ -1587,10 +1587,26 @@ fn discover_cjs_export_names_dynamic(
         }
     }
 
-    let runtime = rquickjs::Runtime::new().ok()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    runtime.set_interrupt_handler(Some(Box::new(move || std::time::Instant::now() > deadline)));
-    let context = rquickjs::Context::full(&runtime).ok()?;
+    vvva_js::ensure_v8_initialized();
+    let mut isolate = v8::Isolate::new(Default::default());
+
+    // Watchdog: terminate execution if the probe script runs too long
+    // (e.g. an infinite loop in top-level module code).
+    let isolate_handle = isolate.thread_safe_handle();
+    let stop_watchdog = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_watchdog_clone = stop_watchdog.clone();
+    let timeout_thread = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if !stop_watchdog_clone.load(std::sync::atomic::Ordering::SeqCst) {
+            isolate_handle.terminate_execution();
+        }
+    });
+
+    let mut handle_scope_storage = v8::HandleScope::new(&mut *isolate);
+    let mut handle_scope =
+        unsafe { std::pin::Pin::new_unchecked(&mut handle_scope_storage) }.init();
+    let context = v8::Context::new(&handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(&mut handle_scope, context);
 
     let probe = format!(
         "(function() {{\n\
@@ -1603,9 +1619,9 @@ fn discover_cjs_export_names_dynamic(
            }}\n\
            function require(__name) {{\n\
              switch (__name) {{\n\
-         {require_stub_cases}\
-               default: return __stub();\n\
-             }}\n\
+          {require_stub_cases}\
+                default: return __stub();\n\
+              }}\n\
            }}\n\
            var process = {{ env: {{}} }};\n\
            var module = {{ exports: {{}} }};\n\
@@ -1617,22 +1633,39 @@ fn discover_cjs_export_names_dynamic(
          }})()"
     );
 
-    let result: Option<Vec<String>> = context
-        .with(|ctx| ctx.eval::<Vec<String>, _>(probe.as_str()).ok())
-        .map(|names| {
-            names
-                .into_iter()
-                .filter(|n| n != "default" && n != "__esModule" && is_valid_js_identifier(n))
-                .collect()
-        });
+    let source = v8::String::new(scope, &probe).unwrap();
+    let script = v8::Script::compile(scope, source, None)?;
+    let result = script.run(scope);
 
-    if let (Some(names), Some(mtime)) = (&result, mtime) {
+    stop_watchdog.store(true, std::sync::atomic::Ordering::SeqCst);
+    drop(timeout_thread);
+
+    let names: Option<Vec<String>> = result.and_then(|result| {
+        let array = v8::Local::<v8::Array>::try_from(result).ok()?;
+        let len = array.length();
+        let mut names = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            if let Some(name) = array.get_index(scope, i) {
+                names.push(name.to_rust_string_lossy(scope));
+            }
+        }
+        Some(names)
+    });
+
+    let filtered_names: Option<Vec<String>> = names.map(|names| {
+        names
+            .into_iter()
+            .filter(|n| n != "default" && n != "__esModule" && is_valid_js_identifier(n))
+            .collect()
+    });
+
+    if let (Some(names), Some(mtime)) = (&filtered_names, mtime) {
         if let Ok(mut cache) = CJS_DISCOVERY_CACHE.lock() {
             cache.insert(base_path, (mtime, names.clone()));
         }
     }
 
-    result
+    filtered_names
 }
 
 /// Best-effort static scan for an ESM file's named exports: `export const/let/
@@ -3697,7 +3730,7 @@ async fn main() -> anyhow::Result<()> {
                 if inspect_addr.is_some() {
                     anyhow::bail!("--prof and --inspect cannot be used together");
                 }
-                let engine =
+                let mut engine =
                     vvva_js::JsEngine::new_with_profiler(permissions.clone(), *prof_interval)
                         .await?;
                 engine.eval_file_with_args(file, script_args).await?;
@@ -3723,7 +3756,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             } else {
-                let engine = vvva_js::JsEngine::new_with_firewall_and_inspector(
+                let mut engine = vvva_js::JsEngine::new_with_firewall_and_inspector(
                     permissions.clone(),
                     firewall,
                     inspect_addr,
@@ -5570,7 +5603,7 @@ async fn permissions_learn(file: &PathBuf, script_args: &[String]) -> anyhow::Re
         file.display()
     );
 
-    let engine = vvva_js::JsEngine::new(permissions.clone()).await?;
+    let mut engine = vvva_js::JsEngine::new(permissions.clone()).await?;
 
     if !script_args.is_empty() {
         let file_arg = serde_json::to_string(file.to_str().unwrap_or(""))?;

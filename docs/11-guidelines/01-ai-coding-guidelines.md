@@ -184,7 +184,7 @@ When writing new Rust builtins that need permission checks, use the existing `Pe
 
 ```rust
 if !permissions.check(&Capability::Network(host.clone())) {
-    return Err(rquickjs::Error::new_from_js_message(
+    return Err(anyhow::anyhow!(
         "permission", "permission",
         format!("Denied. Run with --allow-net={host}"),
     ));

@@ -1,10 +1,5 @@
 //! IRC (Internet Relay Chat) client built-in module
 //!
-//! Provides: `require('irc')` with `Client` class, backed by a real TCP (or TLS)
-//! socket — connect/send/read all do genuine network I/O over the IRC line
-//! protocol (RFC 1459/2812), following the same connection-pool + non-blocking
-//! poll pattern as `tcp.rs`'s `net.Socket`.
-//!
 //! Native functions:
 //! - `__ircCreate(server, port, nick)` -> id
 //! - `__ircConnect(id, host, port, useTls)` -> throws on failure
@@ -12,12 +7,13 @@
 //! - `__ircRead(id, maxBytes)` -> Vec<u8> | throws EAGAIN | throws EOF
 //! - `__ircClose(id)`
 
+use crate::builtins::v8_compat::uint8array_from_bytes;
 use native_tls::TlsStream;
-use rquickjs::{Ctx, Function, Result, function::Rest};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex, OnceLock};
+use v8::{FunctionCallbackArguments, PinScope, ReturnValue};
 use vvva_permissions::{Capability, PermissionState};
 
 type IrcId = u32;
@@ -64,123 +60,213 @@ fn next_irc_id() -> IrcId {
     C.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-fn js_code_err(ctx: &Ctx<'_>, code: &str, msg: String) -> rquickjs::Error {
-    let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    let src = format!(
-        "(function(){{var e=new Error(\"{msg}\");e.code=\"{code}\";return e;}})()",
-        msg = escaped_msg,
-        code = code
+pub fn inject_irc(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    permissions: Arc<PermissionState>,
+) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let _perms = permissions.clone();
+    let _perms2 = permissions.clone();
+    let _perms3 = permissions.clone();
+    let _perms4 = permissions.clone();
+
+    let create_fn = v8::Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              _args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let id = next_irc_id();
+            rv.set(v8::Number::new(scope, id as f64).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ircCreate").unwrap().into(),
+        create_fn.into(),
     );
-    match ctx.eval::<rquickjs::Value<'_>, _>(src) {
-        Ok(v) => ctx.throw(v),
-        Err(e) => e,
-    }
-}
 
-pub fn inject_irc(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    let globals = ctx.globals();
+    let perms_ptr = Arc::into_raw(permissions.clone()) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, perms_ptr);
+    let connect_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let perms = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const PermissionState)
+            };
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as IrcId;
+            let host = args.get(1).to_rust_string_lossy(scope);
+            let port = args.get(2).uint32_value(scope).unwrap_or(6667) as u16;
+            let use_tls = args.get(3).boolean_value(scope);
 
-    // __ircCreate(server, port, nick) -> id
-    // The id is just a registry slot; no socket exists until __ircConnect.
-    let create_fn = Function::new(
-        ctx.clone(),
-        move |_server: String, _port: u16, _nick: String| -> IrcId { next_irc_id() },
-    )?;
-    globals.set("__ircCreate", create_fn)?;
-
-    // __ircConnect(id, host, port, useTls) -> undefined | throws
-    let perms = permissions.clone();
-    let connect_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: IrcId, host: String, port: u16, use_tls: bool| -> Result<()> {
             if !perms.check(&Capability::Network(host.clone())) {
-                return Err(js_code_err(
-                    &ctx,
-                    "EACCES",
-                    format!("Network access denied. Run with --allow-net={}", host),
-                ));
+                let msg = v8::String::new(
+                    scope,
+                    &format!("Network access denied. Run with --allow-net={}", host),
+                )
+                .unwrap();
+                let err = v8::Exception::error(scope, msg);
+                rv.set(err);
+                return;
             }
 
-            let tcp = TcpStream::connect(format!("{host}:{port}"))
-                .map_err(|e| js_code_err(&ctx, "ECONNREFUSED", e.to_string()))?;
+            match TcpStream::connect(format!("{}:{}", host, port)) {
+                Ok(tcp) => {
+                    let conn = if use_tls {
+                        match native_tls::TlsConnector::new() {
+                            Ok(connector) => {
+                                let fallback = tcp.try_clone().ok();
+                                match connector.connect(&host, tcp) {
+                                    Ok(tls) => {
+                                        if tls.get_ref().set_nonblocking(true).is_ok() {
+                                            IrcConn::Tls(tls)
+                                        } else if let Some(tcp) = fallback {
+                                            IrcConn::Plain(tcp)
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        if let Some(tcp) = fallback {
+                                            IrcConn::Plain(tcp)
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => IrcConn::Plain(tcp),
+                        }
+                    } else {
+                        let _ = tcp.set_nonblocking(true);
+                        IrcConn::Plain(tcp)
+                    };
 
-            let conn = if use_tls {
-                let connector = native_tls::TlsConnector::new()
-                    .map_err(|e| js_code_err(&ctx, "EIO", format!("TLS init failed: {e}")))?;
-                let tls = connector.connect(&host, tcp).map_err(|e| {
-                    js_code_err(&ctx, "ECONNRESET", format!("TLS handshake failed: {e}"))
-                })?;
-                tls.get_ref()
-                    .set_nonblocking(true)
-                    .map_err(|e| js_code_err(&ctx, "EIO", e.to_string()))?;
-                IrcConn::Tls(tls)
-            } else {
-                tcp.set_nonblocking(true)
-                    .map_err(|e| js_code_err(&ctx, "EIO", e.to_string()))?;
-                IrcConn::Plain(tcp)
-            };
-
-            irc_registry().lock().unwrap().insert(id, conn);
-            Ok(())
+                    irc_registry().lock().unwrap().insert(id, conn);
+                    rv.set(v8::undefined(scope).into());
+                }
+                Err(e) => {
+                    let msg = v8::String::new(scope, &format!("Connection failed: {}", e)).unwrap();
+                    let err = v8::Exception::error(scope, msg);
+                    rv.set(err);
+                }
+            }
         },
-    )?;
-    globals.set("__ircConnect", connect_fn)?;
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ircConnect").unwrap().into(),
+        connect_fn.into(),
+    );
 
-    // __ircSend(id, line) -> undefined | throws — appends the mandatory CRLF.
-    let send_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: IrcId, line: String| -> Result<()> {
+    let send_fn = v8::Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as IrcId;
+            let line = args.get(1).to_rust_string_lossy(scope);
+
             let mut reg = irc_registry().lock().unwrap();
-            let conn = reg
-                .get_mut(&id)
-                .ok_or_else(|| js_code_err(&ctx, "ENOTCONN", "not connected".to_string()))?;
-            conn.write_all(format!("{line}\r\n").as_bytes())
-                .map_err(|e| js_code_err(&ctx, "EPIPE", e.to_string()))
+            match reg.get_mut(&id) {
+                Some(conn) => match conn.write_all(format!("{}\r\n", line).as_bytes()) {
+                    Ok(_) => rv.set(v8::undefined(scope).into()),
+                    Err(e) => {
+                        let msg = v8::String::new(scope, &e.to_string()).unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                },
+                None => {
+                    let msg = v8::String::new(scope, "not connected").unwrap();
+                    let err = v8::Exception::error(scope, msg);
+                    rv.set(err);
+                }
+            }
         },
-    )?;
-    globals.set("__ircSend", send_fn)?;
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ircSend").unwrap().into(),
+        send_fn.into(),
+    );
 
-    // __ircRead(id, maxBytes) -> Vec<u8> | throws EAGAIN | throws EOF
-    let read_fn = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>, id: IrcId, max_bytes: u32| -> Result<Vec<u8>> {
-            let max = (max_bytes as usize).min(65536);
+    let read_fn = v8::Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as IrcId;
+            let max_bytes = args.get(1).uint32_value(scope).unwrap_or(65536) as usize;
+            let max = max_bytes.min(65536);
+
             let mut buf = vec![0u8; max];
             let mut reg = irc_registry().lock().unwrap();
-            let conn = reg
-                .get_mut(&id)
-                .ok_or_else(|| js_code_err(&ctx, "ENOTCONN", "not connected".to_string()))?;
-
-            match conn.read(&mut buf) {
-                Ok(0) => Err(js_code_err(&ctx, "EOF", "connection closed".into())),
-                Ok(n) => {
-                    buf.truncate(n);
-                    Ok(buf)
+            match reg.get_mut(&id) {
+                Some(conn) => match conn.read(&mut buf) {
+                    Ok(0) => {
+                        let msg = v8::String::new(scope, "connection closed").unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                    Ok(n) => {
+                        buf.truncate(n);
+                        rv.set(uint8array_from_bytes(scope, &buf).into());
+                    }
+                    Err(ref e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::TimedOut =>
+                    {
+                        let msg = v8::String::new(scope, "no data available").unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                    Err(e) => {
+                        let msg = v8::String::new(scope, &e.to_string()).unwrap();
+                        let err = v8::Exception::error(scope, msg);
+                        rv.set(err);
+                    }
+                },
+                None => {
+                    let msg = v8::String::new(scope, "not connected").unwrap();
+                    let err = v8::Exception::error(scope, msg);
+                    rv.set(err);
                 }
-                Err(ref e)
-                    if e.kind() == io::ErrorKind::WouldBlock
-                        || e.kind() == io::ErrorKind::TimedOut =>
-                {
-                    Err(js_code_err(&ctx, "EAGAIN", "no data available".into()))
-                }
-                Err(e) => Err(js_code_err(&ctx, "EIO", e.to_string())),
             }
         },
-    )?;
-    globals.set("__ircRead", read_fn)?;
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ircRead").unwrap().into(),
+        read_fn.into(),
+    );
 
-    // __ircClose(id)
-    let close_fn = Function::new(ctx.clone(), move |_args: Rest<u32>| -> bool {
-        if let Some(id) = _args.0.into_iter().next()
-            && let Some(mut conn) = irc_registry().lock().unwrap().remove(&id)
-        {
-            conn.shutdown();
-        }
-        true
-    })?;
-    globals.set("__ircClose", close_fn)?;
+    let close_fn = v8::Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as IrcId;
+            if let Some(mut conn) = irc_registry().lock().unwrap().remove(&id) {
+                conn.shutdown();
+            }
+            rv.set(v8::Boolean::new(scope, true).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__ircClose").unwrap().into(),
+        close_fn.into(),
+    );
 
-    ctx.eval::<(), _>(r#"
+    let js_code = r#"
     (function() {
         function Client(serverOrOptions, nickArg, options) {
             var opts = (serverOrOptions && typeof serverOrOptions === 'object')
@@ -252,8 +338,6 @@ pub fn inject_irc(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             self._pollTimer = setTimeout(poll, 0);
         };
 
-        // Parses one IRC protocol line per RFC 2812 §2.3.1:
-        // [':' prefix SPACE] command [params] ['SPACE ':' trailing]
         Client.prototype._handleLine = function(line) {
             this.emit('raw', line);
             var prefix = null;
@@ -398,7 +482,10 @@ pub fn inject_irc(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         globalThis.__requireCache['node:irc'] = { Client: Client };
         globalThis.irc = { Client: Client };
     })();
-    "#)?;
+    "#;
 
-    Ok(())
+    let source = v8::String::new(scope, js_code).unwrap();
+    if let Some(script) = v8::Script::compile(scope, source, None) {
+        let _ = script.run(scope);
+    }
 }

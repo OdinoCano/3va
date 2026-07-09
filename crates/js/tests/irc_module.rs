@@ -69,7 +69,7 @@ fn start_fake_ircd() -> (u16, std::thread::JoinHandle<Vec<u8>>) {
 #[tokio::test]
 async fn irc_real_connect_registers_and_pongs_over_the_wire() {
     let (port, server) = start_fake_ircd();
-    let e = engine_with_net("127.0.0.1").await;
+    let mut e = engine_with_net("127.0.0.1").await;
     e.eval(
         format!(
             r#"
@@ -143,7 +143,7 @@ async fn irc_real_connect_registers_and_pongs_over_the_wire() {
 
 #[tokio::test]
 async fn irc_global_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof irc === 'object')")
         .await
@@ -153,7 +153,7 @@ async fn irc_global_exists() {
 
 #[tokio::test]
 async fn irc_client_constructor_exists() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof irc.Client === 'function')")
         .await
@@ -163,7 +163,7 @@ async fn irc_client_constructor_exists() {
 
 #[tokio::test]
 async fn irc_client_has_expected_methods() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -189,7 +189,7 @@ async fn irc_client_has_expected_methods() {
 
 #[tokio::test]
 async fn irc_client_has_event_emitter() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -212,7 +212,7 @@ async fn irc_client_has_event_emitter() {
 
 #[tokio::test]
 async fn irc_connect_blocked_without_net_grant() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -233,7 +233,7 @@ async fn irc_connect_blocked_without_net_grant() {
 
 #[tokio::test]
 async fn irc_constructor_options() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -253,7 +253,7 @@ async fn irc_constructor_options() {
 
 #[tokio::test]
 async fn irc_events_registerable() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -279,7 +279,7 @@ async fn irc_events_registerable() {
 
 #[tokio::test]
 async fn irc_privmsg_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -302,7 +302,7 @@ async fn irc_privmsg_api() {
 
 #[tokio::test]
 async fn irc_join_part_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -327,7 +327,7 @@ async fn irc_join_part_api() {
 
 #[tokio::test]
 async fn irc_raw_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"

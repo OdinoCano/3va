@@ -22,7 +22,7 @@ async fn engine_no_net() -> JsEngine {
 
 #[tokio::test]
 async fn webrtc_globals_exist() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string("String(typeof RTCPeerConnection === 'function')")
         .await
@@ -50,7 +50,7 @@ async fn webrtc_globals_exist() {
 
 #[tokio::test]
 async fn webrtc_native_functions_exist() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let funcs = [
         "__rtcCreatePeerConnection",
         "__rtcCreateOffer",
@@ -75,7 +75,7 @@ async fn webrtc_native_functions_exist() {
 
 #[tokio::test]
 async fn rtc_peer_connection_constructor() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -92,7 +92,7 @@ async fn rtc_peer_connection_constructor() {
 
 #[tokio::test]
 async fn rtc_peer_connection_has_expected_methods() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -118,7 +118,7 @@ async fn rtc_peer_connection_has_expected_methods() {
 
 #[tokio::test]
 async fn rtc_peer_connection_has_event_handlers() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -138,7 +138,7 @@ async fn rtc_peer_connection_has_event_handlers() {
 
 #[tokio::test]
 async fn rtc_peer_connection_has_event_emitter() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -158,7 +158,7 @@ async fn rtc_peer_connection_has_event_emitter() {
 
 #[tokio::test]
 async fn rtc_session_description_constructor() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -175,7 +175,7 @@ async fn rtc_session_description_constructor() {
 
 #[tokio::test]
 async fn rtc_ice_candidate_constructor() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -199,7 +199,7 @@ async fn rtc_ice_candidate_constructor() {
 
 #[tokio::test]
 async fn rtc_data_channel_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -225,7 +225,7 @@ async fn rtc_data_channel_api() {
 
 #[tokio::test]
 async fn rtc_data_channel_has_event_emitter() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -246,7 +246,7 @@ async fn rtc_data_channel_has_event_emitter() {
 
 #[tokio::test]
 async fn rtc_peer_connection_config() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -269,7 +269,7 @@ async fn rtc_peer_connection_config() {
 
 #[tokio::test]
 async fn rtc_create_offer_returns_promise() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -287,7 +287,7 @@ async fn rtc_create_offer_returns_promise() {
 
 #[tokio::test]
 async fn rtc_create_answer_returns_promise() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -305,7 +305,7 @@ async fn rtc_create_answer_returns_promise() {
 
 #[tokio::test]
 async fn rtc_data_channel_options() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -335,7 +335,7 @@ async fn rtc_data_channel_options() {
 
 #[tokio::test]
 async fn rtc_get_connection_state() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -355,7 +355,7 @@ async fn rtc_get_connection_state() {
 
 #[tokio::test]
 async fn rtc_signaling_state() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -376,7 +376,7 @@ async fn rtc_signaling_state() {
 
 #[tokio::test]
 async fn rtc_ice_connection_state() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -396,7 +396,7 @@ async fn rtc_ice_connection_state() {
 
 #[tokio::test]
 async fn rtc_close_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -418,7 +418,7 @@ async fn rtc_close_api() {
 
 #[tokio::test]
 async fn rtc_data_channel_close_api() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"
@@ -441,7 +441,7 @@ async fn rtc_data_channel_close_api() {
 
 #[tokio::test]
 async fn webrtc_require_cache_integration() {
-    let e = engine_no_net().await;
+    let mut e = engine_no_net().await;
     let r = e
         .eval_to_string(
             r#"

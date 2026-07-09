@@ -118,7 +118,7 @@ Converts samples to inferno folded-stacks format (`outer;inner N`) then calls `i
 
 | Test | Covers |
 |------|--------|
-| `parse_quickjs_stack_basic` | Stack string parser — 3-frame stack, `<anonymous>` handling |
+| `parse_v8_stack_basic` | Stack string parser — 3-frame stack, `<anonymous>` handling |
 | `parse_location_full` | `url:line:col` parsing |
 | `parse_location_no_col` | `url:line` (no column) |
 | `to_folded_stacks_basic` | Folded stacks aggregation and count |

@@ -148,7 +148,7 @@ The config file is loaded by the CLI before flag parsing. CLI flags override con
 The following items are explicitly **out of scope** for v2.0.0:
 
 - **Multi-threaded JS execution** (shared-memory parallelism) — deferred to v3.0.0
-- **V8 / SpiderMonkey engine swap** — QuickJS remains the JS engine
+- **V8 / SpiderMonkey engine swap** — V8 remains the JS engine
 - **GUI debugger** — CDP support (v1.0.0) is the debugger surface; a GUI is a third-party concern
 - **Paid / cloud features** — 3va remains fully open source and self-hosted
 

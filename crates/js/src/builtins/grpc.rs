@@ -17,11 +17,11 @@
 //!   __grpcStreamCancel(streamId)
 //!   __grpcCloseChannel(channelId)
 
-use rquickjs::function::Async;
-use rquickjs::{Ctx, Function, Result};
+use crate::builtins::v8_compat::{uint8array_from_bytes, uint8array_to_vec};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tonic::transport::{Channel, Endpoint};
+use v8::{ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue};
 use vvva_permissions::{Capability, PermissionState};
 
 struct GrpcStream {
@@ -62,12 +62,21 @@ impl GrpcStreamState {
     }
 }
 
-fn js_err(ctx: &Ctx<'_>, msg: String) -> rquickjs::Error {
-    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    match ctx.eval::<rquickjs::Value<'_>, _>(format!("new Error(\"{}\")", escaped)) {
-        Ok(v) => ctx.throw(v),
-        Err(e) => e,
-    }
+fn js_err<'s>(
+    scope: &mut PinScope<'s, '_>,
+    code: &str,
+    msg: impl AsRef<str>,
+) -> v8::Local<'s, v8::Value> {
+    let msg = msg.as_ref();
+    let src = format!(
+        "(function(){{var e=new Error(\"{}\");e.code=\"{}\";return e;}})()",
+        msg.replace('\\', "\\\\").replace('"', "\\\""),
+        code
+    );
+    let source = v8::String::new(scope, &src).unwrap();
+    v8::Script::compile(scope, source, None)
+        .and_then(|s| s.run(scope))
+        .unwrap_or_else(|| v8::undefined(scope).into())
 }
 
 async fn create_channel_blocking(
@@ -129,318 +138,285 @@ fn parse_package_definition(proto_content: &str) -> std::result::Result<serde_js
     Ok(serde_json::Value::Object(result))
 }
 
-pub fn inject_grpc(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    let channel_pool: Arc<Mutex<HashMap<u32, Channel>>> = Arc::new(Mutex::new(HashMap::new()));
-    let next_channel_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
-    let stream_state = Arc::new(GrpcStreamState {
-        streams: Arc::new(Mutex::new(HashMap::new())),
-        next_id: Arc::new(Mutex::new(0)),
-    });
+fn set_fn(
+    scope: &mut ContextScope<HandleScope>,
+    global: v8::Local<v8::Object>,
+    name: &str,
+    f: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let func = v8::Function::new(scope, f).unwrap();
+    let key = v8::String::new(scope, name).unwrap().into();
+    global.set(scope, key, func.into());
+}
 
-    {
-        let _perms = permissions.clone();
-        ctx.globals().set(
-            "__grpcLoadProto",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>,
-                      proto_content: String,
-                      _package_name: String|
-                      -> Result<String> {
-                    parse_package_definition(&proto_content)
-                        .map(|v| v.to_string())
-                        .map_err(|e| js_err(&ctx, e.to_string()))
-                },
-            ),
-        )?;
-    }
+static GRPC_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
+fn permissions() -> &'static Arc<PermissionState> {
+    GRPC_PERMISSIONS.get().unwrap()
+}
+static GRPC_CHANNEL_POOL: std::sync::OnceLock<Arc<Mutex<HashMap<u32, Channel>>>> =
+    std::sync::OnceLock::new();
+fn channel_pool() -> &'static Arc<Mutex<HashMap<u32, Channel>>> {
+    GRPC_CHANNEL_POOL.get().unwrap()
+}
+static GRPC_NEXT_CHANNEL_ID: std::sync::OnceLock<Arc<Mutex<u32>>> = std::sync::OnceLock::new();
+fn next_channel_id() -> &'static Arc<Mutex<u32>> {
+    GRPC_NEXT_CHANNEL_ID.get().unwrap()
+}
+static GRPC_STREAM_STATE: std::sync::OnceLock<Arc<GrpcStreamState>> = std::sync::OnceLock::new();
+fn stream_state() -> &'static Arc<GrpcStreamState> {
+    GRPC_STREAM_STATE.get().unwrap()
+}
 
-    {
-        let perms = permissions.clone();
-        let pool = channel_pool.clone();
-        let nid = next_channel_id.clone();
-        ctx.globals().set(
-            "__grpcCreateChannel",
-            Function::new(
-                ctx.clone(),
-                Async(
-                    move |_ctx: Ctx<'_>, host: String, port: u16, use_tls: bool| {
-                        let perms = perms.clone();
-                        let pool = pool.clone();
-                        let nid = nid.clone();
-                        async move {
-                            if !perms.check(&Capability::Network(host.clone())) {
-                                return Err(rquickjs::Error::new_from_js_message(
-                                    "EACCES",
-                                    "EACCES",
-                                    format!("Network access denied. Run with --allow-net={}", host),
-                                ));
-                            }
+pub fn inject_grpc(
+    scope: &mut ContextScope<HandleScope>,
+    permissions_param: Arc<PermissionState>,
+) -> anyhow::Result<()> {
+    GRPC_PERMISSIONS.set(permissions_param).ok();
+    GRPC_CHANNEL_POOL
+        .set(Arc::new(Mutex::new(HashMap::new())))
+        .ok();
+    GRPC_NEXT_CHANNEL_ID.set(Arc::new(Mutex::new(0))).ok();
+    GRPC_STREAM_STATE
+        .set(Arc::new(GrpcStreamState {
+            streams: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(Mutex::new(0)),
+        }))
+        .ok();
 
-                            let channel = create_channel_blocking(host, port, use_tls)
-                                .await
-                                .map_err(|e| {
-                                    rquickjs::Error::new_from_js_message(
-                                        "ECONNREFUSED",
-                                        "ECONNREFUSED",
-                                        e,
-                                    )
-                                })?;
+    let context = scope.get_current_context();
+    let global = context.global(scope);
 
-                            let id = {
-                                let mut n = nid.lock().unwrap();
-                                let id = *n;
-                                *n = n.wrapping_add(1);
-                                id
-                            };
-                            pool.lock().unwrap().insert(id, channel);
-                            Ok::<u32, rquickjs::Error>(id)
-                        }
-                    },
-                ),
-            ),
-        )?;
-    }
+    set_fn(
+        scope,
+        global,
+        "__grpcLoadProto",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let proto_content = args.get(0).to_rust_string_lossy(scope);
+            match parse_package_definition(&proto_content) {
+                Ok(v) => rv.set(v8::String::new(scope, &v.to_string()).unwrap().into()),
+                Err(e) => rv.set(js_err(scope, "EPARSE", e)),
+            }
+        },
+    );
 
-    {
-        let pool = channel_pool.clone();
-        ctx.globals().set(
-            "__grpcMakeUnaryCall",
-            Function::new(
-                ctx.clone(),
-                Async(
-                    move |_ctx: Ctx<'_>,
-                          channel_id: u32,
-                          _service: String,
-                          _method: String,
-                          request_bytes: Vec<u8>| {
-                        let pool = pool.clone();
-                        async move {
-                            let has_channel = {
-                                let guard = pool.lock().unwrap();
-                                guard.contains_key(&channel_id)
-                            };
-                            if !has_channel {
-                                return Err(rquickjs::Error::new_from_js_message(
-                                    "ENOENT",
-                                    "ENOENT",
-                                    "unknown channel",
-                                ));
-                            }
+    set_fn(
+        scope,
+        global,
+        "__grpcCreateChannel",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let host = args.get(0).to_rust_string_lossy(scope);
+            let port = args.get(1).uint32_value(scope).unwrap_or(0) as u16;
+            let use_tls = args.get(2).boolean_value(scope);
 
-                            Ok::<Vec<u8>, rquickjs::Error>(request_bytes)
-                        }
-                    },
-                ),
-            ),
-        )?;
-    }
+            if !permissions().check(&Capability::Network(host.clone())) {
+                let err = js_err(
+                    scope,
+                    "EACCES",
+                    format!("Network access denied. Run with --allow-net={}", host),
+                );
+                rv.set(err);
+                return;
+            }
 
-    {
-        let pool = channel_pool.clone();
-        let stream_state = stream_state.clone();
-        ctx.globals().set(
-            "__grpcCreateServerStream",
-            Function::new(
-                ctx.clone(),
-                Async(
-                    move |_ctx: Ctx<'_>,
-                          channel_id: u32,
-                          _service: String,
-                          _method: String,
-                          _request_bytes: Vec<u8>| {
-                        let pool = pool.clone();
-                        let stream_state = stream_state.clone();
-                        async move {
-                            let has_channel = {
-                                let guard = pool.lock().unwrap();
-                                guard.contains_key(&channel_id)
-                            };
-                            if !has_channel {
-                                return Err(rquickjs::Error::new_from_js_message(
-                                    "ENOENT",
-                                    "ENOENT",
-                                    "unknown channel",
-                                ));
-                            }
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(create_channel_blocking(host, port, use_tls))
+            });
 
-                            let (tx, rx) = tokio::sync::mpsc::channel(100);
-                            let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+            match result {
+                Ok(channel) => {
+                    let id = {
+                        let mut n = next_channel_id().lock().unwrap();
+                        let id = *n;
+                        *n = n.wrapping_add(1);
+                        id
+                    };
+                    channel_pool().lock().unwrap().insert(id, channel);
+                    rv.set(v8::Integer::new_from_unsigned(scope, id).into());
+                }
+                Err(e) => {
+                    let err = js_err(scope, "ECONNREFUSED", e);
+                    rv.set(err);
+                }
+            }
+        },
+    );
 
-                            let grpc_stream = GrpcStream {
-                                tx,
-                                rx: Arc::new(tokio::sync::Mutex::new(rx)),
-                                cancel_tx,
-                            };
+    set_fn(
+        scope,
+        global,
+        "__grpcMakeUnaryCall",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let channel_id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let request_bytes = v8::Local::<v8::Uint8Array>::try_from(args.get(3))
+                .map(|arr| uint8array_to_vec(scope, arr))
+                .unwrap_or_default();
 
-                            let stream_id = stream_state.insert(grpc_stream);
-                            Ok::<u32, rquickjs::Error>(stream_id)
-                        }
-                    },
-                ),
-            ),
-        )?;
-    }
+            let has_channel = channel_pool().lock().unwrap().contains_key(&channel_id);
+            if !has_channel {
+                let err = js_err(scope, "ENOENT", "unknown channel");
+                rv.set(err);
+                return;
+            }
 
-    {
-        let pool = channel_pool.clone();
-        let stream_state = stream_state.clone();
-        ctx.globals().set(
-            "__grpcCreateClientStream",
-            Function::new(
-                ctx.clone(),
-                Async(
-                    move |_ctx: Ctx<'_>, channel_id: u32, _service: String, _method: String| {
-                        let pool = pool.clone();
-                        let stream_state = stream_state.clone();
-                        async move {
-                            let has_channel = {
-                                let guard = pool.lock().unwrap();
-                                guard.contains_key(&channel_id)
-                            };
-                            if !has_channel {
-                                return Err(rquickjs::Error::new_from_js_message(
-                                    "ENOENT",
-                                    "ENOENT",
-                                    "unknown channel",
-                                ));
-                            }
+            rv.set(uint8array_from_bytes(scope, &request_bytes).into());
+        },
+    );
 
-                            let (tx, rx) = tokio::sync::mpsc::channel(100);
-                            let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+    set_fn(
+        scope,
+        global,
+        "__grpcCreateServerStream",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let channel_id = args.get(0).uint32_value(scope).unwrap_or(0);
 
-                            let grpc_stream = GrpcStream {
-                                tx,
-                                rx: Arc::new(tokio::sync::Mutex::new(rx)),
-                                cancel_tx,
-                            };
+            let has_channel = channel_pool().lock().unwrap().contains_key(&channel_id);
+            if !has_channel {
+                let err = js_err(scope, "ENOENT", "unknown channel");
+                rv.set(err);
+                return;
+            }
 
-                            let stream_id = stream_state.insert(grpc_stream);
-                            Ok::<u32, rquickjs::Error>(stream_id)
-                        }
-                    },
-                ),
-            ),
-        )?;
-    }
+            let (tx, rx) = tokio::sync::mpsc::channel(100);
+            let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+            let grpc_stream = GrpcStream {
+                tx,
+                rx: Arc::new(tokio::sync::Mutex::new(rx)),
+                cancel_tx,
+            };
+            let stream_id = stream_state().insert(grpc_stream);
+            rv.set(v8::Integer::new_from_unsigned(scope, stream_id).into());
+        },
+    );
 
-    {
-        let stream_state = stream_state.clone();
-        ctx.globals().set(
-            "__grpcStreamWrite",
-            Function::new(
-                ctx.clone(),
-                Async(move |_ctx: Ctx<'_>, stream_id: u32, data_bytes: Vec<u8>| {
-                    let stream_state = stream_state.clone();
-                    async move {
-                        let tx = {
-                            let guard = stream_state.streams.lock().unwrap();
-                            guard.get(&stream_id).map(|s| s.tx.clone())
-                        };
-                        let tx = tx.ok_or_else(|| {
-                            rquickjs::Error::new_from_js_message(
-                                "ENOENT",
-                                "ENOENT",
-                                "unknown stream",
-                            )
-                        })?;
+    set_fn(
+        scope,
+        global,
+        "__grpcCreateClientStream",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let channel_id = args.get(0).uint32_value(scope).unwrap_or(0);
 
-                        tx.send(data_bytes).await.map_err(|e| {
-                            rquickjs::Error::new_from_js_message("EIO", "EIO", e.to_string())
-                        })?;
+            let has_channel = channel_pool().lock().unwrap().contains_key(&channel_id);
+            if !has_channel {
+                let err = js_err(scope, "ENOENT", "unknown channel");
+                rv.set(err);
+                return;
+            }
 
-                        Ok::<(), rquickjs::Error>(())
-                    }
-                }),
-            ),
-        )?;
-    }
+            let (tx, rx) = tokio::sync::mpsc::channel(100);
+            let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+            let grpc_stream = GrpcStream {
+                tx,
+                rx: Arc::new(tokio::sync::Mutex::new(rx)),
+                cancel_tx,
+            };
+            let stream_id = stream_state().insert(grpc_stream);
+            rv.set(v8::Integer::new_from_unsigned(scope, stream_id).into());
+        },
+    );
 
-    {
-        let stream_state = stream_state.clone();
-        ctx.globals().set(
-            "__grpcStreamFinish",
-            Function::new(
-                ctx.clone(),
-                Async(move |_ctx: Ctx<'_>, stream_id: u32| {
-                    let stream_state = stream_state.clone();
-                    async move {
-                        let stream = stream_state.remove(stream_id);
-                        if stream.is_none() {
-                            return Err(rquickjs::Error::new_from_js_message(
-                                "ENOENT",
-                                "ENOENT",
-                                "unknown stream",
-                            ));
-                        }
+    set_fn(
+        scope,
+        global,
+        "__grpcStreamWrite",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let stream_id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let data_bytes = v8::Local::<v8::Uint8Array>::try_from(args.get(1))
+                .map(|arr| uint8array_to_vec(scope, arr))
+                .unwrap_or_default();
 
-                        Ok::<(), rquickjs::Error>(())
-                    }
-                }),
-            ),
-        )?;
-    }
+            let tx = {
+                let guard = stream_state().streams.lock().unwrap();
+                guard.get(&stream_id).map(|s| s.tx.clone())
+            };
+            let tx = match tx {
+                Some(tx) => tx,
+                None => {
+                    let err = js_err(scope, "ENOENT", "unknown stream");
+                    rv.set(err);
+                    return;
+                }
+            };
 
-    {
-        let stream_state = stream_state.clone();
-        ctx.globals().set(
-            "__grpcStreamRead",
-            Function::new(
-                ctx.clone(),
-                Async(move |_ctx: Ctx<'_>, stream_id: u32| {
-                    let stream_state = stream_state.clone();
-                    async move {
-                        let rx = stream_state.get(stream_id);
-                        let rx = rx.ok_or_else(|| {
-                            rquickjs::Error::new_from_js_message(
-                                "ENOENT",
-                                "ENOENT",
-                                "unknown stream",
-                            )
-                        })?;
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(tx.send(data_bytes))
+            });
+            if let Err(e) = result {
+                let err = js_err(scope, "EIO", e.to_string());
+                rv.set(err);
+            } else {
+                rv.set(v8::undefined(scope).into());
+            }
+        },
+    );
 
-                        #[allow(clippy::await_holding_lock)]
-                        let data = rx.lock().await.recv().await;
+    set_fn(
+        scope,
+        global,
+        "__grpcStreamFinish",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let stream_id = args.get(0).uint32_value(scope).unwrap_or(0);
+            if stream_state().remove(stream_id).is_none() {
+                let err = js_err(scope, "ENOENT", "unknown stream");
+                rv.set(err);
+                return;
+            }
+            rv.set(v8::undefined(scope).into());
+        },
+    );
 
-                        match data {
-                            Some(data) => Ok::<Vec<u8>, rquickjs::Error>(data),
-                            None => Ok(Vec::new()),
-                        }
-                    }
-                }),
-            ),
-        )?;
-    }
+    set_fn(
+        scope,
+        global,
+        "__grpcStreamRead",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let stream_id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let rx = stream_state().get(stream_id);
+            let rx = match rx {
+                Some(rx) => rx,
+                None => {
+                    let err = js_err(scope, "ENOENT", "unknown stream");
+                    rv.set(err);
+                    return;
+                }
+            };
 
-    {
-        let stream_state = stream_state.clone();
-        ctx.globals().set(
-            "__grpcStreamCancel",
-            Function::new(
-                ctx.clone(),
-                move |_ctx: Ctx<'_>, stream_id: u32| -> Result<()> {
-                    if let Some(stream) = stream_state.remove(stream_id) {
-                        let _ = stream.cancel_tx.send(());
-                    }
-                    Ok(())
-                },
-            ),
-        )?;
-    }
+            let data = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    #[allow(clippy::await_holding_lock)]
+                    let mut guard = rx.lock().await;
+                    guard.recv().await
+                })
+            });
 
-    {
-        let pool = channel_pool.clone();
-        ctx.globals().set(
-            "__grpcCloseChannel",
-            Function::new(
-                ctx.clone(),
-                move |_ctx: Ctx<'_>, channel_id: u32| -> Result<()> {
-                    pool.lock().unwrap().remove(&channel_id);
-                    Ok(())
-                },
-            ),
-        )?;
-    }
+            match data {
+                Some(data) => rv.set(uint8array_from_bytes(scope, &data).into()),
+                None => rv.set(uint8array_from_bytes(scope, &[]).into()),
+            }
+        },
+    );
+
+    set_fn(
+        scope,
+        global,
+        "__grpcStreamCancel",
+        move |_scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let stream_id = args.get(0).uint32_value(_scope).unwrap_or(0);
+            if let Some(stream) = stream_state().remove(stream_id) {
+                let _ = stream.cancel_tx.send(());
+            }
+        },
+    );
+
+    set_fn(
+        scope,
+        global,
+        "__grpcCloseChannel",
+        move |_scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let channel_id = args.get(0).uint32_value(_scope).unwrap_or(0);
+            channel_pool().lock().unwrap().remove(&channel_id);
+        },
+    );
 
     Ok(())
 }

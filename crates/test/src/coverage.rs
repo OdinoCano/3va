@@ -493,7 +493,7 @@ mod tests {
 
     async fn run_and_collect(source: &str, file_id: &str) -> CoverageResult {
         let (instrumented, stmts) = instrument_source(source, file_id);
-        let engine = bare_engine().await;
+        let mut engine = bare_engine().await;
         engine
             .eval(&instrumented)
             .await

@@ -208,14 +208,14 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   from sub-modules via a runtime `__exportStar(require("./x"), exports)` copy loop (`for...in`
   over the required module) rather than a literal `exports.NAME = ` line anywhere in the source —
   invisible to any static text scan. Replaced with `discover_cjs_export_names_dynamic`: the
-  wrapped CJS body is actually executed in a throwaway, sandboxed `rquickjs::Context::full`
+  wrapped CJS body is actually executed in a throwaway, sandboxed V8 context
   (2-second interrupt-bounded), with each `require()` target *recursively* resolved and
   discovered first (ESM deps via the new `find_esm_export_names`, CJS deps via this same function
   one level deeper, capped at 4 levels with a visited-set cycle guard) so the stub `require()`
   returns a real, correctly-keyed object for `__exportStar`'s loop to actually copy from — not a
   content-free placeholder. `resolve_cjs_export_names` unions this dynamic result with the
   original static scan (`find_cjs_export_names`) as a fallback for when execution fails outright
-  (parse error, timeout, depth exhausted). `rquickjs` is now a direct dependency of `vvva_cli`
+  (parse error, timeout, depth exhausted). V8 engine is used for this discovery.
   (`crates/cli/Cargo.toml`) for this. (`crates/cli/src/main.rs`)
 
   **Second follow-up correction:** still failed against a *real* `react-router-dom@6.30.4`
@@ -298,13 +298,13 @@ dev-server/resolution behavior against `3va dev`:
   gets the raw file, unchanged. (`crates/cli/src/main.rs`)
 
 - **CJS export discovery is now cached** — every request for a `node_modules` CJS dependency
-  previously re-ran the *entire* recursive QuickJS discovery tree (`discover_cjs_export_names_dynamic`)
+  previously re-ran the *entire* recursive JS engine discovery tree (`discover_cjs_export_names_dynamic`)
   from scratch, including every nested `require()` target, on every single page load or HMR
   reload; Vite avoids the equivalent redundant work via its on-disk `optimizeDeps` pre-bundle
   cache. Added `CJS_DISCOVERY_CACHE`, a process-lifetime `HashMap<PathBuf, (SystemTime, Vec<String>)>`
   behind a `LazyLock<Mutex<_>>` (stdlib only, no new dependency), checked at every recursion depth
   — not just the outermost per-request call — so a shared sub-dependency like `react`, required by
-  many files, pays the QuickJS execution cost once total rather than once per requiring file.
+  many files, pays the JS engine execution cost once total rather than once per requiring file.
   Invalidated by mtime, so editing a `node_modules` file during a session is picked up on the next
   request. (`crates/cli/src/main.rs`)
 
@@ -326,7 +326,7 @@ dev-server/resolution behavior against `3va dev`:
   package.json `scripts.<name>` matched — a real philosophy violation, not just a missing feature.
   The delegated process is a full external binary (the real package manager, running arbitrary
   shell) completely outside `vvva_permissions`' capability model, which only governs JS executed
-  *inside* 3va's own QuickJS engine — there is no `--allow-*` flag that could meaningfully restrict
+  *inside* 3va's own V8 engine — there is no `--allow-*` flag that could meaningfully restrict
   what an already-compiled `vite`/`webpack`/etc. binary does, and auto-running arbitrary shell
   commands the moment someone types `3va <name>` is exactly the class of thing `3va install`
   already refuses to do for postinstall scripts ("There are no exceptions"). Gated behind the same
@@ -409,7 +409,7 @@ dev-server/resolution behavior against `3va dev`:
 
 - **`--heap-snapshot[=<path>]`** — New CLI flag on `3va run`. Writes a Chrome DevTools Memory
   panel-compatible `.heapsnapshot` JSON file after script execution. Default path:
-  `heap-<timestamp>.heapsnapshot`. Uses QuickJS memory APIs and global object enumeration.
+  `heap-<timestamp>.heapsnapshot`. Uses V8 heap snapshot API and global object enumeration.
   (`crates/js/src/lib.rs`, `crates/cli/src/main.rs`)
 
 - **SLSA Level 2 provenance** — Release workflow (`release.yml`) now generates cryptographically
@@ -519,7 +519,7 @@ dev-server/resolution behavior against `3va dev`:
 
 - **`3va.config.ts` / `.js` / `.json` project config** — new `vvva_config` crate loads a config file by walking up from the project root. All CLI commands pick up defaults from the config; CLI flags always override. Config-file `.ts`/`.js` object literals are parsed without JS execution (sandboxed static analysis). `3VA_<SECTION>_<KEY>` environment variables override config-file values. New `3va config [key] [--check]` subcommand shows the resolved config.
 
-- **Real `worker_threads` (OS-thread isolation)** — `new Worker(file, { workerData })` now spawns an OS thread with its own `JsEngine` instance and Tokio runtime. Message passing uses `std::sync::mpsc` channels bridged via `__workerCreate` / `__workerSend` / `__workerRecv` / `__workerTerminate` native functions. `parentPort.postMessage` inside workers pushes to the main thread's poll queue. `SharedArrayBuffer`/`Atomics` are a declared non-goal (incompatible with per-thread QuickJS isolation).
+- **Real `worker_threads` (OS-thread isolation)** — `new Worker(file, { workerData })` now spawns an OS thread with its own `JsEngine` instance and Tokio runtime. Message passing uses `std::sync::mpsc` channels bridged via `__workerCreate` / `__workerSend` / `__workerRecv` / `__workerTerminate` native functions. `parentPort.postMessage` inside workers pushes to the main thread's poll queue. `SharedArrayBuffer`/`Atomics` are a declared non-goal (incompatible with per-thread V8 isolate isolation).
 
 - **`dgram` UDP sockets** — `require('dgram').createSocket('udp4'|'udp6')` returns a real UDP socket backed by `std::net::UdpSocket`. Full `bind`, `send`, `close`, `address` API. Incoming datagrams are received on a background thread and polled from JS via `setInterval`. Requires `--allow-net`.
 
@@ -578,7 +578,7 @@ dev-server/resolution behavior against `3va dev`:
 
 ### Changed
 
-- `rquickjs-core 0.6.2` vendored at `vendor/rquickjs-core/` with a one-line fix for the `never type fallback` future-incompatibility lint (Rust Edition 2024).
+- `rquickjs-core 0.6.2` vendored at `vendor/rquickjs-core/` — **Nota**: el proyecto ahora usa V8.
 - All crate versions bumped to `1.0.0`.
 
 ### Added
@@ -863,7 +863,7 @@ dev-server/resolution behavior against `3va dev`:
   `DataCloneError` for non-serializable values (functions, circular refs), matching browser
   behaviour. (`modules.rs`)
 
-- **`navigator` global** — read-only object with `userAgent` (`'3va/0.1 (QuickJS)'`), `language`,
+- **`navigator` global** — read-only object with `userAgent` (`'3va/0.1 (V8)'`), `language`,
   `languages`, `onLine`, `hardwareConcurrency`, `platform`, `cookieEnabled`, `doNotTrack`.
   Required by many edge/worker detection checks. (`modules.rs`)
 
@@ -1119,7 +1119,7 @@ dev-server/resolution behavior against `3va dev`:
 - Interactive permission prompt enabled by default in `run`.
 
 #### JavaScript Engine (`crates/js`)
-- QuickJS integration via `rquickjs`.
+- V8 integration via `v8` crate.
 - Automatic TypeScript transpilation when executing `.ts`.
 - CommonJS-compatible module system.
 - Global APIs: `console`, `fetch`, `fs` (restricted by permissions), timers.

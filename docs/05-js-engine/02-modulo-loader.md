@@ -17,7 +17,7 @@ Detection is automatic: if the file contains static `import` or `export` stateme
 
 ### 2.2.1 Implementation
 
-ESM support is implemented via two structs in `crates/js/src/esm.rs` that implement the `Resolver` and `Loader` traits from `rquickjs`:
+ESM support is implemented via two structs in `crates/js/src/esm.rs` that implement the `Resolver` and `Loader` traits for V8:
 
 ```rust
 // Resolves the module name to an absolute canonical path
@@ -54,7 +54,7 @@ resolve("./utils", "/app/src/index.ts")
 1. Check `Capability::FileRead(path)` in `PermissionState`. If denied → permission error.
 2. Read the file with `fs::read_to_string`.
 3. If the extension is `.ts` or `.tsx`: transpile with the built-in TypeScript transpiler.
-4. Deliver the source to QuickJS via `Module::declare(ctx, name, source)`.
+4. Deliver the source to V8 via the module evaluation API.
 
 ### 2.2.4 Supported Syntax
 

@@ -4,15 +4,6 @@
 //! `russh` (client protocol, password auth, exec channels) and `russh-sftp`
 //! (SFTP subsystem: readdir/open/mkdir/rmdir/unlink/rename/stat/read/write).
 //!
-//! All async natives below always *resolve* (never reject) with a JSON
-//! envelope `{"ok":true,"data":...}` / `{"ok":false,"code":"...","message":"..."}`.
-//! This sidesteps constructing real `Error` objects (with `.code`) from a
-//! Rust async block driven off the JS thread — `Ctx` can't safely call back
-//! into the JS engine from an arbitrary await-resumption point, matching the
-//! same constraint `tcp.rs`'s `__netAcceptAsync` and `dns`'s `__dnsQuery`
-//! already work around. The JS glue below parses the envelope and builds a
-//! proper `new Error()` with `.code` on the JS thread, where it's safe to do so.
-//!
 //! Native functions:
 //! - `__sshCreate()` -> id
 //! - `__sshConnect(id, host, port, username, password)` -> Promise<envelope>
@@ -26,8 +17,6 @@
 //! - `__sftpStat(id, path)` -> Promise<envelope {size, mtime, mode}>
 //! - `__sshClose(id)`
 
-use rquickjs::function::Async;
-use rquickjs::{Ctx, Function, Result};
 use russh::ChannelMsg;
 use russh::client::{self, Handle};
 use russh_sftp::client::SftpSession;
@@ -42,10 +31,6 @@ type SftpId = u32;
 struct SshHandler;
 impl client::Handler for SshHandler {
     type Error = russh::Error;
-    // Accepts any server key (StrictHostKeyChecking=no equivalent). The
-    // library default is to reject every key, so this MUST be overridden or
-    // every connection fails during key exchange.
-    // TODO: verify against a known fingerprint instead of trusting blindly.
     async fn check_server_key(
         &mut self,
         _key: &russh::keys::PublicKey,
@@ -83,10 +68,6 @@ fn next_sftp_id() -> SftpId {
     C.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Clones the connection out from under the registry lock so the guard is
-/// never held across an `.await` (holding a `std::sync::Mutex` guard across
-/// an await point can stall or deadlock the whole tokio worker if another
-/// task needs the same lock while this one's I/O is in flight).
 fn get_ssh(id: SshId) -> Option<Arc<SshConn>> {
     ssh_registry().lock().unwrap().get(&id).cloned()
 }
@@ -103,23 +84,54 @@ fn err_envelope(code: &str, message: impl std::fmt::Display) -> String {
     json!({"ok": false, "code": code, "message": message.to_string()}).to_string()
 }
 
-pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
-    let globals = ctx.globals();
+static INJECT_SSH_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> =
+    std::sync::OnceLock::new();
+fn permissions() -> &'static Arc<PermissionState> {
+    INJECT_SSH_PERMISSIONS.get().unwrap()
+}
 
-    let create_fn = Function::new(ctx.clone(), move || -> SshId { next_ssh_id() })?;
-    globals.set("__sshCreate", create_fn)?;
+pub fn inject_ssh(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    permissions_param: Arc<PermissionState>,
+) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    INJECT_SSH_PERMISSIONS.set(permissions_param).ok();
 
-    let perms = permissions.clone();
-    let connect_fn = Function::new(
-        ctx.clone(),
-        Async(
-            move |id: SshId, host: String, port: u16, username: String, password: String| {
-                let perms = perms.clone();
-                async move {
-                    if !perms.check(&Capability::Network(host.clone())) {
-                        return Ok::<String, rquickjs::Error>(err_envelope(
+    let create_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              _args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = next_ssh_id();
+            rv.set(v8::Number::new(_scope, id as f64).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sshCreate").unwrap().into(),
+        create_fn.into(),
+    );
+
+    let connect_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SshId;
+            let host = args.get(1).to_rust_string_lossy(_scope);
+            let port = args.get(2).uint32_value(_scope).unwrap_or(22) as u16;
+            let username = args.get(3).to_rust_string_lossy(_scope);
+            let password = args.get(4).to_rust_string_lossy(_scope);
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async {
+                    if !permissions().check(&Capability::Network(host.clone())) {
+                        return Err(err_envelope(
                             "EACCES",
-                            format!("Network access denied. Run with --allow-net={host}"),
+                            format!("Network access denied. Run with --allow-net={}", host),
                         ));
                     }
 
@@ -127,7 +139,7 @@ pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                     let mut handle =
                         match client::connect(config, (&host[..], port), SshHandler).await {
                             Ok(h) => h,
-                            Err(e) => return Ok(err_envelope("ECONNREFUSED", e)),
+                            Err(e) => return Err(err_envelope("ECONNREFUSED", e)),
                         };
 
                     match handle.authenticate_password(&username, &password).await {
@@ -141,302 +153,492 @@ pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
                         Ok(_) => Ok(err_envelope("EAUTH", "authentication failed")),
                         Err(e) => Ok(err_envelope("EAUTH", e)),
                     }
+                });
+
+                if let Err(e) = result {
+                    eprintln!("SSH connect error: {}", e);
                 }
-            },
-        ),
-    )?;
-    globals.set("__sshConnect", connect_fn)?;
+            });
 
-    let exec_fn = Function::new(
-        ctx.clone(),
-        Async(move |id: SshId, command: String| async move {
-            let conn = match get_ssh(id) {
-                Some(c) => c,
-                None => {
-                    return Ok::<String, rquickjs::Error>(err_envelope(
-                        "ENOTCONN",
-                        "Invalid SSH ID",
-                    ));
-                }
-            };
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sshConnect").unwrap().into(),
+        connect_fn.into(),
+    );
 
-            let mut channel = match conn.handle.channel_open_session().await {
-                Ok(ch) => ch,
-                Err(e) => {
-                    return Ok(err_envelope(
-                        "EIO",
-                        format!("channel_open_session failed: {e}"),
-                    ));
-                }
-            };
+    let exec_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SshId;
+            let command = args.get(1).to_rust_string_lossy(_scope);
 
-            if let Err(e) = channel.exec(true, command.as_bytes()).await {
-                return Ok(err_envelope("EIO", format!("exec failed: {e}")));
-            }
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let conn = match get_ssh(id) {
+                        Some(c) => c,
+                        None => return Err(err_envelope("ENOTCONN", "Invalid SSH ID")),
+                    };
 
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let mut code = None;
-            loop {
-                match channel.wait().await {
-                    Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
-                    Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
-                        stderr.extend_from_slice(&data)
+                    let mut channel = match conn.handle.channel_open_session().await {
+                        Ok(ch) => ch,
+                        Err(e) => {
+                            return Err(err_envelope(
+                                "EIO",
+                                format!("channel_open_session failed: {}", e),
+                            ));
+                        }
+                    };
+
+                    if let Err(e) = channel.exec(true, command.as_bytes()).await {
+                        return Err(err_envelope("EIO", format!("exec failed: {}", e)));
                     }
-                    Some(ChannelMsg::ExitStatus { exit_status }) => code = Some(exit_status),
-                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
-                    _ => {}
+
+                    let mut stdout = Vec::new();
+                    let mut stderr = Vec::new();
+                    let mut code = None;
+                    loop {
+                        match channel.wait().await {
+                            Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
+                            Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
+                                stderr.extend_from_slice(&data)
+                            }
+                            Some(ChannelMsg::ExitStatus { exit_status }) => {
+                                code = Some(exit_status)
+                            }
+                            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                            _ => {}
+                        }
+                    }
+
+                    Ok(ok_envelope(json!({
+                        "stdout": String::from_utf8_lossy(&stdout),
+                        "stderr": String::from_utf8_lossy(&stderr),
+                        "code": code.unwrap_or(0),
+                    })))
+                });
+
+                if let Err(e) = result {
+                    eprintln!("SSH exec error: {}", e);
                 }
-            }
+            });
 
-            Ok(ok_envelope(json!({
-                "stdout": String::from_utf8_lossy(&stdout),
-                "stderr": String::from_utf8_lossy(&stderr),
-                "code": code.unwrap_or(0),
-            })))
-        }),
-    )?;
-    globals.set("__sshExec", exec_fn)?;
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sshExec").unwrap().into(),
+        exec_fn.into(),
+    );
 
-    let sftp_fn = Function::new(
-        ctx.clone(),
-        Async(move |id: SshId| async move {
-            let conn = match get_ssh(id) {
-                Some(c) => c,
-                None => {
-                    return Ok::<String, rquickjs::Error>(err_envelope(
-                        "ENOTCONN",
-                        "Invalid SSH ID",
-                    ));
-                }
-            };
+    let sftp_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SshId;
 
-            let channel = match conn.handle.channel_open_session().await {
-                Ok(ch) => ch,
-                Err(e) => {
-                    return Ok(err_envelope(
-                        "EIO",
-                        format!("channel_open_session failed: {e}"),
-                    ));
-                }
-            };
-            if let Err(e) = channel.request_subsystem(true, "sftp").await {
-                return Ok(err_envelope(
-                    "EIO",
-                    format!("sftp subsystem request failed: {e}"),
-                ));
-            }
-            let sftp = match SftpSession::new(channel.into_stream()).await {
-                Ok(s) => s,
-                Err(e) => return Ok(err_envelope("EIO", format!("sftp session failed: {e}"))),
-            };
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let conn = match get_ssh(id) {
+                        Some(c) => c,
+                        None => return Err(err_envelope("ENOTCONN", "Invalid SSH ID")),
+                    };
 
-            let sftp_id = next_sftp_id();
-            sftp_registry()
-                .lock()
-                .unwrap()
-                .insert(sftp_id, Arc::new(SftpConn { sftp }));
-            Ok(ok_envelope(json!({ "sftpId": sftp_id })))
-        }),
-    )?;
-    globals.set("__sshSftp", sftp_fn)?;
-
-    let readdir_fn = Function::new(
-        ctx.clone(),
-        Async(move |id: SftpId, path: String| async move {
-            let conn = match get_sftp(id) {
-                Some(c) => c,
-                None => {
-                    return Ok::<String, rquickjs::Error>(err_envelope(
-                        "ENOTCONN",
-                        "Invalid SFTP ID",
-                    ));
-                }
-            };
-            match conn.sftp.read_dir(&path).await {
-                Ok(rd) => {
-                    let entries: Vec<serde_json::Value> = rd
-                        .map(|entry| {
-                            let meta = entry.metadata();
-                            json!({
-                                "filename": entry.file_name(),
-                                "longname": entry.file_name(),
-                                "attrs": {
-                                    "size": meta.len(),
-                                    "mtime": meta.mtime.unwrap_or(0),
-                                    "atime": meta.atime.unwrap_or(0),
-                                    "mode": meta.permissions.unwrap_or(0),
-                                }
-                            })
-                        })
-                        .collect();
-                    Ok(ok_envelope(serde_json::Value::Array(entries)))
-                }
-                Err(e) => Ok(err_envelope("EIO", format!("readdir failed: {e}"))),
-            }
-        }),
-    )?;
-    globals.set("__sftpReaddir", readdir_fn)?;
-
-    let read_file_fn = Function::new(
-        ctx.clone(),
-        Async(move |id: SftpId, path: String| async move {
-            let conn = match get_sftp(id) {
-                Some(c) => c,
-                None => {
-                    return Ok::<String, rquickjs::Error>(err_envelope(
-                        "ENOTCONN",
-                        "Invalid SFTP ID",
-                    ));
-                }
-            };
-            match conn.sftp.read(&path).await {
-                Ok(bytes) => Ok(ok_envelope(json!(bytes))),
-                Err(e) => Ok(err_envelope("EIO", format!("read failed: {e}"))),
-            }
-        }),
-    )?;
-    globals.set("__sftpReadFile", read_file_fn)?;
-
-    let write_file_fn = Function::new(
-        ctx.clone(),
-        Async(move |id: SftpId, path: String, data: Vec<u8>| async move {
-            let conn = match get_sftp(id) {
-                Some(c) => c,
-                None => {
-                    return Ok::<String, rquickjs::Error>(err_envelope(
-                        "ENOTCONN",
-                        "Invalid SFTP ID",
-                    ));
-                }
-            };
-            match conn.sftp.write(&path, &data).await {
-                Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
-                Err(e) => Ok(err_envelope("EIO", format!("write failed: {e}"))),
-            }
-        }),
-    )?;
-    globals.set("__sftpWriteFile", write_file_fn)?;
-
-    let mkdir_fn = Function::new(
-        ctx.clone(),
-        Async(move |id: SftpId, path: String| async move {
-            let conn = match get_sftp(id) {
-                Some(c) => c,
-                None => {
-                    return Ok::<String, rquickjs::Error>(err_envelope(
-                        "ENOTCONN",
-                        "Invalid SFTP ID",
-                    ));
-                }
-            };
-            match conn.sftp.create_dir(&path).await {
-                Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
-                Err(e) => Ok(err_envelope("EIO", format!("mkdir failed: {e}"))),
-            }
-        }),
-    )?;
-    globals.set("__sftpMkdir", mkdir_fn)?;
-
-    let rmdir_fn = Function::new(
-        ctx.clone(),
-        Async(move |id: SftpId, path: String| async move {
-            let conn = match get_sftp(id) {
-                Some(c) => c,
-                None => {
-                    return Ok::<String, rquickjs::Error>(err_envelope(
-                        "ENOTCONN",
-                        "Invalid SFTP ID",
-                    ));
-                }
-            };
-            match conn.sftp.remove_dir(&path).await {
-                Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
-                Err(e) => Ok(err_envelope("EIO", format!("rmdir failed: {e}"))),
-            }
-        }),
-    )?;
-    globals.set("__sftpRmdir", rmdir_fn)?;
-
-    let unlink_fn = Function::new(
-        ctx.clone(),
-        Async(move |id: SftpId, path: String| async move {
-            let conn = match get_sftp(id) {
-                Some(c) => c,
-                None => {
-                    return Ok::<String, rquickjs::Error>(err_envelope(
-                        "ENOTCONN",
-                        "Invalid SFTP ID",
-                    ));
-                }
-            };
-            match conn.sftp.remove_file(&path).await {
-                Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
-                Err(e) => Ok(err_envelope("EIO", format!("unlink failed: {e}"))),
-            }
-        }),
-    )?;
-    globals.set("__sftpUnlink", unlink_fn)?;
-
-    let rename_fn = Function::new(
-        ctx.clone(),
-        Async(
-            move |id: SftpId, old_path: String, new_path: String| async move {
-                let conn = match get_sftp(id) {
-                    Some(c) => c,
-                    None => {
-                        return Ok::<String, rquickjs::Error>(err_envelope(
-                            "ENOTCONN",
-                            "Invalid SFTP ID",
+                    let channel = match conn.handle.channel_open_session().await {
+                        Ok(ch) => ch,
+                        Err(e) => {
+                            return Err(err_envelope(
+                                "EIO",
+                                format!("channel_open_session failed: {}", e),
+                            ));
+                        }
+                    };
+                    if let Err(e) = channel.request_subsystem(true, "sftp").await {
+                        return Err(err_envelope(
+                            "EIO",
+                            format!("sftp subsystem request failed: {}", e),
                         ));
                     }
-                };
-                match conn.sftp.rename(&old_path, &new_path).await {
-                    Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
-                    Err(e) => Ok(err_envelope("EIO", format!("rename failed: {e}"))),
-                }
-            },
-        ),
-    )?;
-    globals.set("__sftpRename", rename_fn)?;
+                    let sftp = match SftpSession::new(channel.into_stream()).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return Err(err_envelope("EIO", format!("sftp session failed: {}", e)));
+                        }
+                    };
 
-    let stat_fn = Function::new(
-        ctx.clone(),
-        Async(move |id: SftpId, path: String| async move {
-            let conn = match get_sftp(id) {
-                Some(c) => c,
-                None => {
-                    return Ok::<String, rquickjs::Error>(err_envelope(
-                        "ENOTCONN",
-                        "Invalid SFTP ID",
-                    ));
+                    let sftp_id = next_sftp_id();
+                    sftp_registry()
+                        .lock()
+                        .unwrap()
+                        .insert(sftp_id, Arc::new(SftpConn { sftp }));
+                    Ok(ok_envelope(json!({ "sftpId": sftp_id })))
+                });
+
+                if let Err(e) = result {
+                    eprintln!("SSH sftp error: {}", e);
+                }
+            });
+
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sshSftp").unwrap().into(),
+        sftp_fn.into(),
+    );
+
+    let readdir_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
+            let path = args.get(1).to_rust_string_lossy(_scope);
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let conn = match get_sftp(id) {
+                        Some(c) => c,
+                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
+                    };
+                    match conn.sftp.read_dir(&path).await {
+                        Ok(rd) => {
+                            let entries: Vec<serde_json::Value> = rd
+                                .map(|entry| {
+                                    let meta = entry.metadata();
+                                    json!({
+                                        "filename": entry.file_name(),
+                                        "longname": entry.file_name(),
+                                        "attrs": {
+                                            "size": meta.len(),
+                                            "mtime": meta.mtime.unwrap_or(0),
+                                            "atime": meta.atime.unwrap_or(0),
+                                            "mode": meta.permissions.unwrap_or(0),
+                                        }
+                                    })
+                                })
+                                .collect();
+                            Ok(ok_envelope(serde_json::Value::Array(entries)))
+                        }
+                        Err(e) => Ok(err_envelope("EIO", format!("readdir failed: {}", e))),
+                    }
+                });
+
+                if let Err(e) = result {
+                    eprintln!("SFTP readdir error: {}", e);
+                }
+            });
+
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sftpReaddir").unwrap().into(),
+        readdir_fn.into(),
+    );
+
+    let read_file_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
+            let path = args.get(1).to_rust_string_lossy(_scope);
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let conn = match get_sftp(id) {
+                        Some(c) => c,
+                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
+                    };
+                    match conn.sftp.read(&path).await {
+                        Ok(bytes) => Ok(ok_envelope(json!(bytes))),
+                        Err(e) => Ok(err_envelope("EIO", format!("read failed: {}", e))),
+                    }
+                });
+
+                if let Err(e) = result {
+                    eprintln!("SFTP read file error: {}", e);
+                }
+            });
+
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sftpReadFile").unwrap().into(),
+        read_file_fn.into(),
+    );
+
+    let write_file_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
+            let path = args.get(1).to_rust_string_lossy(_scope);
+            let data = {
+                let maybe_uint8 = v8::Local::<v8::Uint8Array>::try_from(args.get(2)).ok();
+                if let Some(uint8) = maybe_uint8 {
+                    let len = uint8.byte_length();
+                    let mut data = vec![0u8; len];
+                    uint8.copy_contents(&mut data);
+                    data
+                } else {
+                    vec![]
                 }
             };
-            match conn.sftp.metadata(&path).await {
-                Ok(attrs) => Ok(ok_envelope(json!({
-                    "size": attrs.len(),
-                    "mtime": attrs.mtime.unwrap_or(0),
-                    "mode": attrs.permissions.unwrap_or(0),
-                }))),
-                Err(e) => Ok(err_envelope("EIO", format!("stat failed: {e}"))),
-            }
-        }),
-    )?;
-    globals.set("__sftpStat", stat_fn)?;
 
-    let ssh_close_fn = Function::new(ctx.clone(), move |id: SshId| -> bool {
-        ssh_registry().lock().unwrap().remove(&id);
-        true
-    })?;
-    globals.set("__sshClose", ssh_close_fn)?;
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let conn = match get_sftp(id) {
+                        Some(c) => c,
+                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
+                    };
+                    match conn.sftp.write(&path, &data).await {
+                        Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
+                        Err(e) => Ok(err_envelope("EIO", format!("write failed: {}", e))),
+                    }
+                });
 
-    ctx.eval::<(), _>(
-        r#"
+                if let Err(e) = result {
+                    eprintln!("SFTP write file error: {}", e);
+                }
+            });
+
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sftpWriteFile").unwrap().into(),
+        write_file_fn.into(),
+    );
+
+    let mkdir_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
+            let path = args.get(1).to_rust_string_lossy(_scope);
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let conn = match get_sftp(id) {
+                        Some(c) => c,
+                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
+                    };
+                    match conn.sftp.create_dir(&path).await {
+                        Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
+                        Err(e) => Ok(err_envelope("EIO", format!("mkdir failed: {}", e))),
+                    }
+                });
+
+                if let Err(e) = result {
+                    eprintln!("SFTP mkdir error: {}", e);
+                }
+            });
+
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sftpMkdir").unwrap().into(),
+        mkdir_fn.into(),
+    );
+
+    let rmdir_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
+            let path = args.get(1).to_rust_string_lossy(_scope);
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let conn = match get_sftp(id) {
+                        Some(c) => c,
+                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
+                    };
+                    match conn.sftp.remove_dir(&path).await {
+                        Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
+                        Err(e) => Ok(err_envelope("EIO", format!("rmdir failed: {}", e))),
+                    }
+                });
+
+                if let Err(e) = result {
+                    eprintln!("SFTP rmdir error: {}", e);
+                }
+            });
+
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sftpRmdir").unwrap().into(),
+        rmdir_fn.into(),
+    );
+
+    let unlink_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
+            let path = args.get(1).to_rust_string_lossy(_scope);
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let conn = match get_sftp(id) {
+                        Some(c) => c,
+                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
+                    };
+                    match conn.sftp.remove_file(&path).await {
+                        Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
+                        Err(e) => Ok(err_envelope("EIO", format!("unlink failed: {}", e))),
+                    }
+                });
+
+                if let Err(e) = result {
+                    eprintln!("SFTP unlink error: {}", e);
+                }
+            });
+
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sftpUnlink").unwrap().into(),
+        unlink_fn.into(),
+    );
+
+    let rename_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
+            let old_path = args.get(1).to_rust_string_lossy(_scope);
+            let new_path = args.get(2).to_rust_string_lossy(_scope);
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let conn = match get_sftp(id) {
+                        Some(c) => c,
+                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
+                    };
+                    match conn.sftp.rename(&old_path, &new_path).await {
+                        Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
+                        Err(e) => Ok(err_envelope("EIO", format!("rename failed: {}", e))),
+                    }
+                });
+
+                if let Err(e) = result {
+                    eprintln!("SFTP rename error: {}", e);
+                }
+            });
+
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sftpRename").unwrap().into(),
+        rename_fn.into(),
+    );
+
+    let stat_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
+            let path = args.get(1).to_rust_string_lossy(_scope);
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async move {
+                    let conn = match get_sftp(id) {
+                        Some(c) => c,
+                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
+                    };
+                    match conn.sftp.metadata(&path).await {
+                        Ok(attrs) => Ok(ok_envelope(json!({
+                            "size": attrs.len(),
+                            "mtime": attrs.mtime.unwrap_or(0),
+                            "mode": attrs.permissions.unwrap_or(0),
+                        }))),
+                        Err(e) => Ok(err_envelope("EIO", format!("stat failed: {}", e))),
+                    }
+                });
+
+                if let Err(e) = result {
+                    eprintln!("SFTP stat error: {}", e);
+                }
+            });
+
+            rv.set(v8::undefined(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sftpStat").unwrap().into(),
+        stat_fn.into(),
+    );
+
+    let ssh_close_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SshId;
+            ssh_registry().lock().unwrap().remove(&id);
+            rv.set(v8::Boolean::new(_scope, true).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sshClose").unwrap().into(),
+        ssh_close_fn.into(),
+    );
+
+    let js_code = r#"
     (function() {
-        // Parses the {"ok":bool,"data"|"code"+"message"} envelope every
-        // native async SSH/SFTP function resolves with (never rejects — see
-        // module doc comment) into either the real data or a proper Error
-        // with a Node-style `.code`, constructed here on the JS thread.
         function _unwrap(json) {
             var env = JSON.parse(json);
             if (env.ok) return { error: null, data: env.data };
@@ -545,8 +747,6 @@ pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
             (this._handlers[event] || []).forEach(function(h) { h.apply(null, args); });
         };
 
-        // Convenience wrappers that go through sftp() automatically, mirroring
-        // the ssh2 npm package's Client-level shortcuts.
         Client.prototype.readFile = function(path, options, callback) {
             if (typeof options === 'function') { callback = options; }
             this.sftp(function(err, sftp) {
@@ -679,8 +879,10 @@ pub fn inject_ssh(ctx: &Ctx, permissions: Arc<PermissionState>) -> Result<()> {
         globalThis.__requireCache['node:ssh2'] = { Client: Client };
         globalThis.ssh = { Client: Client };
     })();
-    "#,
-    )?;
+    "#;
 
-    Ok(())
+    let source = v8::String::new(scope, js_code).unwrap();
+    if let Some(script) = v8::Script::compile(scope, source, None) {
+        let _ = script.run(scope);
+    }
 }

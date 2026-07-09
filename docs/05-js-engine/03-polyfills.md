@@ -517,7 +517,7 @@ global === globalThis    // true
 GLOBAL === globalThis    // true
 ```
 
-Many npm packages reference `global.xxx` instead of `globalThis.xxx`. Both aliases point to the same QuickJS global object.
+Many npm packages reference `global.xxx` instead of `globalThis.xxx`. Both aliases point to the same V8 global object.
 
 ---
 
