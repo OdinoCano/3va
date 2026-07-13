@@ -15,6 +15,10 @@ ignore = [
     # not yet stable in the RustCrypto ecosystem (sha2/sha1 still at 0.10). Migrate when
     # rsa 0.10 stable is released. Track: https://github.com/RustCrypto/RSA/issues/19
     "RUSTSEC-2023-0071",
+    # paste: unmaintained (archived by author). No safe upgrade available —
+    # it's a direct dependency of the `v8` crate itself, not something we
+    # can swap out. Not an active vulnerability, just unmaintained status.
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]

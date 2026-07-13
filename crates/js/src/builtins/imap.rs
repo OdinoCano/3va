@@ -198,9 +198,21 @@ fn base64_encode(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-static IMAP_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
-fn perms() -> &'static Arc<PermissionState> {
-    IMAP_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static IMAP_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn perms() -> Arc<PermissionState> {
+    IMAP_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_imap not called on this thread")
+    })
 }
 static IMAP_INNER: std::sync::OnceLock<Arc<ImapStateInner>> = std::sync::OnceLock::new();
 fn inner() -> &'static Arc<ImapStateInner> {
@@ -211,7 +223,7 @@ pub fn inject_imap(
     scope: &mut v8::ContextScope<v8::HandleScope>,
     permissions: Arc<PermissionState>,
 ) {
-    IMAP_PERMISSIONS.set(permissions).ok();
+    IMAP_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions));
     IMAP_INNER
         .set(Arc::new(ImapStateInner {
             connections: Arc::new(Mutex::new(HashMap::new())),

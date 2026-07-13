@@ -103,9 +103,21 @@ fn pq_tls_connect_blocking(
     Ok((tls, ss_hex))
 }
 
-static TCP_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
-fn permissions() -> &'static Arc<PermissionState> {
-    TCP_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static TCP_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn permissions() -> Arc<PermissionState> {
+    TCP_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_tcp not called on this thread")
+    })
 }
 static TCP_POOL: std::sync::OnceLock<Arc<Mutex<HashMap<u32, TcpConn>>>> =
     std::sync::OnceLock::new();
@@ -131,7 +143,7 @@ pub fn inject_tcp(
     scope: &mut ContextScope<HandleScope>,
     permissions_param: Arc<PermissionState>,
 ) -> anyhow::Result<()> {
-    TCP_PERMISSIONS.set(permissions_param).ok();
+    TCP_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions_param));
     TCP_POOL.set(Arc::new(Mutex::new(HashMap::new()))).ok();
     TCP_NEXT_ID.set(Arc::new(Mutex::new(0))).ok();
 

@@ -49,9 +49,21 @@ fn throw_js_error(scope: &mut PinScope, msg: String) {
     }
 }
 
-static WS_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
-fn perms() -> &'static Arc<PermissionState> {
-    WS_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static WS_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn perms() -> Arc<PermissionState> {
+    WS_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_websocket not called on this thread")
+    })
 }
 static WS_POOL: std::sync::OnceLock<WsPool> = std::sync::OnceLock::new();
 fn pool2() -> &'static WsPool {
@@ -79,7 +91,7 @@ pub fn inject_websocket(
     permissions_param: Arc<PermissionState>,
     pool_param: WsPool,
 ) -> anyhow::Result<()> {
-    WS_PERMISSIONS.set(permissions_param).ok();
+    WS_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions_param));
     WS_POOL.set(pool_param).ok();
     WS_NEXT_ID.set(Arc::new(Mutex::new(0))).ok();
     let context = scope.get_current_context();

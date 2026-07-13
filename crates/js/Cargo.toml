@@ -165,6 +165,7 @@ tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 http = "1"
 
+libc = "0.2"
 libloading = "0.8"
 libffi = "3.2"
 oxc_transformer = "0.132"

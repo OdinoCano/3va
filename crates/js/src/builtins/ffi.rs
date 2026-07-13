@@ -195,10 +195,21 @@ unsafe fn call_native(
     })
 }
 
-static INJECT_FFI_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> =
-    std::sync::OnceLock::new();
-fn permissions() -> &'static Arc<PermissionState> {
-    INJECT_FFI_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static INJECT_FFI_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn permissions() -> Arc<PermissionState> {
+    INJECT_FFI_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_ffi not called on this thread")
+    })
 }
 
 pub fn inject_ffi(
@@ -208,7 +219,7 @@ pub fn inject_ffi(
     let context = scope.get_current_context();
     let global = context.global(scope);
 
-    INJECT_FFI_PERMISSIONS.set(permissions_param).ok();
+    INJECT_FFI_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions_param));
     let ffi_dlopen_fn = Function::new(
         scope,
         move |scope: &mut PinScope<'_, '_>,
@@ -399,6 +410,14 @@ pub fn inject_ffi(
 
         function dlopen(libPath, symbolDefs) {
             var handleId = __ffiDlopen(libPath);
+            // Success is a bare numeric handle id; anything else is a native
+            // error message (permission denied, dlopen failed, ...) that was
+            // returned rather than thrown across the Rust/V8 boundary.
+            if (!/^\d+$/.test(handleId)) {
+                var openErr = new Error(handleId);
+                if (handleId.indexOf('Permission denied') !== -1) openErr.code = 'EACCES';
+                throw openErr;
+            }
             var symbols = {};
 
             Object.keys(symbolDefs).forEach(function(name) {
@@ -415,7 +434,9 @@ pub fn inject_ffi(
                         JSON.stringify(argTypes),
                         JSON.stringify(jsArgs)
                     );
-                    var parsed = JSON.parse(resultJson);
+                    var parsed;
+                    try { parsed = JSON.parse(resultJson); }
+                    catch (e) { throw new Error(resultJson); }
                     return (parsed === null && retType === 'void') ? undefined : parsed;
                 };
             });

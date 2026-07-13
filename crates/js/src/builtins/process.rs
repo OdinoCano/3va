@@ -13,6 +13,60 @@ fn set_fn(
     obj.set(scope, key, func.into());
 }
 
+/// Chunks read from OS stdin by the background reader thread. `None` marks
+/// EOF (the thread stops after pushing it); `Some(bytes)` is real data.
+struct StdinState {
+    queue: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
+    started: std::sync::atomic::AtomicBool,
+    // Separate from the queue, and sticky: once the reader thread hits EOF it
+    // exits for good (POSIX stdin doesn't "un-EOF"), so every poll from then
+    // on — even from a different JsEngine/test in the same process — must
+    // keep reporting EOF immediately. If EOF were only a one-shot item
+    // pushed into the queue, the first caller to drain it would leave every
+    // later caller polling a permanently-empty queue forever (this was a
+    // real hang: two tests using process.stdin in the same test binary).
+    eof: std::sync::atomic::AtomicBool,
+}
+fn stdin_state() -> &'static StdinState {
+    static STATE: std::sync::OnceLock<StdinState> = std::sync::OnceLock::new();
+    STATE.get_or_init(|| StdinState {
+        queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        started: std::sync::atomic::AtomicBool::new(false),
+        eof: std::sync::atomic::AtomicBool::new(false),
+    })
+}
+/// Spawns the (single, process-wide) blocking stdin reader thread on first
+/// call; a no-op afterwards. stdin is one shared OS resource regardless of
+/// how many JsEngines exist, so a single background reader is correct even
+/// across multiple engines/tests in the same process.
+fn ensure_stdin_thread() {
+    let state = stdin_state();
+    if state
+        .started
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    std::thread::spawn(|| {
+        use std::io::Read;
+        loop {
+            let mut buf = vec![0u8; 4096];
+            match std::io::stdin().lock().read(&mut buf) {
+                Ok(0) | Err(_) => {
+                    stdin_state()
+                        .eof
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    break;
+                }
+                Ok(n) => {
+                    buf.truncate(n);
+                    stdin_state().queue.lock().unwrap().push_back(buf);
+                }
+            }
+        }
+    });
+}
+
 fn set_str(
     scope: &mut ContextScope<HandleScope>,
     obj: v8::Local<v8::Object>,
@@ -528,27 +582,51 @@ pub fn inject_process(
         },
     );
 
-    // --- __stdinRead() -> Vec<u8> — real, blocking read of the next chunk from
-    // OS stdin. An empty result means EOF (mirrors a POSIX read() returning 0).
+    // --- __stdinReadPoll() -> Uint8Array | null — non-blocking poll of the
+    // next chunk read from OS stdin. A real (blocking) OS read only ever
+    // happens on a dedicated background thread (spawned lazily, once), so
+    // polling this from a V8 callback never blocks the engine — waiting for
+    // real interactive input would otherwise freeze all JS execution. Returns
+    // null while no chunk is ready yet, an empty Uint8Array at EOF, or the
+    // chunk's bytes. The JS-level `__stdinRead()` (see readline's IIFE below)
+    // wraps this in a Promise via setInterval, same pattern as fs_watch's
+    // __fsWatchNext / dgram's __udpRecv.
     set_fn(
         scope,
         globals,
-        "__stdinRead",
+        "__stdinReadPoll",
         |scope: &mut PinScope, _args: FunctionCallbackArguments, mut rv: ReturnValue| {
-            let data = tokio::task::block_in_place(|| -> Vec<u8> {
-                use std::io::Read;
-                let mut buf = vec![0u8; 4096];
-                match std::io::stdin().lock().read(&mut buf) {
-                    Ok(n) => {
-                        buf.truncate(n);
-                        buf
-                    }
-                    Err(_) => Vec::new(),
+            ensure_stdin_thread();
+            let popped = stdin_state().queue.lock().unwrap().pop_front();
+            match popped {
+                Some(data) => {
+                    rv.set(crate::builtins::v8_compat::uint8array_from_bytes(scope, &data).into())
                 }
-            });
-            rv.set(crate::builtins::v8_compat::uint8array_from_bytes(scope, &data).into());
+                None if stdin_state().eof.load(std::sync::atomic::Ordering::SeqCst) => {
+                    rv.set(crate::builtins::v8_compat::uint8array_from_bytes(scope, &[]).into())
+                }
+                None => rv.set(v8::null(scope).into()),
+            }
         },
     );
+    {
+        let src = v8::String::new(
+            scope,
+            r#"(function() {
+                globalThis.__stdinRead = function() {
+                    return new Promise(function(resolve) {
+                        (function check() {
+                            var r = __stdinReadPoll();
+                            if (r === null || r === undefined) { setTimeout(check, 5); return; }
+                            resolve(r);
+                        })();
+                    });
+                };
+            })();"#,
+        )
+        .unwrap();
+        let _ = v8::Script::compile(scope, src, None).and_then(|s| s.run(scope));
+    }
 
     // --- process object built via native Rust APIs (no format-string injection risk) ---
     let process = v8::Object::new(scope);

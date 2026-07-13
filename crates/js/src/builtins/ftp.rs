@@ -18,11 +18,23 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex, OnceLock};
 use vvva_permissions::{Capability, PermissionState};
 
-static FTP_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
-fn permissions() -> &'static Arc<PermissionState> {
-    FTP_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static FTP_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
 }
-use crate::builtins::v8_compat::{uint8array_from_bytes, uint8array_to_vec};
+fn permissions() -> Arc<PermissionState> {
+    FTP_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_ftp not called on this thread")
+    })
+}
+use crate::builtins::v8_compat::{js_value_to_bytes, uint8array_from_bytes};
 
 type FtpId = u32;
 
@@ -74,13 +86,31 @@ fn next_ftp_id() -> FtpId {
     C.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Builds an `Error` with a `.code` property (EAGAIN/EOF/...) so the JS
+/// polling loops (`_startPoll`, `get()`, `list()`, ...) can tell "try again"
+/// apart from a real failure — they all branch on `e.code`.
+fn code_err<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    code: &str,
+    msg: &str,
+) -> v8::Local<'s, v8::Value> {
+    let err_str = v8::String::new(scope, msg).unwrap();
+    let err = v8::Exception::error(scope, err_str);
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(err) {
+        let key = v8::String::new(scope, "code").unwrap();
+        let val = v8::String::new(scope, code).unwrap();
+        obj.set(scope, key.into(), val.into());
+    }
+    err
+}
+
 pub fn inject_ftp(
     scope: &mut v8::ContextScope<v8::HandleScope>,
     permissions_param: Arc<PermissionState>,
 ) {
     let context = scope.get_current_context();
     let global = context.global(scope);
-    FTP_PERMISSIONS.set(permissions_param).ok();
+    FTP_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions_param));
 
     let create_fn = v8::Function::new(
         scope,
@@ -123,7 +153,7 @@ pub fn inject_ftp(
                 )
                 .unwrap();
                 let err = v8::Exception::error(_scope, msg);
-                rv.set(err);
+                _scope.throw_exception(err);
                 return;
             }
 
@@ -170,7 +200,7 @@ pub fn inject_ftp(
                     let msg =
                         v8::String::new(_scope, &format!("Connection failed: {}", e)).unwrap();
                     let err = v8::Exception::error(_scope, msg);
-                    rv.set(err);
+                    _scope.throw_exception(err);
                 }
             }
         },
@@ -197,13 +227,13 @@ pub fn inject_ftp(
                     Err(e) => {
                         let msg = v8::String::new(_scope, &e.to_string()).unwrap();
                         let err = v8::Exception::error(_scope, msg);
-                        rv.set(err);
+                        _scope.throw_exception(err);
                     }
                 },
                 None => {
                     let msg = v8::String::new(_scope, "not connected").unwrap();
                     let err = v8::Exception::error(_scope, msg);
-                    rv.set(err);
+                    _scope.throw_exception(err);
                 }
             }
         },
@@ -229,9 +259,8 @@ pub fn inject_ftp(
             match reg.get_mut(&id).and_then(|s| s.control.as_mut()) {
                 Some(conn) => match conn.read(&mut buf) {
                     Ok(0) => {
-                        let msg = v8::String::new(_scope, "connection closed").unwrap();
-                        let err = v8::Exception::error(_scope, msg);
-                        rv.set(err);
+                        let err = code_err(_scope, "EOF", "connection closed");
+                        _scope.throw_exception(err);
                     }
                     Ok(n) => {
                         buf.truncate(n);
@@ -241,20 +270,19 @@ pub fn inject_ftp(
                         if e.kind() == io::ErrorKind::WouldBlock
                             || e.kind() == io::ErrorKind::TimedOut =>
                     {
-                        let msg = v8::String::new(_scope, "no data available").unwrap();
-                        let err = v8::Exception::error(_scope, msg);
-                        rv.set(err);
+                        let err = code_err(_scope, "EAGAIN", "no data available");
+                        _scope.throw_exception(err);
                     }
                     Err(e) => {
                         let msg = v8::String::new(_scope, &e.to_string()).unwrap();
                         let err = v8::Exception::error(_scope, msg);
-                        rv.set(err);
+                        _scope.throw_exception(err);
                     }
                 },
                 None => {
                     let msg = v8::String::new(_scope, "not connected").unwrap();
                     let err = v8::Exception::error(_scope, msg);
-                    rv.set(err);
+                    _scope.throw_exception(err);
                 }
             }
         },
@@ -282,7 +310,7 @@ pub fn inject_ftp(
                 )
                 .unwrap();
                 let err = v8::Exception::error(_scope, msg);
-                rv.set(err);
+                _scope.throw_exception(err);
                 return;
             }
 
@@ -334,7 +362,7 @@ pub fn inject_ftp(
                     let msg =
                         v8::String::new(_scope, &format!("Connection failed: {}", e)).unwrap();
                     let err = v8::Exception::error(_scope, msg);
-                    rv.set(err);
+                    _scope.throw_exception(err);
                 }
             }
         },
@@ -360,9 +388,8 @@ pub fn inject_ftp(
             match reg.get_mut(&id).and_then(|s| s.data.as_mut()) {
                 Some(conn) => match conn.read(&mut buf) {
                     Ok(0) => {
-                        let msg = v8::String::new(_scope, "data connection closed").unwrap();
-                        let err = v8::Exception::error(_scope, msg);
-                        rv.set(err);
+                        let err = code_err(_scope, "EOF", "data connection closed");
+                        _scope.throw_exception(err);
                     }
                     Ok(n) => {
                         buf.truncate(n);
@@ -372,20 +399,19 @@ pub fn inject_ftp(
                         if e.kind() == io::ErrorKind::WouldBlock
                             || e.kind() == io::ErrorKind::TimedOut =>
                     {
-                        let msg = v8::String::new(_scope, "no data available").unwrap();
-                        let err = v8::Exception::error(_scope, msg);
-                        rv.set(err);
+                        let err = code_err(_scope, "EAGAIN", "no data available");
+                        _scope.throw_exception(err);
                     }
                     Err(e) => {
                         let msg = v8::String::new(_scope, &e.to_string()).unwrap();
                         let err = v8::Exception::error(_scope, msg);
-                        rv.set(err);
+                        _scope.throw_exception(err);
                     }
                 },
                 None => {
                     let msg = v8::String::new(_scope, "not connected").unwrap();
                     let err = v8::Exception::error(_scope, msg);
-                    rv.set(err);
+                    _scope.throw_exception(err);
                 }
             }
         },
@@ -403,9 +429,7 @@ pub fn inject_ftp(
               args: v8::FunctionCallbackArguments,
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
-            let data = v8::Local::<v8::Uint8Array>::try_from(args.get(1))
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
+            let data = js_value_to_bytes(_scope, args.get(1));
 
             let mut reg = ftp_registry().lock().unwrap();
             match reg.get_mut(&id).and_then(|s| s.data.as_mut()) {
@@ -414,13 +438,13 @@ pub fn inject_ftp(
                     Err(e) => {
                         let msg = v8::String::new(_scope, &e.to_string()).unwrap();
                         let err = v8::Exception::error(_scope, msg);
-                        rv.set(err);
+                        _scope.throw_exception(err);
                     }
                 },
                 None => {
                     let msg = v8::String::new(_scope, "not connected").unwrap();
                     let err = v8::Exception::error(_scope, msg);
-                    rv.set(err);
+                    _scope.throw_exception(err);
                 }
             }
         },

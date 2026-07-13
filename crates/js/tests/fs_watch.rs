@@ -36,6 +36,10 @@ async fn drive_until_watch_event(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         e.idle().await;
+        // Timers (setInterval, used by fs.watch's __fsWatchNext poll loop)
+        // only fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
 
         let r = e
@@ -235,6 +239,10 @@ async fn watch_close_stops_events() {
     // Drive the event loop briefly — no event should arrive.
     for _ in 0..20 {
         e.idle().await;
+        // Timers (setInterval, used by fs.watch's __fsWatchNext poll loop)
+        // only fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

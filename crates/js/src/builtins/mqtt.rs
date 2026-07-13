@@ -96,9 +96,21 @@ fn encode_remaining_length(len: usize) -> Vec<u8> {
     result
 }
 
-static MQTT_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
-fn perms() -> &'static Arc<PermissionState> {
-    MQTT_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static MQTT_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn perms() -> Arc<PermissionState> {
+    MQTT_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_mqtt not called on this thread")
+    })
 }
 
 pub fn inject_mqtt(
@@ -107,7 +119,7 @@ pub fn inject_mqtt(
 ) {
     let context = scope.get_current_context();
     let global = context.global(scope);
-    MQTT_PERMISSIONS.set(permissions).ok();
+    MQTT_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions));
 
     let create_fn = v8::Function::new(
         scope,

@@ -8,9 +8,21 @@ use std::sync::{Arc, Mutex, OnceLock};
 use v8::{Function, FunctionCallbackArguments, PinScope, ReturnValue};
 use vvva_permissions::PermissionState;
 
-static WT_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
-fn perms() -> &'static Arc<PermissionState> {
-    WT_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static WT_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn perms() -> Arc<PermissionState> {
+    WT_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_worker_threads not called on this thread")
+    })
 }
 
 type WorkerId = u32;
@@ -35,7 +47,7 @@ fn next_worker_id() -> WorkerId {
 pub fn inject_worker_threads_native(scope: &mut PinScope, permissions: Arc<PermissionState>) {
     let context = scope.get_current_context();
     let global = context.global(scope);
-    WT_PERMISSIONS.set(permissions).ok();
+    WT_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions));
 
     let create_fn = Function::new(
         scope,
@@ -50,7 +62,7 @@ pub fn inject_worker_threads_native(scope: &mut PinScope, permissions: Arc<Permi
             let (tx, rx) = std::sync::mpsc::sync_channel::<String>(256);
 
             let in_clone = incoming.clone();
-            let perms_clone = Arc::clone(perms());
+            let perms_clone = perms();
 
             let handle = std::thread::Builder::new()
                 .name(format!("3va-worker-{}", id))
@@ -238,12 +250,50 @@ pub fn inject_worker_threads_native(scope: &mut PinScope, permissions: Arc<Permi
         Worker.prototype.unref = function() { return this; };
         Worker.prototype.ref = function() { return this; };
 
-        if (globalThis.__requireCache && globalThis.__requireCache['worker_threads']) {
-            globalThis.__requireCache['worker_threads'].Worker = Worker;
-            globalThis.__requireCache['node:worker_threads'].Worker = Worker;
-            globalThis.__requireCache['worker_threads'].isMainThread = true;
-            globalThis.__requireCache['node:worker_threads'].isMainThread = true;
+        // MessageChannel/MessagePort — pure in-process (no native binding
+        // needed, unlike Worker which crosses real OS threads): a connected
+        // pair of EventEmitters that hand messages to each other async.
+        function MessagePort() {
+            if (EventEmitter) EventEmitter.call(this);
+            this._peer = null;
         }
+        if (EventEmitter) {
+            MessagePort.prototype = Object.create(EventEmitter.prototype);
+            MessagePort.prototype.constructor = MessagePort;
+        }
+        MessagePort.prototype.postMessage = function(data) {
+            var peer = this._peer;
+            if (!peer) return;
+            setTimeout(function() { peer.emit('message', data); }, 0);
+        };
+        MessagePort.prototype.close = function() { this.emit('close'); };
+        MessagePort.prototype.start = function() {};
+        MessagePort.prototype.unref = function() { return this; };
+        MessagePort.prototype.ref = function() { return this; };
+
+        function MessageChannel() {
+            this.port1 = new MessagePort();
+            this.port2 = new MessagePort();
+            this.port1._peer = this.port2;
+            this.port2._peer = this.port1;
+        }
+
+        // The other worker_threads.rs JS blocks (inject_worker_globals'
+        // parentPort setup) only *patch* __requireCache['worker_threads']
+        // if it already exists — nothing ever created the base object, so
+        // require('worker_threads') always failed with "Cannot find
+        // module". Create it here unconditionally.
+        globalThis.__requireCache = globalThis.__requireCache || {};
+        globalThis.__requireCache['worker_threads'] = globalThis.__requireCache['worker_threads'] || {};
+        globalThis.__requireCache['node:worker_threads'] = globalThis.__requireCache['worker_threads'];
+        globalThis.__requireCache['worker_threads'].Worker = Worker;
+        globalThis.__requireCache['worker_threads'].MessageChannel = MessageChannel;
+        globalThis.__requireCache['worker_threads'].MessagePort = MessagePort;
+        globalThis.__requireCache['worker_threads'].isMainThread = true;
+        globalThis.__requireCache['worker_threads'].SHARE_ENV = Symbol('nodejs.worker_threads.SHARE_ENV');
+        globalThis.__requireCache['worker_threads'].workerData = null;
+        globalThis.__requireCache['worker_threads'].parentPort = null;
+        globalThis.__requireCache['worker_threads'].threadId = 0;
     })();
     "#;
 
@@ -377,10 +427,11 @@ fn inject_worker_globals(
         }, 10);
 
         globalThis.parentPort = parentPort;
-        if (globalThis.__requireCache && globalThis.__requireCache['worker_threads']) {
-            globalThis.__requireCache['worker_threads'].parentPort = parentPort;
-            globalThis.__requireCache['node:worker_threads'].parentPort = parentPort;
-        }
+        globalThis.__requireCache = globalThis.__requireCache || {};
+        globalThis.__requireCache['worker_threads'] = globalThis.__requireCache['worker_threads'] || {};
+        globalThis.__requireCache['node:worker_threads'] = globalThis.__requireCache['worker_threads'];
+        globalThis.__requireCache['worker_threads'].parentPort = parentPort;
+        globalThis.__requireCache['worker_threads'].isMainThread = false;
     })();
     "#;
 

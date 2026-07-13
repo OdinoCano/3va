@@ -7,9 +7,23 @@ use std::sync::{Arc, Mutex};
 use v8::{ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue};
 use vvva_permissions::{Capability, PermissionState};
 
-static FS_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
-fn perms() -> &'static Arc<PermissionState> {
-    FS_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static: a `OnceLock` here only accepts the
+// *first* engine's permissions ever created in the process and silently
+// ignores every later `inject_fs` call, so every other `JsEngine` (each test
+// in `cargo test`, each worker in a long-lived process) would silently
+// inherit the first engine's grants instead of its own. Each `JsEngine`'s V8
+// isolate never migrates threads mid-lifetime, so a thread-local correctly
+// scopes permissions per engine.
+thread_local! {
+    static FS_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn perms() -> Arc<PermissionState> {
+    FS_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_fs not called on this thread")
+    })
 }
 
 static FS_FD_TABLE: std::sync::OnceLock<Arc<Mutex<FdTable>>> = std::sync::OnceLock::new();
@@ -222,7 +236,7 @@ pub fn inject_fs(
     scope: &mut ContextScope<HandleScope>,
     permissions: Arc<PermissionState>,
 ) -> anyhow::Result<()> {
-    FS_PERMISSIONS.set(permissions).ok();
+    FS_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions));
     FS_FD_TABLE.set(Arc::new(Mutex::new(FdTable::new()))).ok();
     let context = scope.get_current_context();
     let globals = context.global(scope);
@@ -330,9 +344,7 @@ pub fn inject_fs(
         "__fsFdWrite",
         move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let fd = args.get(0).int32_value(scope).unwrap_or(0);
-            let data = v8::Local::<v8::Uint8Array>::try_from(args.get(1))
-                .map(|arr| crate::builtins::v8_compat::uint8array_to_vec(scope, arr))
-                .unwrap_or_default();
+            let data = crate::builtins::v8_compat::js_value_to_bytes(scope, args.get(1));
             let position_arg = args.get(2);
             let position = if position_arg.is_null_or_undefined() {
                 None
@@ -452,9 +464,7 @@ pub fn inject_fs(
         "__fsWriteFileBytesSync",
         move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
             let path_str = args.get(0).to_rust_string_lossy(scope);
-            let data = v8::Local::<v8::Uint8Array>::try_from(args.get(1))
-                .map(|arr| crate::builtins::v8_compat::uint8array_to_vec(scope, arr))
-                .unwrap_or_default();
+            let data = crate::builtins::v8_compat::js_value_to_bytes(scope, args.get(1));
             let path = PathBuf::from(&path_str);
             if !perms().check(&Capability::FileWrite(path.clone())) {
                 let err = perm_err(scope, "write", &path);
@@ -989,9 +999,16 @@ pub fn inject_fs(
             },
         );
 
-        // __fsWatchNext(id) → JSON  blocks for the next event
+        // __fsWatchNext(id) → JSON | null  non-blocking poll for the next event.
         //   JSON: {"eventType":"change"|"rename","filename":"foo.txt"}
-        //   Throws ECLOSED when the watcher has been removed.
+        //   Returns null when no event is ready yet OR the watcher was closed —
+        //   the JS side polls this on an interval (see dgram.rs's __udpRecv for
+        //   the same pattern). This used to block via
+        //   `block_in_place`+`Handle::block_on`, which panics outright on a
+        //   current_thread Tokio runtime (e.g. plain `#[tokio::test]`) — and
+        //   since that panic happened inside a V8 native callback, it surfaced
+        //   as an unrecoverable "failed to initiate panic" process abort rather
+        //   than a normal Rust panic message.
         set_fn(
             scope,
             globals,
@@ -1005,28 +1022,19 @@ pub fn inject_fs(
                 let entry = match entry {
                     Some(e) => e,
                     None => {
-                        let err = js_err(scope, "ECLOSED: watcher closed");
-                        scope.throw_exception(err);
+                        rv.set(v8::null(scope).into());
                         return;
                     }
                 };
 
-                let event = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let mut rx = entry.rx.lock().await;
-                        rx.recv().await
-                    })
-                });
+                let event = match entry.rx.try_lock() {
+                    Ok(mut rx) => rx.try_recv().ok(),
+                    Err(_) => None,
+                };
 
                 match event {
-                    None => {
-                        let err = js_err(scope, "ECLOSED: watcher channel closed");
-                        scope.throw_exception(err);
-                    }
-                    Some(Err(e)) => {
-                        let err = js_err(scope, format!("EIO: {e}"));
-                        scope.throw_exception(err);
-                    }
+                    None => rv.set(v8::null(scope).into()),
+                    Some(Err(_)) => rv.set(v8::null(scope).into()),
                     Some(Ok(ev)) => {
                         use notify::event::{EventKind, ModifyKind, RenameMode};
                         let event_type = match ev.kind {
@@ -1083,11 +1091,10 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
-                });
-            });
+            // Plain thread sleep, not tokio::time::sleep via block_in_place +
+            // Handle::block_on — that combination panics outright on a
+            // current_thread runtime (see __fsWatchNext's history above).
+            std::thread::sleep(std::time::Duration::from_millis(interval_ms));
             match std::fs::metadata(&path) {
                 Ok(meta) => rv.set(
                     v8::String::new(scope, &stat_meta_to_json(&meta))
@@ -1591,32 +1598,26 @@ pub fn inject_fs(
 
                 var closed = false;
 
-                // Poll loop: each __fsWatchNext call awaits ONE event then recurses.
-                function poll() {
+                // __fsWatchNext is a non-blocking poll (returns null when no
+                // event is ready), so drive it on an interval.
+                var pollTimer = setInterval(function() {
                     if (closed) return;
-                    __fsWatchNext(watcherId).then(function(json) {
-                        if (closed) return;
-                        var ev = JSON.parse(json);
+                    var json;
+                    while ((json = __fsWatchNext(watcherId)) !== null && json !== undefined) {
+                        var ev;
+                        try { ev = JSON.parse(json); } catch (e) { continue; }
                         if (typeof listener === 'function') {
                             listener(ev.eventType, ev.filename);
                         }
                         watcher.emit('change', ev.eventType, ev.filename);
-                        poll();
-                    }).catch(function(err) {
-                        if (!closed) {
-                            // ECLOSED = we called close() — don't surface as an error.
-                            if (!err || (err.message !== 'watcher closed' && err.message !== 'watcher channel closed')) {
-                                watcher.emit('error', err);
-                            }
-                        }
-                    });
-                }
-
-                poll();
+                        if (closed) return;
+                    }
+                }, 10);
 
                 watcher.close = function() {
                     if (closed) return;
                     closed = true;
+                    clearInterval(pollTimer);
                     __fsWatchClose(watcherId);
                 };
 
@@ -1639,25 +1640,24 @@ pub fn inject_fs(
 
                 var watcherId = __fsWatchCreate(filename, false);
 
-                function poll() {
+                var pollTimer = setInterval(function() {
                     if (closed) return;
-                    __fsWatchNext(watcherId).then(function() {
-                        if (closed) return;
+                    var json;
+                    while ((json = __fsWatchNext(watcherId)) !== null && json !== undefined) {
                         var currStat;
                         try { currStat = parseStat(__fsStatSync(filename, false)); }
                         catch(e) { currStat = { mtimeMs: 0, size: 0, isFile: function(){return false;}, isDirectory: function(){return false;} }; }
                         if (typeof listener === 'function') listener(currStat, prevStat);
                         prevStat = currStat;
-                        poll();
-                    }).catch(function() { /* watcher closed or error — stop silently */ });
-                }
-
-                poll();
+                        if (closed) return;
+                    }
+                }, 10);
 
                 return {
                     stop: function() {
                         if (closed) return;
                         closed = true;
+                        clearInterval(pollTimer);
                         __fsWatchClose(watcherId);
                     }
                 };

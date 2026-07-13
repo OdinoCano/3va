@@ -16,6 +16,10 @@ async fn eval_async_result(e: &mut JsEngine, setup: &str, result_global: &str) -
     e.eval(setup).await.unwrap();
     for _ in 0..50 {
         e.idle().await;
+        // Timers (setTimeout, used by pbkdf2()/scrypt()'s deferred callback)
+        // only fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
         let r = e
             .eval_to_string(&format!(

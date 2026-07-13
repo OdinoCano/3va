@@ -79,7 +79,15 @@ fn js_err<'s>(
         .unwrap_or_else(|| v8::undefined(scope).into())
 }
 
-async fn create_channel_blocking(
+/// Builds the channel without connecting yet (tonic's `connect_lazy`) —
+/// the real TCP/TLS handshake happens lazily on the first RPC instead. This
+/// keeps channel creation synchronous, so the native `__grpcCreateChannel`
+/// binding never needs `block_in_place` + `Handle::block_on`, which panics
+/// outright on a current_thread Tokio runtime (e.g. plain `#[tokio::test]`);
+/// see fs_watch's `__fsWatchNext` fix for the same bug pattern. It also
+/// matches how most gRPC clients actually behave: channel construction
+/// doesn't fail on a down server, only the first call against it does.
+fn create_channel_lazy(
     host: String,
     port: u16,
     use_tls: bool,
@@ -87,13 +95,7 @@ async fn create_channel_blocking(
     let scheme = if use_tls { "https" } else { "http" };
     let addr = format!("{}://{}:{}", scheme, host, port);
     let endpoint = Endpoint::try_from(addr).map_err(|e| format!("Invalid address: {e}"))?;
-
-    let channel = endpoint
-        .connect()
-        .await
-        .map_err(|e| format!("Connection failed: {e}"))?;
-
-    Ok(channel)
+    Ok(endpoint.connect_lazy())
 }
 
 fn parse_package_definition(proto_content: &str) -> std::result::Result<serde_json::Value, String> {
@@ -149,9 +151,21 @@ fn set_fn(
     global.set(scope, key, func.into());
 }
 
-static GRPC_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
-fn permissions() -> &'static Arc<PermissionState> {
-    GRPC_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static GRPC_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn permissions() -> Arc<PermissionState> {
+    GRPC_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_grpc not called on this thread")
+    })
 }
 static GRPC_CHANNEL_POOL: std::sync::OnceLock<Arc<Mutex<HashMap<u32, Channel>>>> =
     std::sync::OnceLock::new();
@@ -171,7 +185,7 @@ pub fn inject_grpc(
     scope: &mut ContextScope<HandleScope>,
     permissions_param: Arc<PermissionState>,
 ) -> anyhow::Result<()> {
-    GRPC_PERMISSIONS.set(permissions_param).ok();
+    GRPC_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions_param));
     GRPC_CHANNEL_POOL
         .set(Arc::new(Mutex::new(HashMap::new())))
         .ok();
@@ -214,14 +228,11 @@ pub fn inject_grpc(
                     "EACCES",
                     format!("Network access denied. Run with --allow-net={}", host),
                 );
-                rv.set(err);
+                scope.throw_exception(err);
                 return;
             }
 
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(create_channel_blocking(host, port, use_tls))
-            });
+            let result = create_channel_lazy(host, port, use_tls);
 
             match result {
                 Ok(channel) => {
@@ -236,7 +247,7 @@ pub fn inject_grpc(
                 }
                 Err(e) => {
                     let err = js_err(scope, "ECONNREFUSED", e);
-                    rv.set(err);
+                    scope.throw_exception(err);
                 }
             }
         },
@@ -255,7 +266,7 @@ pub fn inject_grpc(
             let has_channel = channel_pool().lock().unwrap().contains_key(&channel_id);
             if !has_channel {
                 let err = js_err(scope, "ENOENT", "unknown channel");
-                rv.set(err);
+                scope.throw_exception(err);
                 return;
             }
 
@@ -273,7 +284,7 @@ pub fn inject_grpc(
             let has_channel = channel_pool().lock().unwrap().contains_key(&channel_id);
             if !has_channel {
                 let err = js_err(scope, "ENOENT", "unknown channel");
-                rv.set(err);
+                scope.throw_exception(err);
                 return;
             }
 
@@ -299,7 +310,7 @@ pub fn inject_grpc(
             let has_channel = channel_pool().lock().unwrap().contains_key(&channel_id);
             if !has_channel {
                 let err = js_err(scope, "ENOENT", "unknown channel");
-                rv.set(err);
+                scope.throw_exception(err);
                 return;
             }
 
@@ -333,19 +344,23 @@ pub fn inject_grpc(
                 Some(tx) => tx,
                 None => {
                     let err = js_err(scope, "ENOENT", "unknown stream");
-                    rv.set(err);
+                    scope.throw_exception(err);
                     return;
                 }
             };
 
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(tx.send(data_bytes))
-            });
-            if let Err(e) = result {
-                let err = js_err(scope, "EIO", e.to_string());
-                rv.set(err);
-            } else {
-                rv.set(v8::undefined(scope).into());
+            // try_send, not block_in_place + Handle::block_on — the latter
+            // panics outright on a current_thread Tokio runtime (e.g. plain
+            // `#[tokio::test]`); see fs_watch's __fsWatchNext fix for the
+            // same bug. The channel has a 100-message buffer (see the
+            // `mpsc::channel(100)` construction above), so a full channel
+            // here means the consumer is badly backed up, not a normal case.
+            match tx.try_send(data_bytes) {
+                Ok(()) => rv.set(v8::undefined(scope).into()),
+                Err(e) => {
+                    let err = js_err(scope, "EIO", e.to_string());
+                    scope.throw_exception(err);
+                }
             }
         },
     );
@@ -358,7 +373,7 @@ pub fn inject_grpc(
             let stream_id = args.get(0).uint32_value(scope).unwrap_or(0);
             if stream_state().remove(stream_id).is_none() {
                 let err = js_err(scope, "ENOENT", "unknown stream");
-                rv.set(err);
+                scope.throw_exception(err);
                 return;
             }
             rv.set(v8::undefined(scope).into());
@@ -376,18 +391,22 @@ pub fn inject_grpc(
                 Some(rx) => rx,
                 None => {
                     let err = js_err(scope, "ENOENT", "unknown stream");
-                    rv.set(err);
+                    scope.throw_exception(err);
                     return;
                 }
             };
 
-            let data = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    #[allow(clippy::await_holding_lock)]
-                    let mut guard = rx.lock().await;
-                    guard.recv().await
-                })
-            });
+            // try_lock + try_recv, not block_in_place + Handle::block_on —
+            // the latter panics outright on a current_thread Tokio runtime
+            // (e.g. plain `#[tokio::test]`); see fs_watch's __fsWatchNext fix
+            // for the same bug pattern. Non-blocking: returns empty bytes
+            // when nothing is ready yet, same as when the stream is closed —
+            // callers that need to tell those apart should poll on an
+            // interval and treat repeated empties as "still open, not done".
+            let data = rx
+                .try_lock()
+                .ok()
+                .and_then(|mut guard| guard.try_recv().ok());
 
             match data {
                 Some(data) => rv.set(uint8array_from_bytes(scope, &data).into()),

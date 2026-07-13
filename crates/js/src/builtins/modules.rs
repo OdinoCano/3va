@@ -129,17 +129,28 @@ fn dns_lookup_to_json(
     }
 }
 
-static INJECT_MODULES_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> =
-    std::sync::OnceLock::new();
-fn permissions() -> &'static Arc<PermissionState> {
-    INJECT_MODULES_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static INJECT_MODULES_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn permissions() -> Arc<PermissionState> {
+    INJECT_MODULES_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_require not called on this thread")
+    })
 }
 
 pub fn inject_require(
     scope: &mut ContextScope<HandleScope>,
     permissions_param: Arc<PermissionState>,
 ) -> anyhow::Result<()> {
-    INJECT_MODULES_PERMISSIONS.set(permissions_param).ok();
+    INJECT_MODULES_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions_param));
     let context = scope.get_current_context();
     let global = context.global(scope);
 
@@ -229,24 +240,35 @@ pub fn inject_require(
                     full_path.display()
                 );
                 let err_str = V8String::new(scope, &msg).unwrap();
-                rv.set(err_str.into());
+                let err = v8::Exception::error(scope, err_str);
+                scope.throw_exception(err);
                 return;
             }
 
             match std::fs::read_to_string(&full_path) {
                 Ok(source) => {
-                    let transpiled = if path_str.ends_with(".tsx") || path_str.ends_with(".jsx") {
+                    let is_jsx = path_str.ends_with(".tsx") || path_str.ends_with(".jsx");
+                    // A required file with real static import/export syntax
+                    // must go through ESM→CJS conversion too — same fix as
+                    // eval_file() in lib.rs, same reason: new Function(source)
+                    // runs this as a plain function body, which V8 rejects if
+                    // it contains bare `import`/`export` declarations.
+                    let is_esm =
+                        path_str.ends_with(".mjs") || crate::esm::source_is_esm(&source, &path_str);
+                    let transpiled = if path_str.ends_with(".cjs")
+                        || path_str.ends_with(".json")
+                        || source.contains("@exodus/bytes")
+                    {
+                        source
+                    } else if is_esm {
+                        crate::transpiler::transpile_to_cjs(&source, is_jsx)
+                    } else if is_jsx {
                         crate::transpiler::transpile_jsx(&source)
                     } else if path_str.ends_with(".ts")
                         || path_str.ends_with(".mts")
                         || path_str.ends_with(".cts")
                     {
                         crate::transpiler::transpile(&source)
-                    } else if path_str.ends_with(".cjs")
-                        || path_str.ends_with(".json")
-                        || source.contains("@exodus/bytes")
-                    {
-                        source
                     } else {
                         crate::transpiler::transpile_js(&source)
                     };
@@ -342,7 +364,12 @@ pub fn inject_require(
             let hostname_arg = args.get(0);
             let hostname = hostname_arg.to_rust_string_lossy(scope);
 
-            let result = tokio::task::block_in_place(|| {
+            // Plain blocking std::net::ToSocketAddrs — no tokio involved, so
+            // no need for tokio::task::block_in_place (which requires a
+            // multi_thread runtime and panics outright on current_thread,
+            // e.g. plain `#[tokio::test]`; see fs_watch's __fsWatchNext fix
+            // for the same bug pattern).
+            let result = {
                 use std::net::ToSocketAddrs;
                 let addr_str = format!("{}:0", hostname);
                 match addr_str.to_socket_addrs() {
@@ -356,7 +383,7 @@ pub fn inject_require(
                     }
                     Err(e) => Err(e.to_string()),
                 }
-            });
+            };
 
             let json_result = match result {
                 Ok(ips) => serde_json::to_string(&ips).unwrap_or_else(|_| "[]".to_string()),
@@ -415,9 +442,26 @@ pub fn inject_require(
                 }
             };
 
+            // Run the lookup on a brand-new OS thread with its own runtime,
+            // then join() it — not tokio::task::block_in_place +
+            // Handle::current().block_on(), nor a fresh runtime's block_on()
+            // called directly on THIS thread. Tokio marks any thread that's
+            // currently driving a runtime (even if you build a second,
+            // unrelated Runtime and call block_on on *that*) and panics with
+            // "Cannot start a runtime from within a runtime" — the guard is
+            // per-thread, not per-runtime-instance. A plain std::thread has
+            // no such marker, so blocking (join) on it from here is safe
+            // regardless of what runtime (if any) is driving this thread;
+            // see fs_watch's __fsWatchNext fix for the same root bug.
+            let hostname_for_thread = hostname.clone();
             let result: Result<hickory_resolver::lookup::Lookup, String> =
-                match tokio::runtime::Handle::try_current() {
-                    Ok(runtime) => runtime.block_on(async {
+                std::thread::spawn(move || {
+                    let hostname = hostname_for_thread;
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| e.to_string())?;
+                    rt.block_on(async {
                         if record_type == RecordType::PTR {
                             let ip: std::net::IpAddr = match hostname.parse() {
                                 Ok(ip) => ip,
@@ -432,9 +476,10 @@ pub fn inject_require(
                                 .await
                                 .map_err(|e| e.to_string())
                         }
-                    }),
-                    Err(_) => Err("no runtime".to_string()),
-                };
+                    })
+                })
+                .join()
+                .unwrap_or_else(|_| Err("dns query thread panicked".to_string()));
 
             match result {
                 Ok(lookup) => {
@@ -708,6 +753,542 @@ pub fn inject_require(
                 };
             };
             globalThis.__requireCache['events'] = EventEmitter;
+
+            // ── assert ───────────────────────────────────────────────────────────
+            (function() {
+                function AssertionError(opts) {
+                    opts = opts || {};
+                    var msg = opts.message;
+                    if (!msg) {
+                        msg = (opts.operator || 'deepStrictEqual') + '(' + safeInspect(opts.actual) + ', ' + safeInspect(opts.expected) + ')';
+                    }
+                    Error.call(this, msg);
+                    this.message = msg;
+                    this.name = 'AssertionError';
+                    this.actual = opts.actual;
+                    this.expected = opts.expected;
+                    this.operator = opts.operator;
+                    this.generatedMessage = !opts.message;
+                    this.code = 'ERR_ASSERTION';
+                    if (typeof Error.captureStackTrace === 'function') Error.captureStackTrace(this, opts.stackStartFn || AssertionError);
+                }
+                AssertionError.prototype = Object.create(Error.prototype);
+                AssertionError.prototype.constructor = AssertionError;
+                AssertionError.prototype.name = 'AssertionError';
+
+                function safeInspect(v) {
+                    try {
+                        if (typeof v === 'string') return JSON.stringify(v);
+                        if (v instanceof Error) return String(v);
+                        if (typeof v === 'object' && v !== null) return JSON.stringify(v);
+                        return String(v);
+                    } catch (e) { return String(v); }
+                }
+
+                function fail(message, actual, expected, operator, stackStartFn) {
+                    if (message instanceof Error) throw message;
+                    throw new AssertionError({
+                        message: typeof message === 'string' ? message : undefined,
+                        actual: actual, expected: expected, operator: operator,
+                        stackStartFn: stackStartFn,
+                    });
+                }
+
+                function deepEqualInternal(a, b, strict, seen) {
+                    if (Object.is(a, b)) return true;
+                    if (a === null || b === null || a === undefined || b === undefined) return false;
+                    if (typeof a !== typeof b) return false;
+                    if (typeof a !== 'object') {
+                        return !strict && a == b;
+                    }
+                    if (strict && Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false;
+
+                    if (a instanceof Date || b instanceof Date) {
+                        return a instanceof Date && b instanceof Date && a.getTime() === b.getTime();
+                    }
+                    if (a instanceof RegExp || b instanceof RegExp) {
+                        return a instanceof RegExp && b instanceof RegExp && a.source === b.source && a.flags === b.flags;
+                    }
+                    var aTyped = ArrayBuffer.isView(a), bTyped = ArrayBuffer.isView(b);
+                    if (aTyped || bTyped) {
+                        if (!aTyped || !bTyped || a.length !== b.length) return false;
+                        if (strict && a.constructor !== b.constructor) return false;
+                        for (var ti = 0; ti < a.length; ti++) if (a[ti] !== b[ti]) return false;
+                        return true;
+                    }
+
+                    seen = seen || [];
+                    for (var si = 0; si < seen.length; si++) {
+                        if (seen[si][0] === a && seen[si][1] === b) return true;
+                    }
+                    seen.push([a, b]);
+
+                    if (Array.isArray(a) || Array.isArray(b)) {
+                        if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+                        for (var ai = 0; ai < a.length; ai++) {
+                            if (!deepEqualInternal(a[ai], b[ai], strict, seen)) return false;
+                        }
+                        return true;
+                    }
+
+                    if (typeof Map !== 'undefined' && (a instanceof Map || b instanceof Map)) {
+                        if (!(a instanceof Map) || !(b instanceof Map) || a.size !== b.size) return false;
+                        var mapOk = true;
+                        a.forEach(function(v, k) {
+                            if (!mapOk) return;
+                            if (!b.has(k) || !deepEqualInternal(v, b.get(k), strict, seen)) mapOk = false;
+                        });
+                        return mapOk;
+                    }
+                    if (typeof Set !== 'undefined' && (a instanceof Set || b instanceof Set)) {
+                        if (!(a instanceof Set) || !(b instanceof Set) || a.size !== b.size) return false;
+                        var setOk = true;
+                        a.forEach(function(v) { if (!b.has(v)) setOk = false; });
+                        return setOk;
+                    }
+
+                    var keysA = Object.keys(a), keysB = Object.keys(b);
+                    if (keysA.length !== keysB.length) return false;
+                    for (var ki = 0; ki < keysA.length; ki++) {
+                        var key = keysA[ki];
+                        if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+                        if (!deepEqualInternal(a[key], b[key], strict, seen)) return false;
+                    }
+                    return true;
+                }
+
+                function assert(value, message) {
+                    if (!value) fail(message, value, true, '==', assert);
+                }
+                assert.AssertionError = AssertionError;
+                assert.ok = assert;
+                assert.equal = function(a, b, msg) { if (!(a == b)) fail(msg, a, b, '==', assert.equal); };
+                assert.notEqual = function(a, b, msg) { if (a == b) fail(msg, a, b, '!=', assert.notEqual); };
+                assert.strictEqual = function(a, b, msg) { if (!Object.is(a, b)) fail(msg, a, b, 'strictEqual', assert.strictEqual); };
+                assert.notStrictEqual = function(a, b, msg) { if (Object.is(a, b)) fail(msg, a, b, 'notStrictEqual', assert.notStrictEqual); };
+                assert.deepEqual = function(a, b, msg) { if (!deepEqualInternal(a, b, false)) fail(msg, a, b, 'deepEqual', assert.deepEqual); };
+                assert.notDeepEqual = function(a, b, msg) { if (deepEqualInternal(a, b, false)) fail(msg, a, b, 'notDeepEqual', assert.notDeepEqual); };
+                assert.deepStrictEqual = function(a, b, msg) { if (!deepEqualInternal(a, b, true)) fail(msg, a, b, 'deepStrictEqual', assert.deepStrictEqual); };
+                assert.notDeepStrictEqual = function(a, b, msg) { if (deepEqualInternal(a, b, true)) fail(msg, a, b, 'notDeepStrictEqual', assert.notDeepStrictEqual); };
+                assert.throws = function(fn, errorOrMsg, msg) {
+                    var errorMatcher = typeof errorOrMsg === 'function' || errorOrMsg instanceof RegExp ? errorOrMsg : undefined;
+                    if (errorMatcher === undefined && typeof errorOrMsg === 'string') msg = errorOrMsg;
+                    try { fn(); }
+                    catch (e) {
+                        if (typeof errorMatcher === 'function' && !(e instanceof errorMatcher)) {
+                            throw new AssertionError({ message: msg, actual: e, expected: errorMatcher, operator: 'throws', stackStartFn: assert.throws });
+                        }
+                        if (errorMatcher instanceof RegExp && !errorMatcher.test(e.message)) {
+                            throw new AssertionError({ message: msg, actual: e.message, expected: errorMatcher, operator: 'throws', stackStartFn: assert.throws });
+                        }
+                        return;
+                    }
+                    fail(msg || 'Missing expected exception', undefined, undefined, 'throws', assert.throws);
+                };
+                assert.doesNotThrow = function(fn, msg) {
+                    try { fn(); }
+                    catch (e) { fail(msg || ('Got unwanted exception: ' + e.message), undefined, undefined, 'doesNotThrow', assert.doesNotThrow); }
+                };
+                assert.ifError = function(err) {
+                    if (err !== null && err !== undefined) {
+                        throw (err instanceof Error ? err : new AssertionError({ message: 'ifError got unwanted exception: ' + safeInspect(err), actual: err, expected: null, operator: 'ifError', stackStartFn: assert.ifError }));
+                    }
+                };
+                assert.match = function(str, regexp, msg) { if (!regexp.test(str)) fail(msg, str, regexp, 'match', assert.match); };
+                assert.doesNotMatch = function(str, regexp, msg) { if (regexp.test(str)) fail(msg, str, regexp, 'doesNotMatch', assert.doesNotMatch); };
+                assert.rejects = function(fn, errorOrMsg, msg) {
+                    var errorMatcher = typeof errorOrMsg === 'function' ? errorOrMsg : undefined;
+                    if (errorMatcher === undefined && typeof errorOrMsg === 'string') msg = errorOrMsg;
+                    var p = typeof fn === 'function' ? Promise.resolve().then(fn) : Promise.resolve(fn);
+                    return p.then(
+                        function() { fail(msg || 'Missing expected rejection', undefined, undefined, 'rejects', assert.rejects); },
+                        function(e) {
+                            if (typeof errorMatcher === 'function' && !(e instanceof errorMatcher)) {
+                                throw new AssertionError({ message: msg, actual: e, expected: errorMatcher, operator: 'rejects', stackStartFn: assert.rejects });
+                            }
+                        }
+                    );
+                };
+                assert.doesNotReject = function(fn, msg) {
+                    var p = typeof fn === 'function' ? Promise.resolve().then(fn) : Promise.resolve(fn);
+                    return p.catch(function(e) {
+                        fail(msg || ('Got unwanted rejection: ' + e.message), undefined, undefined, 'doesNotReject', assert.doesNotReject);
+                    });
+                };
+                assert.fail = function(message) { fail(message, undefined, undefined, 'fail', assert.fail); };
+
+                globalThis.__requireCache['assert'] = assert;
+                globalThis.__requireCache['node:assert'] = assert;
+                globalThis.__requireCache['assert/strict'] = assert;
+                globalThis.__requireCache['node:assert/strict'] = assert;
+            })();
+
+            // ── timers / timers/promises ────────────────────────────────────────────
+            (function() {
+                var timers = {
+                    setTimeout: globalThis.setTimeout,
+                    clearTimeout: globalThis.clearTimeout,
+                    setInterval: globalThis.setInterval,
+                    clearInterval: globalThis.clearInterval,
+                    setImmediate: globalThis.setImmediate,
+                    clearImmediate: globalThis.clearImmediate,
+                };
+                globalThis.__requireCache['timers'] = timers;
+                globalThis.__requireCache['node:timers'] = timers;
+
+                // Whatever reason a signal carries, the rejection here must
+                // look like a real AbortError (Node/DOM give it `.name ===
+                // 'AbortError'`) — the generic AbortController shim in
+                // web_globals.rs just stores `new Error('AbortError')` as
+                // the reason, whose `.name` is still the generic 'Error'.
+                function abortError(signal) {
+                    var err = (signal && signal.reason instanceof Error) ? signal.reason : new Error('The operation was aborted');
+                    if (!err.name || err.name === 'Error') err.name = 'AbortError';
+                    return err;
+                }
+
+                var timersPromises = {
+                    setTimeout: function(delay, value, options) {
+                        options = options || {};
+                        var signal = options.signal;
+                        return new Promise(function(resolve, reject) {
+                            if (signal && signal.aborted) { reject(abortError(signal)); return; }
+                            var id = globalThis.setTimeout(function() { resolve(value); }, delay);
+                            if (signal) {
+                                signal.addEventListener('abort', function() {
+                                    globalThis.clearTimeout(id);
+                                    reject(abortError(signal));
+                                });
+                            }
+                        });
+                    },
+                    setImmediate: function(value, options) {
+                        options = options || {};
+                        var signal = options.signal;
+                        return new Promise(function(resolve, reject) {
+                            if (signal && signal.aborted) { reject(abortError(signal)); return; }
+                            var id = globalThis.setImmediate(function() { resolve(value); });
+                            if (signal) {
+                                signal.addEventListener('abort', function() {
+                                    globalThis.clearImmediate ? globalThis.clearImmediate(id) : globalThis.clearTimeout(id);
+                                    reject(abortError(signal));
+                                });
+                            }
+                        });
+                    },
+                    setInterval: function(delay, value, options) {
+                        options = options || {};
+                        var signal = options.signal;
+                        var iterator = {
+                            next: function() {
+                                return new Promise(function(resolve, reject) {
+                                    if (signal && signal.aborted) { reject(abortError(signal)); return; }
+                                    globalThis.setTimeout(function() { resolve({ value: value, done: false }); }, delay);
+                                });
+                            },
+                            return: function() { return Promise.resolve({ value: undefined, done: true }); },
+                        };
+                        iterator[Symbol.asyncIterator] = function() { return iterator; };
+                        return iterator;
+                    },
+                };
+                globalThis.__requireCache['timers/promises'] = timersPromises;
+                globalThis.__requireCache['node:timers/promises'] = timersPromises;
+            })();
+
+            // ── dns / dns/promises ───────────────────────────────────────────────────
+            // Backed by real native lookups (__dnsLookup: std::net::ToSocketAddrs;
+            // __dnsQuery: hickory-resolver) — both already existed but were never
+            // assembled into a require()able module.
+            (function() {
+                function mkErr(raw, hostname, syscall) {
+                    var code = 'ENOTFOUND';
+                    var m = /^([A-Z]+)[: ]/.exec(raw);
+                    if (m) code = m[1];
+                    var err = new Error(raw);
+                    err.code = code;
+                    err.hostname = hostname;
+                    err.syscall = syscall || 'queryA';
+                    return err;
+                }
+
+                function lookup(hostname, options, callback) {
+                    if (typeof options === 'function') { callback = options; options = {}; }
+                    options = options || {};
+                    setTimeout(function() {
+                        var raw = __dnsLookup(hostname);
+                        var ips;
+                        try { ips = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'getaddrinfo')); return; }
+                        if (options.all) {
+                            callback(null, ips.map(function(ip) { return { address: ip, family: ip.indexOf(':') !== -1 ? 6 : 4 }; }));
+                        } else {
+                            var ip = ips[0];
+                            callback(null, ip, ip.indexOf(':') !== -1 ? 6 : 4);
+                        }
+                    }, 0);
+                }
+
+                function resolveFamily(hostname, family, callback) {
+                    setTimeout(function() {
+                        var raw = __dnsLookup(hostname);
+                        var ips;
+                        try { ips = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'queryA')); return; }
+                        var filtered = ips.filter(function(ip) { return (ip.indexOf(':') !== -1) === (family === 6); });
+                        if (!filtered.length) { callback(mkErr('ENOTFOUND', hostname, 'queryA')); return; }
+                        callback(null, filtered);
+                    }, 0);
+                }
+
+                function resolveQuery(rrtype) {
+                    return function(hostname, callback) {
+                        setTimeout(function() {
+                            var raw = __dnsQuery(hostname, rrtype);
+                            var data;
+                            try { data = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'query' + rrtype)); return; }
+                            if (data === null || (Array.isArray(data) && data.length === 0)) {
+                                var err = new Error('query' + rrtype + ' ENODATA ' + hostname);
+                                err.code = 'ENODATA';
+                                err.hostname = hostname;
+                                err.syscall = 'query' + rrtype;
+                                callback(err);
+                                return;
+                            }
+                            callback(null, data);
+                        }, 0);
+                    };
+                }
+
+                var resolveMx = resolveQuery('MX');
+                var resolveTxt = resolveQuery('TXT');
+                var resolveSrv = resolveQuery('SRV');
+                var resolveNs = resolveQuery('NS');
+                var resolveCname = resolveQuery('CNAME');
+                var resolveNaptr = resolveQuery('NAPTR');
+                var resolveSoa = resolveQuery('SOA');
+                var resolvePtrQuery = resolveQuery('PTR');
+
+                function resolve4(hostname, callback) { resolveFamily(hostname, 4, callback); }
+                function resolve6(hostname, callback) { resolveFamily(hostname, 6, callback); }
+
+                function resolve(hostname, rrtype, callback) {
+                    if (typeof rrtype === 'function') { callback = rrtype; rrtype = 'A'; }
+                    rrtype = rrtype || 'A';
+                    var map = {
+                        A: resolve4, AAAA: resolve6, MX: resolveMx, TXT: resolveTxt,
+                        SRV: resolveSrv, NS: resolveNs, CNAME: resolveCname,
+                        NAPTR: resolveNaptr, SOA: resolveSoa, PTR: resolvePtrQuery,
+                    };
+                    (map[rrtype] || resolve4)(hostname, callback);
+                }
+
+                function reverse(ip, callback) {
+                    setTimeout(function() {
+                        var raw = __dnsQuery(ip, 'PTR');
+                        var data;
+                        try { data = JSON.parse(raw); } catch (e) { callback(mkErr(raw, ip, 'getHostByAddr')); return; }
+                        callback(null, data);
+                    }, 0);
+                }
+
+                function promisify1(fn) {
+                    return function(a, b) {
+                        return new Promise(function(resolve, reject) {
+                            fn(a, b, function(err, res) { if (err) reject(err); else resolve(res); });
+                        });
+                    };
+                }
+
+                function lookupPromise(hostname, options) {
+                    return new Promise(function(resolvePromise, reject) {
+                        lookup(hostname, options || {}, function(err, address, family) {
+                            if (err) { reject(err); return; }
+                            if (Array.isArray(address)) resolvePromise(address);
+                            else resolvePromise({ address: address, family: family });
+                        });
+                    });
+                }
+
+                var dns = {
+                    lookup: lookup,
+                    resolve: resolve,
+                    resolve4: resolve4,
+                    resolve6: resolve6,
+                    resolveMx: resolveMx,
+                    resolveTxt: resolveTxt,
+                    resolveSrv: resolveSrv,
+                    resolveNs: resolveNs,
+                    resolveCname: resolveCname,
+                    resolveNaptr: resolveNaptr,
+                    resolveSoa: resolveSoa,
+                    resolvePtr: resolvePtrQuery,
+                    reverse: reverse,
+                    getServers: function() { return []; },
+                    setServers: function() {},
+                    lookupService: function(address, port, callback) {
+                        setTimeout(function() {
+                            var err = new Error('getnameinfo ENOTSUP ' + address);
+                            err.code = 'ENOTSUP';
+                            err.errno = -86;
+                            callback(err);
+                        }, 0);
+                    },
+                    ADDRCONFIG: 0, ALL: 0, V4MAPPED: 0,
+                    NODATA: 'ENODATA', FORMERR: 'EFORMERR', SERVFAIL: 'ESERVFAIL',
+                    NOTFOUND: 'ENOTFOUND', NOTIMP: 'ENOTIMP', REFUSED: 'EREFUSED',
+                };
+                dns.promises = {
+                    lookup: lookupPromise,
+                    resolve: function(hostname, rrtype) { return promisify1(resolve)(hostname, rrtype); },
+                    resolve4: promisify1(function(h, _b, cb) { resolve4(h, cb); }),
+                    resolve6: promisify1(function(h, _b, cb) { resolve6(h, cb); }),
+                    resolveMx: promisify1(function(h, _b, cb) { resolveMx(h, cb); }),
+                    resolveTxt: promisify1(function(h, _b, cb) { resolveTxt(h, cb); }),
+                    resolveSrv: promisify1(function(h, _b, cb) { resolveSrv(h, cb); }),
+                    resolveNs: promisify1(function(h, _b, cb) { resolveNs(h, cb); }),
+                    resolveCname: promisify1(function(h, _b, cb) { resolveCname(h, cb); }),
+                    resolveNaptr: promisify1(function(h, _b, cb) { resolveNaptr(h, cb); }),
+                    resolveSoa: promisify1(function(h, _b, cb) { resolveSoa(h, cb); }),
+                    resolvePtr: promisify1(function(h, _b, cb) { resolvePtrQuery(h, cb); }),
+                    reverse: promisify1(function(h, _b, cb) { reverse(h, cb); }),
+                    getServers: function() { return []; },
+                    setServers: function() {},
+                };
+                globalThis.__requireCache['dns'] = dns;
+                globalThis.__requireCache['node:dns'] = dns;
+                globalThis.__requireCache['dns/promises'] = dns.promises;
+                globalThis.__requireCache['node:dns/promises'] = dns.promises;
+            })();
+
+            (function() {
+                var os = {
+                    hostname: function() { return __osHostname(); },
+                    totalmem: function() { return __osTotalMem(); },
+                    freemem: function() { return __osFreeMem(); },
+                    uptime: function() { return __osUptime(); },
+                    cpus: function() { return JSON.parse(__osCpus()); },
+                    networkInterfaces: function() { return JSON.parse(__osNetworkInterfaces()); },
+                    platform: function() { return __osPlatform(); },
+                    arch: function() { return __osArch(); },
+                    type: function() {
+                        var p = __osPlatform();
+                        return p === 'darwin' ? 'Darwin' : (p === 'win32' ? 'Windows_NT' : 'Linux');
+                    },
+                    release: function() { return '0.0.0'; },
+                    homedir: function() {
+                        return (globalThis.process && globalThis.process.env &&
+                                (globalThis.process.env.HOME || globalThis.process.env.USERPROFILE)) || '/';
+                    },
+                    tmpdir: function() {
+                        return (globalThis.process && globalThis.process.env && globalThis.process.env.TMPDIR) || '/tmp';
+                    },
+                    endianness: function() { return 'LE'; },
+                    EOL: __osPlatform() === 'win32' ? '\r\n' : '\n',
+                    constants: { signals: {}, errno: {}, priority: {} },
+                };
+                globalThis.__requireCache['os'] = os;
+                globalThis.__requireCache['node:os'] = os;
+
+                var tty = {
+                    isatty: function(fd) { return typeof __isatty === 'function' ? __isatty(fd) : false; },
+                    ReadStream: function() {},
+                    WriteStream: function() {},
+                };
+                globalThis.__requireCache['tty'] = tty;
+                globalThis.__requireCache['node:tty'] = tty;
+
+                var v8mod = {
+                    getHeapStatistics: function() {
+                        return {
+                            total_heap_size: 0, total_heap_size_executable: 0,
+                            total_physical_size: 0, total_available_size: 0,
+                            used_heap_size: 0, heap_size_limit: 0,
+                            malloced_memory: 0, peak_malloced_memory: 0,
+                            does_zap_garbage: 0, number_of_native_contexts: 0,
+                            number_of_detached_contexts: 0,
+                        };
+                    },
+                    getHeapSpaceStatistics: function() { return []; },
+                    setFlagsFromString: function() {},
+                    serialize: function(v) { return Buffer.from(JSON.stringify(v)); },
+                    deserialize: function(buf) { return JSON.parse(buf.toString()); },
+                };
+                globalThis.__requireCache['v8'] = v8mod;
+                globalThis.__requireCache['node:v8'] = v8mod;
+
+                // ponytail: sandboxes are plain objects run through `with`,
+                // not real isolated V8 contexts — enough for the common
+                // "eval config code against a data object" use case; a real
+                // per-Context sandbox needs a native v8::Context binding,
+                // add one if code needs true isolation (e.g. untrusted input).
+                var _vmContexts = new WeakSet();
+                function vmRunInSandbox(code, sandbox) {
+                    try {
+                        return (new Function('__vm_sandbox__', 'with(__vm_sandbox__){ return (' + code + ') }'))(sandbox);
+                    } catch (e) {
+                        if (e instanceof SyntaxError) {
+                            return (new Function('__vm_sandbox__', 'with(__vm_sandbox__){ ' + code + ' }'))(sandbox);
+                        }
+                        throw e;
+                    }
+                }
+                function VmScript(code) { this.code = code; }
+                VmScript.prototype.runInContext = function(sandbox) { return vmRunInSandbox(this.code, sandbox || {}); };
+                VmScript.prototype.runInNewContext = function(sandbox) { return vmRunInSandbox(this.code, sandbox || {}); };
+                VmScript.prototype.runInThisContext = function() { return (0, eval)(this.code); };
+
+                var vm = {
+                    createContext: function(sandbox) {
+                        sandbox = sandbox || {};
+                        _vmContexts.add(sandbox);
+                        return sandbox;
+                    },
+                    isContext: function(obj) {
+                        return typeof obj === 'object' && obj !== null && _vmContexts.has(obj);
+                    },
+                    runInNewContext: function(code, sandbox) { return vmRunInSandbox(code, sandbox || {}); },
+                    runInContext: function(code, sandbox) { return vmRunInSandbox(code, sandbox || {}); },
+                    runInThisContext: function(code) { return (0, eval)(code); },
+                    Script: VmScript,
+                };
+                globalThis.__requireCache['vm'] = vm;
+                globalThis.__requireCache['node:vm'] = vm;
+
+                var cluster = Object.create(EventEmitter.prototype);
+                EventEmitter.call(cluster);
+                var _clusterWorkers = {};
+                var _clusterNextId = 0;
+                function ClusterWorker() {
+                    EventEmitter.call(this);
+                    this.id = ++_clusterNextId;
+                    this.process = { pid: 0 };
+                    this.state = 'online';
+                    this.exitedAfterDisconnect = false;
+                }
+                util.inherits(ClusterWorker, EventEmitter);
+                ClusterWorker.prototype.send = function() { return true; };
+                ClusterWorker.prototype.kill = function() { this.state = 'dead'; };
+                ClusterWorker.prototype.disconnect = function() { this.state = 'dead'; };
+                ClusterWorker.prototype.isDead = function() { return this.state === 'dead'; };
+
+                cluster.isPrimary = true;
+                cluster.isMaster = true;
+                cluster.isWorker = false;
+                cluster.workers = _clusterWorkers;
+                cluster.settings = {};
+                cluster.schedulingPolicy = 2;
+                cluster.SCHED_NONE = 1;
+                cluster.SCHED_RR = 2;
+                cluster.fork = function() {
+                    var w = new ClusterWorker();
+                    _clusterWorkers[w.id] = w;
+                    return w;
+                };
+                cluster.setupPrimary = function(settings) { cluster.settings = settings || {}; };
+                cluster.setupMaster = cluster.setupPrimary;
+                cluster.disconnect = function(cb) { if (cb) cb(); };
+                globalThis.__requireCache['cluster'] = cluster;
+                globalThis.__requireCache['node:cluster'] = cluster;
+            })();
 
             function Stream() { EventEmitter.call(this); }
             util.inherits(Stream, EventEmitter);
@@ -1006,65 +1587,370 @@ pub fn inject_require(
 
             globalThis.__requireCache['stream'] = { Readable: Readable, Writable: Writable, Transform: Transform, PassThrough: PassThrough, Duplex: Duplex, Stream: Stream };
 
-            globalThis.__requireCache['path'] = {
-                resolve: function() {
-                    var args = Array.prototype.slice.call(arguments);
-                    if (!args.length) return process.cwd ? process.cwd() : '/';
-                    var result = args.reduce(function(acc, seg) {
-                        if (!seg) return acc;
-                        if (seg.charAt(0) === '/') return seg;
-                        return acc ? acc.replace(/\/*$/, '/') + seg : seg;
-                    }, '');
-                    return result || '/';
-                },
-                join: function() {
-                    return Array.prototype.slice.call(arguments).join('/').replace(/\/+/g, '/');
-                },
-                dirname: function(p) {
-                    if (!p) return '.';
-                    var sep = p.indexOf('/') !== -1 ? '/' : '\\';
-                    var parts = p.split(sep);
-                    if (parts.length === 1) return '.';
-                    parts.pop();
-                    return parts.join(sep) || (sep === '/' ? '/' : '.');
-                },
-                basename: function(p, ext) {
-                    if (!p) return '.';
-                    var sep = p.indexOf('/') !== -1 ? '/' : '\\';
-                    var parts = p.split(sep);
-                    var last = parts[parts.length - 1];
-                    if (ext && last.endsWith(ext)) return last.slice(0, -ext.length);
-                    return last || '';
-                },
-                extname: function(p) {
-                    if (!p) return '';
-                    var last = p.split(/[\/\\]/).pop() || '';
-                    var idx = last.lastIndexOf('.');
-                    return idx <= 0 ? '' : last.slice(idx);
-                },
-                isAbsolute: function(p) { return p && (p.charAt(0) === '/' || p.match(/^[A-Za-z]:/)); },
-                normalize: function(p) { return p.replace(/\/+/g, '/').replace(/\/$/, '') || '/'; },
-                relative: function(from, to) {
-                    var fromParts = from.split('/').filter(Boolean);
-                    var toParts = to.split('/').filter(Boolean);
-                    var i = 0;
-                    while (i < fromParts.length && i < toParts.length && fromParts[i] === toParts[i]) i++;
-                    return '../'.repeat(fromParts.length - i) + toParts.slice(i).join('/');
-                },
-                join: function() { return this.normalize(Array.prototype.slice.call(arguments).join('/')); },
-                resolve: function() {
-                    var args = Array.prototype.slice.call(arguments);
-                    var result = args.reduce(function(acc, seg) {
-                        if (!seg) return acc;
-                        if (seg.charAt(0) === '/') return seg;
-                        return acc ? acc.replace(/\/*$/, '/') + seg : seg;
-                    }, '');
-                    return result || '.';
-                },
-            };
+            // ── process.stdout/stderr as real Writable streams, process.env as a
+            // real Proxy — process.rs sets plain placeholders (see its comments),
+            // this replaces them now that stream.Writable exists.
+            if (typeof process !== 'undefined') {
+                var __stdoutFd = process.stdout && process.stdout.fd;
+                var __stderrFd = process.stderr && process.stderr.fd;
+                process.stdout = new Writable({
+                    write: function(chunk, encoding, callback) {
+                        __stdoutWrite(Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? Buffer.from(chunk).toString() : String(chunk));
+                        callback();
+                    }
+                });
+                process.stdout.fd = __stdoutFd === undefined ? 1 : __stdoutFd;
+                process.stdout.isTTY = false;
+                process.stdout.columns = 80;
+                process.stdout.rows = 24;
+
+                process.stderr = new Writable({
+                    write: function(chunk, encoding, callback) {
+                        __stderrWrite(Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? Buffer.from(chunk).toString() : String(chunk));
+                        callback();
+                    }
+                });
+                process.stderr.fd = __stderrFd === undefined ? 2 : __stderrFd;
+                process.stderr.isTTY = false;
+
+                // process.stdin: a Readable pulling from the real OS stdin
+                // (native __stdinRead(), process.rs — non-blocking, backed by
+                // a background reader thread so waiting for input never
+                // freezes the engine). Paused by default like Node; starts
+                // pumping chunks once something adds a 'data' listener or
+                // calls .resume(), matching Node's flowing-mode semantics.
+                var stdin = new Readable();
+                stdin.fd = 0;
+                stdin.isTTY = typeof __isatty === 'function' ? __isatty(0) : false;
+                stdin._paused = true;
+                stdin._ended = false;
+                stdin._encoding = null;
+                stdin.setEncoding = function(enc) { this._encoding = enc; return this; };
+                stdin.pause = function() { this._paused = true; return this; };
+                stdin.resume = function() {
+                    if (!this._paused) return this;
+                    this._paused = false;
+                    this._pump();
+                    return this;
+                };
+                stdin._pump = function() {
+                    var self = this;
+                    if (self._paused || self._ended) return;
+                    __stdinRead().then(function(chunk) {
+                        if (self._ended) return;
+                        if (chunk.length === 0) {
+                            self._ended = true;
+                            self.emit('end');
+                            self.emit('close');
+                            return;
+                        }
+                        var data = self._encoding
+                            ? new TextDecoder(self._encoding === 'utf8' ? 'utf-8' : self._encoding).decode(chunk)
+                            : (typeof Buffer !== 'undefined' ? Buffer.from(chunk) : chunk);
+                        self.emit('data', data);
+                        if (!self._paused) self._pump();
+                    });
+                };
+                var stdinOn = stdin.on;
+                stdin.on = stdin.addListener = function(ev, fn) {
+                    stdinOn.call(this, ev, fn);
+                    if (ev === 'data') this.resume();
+                    return this;
+                };
+                process.stdin = stdin;
+
+                var __envTarget = process.env || {};
+                process.env = new Proxy(__envTarget, {
+                    get: function(target, prop) {
+                        if (prop === '__isProxy') return true;
+                        return target[prop];
+                    },
+                    set: function(target, prop, value) { target[prop] = String(value); return true; },
+                    has: function(target, prop) { return prop in target; },
+                    deleteProperty: function(target, prop) { delete target[prop]; return true; },
+                    ownKeys: function(target) { return Object.keys(target); },
+                    getOwnPropertyDescriptor: function(target, prop) {
+                        return Object.getOwnPropertyDescriptor(target, prop);
+                    }
+                });
+            }
+
+            // ── readline / readline/promises ────────────────────────────────────────
+            (function() {
+                function Interface(options) {
+                    EventEmitter.call(this);
+                    options = options || {};
+                    this.input = options.input;
+                    this.output = options.output;
+                    this.terminal = options.terminal !== undefined ? !!options.terminal : !!(this.output && this.output.isTTY);
+                    this._prompt = '> ';
+                    this._lineBuffer = '';
+                    this._closed = false;
+
+                    var self = this;
+                    if (this.input) {
+                        this.input.on('data', function(chunk) {
+                            self._feedChars(typeof chunk === 'string' ? chunk : chunk.toString());
+                        });
+                        this.input.on('end', function() {
+                            if (self._lineBuffer.length) {
+                                self.emit('line', self._lineBuffer);
+                                self._lineBuffer = '';
+                            }
+                            self.close();
+                        });
+                    }
+                }
+                util.inherits(Interface, EventEmitter);
+
+                Interface.prototype._feedChars = function(str) {
+                    this._lineBuffer += str;
+                    var lines = this._lineBuffer.split(/\r\n|\r|\n/);
+                    this._lineBuffer = lines.pop();
+                    for (var i = 0; i < lines.length; i++) this.emit('line', lines[i]);
+                };
+                Interface.prototype.setPrompt = function(p) { this._prompt = p; return this; };
+                Interface.prototype.getPrompt = function() { return this._prompt; };
+                Interface.prototype.prompt = function() {
+                    if (this.output) this.output.write(this._prompt);
+                    return this;
+                };
+                Interface.prototype.question = function(query, options, callback) {
+                    if (typeof options === 'function') { callback = options; options = {}; }
+                    if (this.output) this.output.write(query);
+                    this.once('line', function(line) { if (callback) callback(line); });
+                    return this;
+                };
+                Interface.prototype.close = function() {
+                    if (this._closed) return;
+                    this._closed = true;
+                    this.emit('close');
+                };
+                Interface.prototype.pause = function() {
+                    if (this.input && this.input.pause) this.input.pause();
+                    return this;
+                };
+                Interface.prototype.resume = function() {
+                    if (this.input && this.input.resume) this.input.resume();
+                    return this;
+                };
+                Interface.prototype.write = function(data) { this._feedChars(data); return this; };
+                Interface.prototype[Symbol.asyncIterator] = function() {
+                    var self = this, buffered = [], waiting = null, done = false;
+                    this.on('line', function(line) {
+                        if (waiting) { var w = waiting; waiting = null; w({ value: line, done: false }); }
+                        else buffered.push(line);
+                    });
+                    this.on('close', function() {
+                        done = true;
+                        if (waiting) { var w = waiting; waiting = null; w({ value: undefined, done: true }); }
+                    });
+                    return {
+                        next: function() {
+                            if (buffered.length) return Promise.resolve({ value: buffered.shift(), done: false });
+                            if (done) return Promise.resolve({ value: undefined, done: true });
+                            return new Promise(function(resolve) { waiting = resolve; });
+                        },
+                        return: function() { self.close(); return Promise.resolve({ value: undefined, done: true }); },
+                    };
+                };
+
+                function createInterface(options) {
+                    return new Interface(options);
+                }
+                function cursorTo(stream, x, y, cb) { if (typeof y === 'function') cb = y; if (cb) cb(); return true; }
+                function moveCursor(stream, dx, dy, cb) { if (typeof dy === 'function') cb = dy; if (cb) cb(); return true; }
+                function clearLine(stream, dir, cb) { if (typeof dir === 'function') cb = dir; if (cb) cb(); return true; }
+                function clearScreenDown(stream, cb) { if (cb) cb(); return true; }
+
+                var readline = {
+                    Interface: Interface,
+                    createInterface: createInterface,
+                    cursorTo: cursorTo,
+                    moveCursor: moveCursor,
+                    clearLine: clearLine,
+                    clearScreenDown: clearScreenDown,
+                    emitKeypressEvents: function() {},
+                };
+                readline.promises = {
+                    Interface: Interface,
+                    createInterface: function(options) {
+                        var iface = new Interface(options);
+                        var origQuestion = iface.question.bind(iface);
+                        iface.question = function(query) {
+                            return new Promise(function(resolve) { origQuestion(query, resolve); });
+                        };
+                        return iface;
+                    },
+                    cursorTo: function() { return Promise.resolve(); },
+                    moveCursor: function() { return Promise.resolve(); },
+                    clearLine: function() { return Promise.resolve(); },
+                    clearScreenDown: function() { return Promise.resolve(); },
+                };
+                globalThis.__requireCache['readline'] = readline;
+                globalThis.__requireCache['node:readline'] = readline;
+                globalThis.__requireCache['readline/promises'] = readline.promises;
+                globalThis.__requireCache['node:readline/promises'] = readline.promises;
+            })();
+
+            // path — a real segment-based normalize/resolve/relative (the
+            // old ones were regex approximations that didn't actually
+            // collapse ".."/"." — e.g. normalize('/a/b/../c') returned
+            // '/a/b/../c' unchanged instead of '/a/c' — and had duplicate
+            // `join`/`resolve` keys in this same object literal, so half
+            // the intended behavior was silently shadowed).
+            (function() {
+                function splitNormalize(p, sep, isAbsolute) {
+                    var segments = p.split(sep);
+                    var out = [];
+                    for (var i = 0; i < segments.length; i++) {
+                        var seg = segments[i];
+                        if (seg === '' || seg === '.') continue;
+                        if (seg === '..') {
+                            if (out.length && out[out.length - 1] !== '..') out.pop();
+                            else if (!isAbsolute) out.push('..');
+                        } else {
+                            out.push(seg);
+                        }
+                    }
+                    return out;
+                }
+                function makePath(sep, otherSep) {
+                    var altRe = otherSep ? new RegExp('\\' + otherSep, 'g') : null;
+                    function toSep(p) { return altRe ? p.replace(altRe, sep) : p; }
+                    var p = {
+                        sep: sep,
+                        delimiter: sep === '\\' ? ';' : ':',
+                        isAbsolute: function(path) {
+                            path = toSep(String(path));
+                            if (sep === '\\') return /^[A-Za-z]:[\\/]/.test(path) || path.charAt(0) === '\\';
+                            return path.charAt(0) === '/';
+                        },
+                        normalize: function(path) {
+                            path = toSep(String(path || ''));
+                            if (path === '') return '.';
+                            var isAbsolute = p.isAbsolute(path);
+                            var trailingSlash = path.length > 1 && path.charAt(path.length - 1) === sep;
+                            var out = splitNormalize(path, sep, isAbsolute);
+                            var result = out.join(sep);
+                            if (isAbsolute) result = sep + result;
+                            if (trailingSlash && result.charAt(result.length - 1) !== sep) result += sep;
+                            if (result === '') result = isAbsolute ? sep : '.';
+                            return result;
+                        },
+                        join: function() {
+                            var parts = Array.prototype.slice.call(arguments).filter(function(s) { return s; });
+                            return p.normalize(parts.join(sep));
+                        },
+                        resolve: function() {
+                            var args = Array.prototype.slice.call(arguments);
+                            var resolvedAbsolute = false;
+                            var pathsToProcess = [];
+                            for (var i = args.length - 1; i >= 0 && !resolvedAbsolute; i--) {
+                                var seg = toSep(String(args[i] || ''));
+                                if (!seg) continue;
+                                pathsToProcess.unshift(seg);
+                                resolvedAbsolute = p.isAbsolute(seg);
+                            }
+                            if (!resolvedAbsolute) {
+                                pathsToProcess.unshift((typeof process !== 'undefined' && process.cwd) ? process.cwd() : sep);
+                            }
+                            var combined = pathsToProcess.join(sep);
+                            var out = splitNormalize(combined, sep, true);
+                            return sep + out.join(sep);
+                        },
+                        relative: function(from, to) {
+                            from = toSep(String(from));
+                            to = toSep(String(to));
+                            var fromParts = splitNormalize(from, sep, p.isAbsolute(from));
+                            var toParts = splitNormalize(to, sep, p.isAbsolute(to));
+                            var i = 0;
+                            while (i < fromParts.length && i < toParts.length && fromParts[i] === toParts[i]) i++;
+                            var ups = fromParts.length - i;
+                            var result = [];
+                            for (var j = 0; j < ups; j++) result.push('..');
+                            for (var k = i; k < toParts.length; k++) result.push(toParts[k]);
+                            return result.length ? result.join(sep) : '.';
+                        },
+                        dirname: function(path) {
+                            path = toSep(String(path || ''));
+                            if (!path) return '.';
+                            var isAbsolute = p.isAbsolute(path);
+                            var parts = splitNormalize(path, sep, isAbsolute);
+                            parts.pop();
+                            var result = parts.join(sep);
+                            if (isAbsolute) result = sep + result;
+                            return result || (isAbsolute ? sep : '.');
+                        },
+                        basename: function(path, ext) {
+                            path = toSep(String(path || ''));
+                            if (!path) return '';
+                            var parts = path.split(sep).filter(Boolean);
+                            var last = parts[parts.length - 1] || '';
+                            if (ext && last !== ext && last.slice(-ext.length) === ext) return last.slice(0, -ext.length);
+                            return last;
+                        },
+                        extname: function(path) {
+                            path = toSep(String(path || ''));
+                            var last = path.split(sep).pop() || '';
+                            var idx = last.lastIndexOf('.');
+                            return idx <= 0 ? '' : last.slice(idx);
+                        },
+                        format: function(obj) {
+                            obj = obj || {};
+                            var dir = obj.dir || obj.root || '';
+                            var base = obj.base || ((obj.name || '') + (obj.ext || ''));
+                            return dir ? (dir + (dir.charAt(dir.length - 1) === sep ? '' : sep) + base) : base;
+                        },
+                        parse: function(path) {
+                            path = toSep(String(path || ''));
+                            var isAbsolute = p.isAbsolute(path);
+                            var base = p.basename(path);
+                            var ext = p.extname(base);
+                            var name = ext ? base.slice(0, -ext.length) : base;
+                            var dir = p.dirname(path);
+                            return { root: isAbsolute ? sep : '', dir: dir, base: base, ext: ext, name: name };
+                        },
+                    };
+                    return p;
+                }
+                var posixPath = makePath('/', '\\');
+                var win32Path = makePath('\\', '/');
+                posixPath.posix = posixPath;
+                posixPath.win32 = win32Path;
+                win32Path.posix = posixPath;
+                win32Path.win32 = win32Path;
+                globalThis.__requireCache['path'] = posixPath;
+                globalThis.__requireCache['path/posix'] = posixPath;
+                globalThis.__requireCache['path/win32'] = win32Path;
+            })();
 
             globalThis.__requireCache['buffer'] = globalThis.Buffer;
             globalThis.__requireCache['stream'] = globalThis.__requireCache['stream'] || Stream;
+
+            // ── url ──────────────────────────────────────────────────────────────
+            (function() {
+                function pathToFileURL(p) {
+                    var path = String(p).replace(/\\/g, '/');
+                    var encoded = path.split('/').map(encodeURIComponent).join('/');
+                    if (encoded.charAt(0) !== '/') encoded = '/' + encoded;
+                    return new globalThis.URL('file://' + encoded);
+                }
+                function fileURLToPath(u) {
+                    var href = (u && u.href) ? u.href : String(u);
+                    if (href.indexOf('file://') !== 0) {
+                        throw new TypeError('The URL must be of scheme file');
+                    }
+                    return href.slice('file://'.length).split('/').map(decodeURIComponent).join('/');
+                }
+                globalThis.__requireCache['url'] = {
+                    URL: globalThis.URL,
+                    URLSearchParams: globalThis.URLSearchParams,
+                    pathToFileURL: pathToFileURL,
+                    fileURLToPath: fileURLToPath,
+                    format: function(u) { return (u && u.href) ? u.href : String(u); },
+                };
+            })();
 
             // ── net / tls — raw TCP sockets, backed by the native __tcp*/__net* ────
             // bindings in builtins/tcp.rs. Those bindings return either a number
@@ -1271,6 +2157,489 @@ pub fn inject_require(
 
             globalThis.__requireCache['tls'] = { TLSSocket: TLSSocket, connect: tlsConnect };
             globalThis.__requireCache['node:tls'] = globalThis.__requireCache['tls'];
+
+            // ── http module ──────────────────────────────────────────────────────────
+            var httpAgent = function(options) {
+                this.options = options || {};
+                this.maxSockets = Infinity;
+                this.sockets = {};
+                this.requests = {};
+            };
+            httpAgent.prototype.addRequest = function(req, options) {};
+            httpAgent.prototype.createConnection = function(options, cb) {};
+            httpAgent.prototype.destroy = function() {};
+            httpAgent.prototype.free = function(socket) {};
+            httpAgent.prototype.getCurrentStatus = function() {};
+            httpAgent.prototype.keepSocketAlive = function(socket) {};
+            httpAgent.prototype.reuseSocket = function(socket, req) {};
+            httpAgent.prototype.onFREE = function(socket) {};
+            httpAgent.prototype.onConnected = function(socket, options) {};
+            httpAgent.prototype.onRemoved = function(socket) {};
+            var httpGlobalAgent = new httpAgent();
+            var HTTP_STATUS_CODES = { '100': 'Continue', '200': 'OK', '201': 'Created', '204': 'No Content', '301': 'Moved Permanently', '302': 'Found', '304': 'Not Modified', '400': 'Bad Request', '401': 'Unauthorized', '403': 'Forbidden', '404': 'Not Found', '405': 'Method Not Allowed', '500': 'Internal Server Error', '502': 'Bad Gateway', '503': 'Service Unavailable' };
+
+            // ── IncomingMessage — request bodies are already fully buffered by the
+            // native accept loop (see http_server.rs), so headers/method/url/_body
+            // are set synchronously; 'data'/'end' are still emitted async for code
+            // that expects to stream a request body.
+            var httpIncomingMessage = function(socket) {
+                Readable.call(this);
+                this.socket = socket || {};
+                this.connection = this.socket;
+                this.httpVersion = '1.1';
+                this.httpVersionMajor = 1;
+                this.httpVersionMinor = 1;
+                this.method = 'GET';
+                this.url = '/';
+                this.headers = {};
+                this._body = '';
+                this.complete = true;
+            };
+            util.inherits(httpIncomingMessage, Readable);
+            httpIncomingMessage.prototype.setTimeout = function() { return this; };
+            httpIncomingMessage.prototype.destroy = function() { return this; };
+
+            // ── ServerResponse — buffers writes and flushes as one __httpRespond(Bytes)
+            // call on end(), since the native side writes headers+body together.
+            var httpServerResponse = function(req) {
+                Writable.call(this);
+                // Real usage: constructed internally by the accept loop with a
+                // req whose `socket._connId` names the native connection to
+                // write to. Node API compat also allows `new ServerResponse(req)`
+                // standalone (e.g. for unit tests) — _connId stays undefined
+                // there, fine as long as .end() is never called on it.
+                this._connId = req && req.socket && req.socket._connId;
+                this.statusCode = 200;
+                this.statusMessage = '';
+                this._headers = {};
+                this._chunks = [];
+                this.finished = false;
+                this.headersSent = false;
+            };
+            util.inherits(httpServerResponse, Writable);
+            httpServerResponse.prototype.setHeader = function(name, value) { this._headers[name] = value; return this; };
+            httpServerResponse.prototype.getHeader = function(name) { return this._headers[name]; };
+            httpServerResponse.prototype.removeHeader = function(name) { delete this._headers[name]; return this; };
+            httpServerResponse.prototype.hasHeader = function(name) { return Object.prototype.hasOwnProperty.call(this._headers, name); };
+            httpServerResponse.prototype.getHeaders = function() { return this._headers; };
+            httpServerResponse.prototype.writeHead = function(statusCode, statusMessage, headers) {
+                this.statusCode = statusCode;
+                if (typeof statusMessage === 'object' && statusMessage !== null) { headers = statusMessage; statusMessage = undefined; }
+                this.statusMessage = statusMessage || HTTP_STATUS_CODES[String(statusCode)] || '';
+                if (headers) {
+                    for (var k in headers) if (Object.prototype.hasOwnProperty.call(headers, k)) this._headers[k] = headers[k];
+                }
+                this.headersSent = true;
+                return this;
+            };
+            httpServerResponse.prototype.write = function(chunk, encoding, callback) {
+                if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+                if (chunk !== undefined) this._chunks.push(chunk);
+                if (typeof callback === 'function') setTimeout(callback, 0);
+                return true;
+            };
+            httpServerResponse.prototype.end = function(chunk, encoding, callback) {
+                var self = this;
+                if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
+                if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+                if (chunk !== undefined) this._chunks.push(chunk);
+                if (this.finished) { if (callback) setTimeout(callback, 0); return this; }
+                this.finished = true;
+
+                var headersJson = JSON.stringify(this._headers);
+                var isBinary = this._chunks.some(function(c) {
+                    return c instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(c));
+                });
+                if (isBinary) {
+                    var parts = this._chunks.map(function(c) {
+                        if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.from(c) : new TextEncoder().encode(c);
+                        return c;
+                    });
+                    var total = parts.reduce(function(n, p) { return n + p.length; }, 0);
+                    var merged = new Uint8Array(total);
+                    var off = 0;
+                    parts.forEach(function(p) { merged.set(p, off); off += p.length; });
+                    __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged);
+                } else {
+                    __httpRespond(this._connId, this.statusCode, this.statusMessage, headersJson, this._chunks.join(''));
+                }
+                setTimeout(function() { self.emit('finish'); self.emit('close'); if (typeof callback === 'function') callback(); }, 0);
+                return this;
+            };
+            httpServerResponse.prototype.setTimeout = function() { return this; };
+            httpServerResponse.prototype.destroy = function() { return this; };
+            httpServerResponse.prototype.flushHeaders = function() {};
+
+            // ── Server — real listener backed by __httpListen/__httpAcceptPoll.
+            var httpServer = function(opts, requestListener) {
+                EventEmitter.call(this);
+                if (typeof opts === 'function') { requestListener = opts; opts = {}; }
+                if (requestListener) this.on('request', requestListener);
+                this._id = null;
+                this._pollTimer = null;
+                this.listening = false;
+                this._port = 0;
+                this._host = '0.0.0.0';
+            };
+            util.inherits(httpServer, EventEmitter);
+            httpServer.prototype.listen = function(port, hostname, backlog, callback) {
+                var self = this;
+                if (typeof port === 'object' && port !== null) {
+                    var opts = port;
+                    callback = hostname;
+                    port = opts.port || 0;
+                    hostname = opts.host || opts.hostname;
+                }
+                if (typeof hostname === 'function') { callback = hostname; hostname = undefined; }
+                if (typeof backlog === 'function') { callback = backlog; }
+                hostname = hostname || '0.0.0.0';
+                port = port || 0;
+                if (typeof callback === 'function') this.once('listening', callback);
+
+                var result = __httpListen(port, hostname);
+                if (typeof result !== 'number') {
+                    setTimeout(function() { self.emit('error', result); }, 0);
+                    return self;
+                }
+                self._id = result;
+                self._port = port;
+                self._host = hostname;
+                self.listening = true;
+                self._pollTimer = setInterval(function() {
+                    var raw;
+                    while ((raw = __httpAcceptPoll(self._id)) !== null && raw !== undefined) {
+                        var r;
+                        try { r = JSON.parse(raw); } catch (e) { continue; }
+                        var req = new httpIncomingMessage({ remoteAddress: r.remoteAddress, _connId: r.conn_id });
+                        req.method = r.method;
+                        req.url = r.url;
+                        req.headers = r.headers || {};
+                        req._body = r.body || '';
+                        var res = new httpServerResponse(req);
+                        self.emit('request', req, res);
+                        self.emit('connection', req.socket);
+                        (function(req) {
+                            setTimeout(function() {
+                                if (req._body) req.emit('data', typeof Buffer !== 'undefined' ? Buffer.from(req._body) : req._body);
+                                req.emit('end');
+                            }, 0);
+                        })(req);
+                    }
+                }, 5);
+                setTimeout(function() { self.emit('listening'); }, 0);
+                return self;
+            };
+            httpServer.prototype.close = function(callback) {
+                var self = this;
+                if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+                if (this._id !== null) { __httpClose(this._id); }
+                this.listening = false;
+                if (typeof callback === 'function') this.once('close', callback);
+                setTimeout(function() { self.emit('close'); }, 0);
+                return this;
+            };
+            httpServer.prototype.address = function() {
+                if (!this.listening) return null;
+                return { port: this._port, address: this._host, family: this._host.indexOf(':') !== -1 ? 'IPv6' : 'IPv4' };
+            };
+            httpServer.prototype.getConnections = function(cb) { cb(null, 0); };
+            httpServer.prototype.ref = function() { return this; };
+            httpServer.prototype.unref = function() { return this; };
+            httpServer.prototype.listenOnServerHandler = function(socket) {};
+
+            var httpOutgoingMessage = function() { EventEmitter.call(this); };
+            util.inherits(httpOutgoingMessage, EventEmitter);
+            httpOutgoingMessage.prototype.write = function(chunk, encoding, callback) { return true; };
+            httpOutgoingMessage.prototype.end = function(chunk, encoding, callback) {};
+            httpOutgoingMessage.prototype.destroy = function(err) {};
+            httpOutgoingMessage.prototype.setTimeout = function(msecs, callback) { return this; };
+
+            function createServer(opts, requestListener) {
+                return new httpServer(opts, requestListener);
+            }
+
+            var httpModule = {
+                createServer: createServer,
+                globalAgent: httpGlobalAgent,
+                Agent: httpAgent,
+                Server: httpServer,
+                OutgoingMessage: httpOutgoingMessage,
+                IncomingMessage: httpIncomingMessage,
+                ServerResponse: httpServerResponse,
+                request: function(options, callback) { return new httpOutgoingMessage(); },
+                get: function(options, callback) { return new httpOutgoingMessage(); },
+                ClientRequest: httpOutgoingMessage,
+                maxHeaderSize: 16384,
+                STATUS_CODES: HTTP_STATUS_CODES
+            };
+            globalThis.__requireCache['http'] = httpModule;
+            globalThis.__requireCache['node:http'] = httpModule;
+
+            // ── https module ─────────────────────────────────────────────────────────
+            var httpsModule = {
+                createServer: function(opts, requestListener) { return createServer(opts, requestListener); },
+                globalAgent: new httpAgent(),
+                request: function(options, callback) { return new httpOutgoingMessage(); },
+                get: function(options, callback) { return new httpOutgoingMessage(); }
+            };
+            globalThis.__requireCache['https'] = httpsModule;
+            globalThis.__requireCache['node:https'] = httpsModule;
+
+            // ── reflect-metadata polyfill ──────────────────────────────────────────
+            (function() {
+                var metadataMap = new WeakMap();
+                var symbol = Symbol.for('Reflect.metadata');
+
+                function assertFunction(fn) {
+                    if (typeof fn !== 'function') throw new TypeError('argument must be a function');
+                }
+
+                var ReflectMetadata = {
+                    defineMetadata: function(metadataKey, metadataValue, target, targetKey) {
+                        assertFunction(target);
+                        if (targetKey !== undefined && typeof targetKey !== 'symbol' && typeof targetKey !== 'string') {
+                            throw new TypeError('targetKey must be a symbol or string');
+                        }
+                        var meta = metadataMap.get(target);
+                        if (!meta) {
+                            meta = {};
+                            metadataMap.set(target, meta);
+                        }
+                        var key = targetKey || symbol;
+                        if (!meta[key]) meta[key] = {};
+                        meta[key][metadataKey] = metadataValue;
+                        return target;
+                    },
+                    hasMetadata: function(metadataKey, target, targetKey) {
+                        assertFunction(target);
+                        var meta = metadataMap.get(target);
+                        if (!meta) return false;
+                        var key = targetKey || symbol;
+                        var metadata = meta[key];
+                        if (!metadata) return false;
+                        if (targetKey === undefined) {
+                            for (var k in metadata) { if (k !== symbol && metadata.hasOwnProperty(k)) return true; }
+                            return false;
+                        }
+                        return metadata.hasOwnProperty(metadataKey);
+                    },
+                    hasOwnMetadata: function(metadataKey, target, targetKey) {
+                        assertFunction(target);
+                        var meta = metadataMap.get(target);
+                        if (!meta) return false;
+                        var key = targetKey || symbol;
+                        var metadata = meta[key];
+                        return metadata ? metadata.hasOwnProperty(metadataKey) : false;
+                    },
+                    getMetadata: function(metadataKey, target, targetKey) {
+                        assertFunction(target);
+                        var meta = metadataMap.get(target);
+                        if (!meta) return undefined;
+                        var key = targetKey || symbol;
+                        var metadata = meta[key];
+                        if (!metadata && targetKey === undefined) {
+                            for (var k in meta) {
+                                if (k !== symbol && meta[k].hasOwnProperty(metadataKey)) {
+                                    return meta[k][metadataKey];
+                                }
+                            }
+                            return undefined;
+                        }
+                        return metadata ? metadata[metadataKey] : undefined;
+                    },
+                    getOwnMetadata: function(metadataKey, target, targetKey) {
+                        assertFunction(target);
+                        var meta = metadataMap.get(target);
+                        if (!meta) return undefined;
+                        var key = targetKey || symbol;
+                        var metadata = meta[key];
+                        return metadata ? metadata[metadataKey] : undefined;
+                    },
+                    deleteMetadata: function(metadataKey, target, targetKey) {
+                        assertFunction(target);
+                        var meta = metadataMap.get(target);
+                        if (!meta) return false;
+                        var key = targetKey || symbol;
+                        var metadata = meta[key];
+                        if (!metadata) return false;
+                        if (targetKey !== undefined) {
+                            delete metadata[metadataKey];
+                            return true;
+                        }
+                        var found = false;
+                        for (var k in metadata) {
+                            if (k !== symbol && metadata.hasOwnProperty(metadataKey)) {
+                                found = true;
+                            }
+                        }
+                        return found;
+                    },
+                    getMetadataKeys: function(target, targetKey) {
+                        assertFunction(target);
+                        var meta = metadataMap.get(target);
+                        if (!meta) return [];
+                        var keys = [];
+                        if (targetKey === undefined) {
+                            for (var k in meta) {
+                                if (k !== symbol) {
+                                    var metadata = meta[k];
+                                    for (var mk in metadata) {
+                                        if (metadata.hasOwnProperty(mk) && keys.indexOf(mk) === -1) {
+                                            keys.push(mk);
+                                        }
+                                    }
+                                }
+                            }
+                            return keys;
+                        }
+                        var metadata = meta[targetKey || symbol];
+                        if (!metadata) return [];
+                        for (var mk in metadata) {
+                            if (metadata.hasOwnProperty(mk) && keys.indexOf(mk) === -1) {
+                                keys.push(mk);
+                            }
+                        }
+                        return keys;
+                    },
+                    getOwnMetadataKeys: function(target, targetKey) {
+                        assertFunction(target);
+                        var meta = metadataMap.get(target);
+                        if (!meta) return [];
+                        var keys = [];
+                        var key = targetKey || symbol;
+                        var metadata = meta[key];
+                        if (!metadata) return [];
+                        for (var mk in metadata) {
+                            if (metadata.hasOwnProperty(mk) && keys.indexOf(mk) === -1) {
+                                keys.push(mk);
+                            }
+                        }
+                        return keys;
+                    },
+                    defineMetadataMetadata: function(metadataKey, metadataValue, target, targetKey) {
+                        assertFunction(target);
+                        return this.defineMetadata(metadataKey, metadataValue, target, targetKey);
+                    },
+                    hasMetadataMetadata: function(metadataKey, target, targetKey) {
+                        assertFunction(target);
+                        var meta = metadataMap.get(target);
+                        if (!meta) return false;
+                        var key = targetKey || symbol;
+                        var metadata = meta[key];
+                        return metadata ? metadata.hasOwnProperty(metadataKey) : false;
+                    }
+                };
+
+                globalThis.__requireCache['reflect-metadata'] = {
+                    __esModule: true,
+                    default: ReflectMetadata,
+                    Reflect: ReflectMetadata
+                };
+                globalThis.__requireCache['reflect-metadata/Reflect'] = ReflectMetadata;
+
+                Object.defineProperties(Reflect, {
+                    defineMetadata: { value: ReflectMetadata.defineMetadata, writable: true, enumerable: true, configurable: true },
+                    hasMetadata: { value: ReflectMetadata.hasMetadata, writable: true, enumerable: true, configurable: true },
+                    hasOwnMetadata: { value: ReflectMetadata.hasOwnMetadata, writable: true, enumerable: true, configurable: true },
+                    getMetadata: { value: ReflectMetadata.getMetadata, writable: true, enumerable: true, configurable: true },
+                    getOwnMetadata: { value: ReflectMetadata.getOwnMetadata, writable: true, enumerable: true, configurable: true },
+                    deleteMetadata: { value: ReflectMetadata.deleteMetadata, writable: true, enumerable: true, configurable: true },
+                    getMetadataKeys: { value: ReflectMetadata.getMetadataKeys, writable: true, enumerable: true, configurable: true },
+                    getOwnMetadataKeys: { value: ReflectMetadata.getOwnMetadataKeys, writable: true, enumerable: true, configurable: true },
+                    defineMetadataMetadata: { value: ReflectMetadata.defineMetadataMetadata, writable: true, enumerable: true, configurable: true },
+                    hasMetadataMetadata: { value: ReflectMetadata.hasMetadataMetadata, writable: true, enumerable: true, configurable: true },
+                    metadata: { value: function(metadataKey, metadataValue) { return function(target, targetPropertyKey) { if (targetPropertyKey === undefined) { ReflectMetadata.defineMetadata(metadataKey, metadataValue, target); } else { ReflectMetadata.defineMetadata(metadataKey, metadataValue, target, targetPropertyKey); } }; }, writable: true, enumerable: true, configurable: true }
+                });
+            })();
+
+            // ── async_hooks — AsyncLocalStorage / AsyncResource ─────────────────────
+            // __acsGet/__acsSet (installed by async_context.rs, before this file runs)
+            // read/write V8's ContinuationPreservedEmbedderData directly, which V8
+            // itself snapshots/restores across await and .then() continuations. Each
+            // AsyncLocalStorage instance gets a unique key into a shared frame object
+            // stored in that slot, so multiple instances (and nested/concurrent runs)
+            // stay independent without any promise/timer monkey-patching.
+            var __acsNextId = 1;
+
+            function AsyncLocalStorage() {
+                this._id = '__als' + (__acsNextId++);
+            }
+            AsyncLocalStorage.prototype.run = function(store, fn) {
+                var args = Array.prototype.slice.call(arguments, 2);
+                var prevFrame = __acsGet();
+                var newFrame = Object.assign({}, prevFrame);
+                newFrame[this._id] = store;
+                __acsSet(newFrame);
+                try {
+                    return fn.apply(null, args);
+                } finally {
+                    __acsSet(prevFrame);
+                }
+            };
+            AsyncLocalStorage.prototype.exit = function(fn) {
+                var args = Array.prototype.slice.call(arguments, 1);
+                var prevFrame = __acsGet();
+                var newFrame = Object.assign({}, prevFrame);
+                delete newFrame[this._id];
+                __acsSet(newFrame);
+                try {
+                    return fn.apply(null, args);
+                } finally {
+                    __acsSet(prevFrame);
+                }
+            };
+            AsyncLocalStorage.prototype.enterWith = function(store) {
+                var newFrame = Object.assign({}, __acsGet());
+                newFrame[this._id] = store;
+                __acsSet(newFrame);
+            };
+            AsyncLocalStorage.prototype.disable = function() {
+                var newFrame = Object.assign({}, __acsGet());
+                delete newFrame[this._id];
+                __acsSet(newFrame);
+            };
+            AsyncLocalStorage.prototype.getStore = function() {
+                var frame = __acsGet();
+                if (!frame || typeof frame !== 'object') return undefined;
+                return Object.prototype.hasOwnProperty.call(frame, this._id) ? frame[this._id] : undefined;
+            };
+
+            function AsyncResource(type) {
+                this.type = type;
+                this._frame = __acsGet();
+            }
+            AsyncResource.prototype.runInAsyncScope = function(fn) {
+                var args = Array.prototype.slice.call(arguments, 1);
+                var prevFrame = __acsGet();
+                __acsSet(this._frame);
+                try {
+                    return fn.apply(null, args);
+                } finally {
+                    __acsSet(prevFrame);
+                }
+            };
+            AsyncResource.prototype.emitDestroy = function() { return this; };
+            AsyncResource.prototype.asyncId = function() { return 0; };
+            AsyncResource.prototype.triggerAsyncId = function() { return 0; };
+            AsyncResource.bind = function(fn, type) {
+                var res = new AsyncResource(type || fn.name || 'bound-anonymous-fn');
+                return function() {
+                    var args = arguments, self = this;
+                    return res.runInAsyncScope(function() { return fn.apply(self, args); });
+                };
+            };
+
+            globalThis.__requireCache['async_hooks'] = {
+                AsyncLocalStorage: AsyncLocalStorage,
+                AsyncResource: AsyncResource,
+                executionAsyncId: function() { return 0; },
+                triggerAsyncId: function() { return 0; },
+                executionAsyncResource: function() { return {}; },
+                createHook: function() {
+                    return { enable: function() { return this; }, disable: function() { return this; } };
+                },
+            };
+            globalThis.__requireCache['node:async_hooks'] = globalThis.__requireCache['async_hooks'];
         })();
     "#;
     let source = V8String::new(scope, js_code).unwrap();
@@ -1308,6 +2677,18 @@ pub fn inject_require(
                 return globalThis.__loadedModules[resolved].exports;
             }
 
+            // require() of a .mjs file is always an error in Node — .mjs
+            // marks a file as ESM-only regardless of its actual content, so
+            // this must be an extension check, not the source_is_esm()
+            // content sniff used elsewhere (a .cjs file with import/export-
+            // looking text must NOT hit this, and does not: it's excluded
+            // by extension here too).
+            if (resolved.slice(-4) === '.mjs') {
+                var esmErr = new Error("Must use import to load ES Module: " + resolved);
+                esmErr.code = 'ERR_REQUIRE_ESM';
+                throw esmErr;
+            }
+
             if (resolved.slice(-5) === '.json') {
                 var jsonSrc = __readFile(resolved);
                 var parsed = JSON.parse(jsonSrc);
@@ -1325,8 +2706,17 @@ pub fn inject_require(
 
             var source = __readFile(resolved);
             try {
-                var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', source);
-                fn(mod.exports, mod, localRequire, resolved, moduleDir);
+                // A required file's own `import.meta.url` must be ITS path,
+                // not the entry script's — replace_import_meta() rewrites
+                // `import.meta.url` to the bare identifier `__vvva_meta_url__`,
+                // so shadowing it as a local parameter here (instead of relying
+                // on the single globalThis.__vvva_meta_url__ set once for the
+                // entry point) gives each required module its own value.
+                var ownMetaUrl = /^[A-Za-z]:[\\/]/.test(resolved)
+                    ? 'file:///' + resolved.replace(/\\/g, '/')
+                    : 'file://' + resolved;
+                var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', source);
+                fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl);
             } catch (e) {
                 delete globalThis.__loadedModules[resolved];
                 throw e;
@@ -1384,16 +2774,41 @@ pub fn resolve_path_from_esm(
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    Ok(base.join(path))
+    let joined = base.join(path);
+    // Only used for bare specifiers (relative/absolute ones never reach this
+    // call site — see esm.rs's resolve_esm_from_dir). A bare specifier is
+    // only actually *at* `base/specifier` when that file exists; otherwise
+    // it's an npm package name and the caller must fall back to walking
+    // node_modules instead of treating this non-existent path as resolved.
+    if joined.is_file() {
+        Ok(joined)
+    } else {
+        Err(format!("not found: {}", joined.display()))
+    }
 }
 
 pub fn split_bare_specifier(name: &str) -> (&str, Option<&str>) {
-    if let Some(pos) = name.find('/') {
-        let pkg = &name[..pos];
-        let subpath = name[pos + 1..].strip_prefix('/').filter(|s| !s.is_empty());
-        (pkg, subpath)
+    // Scoped packages ("@scope/name[/subpath]") have the package name span
+    // the first *two* path segments, not just up to the first '/' — that
+    // previously split "@myorg/helpers" into pkg "@myorg" + subpath
+    // "helpers", which doesn't exist in node_modules. Skip past the scope
+    // segment before looking for the pkg/subpath boundary.
+    let search_from = if name.starts_with('@') {
+        match name.find('/') {
+            Some(i) => i + 1,
+            None => return (name, None),
+        }
     } else {
-        (name, None)
+        0
+    };
+    match name[search_from..].find('/') {
+        Some(rel_pos) => {
+            let pkg_end = search_from + rel_pos;
+            let pkg = &name[..pkg_end];
+            let subpath = name.get(pkg_end + 1..).filter(|s| !s.is_empty());
+            (pkg, subpath)
+        }
+        None => (name, None),
     }
 }
 
