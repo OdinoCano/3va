@@ -38,9 +38,9 @@
 | Post-quantum TLS (`__pqTlsConnect`) | ✅ | Hybrid classical TLS + ML-KEM-768; async (non-blocking); `{ connId, pqSharedSecret }` |
 | Audit logger | ✅ | Sensitive operation logging |
 | CPU profiler (`--prof`) | ✅ | Sampling via `setInterval`+`Error.stack`; `.cpuprofile` JSON; SVG flamegraph; `3va prof` CLI |
-| Fuzz targets in CI | ✅ | 3 targets; 30 s smoke run on nightly in GitHub Actions |
-| Doc-tests | ✅ | `vvva_core`, `vvva_permissions`, `vvva_crypto`, `vvva_js` |
-| Test suite | ✅ | 1392 tests (unit + integration + doc), 0 failures |
+| Fuzz targets in CI | ✅ | 6 targets (`fuzz/fuzz_targets/`: bundler codegen, permission sandbox, pm resolver, js import-meta, js esm-resolver, js transpiler). Every PR (`ci.yml`) smoke-runs 1 target for 30s; the full set of 6 runs for 30s each in the **weekly** (Monday cron) scheduled job in `security.yml` — not nightly. |
+| Doc-tests | ✅ | Runnable doctests currently in `vvva_core`, `vvva_permissions` (×2), `vvva_crypto` (×2), `vvva_config`, `vvva_firewall`; `vvva_js` has doc comments but none with a runnable code block, so it contributes 0 |
+| Test suite | ✅ | 1256 tests (unit + integration + doc) as of 2026-07-13, 0 failures — verify current count with `cargo test --workspace` before citing, this number drifts every PR |
 
 ---
 

@@ -1241,7 +1241,61 @@ Interactively creates a `package.json` in the current directory.
 
 ---
 
-### 2.12.8 `why`
+### 2.12.8 `create`
+
+Scaffolds a new project by delegating to the official framework generator, resolving the
+initializer the same way `npm create <spec>` / `npm init <spec>` does (see
+[`init.js#execCreate`](https://github.com/npm/cli/blob/latest/lib/commands/init.js) in
+`.compatibility/node/deps/npm/lib/commands/init.js`).
+
+**Signature:**
+```
+3va create <spec> [name] [--dir <path>] [-- <extra args>]
+3va create-<spec>      # npx-style single-token alias
+```
+
+**Initializer resolution (`<spec>`):**
+| Input | Resolves to |
+|-------|-------------|
+| `name` | `create-name@latest` |
+| `name@version` | `create-name@version` |
+| `@scope/name[@version]` | `@scope/create-name[@version]` |
+| `@scope[@version]` (bare scope) | `@scope/create[@version]` |
+
+`nuxt`, `solid`, and `svelte` are the exceptions — they don't publish a `create-*` package, so
+those three names run their own generator CLI (`nuxi`, `degit`, `sv`) instead of the table above.
+Not implemented: npm's git-shorthand rewrite (`user/repo` → `user/create-repo`), which needs
+`npm-package-arg`'s full hosted-git detection to resolve correctly.
+
+**Behavior:**
+- The first token after `<spec>` that doesn't start with `-` is taken as the project name
+  (defaults to the unscoped, unversioned package name if omitted); anything else is forwarded
+  as-is to the scaffolder.
+- `3va create-<spec>` is rewritten internally to `3va create <spec>` before argument parsing, so
+  both spellings behave identically.
+- `-y`/`--yes` is also passed to `npx` itself (`npx -y create-...`), matching npm's own behavior
+  of skipping the "ok to install `create-<pkg>`?" prompt — it is *not* removed from the args
+  forwarded to the scaffolder, since many scaffolders (e.g. `create-next-app`) understand `-y`
+  themselves too.
+- Every other `npm init`/`npm create`-style flag (`-f`, `--scope`, `-w`, `--init-author-name`,
+  etc.) is forwarded byte-for-byte to the scaffolder, unvalidated. Whether it does anything
+  depends on whether the target `create-<pkg>` package understands it — 3va does not implement
+  npm's own workspace fan-out (`-w`/`--workspaces`, running the scaffolder once per workspace and
+  wiring the result into the root `package.json`); add if that's needed.
+
+**Examples:**
+```bash
+3va create astro@latest myapp
+3va create expo-app --template default@sdk-57
+3va create-expo-app@latest
+3va create @vue/app myapp        # -> npx @vue/create-app@latest myapp
+3va create @eslint                # bare scope -> npx @eslint/create@latest eslint
+3va create my-lib -y              # -> npx -y create-my-lib@latest my-lib -y
+```
+
+---
+
+### 2.12.9 `why`
 
 Explains why a package is installed by tracing direct and transitive dependency paths.
 

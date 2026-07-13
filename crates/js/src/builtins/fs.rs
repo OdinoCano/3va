@@ -1463,9 +1463,24 @@ pub fn inject_fs(
                 stream.bytesRead = 0;
                 stream._fd = undefined;
                 stream._done = false;
+                // The permission-checked native open/read happens later, on a
+                // setTimeout/interval tick driving this stream — by then the
+                // require()-boundary scope wrapper (which only brackets the
+                // synchronous createReadStream() call itself) has already
+                // reverted to whatever scope was active before. Capture the
+                // caller's scope now and re-apply it around every deferred
+                // native call so a package that opens a stream is still the
+                // one whose grants get checked, not whoever happens to be
+                // running when the timer fires.
+                var __streamScope = (typeof globalThis.__currentCallerScope === 'string')
+                    ? globalThis.__currentCallerScope : '.';
                 stream._read = function(size) {
                     var self = this;
                     if (self._done) return;
+                    var __prevScope = globalThis.__currentCallerScope;
+                    globalThis.__currentCallerScope = __streamScope;
+                    if (typeof __setCallerScope === 'function') __setCallerScope(__streamScope);
+                    try {
                     if (self._fd === undefined) {
                         try {
                             self._fd = __fsFdOpen(path, 'r', null);
@@ -1509,6 +1524,10 @@ pub fn inject_fs(
                         if (self._fd !== undefined) { try { __fsFdClose(self._fd); } catch(_) {} }
                         self.emit('error', e);
                     }
+                    } finally {
+                        globalThis.__currentCallerScope = __prevScope;
+                        if (typeof __setCallerScope === 'function') __setCallerScope(__prevScope);
+                    }
                 };
                 var _onOrig = stream.on.bind(stream);
                 stream.on = function(event, fn) {
@@ -1539,8 +1558,18 @@ pub fn inject_fs(
                 stream.path = path;
                 stream.bytesWritten = 0;
                 stream._fd = undefined;
+                // See the matching comment in createReadStream: the deferred
+                // native write happens after the require()-boundary scope
+                // wrapper has already reverted, so re-apply the creator's
+                // scope around each deferred call.
+                var __streamScope = (typeof globalThis.__currentCallerScope === 'string')
+                    ? globalThis.__currentCallerScope : '.';
                 stream._write = function(chunk, encoding, callback) {
                     var self = this;
+                    var __prevScope = globalThis.__currentCallerScope;
+                    globalThis.__currentCallerScope = __streamScope;
+                    if (typeof __setCallerScope === 'function') __setCallerScope(__streamScope);
+                    try {
                     if (self._fd === undefined) {
                         try {
                             self._fd = __fsFdOpen(path, flags, null);
@@ -1565,12 +1594,24 @@ pub fn inject_fs(
                     } catch(e) {
                         callback(e);
                     }
+                    } finally {
+                        globalThis.__currentCallerScope = __prevScope;
+                        if (typeof __setCallerScope === 'function') __setCallerScope(__prevScope);
+                    }
                 };
                 stream._final = function(callback) {
-                    if (this._fd !== undefined) {
-                        try { __fsFdClose(this._fd); this._fd = undefined; } catch(_) {}
+                    var __prevScope = globalThis.__currentCallerScope;
+                    globalThis.__currentCallerScope = __streamScope;
+                    if (typeof __setCallerScope === 'function') __setCallerScope(__streamScope);
+                    try {
+                        if (this._fd !== undefined) {
+                            try { __fsFdClose(this._fd); this._fd = undefined; } catch(_) {}
+                        }
+                        callback();
+                    } finally {
+                        globalThis.__currentCallerScope = __prevScope;
+                        if (typeof __setCallerScope === 'function') __setCallerScope(__prevScope);
                     }
-                    callback();
                 };
                 stream.destroy = function(err) {
                     if (this._fd !== undefined) { try { __fsFdClose(this._fd); this._fd = undefined; } catch(_) {} }

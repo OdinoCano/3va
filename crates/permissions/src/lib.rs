@@ -26,9 +26,11 @@ pub mod capability;
 pub mod enforcement;
 pub mod preset;
 pub mod sandbox;
+pub mod scope;
 
 pub use audit::{AuditEvent, AuditLog, AuditLogger};
 pub use capability::{Capability, PermissionState};
 pub use enforcement::{EnvEnforcer, FsEnforcer, NetEnforcer, PermissionError, ProcessEnforcer};
 pub use preset::PermissionPreset;
 pub use sandbox::{VirtualFs, VirtualNetwork};
+pub use scope::{ROOT_SCOPE, ScopeGuard, current_scope, set_current_scope};

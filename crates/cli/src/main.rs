@@ -2556,57 +2556,59 @@ fn read_package_json_permissions(start_dir: &std::path::Path) -> ThreeVaPermissi
         return merged;
     };
     let mut missing_vars = Vec::new();
-    for scope in scopes.values() {
-        merged.allow_read.extend(collect_paths(
-            scope,
-            "allow-read",
-            start_dir,
-            &mut missing_vars,
-        ));
-        merged.allow_write.extend(collect_paths(
-            scope,
-            "allow-write",
-            start_dir,
-            &mut missing_vars,
-        ));
-        merged.allow_net.extend(collect_strings(scope, "allow-net"));
-        merged.allow_env.extend(collect_strings(scope, "allow-env"));
-        merged.allow_ffi.extend(collect_paths(
-            scope,
-            "allow-ffi",
-            start_dir,
-            &mut missing_vars,
-        ));
-        if scope["allow-child-process"].as_bool() == Some(true) {
-            merged.allow_child_process = true;
-        }
-
-        // deny-* gana sobre cualquier allow-* más amplio (p.ej. permitir todo un
-        // paquete vía prefijo de directorio pero excluir un archivo puntual con
-        // una CVE conocida): PermissionState::check() consulta denied antes que
-        // granted, sin importar el orden de inserción.
-        merged.deny_read.extend(collect_paths(
-            scope,
-            "deny-read",
-            start_dir,
-            &mut missing_vars,
-        ));
-        merged.deny_write.extend(collect_paths(
-            scope,
-            "deny-write",
-            start_dir,
-            &mut missing_vars,
-        ));
-        merged.deny_net.extend(collect_strings(scope, "deny-net"));
-        merged.deny_env.extend(collect_strings(scope, "deny-env"));
-        merged.deny_ffi.extend(collect_paths(
-            scope,
-            "deny-ffi",
-            start_dir,
-            &mut missing_vars,
-        ));
-        if scope["deny-child-process"].as_bool() == Some(true) {
-            merged.deny_child_process = true;
+    // Scope "." (or any key equal to the root marker) is the app's own
+    // permissions and merges into the flat fields below, same as before this
+    // function distinguished scopes at all. Every *other* key (a package
+    // name like "axios") is kept in its own bucket and later wired into
+    // PermissionState via grant_scoped/deny_scoped, so it only ever applies
+    // to that package's own code — see vvva_permissions::scope for how "which
+    // package is currently executing" is tracked at check() time.
+    for (scope_name, scope) in scopes {
+        let grants = ScopeGrants {
+            allow_read: collect_paths(scope, "allow-read", start_dir, &mut missing_vars),
+            allow_write: collect_paths(scope, "allow-write", start_dir, &mut missing_vars),
+            allow_net: collect_strings(scope, "allow-net"),
+            allow_env: collect_strings(scope, "allow-env"),
+            allow_child_process: scope["allow-child-process"].as_bool() == Some(true),
+            allow_ffi: collect_paths(scope, "allow-ffi", start_dir, &mut missing_vars),
+            // deny-* gana sobre cualquier allow-* más amplio (p.ej. permitir todo un
+            // paquete vía prefijo de directorio pero excluir un archivo puntual con
+            // una CVE conocida): PermissionState::check() consulta denied antes que
+            // granted, sin importar el orden de inserción.
+            deny_read: collect_paths(scope, "deny-read", start_dir, &mut missing_vars),
+            deny_write: collect_paths(scope, "deny-write", start_dir, &mut missing_vars),
+            deny_net: collect_strings(scope, "deny-net"),
+            deny_env: collect_strings(scope, "deny-env"),
+            deny_ffi: collect_paths(scope, "deny-ffi", start_dir, &mut missing_vars),
+            deny_child_process: scope["deny-child-process"].as_bool() == Some(true),
+        };
+        if scope_name == vvva_permissions::ROOT_SCOPE {
+            merged.allow_read.extend(grants.allow_read);
+            merged.allow_write.extend(grants.allow_write);
+            merged.allow_net.extend(grants.allow_net);
+            merged.allow_env.extend(grants.allow_env);
+            merged.allow_child_process |= grants.allow_child_process;
+            merged.allow_ffi.extend(grants.allow_ffi);
+            merged.deny_read.extend(grants.deny_read);
+            merged.deny_write.extend(grants.deny_write);
+            merged.deny_net.extend(grants.deny_net);
+            merged.deny_env.extend(grants.deny_env);
+            merged.deny_ffi.extend(grants.deny_ffi);
+            merged.deny_child_process |= grants.deny_child_process;
+        } else {
+            let entry = merged.scoped.entry(scope_name.clone()).or_default();
+            entry.allow_read.extend(grants.allow_read);
+            entry.allow_write.extend(grants.allow_write);
+            entry.allow_net.extend(grants.allow_net);
+            entry.allow_env.extend(grants.allow_env);
+            entry.allow_child_process |= grants.allow_child_process;
+            entry.allow_ffi.extend(grants.allow_ffi);
+            entry.deny_read.extend(grants.deny_read);
+            entry.deny_write.extend(grants.deny_write);
+            entry.deny_net.extend(grants.deny_net);
+            entry.deny_env.extend(grants.deny_env);
+            entry.deny_ffi.extend(grants.deny_ffi);
+            entry.deny_child_process |= grants.deny_child_process;
         }
     }
     missing_vars.sort();
@@ -2623,8 +2625,33 @@ fn read_package_json_permissions(start_dir: &std::path::Path) -> ThreeVaPermissi
     merged
 }
 
+/// allow-*/deny-* recolectados de un solo scope de
+/// `package.json["3va"].permissions.<scope>` (donde `<scope>` es `"."` para
+/// la app o un nombre de paquete).
+#[derive(Default)]
+struct ScopeGrants {
+    allow_read: Vec<String>,
+    allow_write: Vec<String>,
+    allow_net: Vec<String>,
+    allow_env: Vec<String>,
+    allow_child_process: bool,
+    allow_ffi: Vec<String>,
+    deny_read: Vec<String>,
+    deny_write: Vec<String>,
+    deny_net: Vec<String>,
+    deny_env: Vec<String>,
+    deny_ffi: Vec<String>,
+    deny_child_process: bool,
+}
+
 /// allow-*/deny-* recolectados de `package.json["3va"].permissions`, en el mismo
 /// formato de listas que los flags CLI de `3va run`.
+///
+/// El scope `"."` (la app) vive en los campos planos de abajo — igual que
+/// antes de que existiera aislamiento por paquete — porque *siempre* debe
+/// aplicar como grant global, sea cual sea el código que esté ejecutando.
+/// Cualquier otro scope (nombre de paquete) va en `scoped`, y solo aplica
+/// mientras ese paquete es quien está ejecutando (ver `vvva_permissions::scope`).
 #[derive(Default)]
 struct ThreeVaPermissions {
     allow_read: Vec<String>,
@@ -2640,6 +2667,7 @@ struct ThreeVaPermissions {
     deny_env: Vec<String>,
     deny_ffi: Vec<String>,
     deny_child_process: bool,
+    scoped: std::collections::HashMap<String, ScopeGrants>,
 }
 
 /// Combina un flag CLI (`--allow-x`) con la lista equivalente de package.json.
@@ -2812,6 +2840,80 @@ fn build_permissions(
     }
     if pkg_permissions.deny_child_process {
         permissions.deny(vvva_permissions::Capability::SpawnProcess);
+    }
+
+    // Per-package scopes — these are NOT merged into the flat grants above.
+    // grant_scoped/deny_scoped only apply while that package's own code is
+    // executing (tracked via the require() wrapper in crates/js), so an
+    // `"axios": { "allow-net": [...] }` entry never widens what other
+    // dependencies (or the app itself) can reach.
+    for (scope_name, grants) in &pkg_permissions.scoped {
+        for path in &grants.allow_read {
+            permissions.grant_scoped(
+                scope_name,
+                vvva_permissions::Capability::FileRead(PathBuf::from(path)),
+            );
+        }
+        for path in &grants.allow_write {
+            permissions.grant_scoped(
+                scope_name,
+                vvva_permissions::Capability::FileWrite(PathBuf::from(path)),
+            );
+        }
+        for host in &grants.allow_net {
+            permissions.grant_scoped(
+                scope_name,
+                vvva_permissions::Capability::Network(host.clone()),
+            );
+        }
+        for var in &grants.allow_env {
+            permissions.grant_scoped(
+                scope_name,
+                vvva_permissions::Capability::EnvVar(var.clone()),
+            );
+        }
+        if grants.allow_child_process {
+            permissions.grant_scoped(scope_name, vvva_permissions::Capability::SpawnProcess);
+        }
+        for path in &grants.allow_ffi {
+            permissions.grant_scoped(
+                scope_name,
+                vvva_permissions::Capability::FFI(PathBuf::from(path)),
+            );
+        }
+        for path in &grants.deny_read {
+            permissions.deny_scoped(
+                scope_name,
+                vvva_permissions::Capability::FileRead(PathBuf::from(path)),
+            );
+        }
+        for path in &grants.deny_write {
+            permissions.deny_scoped(
+                scope_name,
+                vvva_permissions::Capability::FileWrite(PathBuf::from(path)),
+            );
+        }
+        for host in &grants.deny_net {
+            permissions.deny_scoped(
+                scope_name,
+                vvva_permissions::Capability::Network(host.clone()),
+            );
+        }
+        for var in &grants.deny_env {
+            permissions.deny_scoped(
+                scope_name,
+                vvva_permissions::Capability::EnvVar(var.clone()),
+            );
+        }
+        for path in &grants.deny_ffi {
+            permissions.deny_scoped(
+                scope_name,
+                vvva_permissions::Capability::FFI(PathBuf::from(path)),
+            );
+        }
+        if grants.deny_child_process {
+            permissions.deny_scoped(scope_name, vvva_permissions::Capability::SpawnProcess);
+        }
     }
 
     permissions
@@ -3371,16 +3473,17 @@ enum Commands {
         yes: bool,
     },
 
-    /// Scaffold a new project from a framework template
+    /// Scaffold a new project (`3va create <pkg>[@version]`, like `npm create`/`bun create`)
     Create {
-        /// Framework to scaffold (nuxt, solid, redwood, refine, next, astro, remix, svelte)
-        #[arg(value_enum)]
+        /// Package to scaffold, e.g. `astro`, `astro@latest`, `expo-app`
         framework: String,
-        /// Project name (defaults to framework name if not specified)
-        name: Option<String>,
         /// Output directory
         #[arg(long = "dir", short = 'd')]
         dir: Option<PathBuf>,
+        /// Project name, then any extra args forwarded to the scaffolder
+        /// (e.g. `myapp --template default@sdk-57`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
     },
 
     // =========================================================================
@@ -3579,9 +3682,69 @@ async fn run_audit_json(deny: bool, update_cache: bool, scan_secrets: bool) -> a
     Ok(())
 }
 
+/// Resolves a `3va create <spec>` initializer to the actual npm package name
+/// to run, mirroring npm's own resolution in `lib/commands/init.js#execCreate`
+/// (see `.compatibility/node/deps/npm/lib/commands/init.js`):
+///
+/// - Bare scope (`@foo`, `@foo@version`) → `@foo/create[@version]`.
+/// - Scoped registry name (`@scope/name[@version]`) → `@scope/create-name[@version]`.
+/// - Plain registry name (`name[@version]`) → `create-name[@version]`.
+///
+/// Does not replicate npm's git-shorthand rewrite (`user/repo` →
+/// `user/create-repo`) — that requires `npm-package-arg`'s full hosted-git
+/// detection to do correctly; add if `3va create` needs to scaffold from a
+/// bare git shorthand.
+fn resolve_create_spec(framework: &str) -> String {
+    // Bare scope, no package name yet: "@foo" or "@foo@version".
+    if let Some(scope) = framework.strip_prefix('@') {
+        if !scope.contains('/') {
+            let (name, version) = split_version(scope);
+            return format!("@{name}/create@{}", version.unwrap_or("latest"));
+        }
+    }
+
+    // Scoped (`@scope/name`) or plain (`name`) registry package, optional
+    // version. The leading '@' of a scope isn't a version separator, so
+    // look for the version's '@' starting after it, not from index 0.
+    let (search_from, scope_prefix) = match framework.strip_prefix('@') {
+        Some(rest) => (rest, "@"),
+        None => (framework, ""),
+    };
+    let (name, version) = split_version(search_from);
+    let full_name = format!("{scope_prefix}{name}");
+
+    let prefixed = match full_name.split_once('/') {
+        Some((scope, unscoped)) => format!("{scope}/create-{unscoped}"),
+        None => format!("create-{full_name}"),
+    };
+    format!("{prefixed}@{}", version.unwrap_or("latest"))
+}
+
+fn split_version(spec: &str) -> (&str, Option<&str>) {
+    match spec.split_once('@') {
+        Some((name, version)) => (name, Some(version)),
+        None => (spec, None),
+    }
+}
+
+/// `3va create-<pkg>[@version]` (npx-style single-token invocation) is sugar
+/// for `3va create <pkg>[@version]` — rewrite before clap sees it so both
+/// spellings hit the same `Commands::Create` handler.
+fn rewrite_create_dash_alias(mut args: Vec<String>) -> Vec<String> {
+    if let Some(pkg) = args.get(1).and_then(|a| a.strip_prefix("create-")) {
+        if !pkg.is_empty() {
+            let pkg = pkg.to_string();
+            args.splice(1..2, ["create".to_string(), pkg]);
+        }
+    }
+    args
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = match Cli::try_parse() {
+    let raw_args = rewrite_create_dash_alias(std::env::args().collect());
+
+    let cli = match Cli::try_parse_from(&raw_args) {
         Ok(cli) => cli,
         Err(e) => {
             // `3va <name>` where `<name>` isn't a built-in subcommand: fall
@@ -4385,27 +4548,50 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Create {
             framework,
-            name,
             dir,
+            rest,
         } => {
-            let project_name = name.clone().unwrap_or_else(|| framework.clone());
+            // Bare name (no scope, no version) — only used to special-case
+            // the handful of generators that don't follow the
+            // `create-<pkg>` convention, and as the default project name.
+            let unscoped = match framework.strip_prefix('@') {
+                Some(rest) => rest.split_once('/').map_or(rest, |(_, name)| name),
+                None => framework.as_str(),
+            };
+            let pkg = unscoped.split_once('@').map_or(unscoped, |(n, _)| n);
+            // First non-flag token in `rest` (if any) is the project name;
+            // everything else forwards straight to the scaffolder.
+            let (project_name, extra): (String, &[String]) = match rest.split_first() {
+                Some((first, tail)) if !first.starts_with('-') => (first.clone(), tail),
+                _ => (pkg.to_string(), rest.as_slice()),
+            };
+            // npm's own `-y`/`--yes` also tells npx to skip its "ok to
+            // install create-<pkg>?" prompt (`libexec({ yes, ... })` in
+            // npm's init.js); everything else in `extra` is untouched and
+            // still forwarded to the scaffolder itself.
+            let npx_yes = extra.iter().any(|a| a == "-y" || a == "--yes");
 
-            println!("Scaffolding {} project: {}", framework, project_name);
+            println!("Scaffolding {} project: {}", pkg, project_name);
 
-            let scaffolder_cmd = match framework.as_str() {
+            // A few generators don't follow the `create-<pkg>` npm-init
+            // convention; everything else resolves via the same algorithm
+            // npm's own `npm create`/`npm init <pkg>` uses (see
+            // `resolve_create_spec`).
+            let scaffolder_cmd = match pkg {
                 "nuxt" => format!("npx nuxi@latest init {}", project_name),
                 "solid" => format!("npx degit solidjs/templates/ts {}", project_name),
-                "redwood" => format!("npx create-redwood-app@latest {}", project_name),
-                "refine" => format!("npx create-refine-app@latest {}", project_name),
-                "next" => format!("npx create-next-app@latest {}", project_name),
-                "astro" => format!("npx create-astro@latest {}", project_name),
-                "remix" => format!("npx create-remix@latest {}", project_name),
                 "svelte" => format!("npx sv create {}", project_name),
-                _ => {
-                    eprintln!("Unknown framework: {}", framework);
-                    eprintln!("Supported frameworks: nuxt, solid, redwood, refine, next, astro, remix, svelte");
-                    std::process::exit(1);
-                }
+                _ => format!(
+                    "npx {}{} {}",
+                    if npx_yes { "-y " } else { "" },
+                    resolve_create_spec(framework),
+                    project_name
+                ),
+            };
+            let scaffolder_cmd = if extra.is_empty() {
+                scaffolder_cmd
+            } else {
+                format!("{} {}", scaffolder_cmd, extra.join(" "))
             };
 
             println!("Running: {}", scaffolder_cmd);
@@ -5801,6 +5987,179 @@ mod tests {
         assert!(csp_header(false).is_empty());
     }
 
+    // ── `3va create` tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_create_spec_plain_name() {
+        assert_eq!(resolve_create_spec("astro"), "create-astro@latest");
+        assert_eq!(resolve_create_spec("astro@latest"), "create-astro@latest");
+        assert_eq!(
+            resolve_create_spec("expo-app@5.2.0"),
+            "create-expo-app@5.2.0"
+        );
+    }
+
+    #[test]
+    fn resolve_create_spec_scoped_package() {
+        // npm: "@scope/name[@version]" -> "@scope/create-name[@version]"
+        assert_eq!(resolve_create_spec("@vue/app"), "@vue/create-app@latest");
+        assert_eq!(
+            resolve_create_spec("@vue/app@3.0.0"),
+            "@vue/create-app@3.0.0"
+        );
+    }
+
+    #[test]
+    fn resolve_create_spec_bare_scope() {
+        // npm: "@scope" alone -> "@scope/create"
+        assert_eq!(resolve_create_spec("@eslint"), "@eslint/create@latest");
+        assert_eq!(resolve_create_spec("@eslint@1.0.0"), "@eslint/create@1.0.0");
+    }
+
+    #[test]
+    fn create_bare_scope_resolves_correctly() {
+        let cli = Cli::try_parse_from(["3va", "create", "@eslint"]).unwrap();
+        match cli.command {
+            Commands::Create { framework, .. } => {
+                assert_eq!(resolve_create_spec(&framework), "@eslint/create@latest");
+            }
+            _ => panic!("expected Commands::Create"),
+        }
+    }
+
+    #[test]
+    fn create_dash_alias_rewrites_to_subcommand() {
+        let args = vec!["3va".to_string(), "create-expo-app@latest".to_string()];
+        assert_eq!(
+            rewrite_create_dash_alias(args),
+            vec!["3va", "create", "expo-app@latest"]
+        );
+    }
+
+    #[test]
+    fn create_dash_alias_leaves_other_subcommands_alone() {
+        let args = vec!["3va".to_string(), "create".to_string(), "astro".to_string()];
+        assert_eq!(rewrite_create_dash_alias(args.clone()), args);
+
+        let run_args = vec!["3va".to_string(), "run".to_string(), "app.js".to_string()];
+        assert_eq!(rewrite_create_dash_alias(run_args.clone()), run_args);
+    }
+
+    #[test]
+    fn create_dash_alias_ignores_bare_create_dash() {
+        // "create-" with nothing after it isn't a package name; leave as-is
+        // so clap reports its normal "unrecognized subcommand" error.
+        let args = vec!["3va".to_string(), "create-".to_string()];
+        assert_eq!(rewrite_create_dash_alias(args.clone()), args);
+    }
+
+    #[test]
+    fn create_parses_pkg_at_version() {
+        let cli = Cli::try_parse_from(["3va", "create", "astro@latest", "myapp"]).unwrap();
+        match cli.command {
+            Commands::Create {
+                framework, rest, ..
+            } => {
+                assert_eq!(framework, "astro@latest");
+                assert_eq!(rest, vec!["myapp"]);
+            }
+            _ => panic!("expected Commands::Create"),
+        }
+    }
+
+    #[test]
+    fn create_forwards_extra_flags_to_rest() {
+        let cli =
+            Cli::try_parse_from(["3va", "create", "expo-app", "--template", "default@sdk-57"])
+                .unwrap();
+        match cli.command {
+            Commands::Create {
+                framework, rest, ..
+            } => {
+                assert_eq!(framework, "expo-app");
+                assert_eq!(rest, vec!["--template", "default@sdk-57"]);
+            }
+            _ => panic!("expected Commands::Create"),
+        }
+    }
+
+    #[test]
+    fn create_dir_flag_before_rest_is_not_swallowed() {
+        let cli = Cli::try_parse_from([
+            "3va",
+            "create",
+            "expo-app",
+            "--dir",
+            "/tmp",
+            "--template",
+            "x",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Create {
+                framework,
+                dir,
+                rest,
+            } => {
+                assert_eq!(framework, "expo-app");
+                assert_eq!(dir, Some(PathBuf::from("/tmp")));
+                assert_eq!(rest, vec!["--template", "x"]);
+            }
+            _ => panic!("expected Commands::Create"),
+        }
+    }
+
+    #[test]
+    fn create_forwards_npm_init_style_flags_untouched() {
+        // 3va doesn't interpret these — they're the downstream `create-<pkg>`
+        // package's problem. Just confirm nothing here mangles or drops them.
+        let cli = Cli::try_parse_from([
+            "3va",
+            "create",
+            "my-lib",
+            "-y",
+            "-f",
+            "--scope",
+            "@myorg",
+            "-w",
+            "pkgA",
+            "-w",
+            "pkgB",
+            "--workspaces",
+            "--init-author-name",
+            "Jane Doe",
+            "--init-license",
+            "MIT",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Create {
+                framework, rest, ..
+            } => {
+                assert_eq!(framework, "my-lib");
+                assert_eq!(
+                    rest,
+                    vec![
+                        "-y",
+                        "-f",
+                        "--scope",
+                        "@myorg",
+                        "-w",
+                        "pkgA",
+                        "-w",
+                        "pkgB",
+                        "--workspaces",
+                        "--init-author-name",
+                        "Jane Doe",
+                        "--init-license",
+                        "MIT",
+                    ]
+                );
+            }
+            _ => panic!("expected Commands::Create"),
+        }
+    }
+
     // ── Codemod tests (v2.0.0) ────────────────────────────────────────────────
 
     #[test]
@@ -6066,7 +6425,7 @@ mod tests {
     // ── package.json["3va"].permissions ────────────────────────────────────────
 
     #[test]
-    fn package_json_permissions_merge_across_scopes() {
+    fn package_json_permissions_root_scope_applies_globally() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("package.json"),
@@ -6085,11 +6444,47 @@ mod tests {
         let pkg_permissions = read_package_json_permissions(dir.path());
         let state = build_permissions(None, None, None, None, false, None, false, &pkg_permissions);
 
+        // "." grants apply no matter what code is executing.
         assert!(state.check(&Capability::EnvVar("SHELL".to_string())));
         assert!(state.check(&Capability::EnvVar("SESSION_MANAGER".to_string())));
         assert!(!state.check(&Capability::EnvVar("AWS_SECRET_KEY".to_string())));
-        assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
         assert!(!state.check(&Capability::SpawnProcess));
+    }
+
+    #[test]
+    fn package_json_permissions_scoped_grant_is_isolated_to_that_package() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "tags-backend",
+                "3va": {
+                    "permissions": {
+                        ".": { "allow-env": ["SHELL"] },
+                        "express": { "allow-net": ["*"] }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        let state = build_permissions(None, None, None, None, false, None, false, &pkg_permissions);
+
+        // A scope named "express" in package.json is NOT a global grant —
+        // this is the isolation gap this test used to (incorrectly)
+        // document as "merging across scopes". It must only apply while
+        // express's own code is executing (see vvva_permissions::scope).
+        vvva_permissions::set_current_scope(vvva_permissions::ROOT_SCOPE);
+        assert!(!state.check(&Capability::Network("registry.npmjs.org".to_string())));
+
+        vvva_permissions::set_current_scope("express");
+        assert!(state.check(&Capability::Network("registry.npmjs.org".to_string())));
+
+        vvva_permissions::set_current_scope("axios");
+        assert!(!state.check(&Capability::Network("registry.npmjs.org".to_string())));
+
+        vvva_permissions::set_current_scope(vvva_permissions::ROOT_SCOPE);
     }
 
     #[test]

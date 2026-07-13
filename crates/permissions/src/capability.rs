@@ -1,7 +1,8 @@
 use crate::audit::{AuditEvent, AuditLog};
+use crate::scope::{self, ROOT_SCOPE};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +45,15 @@ pub struct PermissionState {
     /// Capabilities denegadas explícitamente (tienen precedencia sobre granted).
     pub denied: RwLock<HashSet<Capability>>,
 
+    /// Grants scoped to a specific dependency (`package.json["3va"].permissions.<name>`),
+    /// keyed by package name. Checked in addition to (never instead of) the
+    /// global `granted`/`denied` sets above — see [`crate::scope`] for how the
+    /// "current" scope is determined at check() time.
+    scoped_granted: RwLock<HashMap<String, HashSet<Capability>>>,
+    /// Scoped denies — win over both scoped and global grants, same as the
+    /// global `denied` set does.
+    scoped_denied: RwLock<HashMap<String, HashSet<Capability>>>,
+
     /// Si está activado, lanza un prompt en consola cuando se detecta un permiso no configurado.
     pub interactive: bool,
 
@@ -77,6 +87,36 @@ impl PermissionState {
     /// Deniega una capability explícita (tiene precedencia sobre `grant`).
     pub fn deny(&self, cap: Capability) {
         self.denied.write().unwrap().insert(cap);
+    }
+
+    /// Concede una capability solo cuando el código que ejecuta pertenece al
+    /// scope dado (nombre de paquete, o [`ROOT_SCOPE`] para el código de la
+    /// app). No amplía el scope global — un grant aquí para `"axios"` no
+    /// aplica a ningún otro paquete.
+    pub fn grant_scoped(&self, scope: &str, cap: Capability) {
+        if scope == ROOT_SCOPE {
+            return self.grant(cap);
+        }
+        self.scoped_granted
+            .write()
+            .unwrap()
+            .entry(scope.to_string())
+            .or_default()
+            .insert(cap);
+    }
+
+    /// Deniega una capability solo dentro de un scope específico. Gana sobre
+    /// cualquier grant (global o del mismo scope), igual que `deny`.
+    pub fn deny_scoped(&self, scope: &str, cap: Capability) {
+        if scope == ROOT_SCOPE {
+            return self.deny(cap);
+        }
+        self.scoped_denied
+            .write()
+            .unwrap()
+            .entry(scope.to_string())
+            .or_default()
+            .insert(cap);
     }
 
     /// Deniega toda la categoría de filesystem (lectura y escritura).
@@ -139,18 +179,39 @@ impl PermissionState {
             _ => {}
         }
 
-        // Paso 2: deny-list explícita
+        // Which package's code is currently executing (set by the JS engine's
+        // require() wrapper; "." / ROOT_SCOPE for the app's own code, or when
+        // no scoped grants were ever declared for this project).
+        let active_scope = scope::current_scope();
+
+        // Paso 2: deny-list explícita — global primero, luego la del scope activo.
         {
             let denied = self.denied.read().unwrap();
             if denied.iter().any(|d| caps_match(d, required)) {
                 return false;
             }
         }
+        if active_scope != ROOT_SCOPE {
+            let scoped_denied = self.scoped_denied.read().unwrap();
+            if let Some(set) = scoped_denied.get(&active_scope)
+                && set.iter().any(|d| caps_match(d, required))
+            {
+                return false;
+            }
+        }
 
-        // Paso 3: granted-list
+        // Paso 3: granted-list — global primero, luego la del scope activo.
         {
             let granted = self.granted.read().unwrap();
             if granted.iter().any(|g| caps_match(g, required)) {
+                return true;
+            }
+        }
+        if active_scope != ROOT_SCOPE {
+            let scoped_granted = self.scoped_granted.read().unwrap();
+            if let Some(set) = scoped_granted.get(&active_scope)
+                && set.iter().any(|g| caps_match(g, required))
+            {
                 return true;
             }
         }
@@ -311,6 +372,8 @@ impl Clone for PermissionState {
         Self {
             granted: RwLock::new(self.granted.read().unwrap().clone()),
             denied: RwLock::new(self.denied.read().unwrap().clone()),
+            scoped_granted: RwLock::new(self.scoped_granted.read().unwrap().clone()),
+            scoped_denied: RwLock::new(self.scoped_denied.read().unwrap().clone()),
             interactive: self.interactive,
             deny_all_fs: self.deny_all_fs,
             deny_all_net: self.deny_all_net,
@@ -492,5 +555,61 @@ mod tests {
         assert!(state.check(&Capability::Network("api.example.com".to_string())));
         assert!(!state.check(&Capability::Network("evil.com".to_string())));
         assert!(!state.check(&Capability::Network("example.com".to_string())));
+    }
+
+    // ── scoped (per-package) grants ────────────────────────────────────────────
+    // These tests set the thread-local "current scope" directly, mirroring
+    // what the JS engine's require() wrapper does before a package touches a
+    // capability-gated builtin. Serialized via a mutex since thread-locals are
+    // per-thread but `cargo test` may reuse the test-runner thread across
+    // `#[test]` fns run serially in the same binary — reset scope on exit.
+
+    #[test]
+    fn scoped_grant_does_not_leak_to_other_scopes() {
+        let state = PermissionState::new();
+        state.grant_scoped("axios", Capability::Network("api.example.com".to_string()));
+
+        crate::scope::set_current_scope("axios");
+        assert!(state.check(&Capability::Network("api.example.com".to_string())));
+
+        crate::scope::set_current_scope("express");
+        assert!(!state.check(&Capability::Network("api.example.com".to_string())));
+
+        crate::scope::set_current_scope(ROOT_SCOPE);
+        assert!(!state.check(&Capability::Network("api.example.com".to_string())));
+    }
+
+    #[test]
+    fn scoped_deny_overrides_global_grant_for_that_scope_only() {
+        let state = PermissionState::new();
+        state.grant(Capability::Network("*".to_string()));
+        state.deny_scoped(
+            "sketchy-pkg",
+            Capability::Network("internal.corp".to_string()),
+        );
+
+        crate::scope::set_current_scope("sketchy-pkg");
+        assert!(!state.check(&Capability::Network("internal.corp".to_string())));
+        // The wildcard grant still covers a different host in that same scope.
+        assert!(state.check(&Capability::Network("other.example.com".to_string())));
+
+        crate::scope::set_current_scope("some-other-pkg");
+        assert!(state.check(&Capability::Network("internal.corp".to_string())));
+
+        crate::scope::set_current_scope(ROOT_SCOPE);
+    }
+
+    #[test]
+    fn root_scope_grant_is_stored_globally_not_as_a_scope_entry() {
+        let state = PermissionState::new();
+        state.grant_scoped(ROOT_SCOPE, Capability::EnvAccess);
+        assert!(
+            state
+                .granted
+                .read()
+                .unwrap()
+                .contains(&Capability::EnvAccess)
+        );
+        assert!(state.scoped_granted.read().unwrap().is_empty());
     }
 }

@@ -6,6 +6,15 @@
 
 ## 4.2 Compatible APIs
 
+The percentages below are self-reported estimates, not measured against an
+exhaustive Node.js API conformance suite — treat them as directional, not
+exact. The specific factual sub-claims in the Notes column (which named
+functions exist/are missing) were spot-checked against current code on
+2026-07-13: `ECDH` is still accurate as "missing" in practice — `crypto.subtle.generateKey({name:'ECDH'})`
+generates an EC keypair but `deriveBits`/`deriveKey` (the actual key-exchange
+step) are unimplemented stubs, and there is no classic `crypto.createECDH()`;
+`parseArgs`/`styleText`/`matchesGlob` are confirmed still missing.
+
 | Module | Compatibility | Notes |
 |--------|----------------|-------|
 | `fs` | 98% | FD API completo, `opendir`, `mkdtemp`; `watch` real con inotify vía crate `notify` |
@@ -25,7 +34,12 @@
 | `zlib` | 98% | Async callbacks + sync + Transform streams reales; brotli real vía crate `brotli 7` |
 | `child_process` | 95% | `exec`/`spawn`/`execSync`/`spawnSync` reales; stdin piping vía `stdin.write()`/`stdin.end()` y `spawnSync({input})` |
 
-## 4.3 Compatibility Flags
+## 4.3 Compatibility Flags — NOT IMPLEMENTED
+
+**None of the flags below exist in `crates/cli/src/main.rs`.** This section
+was written as an aspirational placeholder and never built or removed —
+`3va run --compat` / `--preset=node` are not real flags today. Left here as a
+possible future feature, not a claim about current behavior.
 
 | Flag | Description |
 |------|-------------|
@@ -48,6 +62,12 @@ crypto (some algorithms)
 ```
 
 ## 4.5 Breaking Changes
+
+**Same caveat as §4.3** — `--legacy-security` does not exist as a flag; this
+table predates any real 1.0/0.9 release and doesn't correspond to an actual
+migration path. For the real, current breaking-change history see
+`docs/CHANGELOG.md` and `3va codemod --from=1 --to=2` (which is a real,
+implemented command — see `crates/cli/src/main.rs::run_codemod`).
 
 | Version | Change | Migration |
 |---------|--------|-----------|
@@ -84,15 +104,18 @@ crypto (some algorithms)
 
 ## 4.7 Compatibility Testing
 
-```bash
-# Compatibility test suite
-3va test --compat
+`3va test --compat` and `3va test-compat <pkg>` below are **not real
+subcommands** — `3va test` has no `--compat` flag and there is no
+`test-compat` command in `crates/cli/src/main.rs`. The last two lines are
+real and are how Expo/framework compatibility is actually verified today:
 
-# Run npm test of packages
+```bash
+# NOT IMPLEMENTED — aspirational, do not run
+3va test --compat
 3va test-compat express
 3va test-compat lodash
 
-# Expo / ESM→CJS integration tests
+# Expo / ESM→CJS integration tests (real, implemented)
 cargo test -p vvva_js --test pipeline
 cargo test -p vvva_js --test framework_compat
 ```
