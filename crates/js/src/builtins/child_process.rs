@@ -1,15 +1,9 @@
 use std::sync::Arc;
 use v8::{
-    ContextScope, Function, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, Script,
+    ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, Script,
     String as V8String,
 };
 use vvva_permissions::{Capability, PermissionState};
-
-static CHILD_PROCESS_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> =
-    std::sync::OnceLock::new();
-fn perms() -> &'static Arc<PermissionState> {
-    CHILD_PROCESS_PERMISSIONS.get().unwrap()
-}
 
 pub fn inject_child_process(
     scope: &mut ContextScope<HandleScope>,
@@ -18,12 +12,18 @@ pub fn inject_child_process(
     let context = scope.get_current_context();
     let global = context.global(scope);
 
-    CHILD_PROCESS_PERMISSIONS.set(permissions).ok();
-    let exec_async_fn = Function::new(
-        scope,
-        move |_scope: &mut PinScope<'_, '_>,
-              args: FunctionCallbackArguments,
-              mut rv: ReturnValue| {
+    // Leak once per engine and hand every closure a pointer via v8::External,
+    // instead of a process-wide static (which corrupted permission checks
+    // across concurrently-running engines/tests).
+    let perms_ptr = Arc::into_raw(permissions) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, perms_ptr);
+
+    let exec_async_fn = v8::Function::builder(
+        |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let perms = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const PermissionState)
+            };
             let cmd_arg = args.get(0);
             let cmd = cmd_arg
                 .to_string(_scope)
@@ -45,7 +45,7 @@ pub fn inject_child_process(
             let timeout_ms_arg = args.get(2);
             let _timeout_ms: u64 = timeout_ms_arg.uint32_value(_scope).unwrap_or(0) as u64;
 
-            if !perms().check(&Capability::SpawnProcess) {
+            if !perms.check(&Capability::SpawnProcess) {
                 let err_str = V8String::new(
                     _scope,
                     "Process spawn denied. Run with --allow-child-process",
@@ -55,11 +55,16 @@ pub fn inject_child_process(
                 return;
             }
 
-            let result = tokio::task::block_in_place(|| {
+            // Plain blocking std::process::Command — not wrapped in
+            // tokio::task::block_in_place, which requires a multi_thread
+            // runtime and panics outright on current_thread (e.g. plain
+            // `#[tokio::test]`); see fs_watch's __fsWatchNext fix for the
+            // same bug pattern. Nothing here is a tokio operation.
+            let result = {
                 let mut c = std::process::Command::new(&cmd);
                 c.args(&args_vec);
                 c.output()
-            });
+            };
 
             match result {
                 Ok(output) => {
@@ -82,6 +87,8 @@ pub fn inject_child_process(
             }
         },
     )
+    .data(external.into())
+    .build(scope)
     .unwrap();
     global.set(
         scope,
@@ -89,15 +96,16 @@ pub fn inject_child_process(
         exec_async_fn.into(),
     );
 
-    let exec_sync_shell_fn = Function::new(
-        scope,
-        move |_scope: &mut PinScope<'_, '_>,
-              args: FunctionCallbackArguments,
-              mut rv: ReturnValue| {
+    let exec_sync_shell_fn = v8::Function::builder(
+        |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let perms = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const PermissionState)
+            };
             let cmd_arg = args.get(0);
             let command = cmd_arg.to_rust_string_lossy(_scope);
 
-            if !perms().check(&Capability::SpawnProcess) {
+            if !perms.check(&Capability::SpawnProcess) {
                 let err_str = V8String::new(
                     _scope,
                     "Process spawn denied. Run with --allow-child-process",
@@ -131,6 +139,8 @@ pub fn inject_child_process(
             }
         },
     )
+    .data(external.into())
+    .build(scope)
     .unwrap();
     global.set(
         scope,
@@ -138,62 +148,32 @@ pub fn inject_child_process(
         exec_sync_shell_fn.into(),
     );
 
-    let spawn_sync_exec_fn = Function::new(scope, move |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
-        let cmd_arg = args.get(0);
-        let cmd = cmd_arg.to_string(_scope).map(|s| s.to_rust_string_lossy(_scope)).unwrap_or_default();
-        let args_arg = args.get(1);
-        let args_vec: Vec<String> = if args_arg.is_array() {
-            let arr = v8::Local::<v8::Array>::try_from(args_arg).unwrap();
-            (0..arr.length()).filter_map(|i| {
-                arr.get_index(_scope, i).and_then(|v| v.to_string(_scope).map(|s| s.to_rust_string_lossy(_scope)))
-            }).collect()
-        } else {
-            vec![]
-        };
-
-        if !perms().check(&Capability::SpawnProcess) {
-            let err_str = V8String::new(_scope, "Process spawn denied. Run with --allow-child-process").unwrap();
-            rv.set(err_str.into());
-            return;
-        }
-
-        let result = std::process::Command::new(&cmd)
-            .args(&args_vec)
-            .output();
-
-        match result {
-            Ok(output) => {
-                let stdout = std::string::String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = std::string::String::from_utf8_lossy(&output.stderr).into_owned();
-                let code = output.status.code().unwrap_or(-1);
-                let json = serde_json::json!({ "stdout": stdout, "stderr": stderr, "status": code, "pid": 0 }).to_string();
-                let result_str = V8String::new(_scope, &json).unwrap();
-                rv.set(result_str.into());
-            }
-            Err(e) => {
-                let err_str = V8String::new(_scope, &format!("spawnSync error: {}", e)).unwrap();
-                rv.set(err_str.into());
-            }
-        }
-    }).unwrap();
-    global.set(
-        scope,
-        V8String::new(scope, "__spawnSyncExec").unwrap().into(),
-        spawn_sync_exec_fn.into(),
-    );
-
-    let exec_shell_async_fn = Function::new(
-        scope,
-        move |_scope: &mut PinScope<'_, '_>,
-              args: FunctionCallbackArguments,
-              mut rv: ReturnValue| {
+    let spawn_sync_exec_fn = v8::Function::builder(
+        |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let perms = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const PermissionState)
+            };
             let cmd_arg = args.get(0);
-            let command = cmd_arg
+            let cmd = cmd_arg
                 .to_string(_scope)
                 .map(|s| s.to_rust_string_lossy(_scope))
                 .unwrap_or_default();
+            let args_arg = args.get(1);
+            let args_vec: Vec<String> = if args_arg.is_array() {
+                let arr = v8::Local::<v8::Array>::try_from(args_arg).unwrap();
+                (0..arr.length())
+                    .filter_map(|i| {
+                        arr.get_index(_scope, i).and_then(|v| {
+                            v.to_string(_scope).map(|s| s.to_rust_string_lossy(_scope))
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
 
-            if !perms().check(&Capability::SpawnProcess) {
+            if !perms.check(&Capability::SpawnProcess) {
                 let err_str = V8String::new(
                     _scope,
                     "Process spawn denied. Run with --allow-child-process",
@@ -203,13 +183,64 @@ pub fn inject_child_process(
                 return;
             }
 
-            let result = tokio::task::block_in_place(|| {
+            let result = std::process::Command::new(&cmd).args(&args_vec).output();
+
+            match result {
+                Ok(output) => {
+                    let stdout = std::string::String::from_utf8_lossy(&output.stdout).into_owned();
+                    let stderr = std::string::String::from_utf8_lossy(&output.stderr).into_owned();
+                    let code = output.status.code().unwrap_or(-1);
+                    let json = serde_json::json!({ "stdout": stdout, "stderr": stderr, "status": code, "pid": 0 }).to_string();
+                    let result_str = V8String::new(_scope, &json).unwrap();
+                    rv.set(result_str.into());
+                }
+                Err(e) => {
+                    let err_str = V8String::new(_scope, &format!("spawnSync error: {}", e)).unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__spawnSyncExec").unwrap().into(),
+        spawn_sync_exec_fn.into(),
+    );
+
+    let exec_shell_async_fn = v8::Function::builder(
+        |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let perms = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const PermissionState)
+            };
+            let cmd_arg = args.get(0);
+            let command = cmd_arg
+                .to_string(_scope)
+                .map(|s| s.to_rust_string_lossy(_scope))
+                .unwrap_or_default();
+
+            if !perms.check(&Capability::SpawnProcess) {
+                let err_str = V8String::new(
+                    _scope,
+                    "Process spawn denied. Run with --allow-child-process",
+                )
+                .unwrap();
+                rv.set(err_str.into());
+                return;
+            }
+
+            // See the plain-blocking-command comment above __execAsync's
+            // native fn — same reasoning, no block_in_place needed.
+            let result = {
                 let shell = if cfg!(windows) { "cmd" } else { "sh" };
                 let flag = if cfg!(windows) { "/C" } else { "-c" };
                 std::process::Command::new(shell)
                     .args([flag, &command])
                     .output()
-            });
+            };
 
             match result {
                 Ok(output) => {
@@ -232,6 +263,8 @@ pub fn inject_child_process(
             }
         },
     )
+    .data(external.into())
+    .build(scope)
     .unwrap();
     global.set(
         scope,
@@ -239,11 +272,12 @@ pub fn inject_child_process(
         exec_shell_async_fn.into(),
     );
 
-    let spawn_with_input_fn = Function::new(
-        scope,
-        move |_scope: &mut PinScope<'_, '_>,
-              args: FunctionCallbackArguments,
-              mut rv: ReturnValue| {
+    let spawn_with_input_fn = v8::Function::builder(
+        |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let perms = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const PermissionState)
+            };
             let cmd_arg = args.get(0);
             let cmd = cmd_arg
                 .to_string(_scope)
@@ -268,17 +302,20 @@ pub fn inject_child_process(
                 .map(|s| s.to_rust_string_lossy(_scope))
                 .unwrap_or_default();
 
-            if !perms().check(&Capability::SpawnProcess) {
+            if !perms.check(&Capability::SpawnProcess) {
                 let err_str = V8String::new(
                     _scope,
                     "Process spawn denied. Run with --allow-child-process",
                 )
                 .unwrap();
-                rv.set(err_str.into());
+                let err = v8::Exception::error(_scope, err_str);
+                _scope.throw_exception(err);
                 return;
             }
 
-            let result = tokio::task::block_in_place(|| {
+            // See the plain-blocking-command comment above __execAsync's
+            // native fn — same reasoning, no block_in_place needed.
+            let result = (|| {
                 use std::io::Write;
                 let mut child = std::process::Command::new(&cmd)
                     .args(&args_vec)
@@ -294,7 +331,7 @@ pub fn inject_child_process(
                     drop(child.stdin.take());
                 }
                 child.wait_with_output()
-            });
+            })();
 
             match result {
                 Ok(output) => {
@@ -309,11 +346,14 @@ pub fn inject_child_process(
                 }
                 Err(e) => {
                     let err_str = V8String::new(_scope, &format!("spawn error: {}", e)).unwrap();
-                    rv.set(err_str.into());
+                    let err = v8::Exception::error(_scope, err_str);
+                    _scope.throw_exception(err);
                 }
             }
         },
     )
+    .data(external.into())
+    .build(scope)
     .unwrap();
     global.set(
         scope,
@@ -321,67 +361,90 @@ pub fn inject_child_process(
         spawn_with_input_fn.into(),
     );
 
-    let spawn_sync_with_stdin_fn = Function::new(scope, move |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
-        let cmd_arg = args.get(0);
-        let cmd = cmd_arg.to_string(_scope).map(|s| s.to_rust_string_lossy(_scope)).unwrap_or_default();
-        let args_arg = args.get(1);
-        let args_vec: Vec<String> = if args_arg.is_array() {
-            let arr = v8::Local::<v8::Array>::try_from(args_arg).unwrap();
-            (0..arr.length()).filter_map(|i| {
-                arr.get_index(_scope, i).and_then(|v| v.to_string(_scope).map(|s| s.to_rust_string_lossy(_scope)))
-            }).collect()
-        } else {
-            vec![]
-        };
-        let stdin_arg = args.get(2);
-        let stdin_data = stdin_arg.to_string(_scope).map(|s| s.to_rust_string_lossy(_scope)).unwrap_or_default();
+    let spawn_sync_with_stdin_fn = v8::Function::builder(
+        |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let perms = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const PermissionState)
+            };
+            let cmd_arg = args.get(0);
+            let cmd = cmd_arg
+                .to_string(_scope)
+                .map(|s| s.to_rust_string_lossy(_scope))
+                .unwrap_or_default();
+            let args_arg = args.get(1);
+            let args_vec: Vec<String> = if args_arg.is_array() {
+                let arr = v8::Local::<v8::Array>::try_from(args_arg).unwrap();
+                (0..arr.length())
+                    .filter_map(|i| {
+                        arr.get_index(_scope, i).and_then(|v| {
+                            v.to_string(_scope).map(|s| s.to_rust_string_lossy(_scope))
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+            let stdin_arg = args.get(2);
+            let stdin_data = stdin_arg
+                .to_string(_scope)
+                .map(|s| s.to_rust_string_lossy(_scope))
+                .unwrap_or_default();
 
-        if !perms().check(&Capability::SpawnProcess) {
-            let err_str = V8String::new(_scope, "Process spawn denied. Run with --allow-child-process").unwrap();
-            rv.set(err_str.into());
-            return;
-        }
-
-        use std::io::Write;
-        let mut child = std::process::Command::new(&cmd)
-            .args(&args_vec)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
-
-        match child {
-            Ok(ref mut c) => {
-                if !stdin_data.is_empty() {
-                    if let Some(mut stdin) = c.stdin.take() {
-                        let _ = stdin.write_all(stdin_data.as_bytes());
-                    }
-                } else {
-                    drop(c.stdin.take());
-                }
-            }
-            Err(e) => {
-                let err_str = V8String::new(_scope, &format!("spawn error: {}", e)).unwrap();
+            if !perms.check(&Capability::SpawnProcess) {
+                let err_str = V8String::new(
+                    _scope,
+                    "Process spawn denied. Run with --allow-child-process",
+                )
+                .unwrap();
                 rv.set(err_str.into());
                 return;
             }
-        }
 
-        match child.unwrap().wait_with_output() {
-            Ok(output) => {
-                let stdout = std::string::String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = std::string::String::from_utf8_lossy(&output.stderr).into_owned();
-                let status = output.status.code().unwrap_or(-1);
-                let json = serde_json::json!({"stdout": stdout, "stderr": stderr, "status": status, "pid": 0}).to_string();
-                let result_str = V8String::new(_scope, &json).unwrap();
-                rv.set(result_str.into());
+            use std::io::Write;
+            let mut child = std::process::Command::new(&cmd)
+                .args(&args_vec)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+
+            match child {
+                Ok(ref mut c) => {
+                    if !stdin_data.is_empty() {
+                        if let Some(mut stdin) = c.stdin.take() {
+                            let _ = stdin.write_all(stdin_data.as_bytes());
+                        }
+                    } else {
+                        drop(c.stdin.take());
+                    }
+                }
+                Err(e) => {
+                    let err_str = V8String::new(_scope, &format!("spawn error: {}", e)).unwrap();
+                    rv.set(err_str.into());
+                    return;
+                }
             }
-            Err(e) => {
-                let err_str = V8String::new(_scope, &format!("spawn error: {}", e)).unwrap();
-                rv.set(err_str.into());
+
+            match child.unwrap().wait_with_output() {
+                Ok(output) => {
+                    let stdout = std::string::String::from_utf8_lossy(&output.stdout).into_owned();
+                    let stderr = std::string::String::from_utf8_lossy(&output.stderr).into_owned();
+                    let status = output.status.code().unwrap_or(-1);
+                    let json = serde_json::json!({"stdout": stdout, "stderr": stderr, "status": status, "pid": 0}).to_string();
+                    let result_str = V8String::new(_scope, &json).unwrap();
+                    rv.set(result_str.into());
+                }
+                Err(e) => {
+                    let err_str = V8String::new(_scope, &format!("spawn error: {}", e)).unwrap();
+                    rv.set(err_str.into());
+                }
             }
-        }
-    }).unwrap();
+        },
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
     global.set(
         scope,
         V8String::new(scope, "__spawnSyncWithStdin").unwrap().into(),
@@ -445,14 +508,14 @@ pub fn inject_child_process(
 
                     function runWith(stdinData) {
                         if (stdinData) {
-                            __spawnWithInput(command, args, stdinData).then(function(raw) {
-                                var r = JSON.parse(raw);
+                            try {
+                                var r = JSON.parse(__spawnWithInput(command, args, stdinData));
                                 if (r.stdout) cp.stdout._listeners.forEach(function(fn) { fn(r.stdout); });
                                 if (r.stderr) cp.stderr._listeners.forEach(function(fn) { fn(r.stderr); });
                                 cp._exitListeners.forEach(function(fn) { fn(r.code, null); });
-                            }).catch(function(e) {
+                            } catch (e) {
                                 cp._exitListeners.forEach(function(fn) { fn(1, null); });
-                            });
+                            }
                         } else {
                             __execAsync(command, args, 0).then(function(raw) {
                                 var r = JSON.parse(raw);

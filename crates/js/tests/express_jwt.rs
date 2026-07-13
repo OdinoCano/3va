@@ -67,6 +67,10 @@ fn raw_http(
 async fn drive_forever(e: &mut JsEngine) -> ! {
     loop {
         e.idle().await;
+        // Timers (setInterval, used by http's __httpAcceptPoll loop) only
+        // fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
     }
 }

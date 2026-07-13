@@ -6,9 +6,21 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex, OnceLock};
 use v8::{ContextScope, Function, HandleScope, Script, String as V8String};
 
-static DGRAM_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> = std::sync::OnceLock::new();
-fn permissions() -> &'static Arc<PermissionState> {
-    DGRAM_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static DGRAM_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn permissions() -> Arc<PermissionState> {
+    DGRAM_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_dgram not called on this thread")
+    })
 }
 use vvva_permissions::{Capability, PermissionState};
 
@@ -77,7 +89,7 @@ pub fn inject_dgram(
     scope: &mut ContextScope<HandleScope>,
     permissions_param: Arc<PermissionState>,
 ) -> anyhow::Result<()> {
-    DGRAM_PERMISSIONS.set(permissions_param).ok();
+    DGRAM_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions_param));
     let context = scope.get_current_context();
     let global = context.global(scope);
 

@@ -15,18 +15,23 @@ use vvva_permissions::PermissionState;
 
 const HARD_MAX_BODY: usize = 100 * 1024 * 1024;
 
+/// Requests that finished parsing, waiting to be picked up by JS, keyed by
+/// server id. Populated by the background accept task spawned in
+/// `__httpListen`; drained by the non-blocking `__httpAcceptPoll`.
+type ReadyQueue = Arc<Mutex<HashMap<u32, std::collections::VecDeque<String>>>>;
+
 struct HttpListenCtx {
     perms: Arc<PermissionState>,
     servers: Arc<Mutex<HashMap<u32, Arc<TcpListener>>>>,
     nid: Arc<Mutex<u32>>,
     fw: Arc<Option<Arc<Firewall>>>,
+    conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
+    conn_nid: Arc<Mutex<u32>>,
+    ready: ReadyQueue,
 }
 
 struct HttpAcceptCtx {
-    servers: Arc<Mutex<HashMap<u32, Arc<TcpListener>>>>,
-    conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
-    nid: Arc<Mutex<u32>>,
-    fw: Arc<Option<Arc<Firewall>>>,
+    ready: ReadyQueue,
 }
 
 struct HttpRespondCtx {
@@ -258,6 +263,7 @@ pub fn inject_http_server(
     let next_server_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
     let next_conn_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(1));
     let fw: Arc<Option<Arc<Firewall>>> = Arc::new(firewall);
+    let ready: ReadyQueue = Arc::new(Mutex::new(HashMap::new()));
     let context = scope.get_current_context();
     let global = context.global(scope);
 
@@ -265,6 +271,9 @@ pub fn inject_http_server(
         let ctx_ptr = Box::leak(Box::new(HttpListenCtx {
             perms: permissions.clone(),
             servers: servers.clone(),
+            conns: conns.clone(),
+            conn_nid: next_conn_id.clone(),
+            ready: ready.clone(),
             nid: next_server_id.clone(),
             fw: fw.clone(),
         })) as *mut HttpListenCtx as *mut std::ffi::c_void;
@@ -305,10 +314,8 @@ pub fn inject_http_server(
                                     *n = n.wrapping_add(1);
                                     id
                                 };
-                                ctx.servers
-                                    .lock()
-                                    .unwrap()
-                                    .insert(id, Arc::new(tokio_listener));
+                                let listener = Arc::new(tokio_listener);
+                                ctx.servers.lock().unwrap().insert(id, listener.clone());
 
                                 if id == 0
                                     && let Some(firewall) = ctx.fw.as_ref().as_ref()
@@ -318,6 +325,161 @@ pub fn inject_http_server(
                                         std::time::Duration::from_secs(60),
                                     );
                                 }
+
+                                // Background accept loop: runs for the listener's
+                                // lifetime, parsing each request (with real
+                                // timeouts/firewall checks — hence async, not a
+                                // blocking std accept) and dropping the finished
+                                // JSON into `ready[id]` for the non-blocking
+                                // `__httpAcceptPoll` to pick up. This avoids
+                                // calling `Handle::block_on` from inside a V8
+                                // callback that is itself already running inside
+                                // a tokio task, which would panic.
+                                let conns = ctx.conns.clone();
+                                let conn_nid = ctx.conn_nid.clone();
+                                let fw = ctx.fw.clone();
+                                let ready = ctx.ready.clone();
+                                tokio::spawn(async move {
+                                    loop {
+                                        let (stream, peer_addr) = match listener.accept().await {
+                                            Ok(v) => v,
+                                            Err(_) => break,
+                                        };
+
+                                        let ip: IpAddr = match peer_addr {
+                                            SocketAddr::V4(a) => IpAddr::V4(*a.ip()),
+                                            SocketAddr::V6(a) => IpAddr::V6(*a.ip()),
+                                        };
+
+                                        if let Some(firewall) = fw.as_ref().as_ref() {
+                                            match firewall.check_connection(ip) {
+                                                FirewallDecision::Allow => {
+                                                    firewall.on_connect(ip);
+                                                }
+                                                decision => {
+                                                    reject_stream(
+                                                        stream,
+                                                        decision.http_status(),
+                                                        decision.message(),
+                                                    );
+                                                    continue;
+                                                }
+                                            }
+                                        }
+
+                                        let (
+                                            hdr_timeout,
+                                            body_timeout,
+                                            max_hdr_count,
+                                            max_hdr_bytes,
+                                            max_body,
+                                            min_body_rate,
+                                        ) = if let Some(firewall) = fw.as_ref().as_ref() {
+                                            let c = &firewall.config;
+                                            (
+                                                std::time::Duration::from_millis(
+                                                    c.header_timeout_ms,
+                                                ),
+                                                std::time::Duration::from_millis(
+                                                    c.body_timeout_ms,
+                                                ),
+                                                c.max_header_count as usize,
+                                                c.max_header_bytes as usize,
+                                                c.max_body_bytes as usize,
+                                                c.min_body_rate_bps,
+                                            )
+                                        } else {
+                                            (
+                                                std::time::Duration::from_secs(10),
+                                                std::time::Duration::from_secs(30),
+                                                100,
+                                                16_384,
+                                                0,
+                                                100,
+                                            )
+                                        };
+
+                                        let parsed = parse_request(
+                                            stream,
+                                            hdr_timeout,
+                                            body_timeout,
+                                            max_hdr_count,
+                                            max_hdr_bytes,
+                                            max_body,
+                                            min_body_rate,
+                                        )
+                                        .await;
+
+                                        let parsed = match parsed {
+                                            Ok(p) => p,
+                                            Err(_) => {
+                                                if let Some(firewall) = fw.as_ref().as_ref() {
+                                                    firewall.on_disconnect(ip);
+                                                }
+                                                continue;
+                                            }
+                                        };
+
+                                        if let Some(firewall) = fw.as_ref().as_ref() {
+                                            match firewall.check_request(ip) {
+                                                FirewallDecision::Allow => {}
+                                                decision => {
+                                                    let resp = format!(
+                                                        "HTTP/1.1 {s} {m}\r\nContent-Length: {l}\r\nConnection: close\r\n\r\n{m}",
+                                                        s = decision.http_status(),
+                                                        m = decision.message(),
+                                                        l = decision.message().len(),
+                                                    );
+                                                    let _ = {
+                                                        let mut s = parsed.std_stream;
+                                                        s.write_all(resp.as_bytes())
+                                                    };
+                                                    firewall.on_disconnect(ip);
+                                                    continue;
+                                                }
+                                            }
+                                        }
+
+                                        let conn_id = {
+                                            let mut n = conn_nid.lock().unwrap();
+                                            let cid = *n;
+                                            *n = n.wrapping_add(1);
+                                            cid
+                                        };
+                                        conns.lock().unwrap().insert(
+                                            conn_id,
+                                            ConnEntry {
+                                                stream: parsed.std_stream,
+                                            },
+                                        );
+
+                                        let hdr_pairs: Vec<String> = parsed
+                                            .headers
+                                            .iter()
+                                            .map(|(k, v)| {
+                                                format!(
+                                                    "\"{}\":\"{}\"",
+                                                    json_escape(k),
+                                                    json_escape(v)
+                                                )
+                                            })
+                                            .collect();
+                                        let body_str = String::from_utf8_lossy(&parsed.body);
+                                        let json = format!(
+                                            "{{\"method\":\"{m}\",\"url\":\"{u}\",\"headers\":{{{h}}},\
+                                             \"body\":\"{b}\",\"conn_id\":{c},\"remoteAddress\":\"{ip}\"}}",
+                                            m = json_escape(&parsed.method),
+                                            u = json_escape(&parsed.path),
+                                            h = hdr_pairs.join(","),
+                                            b = json_escape(&body_str),
+                                            c = conn_id,
+                                            ip = ip,
+                                        );
+
+                                        ready.lock().unwrap().entry(id).or_default().push_back(json);
+                                    }
+                                });
+
                                 rv.set(v8::Integer::new_from_unsigned(scope, id).into());
                             }
                             Err(e) => {
@@ -345,12 +507,14 @@ pub fn inject_http_server(
 
     {
         let ctx_ptr = Box::leak(Box::new(HttpAcceptCtx {
-            servers: servers.clone(),
-            conns: conns.clone(),
-            nid: next_conn_id.clone(),
-            fw: fw.clone(),
+            ready: ready.clone(),
         })) as *mut HttpAcceptCtx as *mut std::ffi::c_void;
         let external = v8::External::new(scope, ctx_ptr);
+        // Non-blocking: pops one ready request's JSON for `server_id`, or
+        // returns null if none has finished parsing yet. The actual accept +
+        // parse work happens in the background task spawned by __httpListen;
+        // this just drains its output queue. JS polls this on an interval,
+        // the same pattern dgram.rs uses for __udpRecv.
         let http_accept_fn = v8::Function::builder(
             |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
                 let ctx = unsafe {
@@ -360,132 +524,28 @@ pub fn inject_http_server(
                 let server_id_arg = args.get(0);
                 let server_id = server_id_arg.uint32_value(scope).unwrap_or(0);
 
-                let listener = {
-                    let guard = ctx.servers.lock().unwrap();
-                    guard.get(&server_id).cloned()
-                };
+                let popped = ctx
+                    .ready
+                    .lock()
+                    .unwrap()
+                    .get_mut(&server_id)
+                    .and_then(|q| q.pop_front());
 
-                let listener = match listener {
-                    Some(l) => l,
-                    None => {
-                        let err_str = V8String::new(scope, "unknown server id").unwrap();
-                        rv.set(err_str.into());
-                        return;
-                    }
-                };
-
-                let result: Result<String, String> = match tokio::runtime::Handle::try_current() {
-                    Ok(runtime) => runtime.block_on(async {
-                        loop {
-                            let (stream, peer_addr) = listener.accept().await.map_err(|e| e.to_string())?;
-
-                            let ip: IpAddr = match peer_addr {
-                                SocketAddr::V4(a) => IpAddr::V4(*a.ip()),
-                                SocketAddr::V6(a) => IpAddr::V6(*a.ip()),
-                            };
-
-                            if let Some(firewall) = ctx.fw.as_ref().as_ref() {
-                                match firewall.check_connection(ip) {
-                                    FirewallDecision::Allow => { firewall.on_connect(ip); }
-                                    decision => {
-                                        reject_stream(stream, decision.http_status(), decision.message());
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            let (hdr_timeout, body_timeout, max_hdr_count, max_hdr_bytes, max_body, min_body_rate) =
-                                if let Some(firewall) = ctx.fw.as_ref().as_ref() {
-                                    let c = &firewall.config;
-                                    (
-                                        std::time::Duration::from_millis(c.header_timeout_ms),
-                                        std::time::Duration::from_millis(c.body_timeout_ms),
-                                        c.max_header_count as usize,
-                                        c.max_header_bytes as usize,
-                                        c.max_body_bytes as usize,
-                                        c.min_body_rate_bps,
-                                    )
-                                } else {
-                                    (
-                                        std::time::Duration::from_secs(10),
-                                        std::time::Duration::from_secs(30),
-                                        100, 16_384, 0, 100,
-                                    )
-                                };
-
-                            let parsed = parse_request(
-                                stream, hdr_timeout, body_timeout,
-                                max_hdr_count, max_hdr_bytes, max_body, min_body_rate,
-                            ).await;
-
-                            let parsed = match parsed {
-                                Ok(p) => p,
-                                Err(_) => {
-                                    if let Some(firewall) = ctx.fw.as_ref().as_ref() {
-                                        firewall.on_disconnect(ip);
-                                    }
-                                    continue;
-                                }
-                            };
-
-                            if let Some(firewall) = ctx.fw.as_ref().as_ref() {
-                                match firewall.check_request(ip) {
-                                    FirewallDecision::Allow => {}
-                                    decision => {
-                                        let resp = format!(
-                                            "HTTP/1.1 {s} {m}\r\nContent-Length: {l}\r\nConnection: close\r\n\r\n{m}",
-                                            s = decision.http_status(), m = decision.message(),
-                                            l = decision.message().len(),
-                                        );
-                                        let _ = { let mut s = parsed.std_stream; s.write_all(resp.as_bytes()) };
-                                        firewall.on_disconnect(ip);
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            let conn_id = {
-                                let mut n = ctx.nid.lock().unwrap();
-                                let id = *n; *n = n.wrapping_add(1); id
-                            };
-                            ctx.conns.lock().unwrap().insert(conn_id, ConnEntry { stream: parsed.std_stream });
-
-                            let hdr_pairs: Vec<String> = parsed.headers.iter()
-                                .map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)))
-                                .collect();
-                            let body_str = String::from_utf8_lossy(&parsed.body);
-                            let json = format!(
-                                "{{\"method\":\"{m}\",\"url\":\"{u}\",\"headers\":{{{h}}},\
-                                 \"body\":\"{b}\",\"conn_id\":{c},\"remoteAddress\":\"{ip}\"}}",
-                                m  = json_escape(&parsed.method),
-                                u  = json_escape(&parsed.path),
-                                h  = hdr_pairs.join(","),
-                                b  = json_escape(&body_str),
-                                c  = conn_id,
-                                ip = ip,
-                            );
-
-                            return Ok::<String, String>(json);
-                        }
-                    }),
-                    Err(_) => Err("no runtime".to_string()),
-                };
-
-                match result {
-                    Ok(json) => {
+                match popped {
+                    Some(json) => {
                         let result_str = V8String::new(scope, &json).unwrap();
                         rv.set(result_str.into());
                     }
-                    Err(e) => {
-                        let err_str = V8String::new(scope, &e).unwrap();
-                        rv.set(err_str.into());
-                    }
+                    None => rv.set(v8::null(scope).into()),
                 }
-            }
-        ).data(external.into()).build(scope).unwrap();
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
         global.set(
             scope,
-            V8String::new(scope, "__httpAcceptAsync").unwrap().into(),
+            V8String::new(scope, "__httpAcceptPoll").unwrap().into(),
             http_accept_fn.into(),
         );
     }

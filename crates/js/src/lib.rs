@@ -29,6 +29,12 @@ static PROFILER_HANDLE_CELL: std::sync::OnceLock<Profiler> = std::sync::OnceLock
 // global V8 state ("Invalid global state" panics deep in the v8 crate).
 static V8_INIT: std::sync::Once = std::sync::Once::new();
 
+// Retained so `run_event_loop`/`idle` can pump V8's own background→foreground
+// task queue (used by e.g. async WebAssembly compilation). Without this,
+// `WebAssembly.instantiate()`'s promise never settles: the microtask
+// checkpoint alone does not run tasks V8 posts to the platform.
+static V8_PLATFORM: std::sync::OnceLock<v8::SharedRef<v8::Platform>> = std::sync::OnceLock::new();
+
 /// Initializes the V8 platform, if it hasn't been already. Safe to call any
 /// number of times from any number of places in the process — e.g. once per
 /// `JsEngine`, plus any standalone `v8::Isolate` created outside of one
@@ -36,9 +42,21 @@ static V8_INIT: std::sync::Once = std::sync::Once::new();
 pub fn ensure_v8_initialized() {
     V8_INIT.call_once(|| {
         let platform = v8::new_default_platform(0, false).make_shared();
-        v8::V8::initialize_platform(platform);
+        v8::V8::initialize_platform(platform.clone());
         v8::V8::initialize();
+        let _ = V8_PLATFORM.set(platform);
     });
+}
+
+/// Runs one ready V8 platform task (foreground or background-completed) for
+/// `isolate`, if any is pending. Deliberately not looped to exhaustion: a
+/// task that reposts more work could otherwise spin this call forever. The
+/// caller (idle()/run_event_loop()) already runs repeatedly, so tasks drain
+/// incrementally across iterations just like timers do.
+fn pump_v8_platform_tasks(isolate: &v8::Isolate) {
+    if let Some(platform) = V8_PLATFORM.get() {
+        v8::Platform::pump_message_loop(platform, isolate, false);
+    }
 }
 
 pub struct JsEngine {
@@ -244,7 +262,10 @@ impl JsEngine {
         Ok(result.to_rust_string_lossy(&scope))
     }
 
-    pub async fn idle(&self) {}
+    pub async fn idle(&mut self) {
+        pump_v8_platform_tasks(&self.isolate);
+        self.isolate.perform_microtask_checkpoint();
+    }
 
     pub async fn with_scope<R>(
         &mut self,
@@ -282,14 +303,24 @@ impl JsEngine {
         let source = std::fs::read_to_string(path)?;
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let transpiled = match ext {
-            "tsx" | "jsx" => transpiler::transpile_jsx(&source),
-            "ts" | "mts" | "cts" => transpiler::transpile(&source),
-            _ => {
-                if transpiler::looks_like_jsx(&source) {
-                    transpiler::transpile_js(&source)
-                } else {
-                    source
+        // Entry-point files with real static import/export syntax must go
+        // through transpile_to_cjs (ESM→CJS conversion), not plain
+        // transpile()/transpile_js() — those only strip TS types/JSX and
+        // leave import/export untouched, which V8 rejects when the file is
+        // run as a classic script (not a compiled ES Module).
+        let is_esm = ext == "mjs" || is_esm_source(&source);
+        let transpiled = if is_esm {
+            transpiler::transpile_to_cjs(&source, matches!(ext, "tsx" | "jsx"))
+        } else {
+            match ext {
+                "tsx" | "jsx" => transpiler::transpile_jsx(&source),
+                "ts" | "mts" | "cts" => transpiler::transpile(&source),
+                _ => {
+                    if transpiler::looks_like_jsx(&source) {
+                        transpiler::transpile_js(&source)
+                    } else {
+                        source
+                    }
                 }
             }
         };
@@ -311,7 +342,6 @@ impl JsEngine {
             .map(|u| u.to_string())
             .unwrap_or_else(|_| format!("file://{}", filename.replace('\\', "/")));
 
-        let _is_esm = is_esm_source(&code);
         let code = transpiler::replace_import_meta(&code);
 
         {
@@ -356,8 +386,18 @@ impl JsEngine {
             let setup_src = v8::String::new(&scope, &setup).unwrap();
             let _ = v8::Script::compile(&scope, setup_src, None).and_then(|s| s.run(&scope));
 
+            // Unlike the setup script above (internal boilerplate, always
+            // valid), the file's own code must propagate compile/run
+            // failures — a `let _ = ...` here (as before) silently
+            // discarded syntax errors and exceptions thrown during
+            // evaluation (e.g. a require() permission denial), so
+            // eval_file() always returned Ok even when the script never
+            // actually ran.
             let code_src = v8::String::new(&scope, &code).unwrap();
-            let _ = v8::Script::compile(&scope, code_src, None).and_then(|s| s.run(&scope));
+            v8::Script::compile(&scope, code_src, None)
+                .ok_or_else(|| anyhow::anyhow!("compile error"))?
+                .run(&scope)
+                .ok_or_else(|| anyhow::anyhow!("execution error"))?;
         }
 
         self.run_event_loop().await?;
@@ -386,6 +426,7 @@ impl JsEngine {
                 let mut scope = v8::ContextScope::new(&mut scope, context);
                 builtins::timers::TimerManager::fire_pending(&mut scope, tm)?;
             }
+            pump_v8_platform_tasks(&self.isolate);
             self.isolate.perform_microtask_checkpoint();
 
             let expired = self.runtime_core.lock().unwrap().poll_timers();
@@ -433,50 +474,16 @@ impl JsEngine {
     }
 
     pub async fn take_heap_snapshot(&mut self) -> anyhow::Result<String> {
-        let heap_stats = self.isolate.get_heap_statistics();
-
-        let snapshot = serde_json::json!({
-            "snapshot": {
-                "meta": {
-                    "node_fields": ["type", "name", "id", "self_size", "edge_count", "trace_node_id"],
-                    "node_types": [
-                        ["hidden", "object", "function", "string", "unknown", "array", "boolean", "number"],
-                        "string",
-                        "number",
-                        "number",
-                        "number",
-                        "number"
-                    ],
-                    "edge_fields": ["type", "name_or_index", "to_node", "from_node"],
-                    "edge_types": [
-                        ["context", "element", "property", "internal", "hidden", "shortcut", "weak"],
-                        "string_or_number",
-                        "node",
-                        "node"
-                    ],
-                    "trace_function_info_fields": ["function_id", "name", "script_name", "line", "column"],
-                    "trace_node_fields": ["id", "function_info_index", "offset", "col", "line"],
-                    "sample_fields": ["timestamp_us", "client_id", "heap_size"],
-                    "location_fields": ["object_index", "field_index"]
-                },
-                "node_count": 0,
-                "edge_count": 0,
-                "trace_function_count": 0
-            },
-            "nodes": [],
-            "edges": [],
-            "strings": [""],
-            "memory_usage": {
-                "heap_size": heap_stats.used_heap_size(),
-                "heap_size_limit": heap_stats.heap_size_limit(),
-                "total_physical_size": heap_stats.total_physical_size(),
-                "total_available_size": heap_stats.total_available_size(),
-                "used_heap_size": heap_stats.used_heap_size(),
-                "malloc_size": heap_stats.malloced_memory(),
-            }
+        // V8's own heap profiler — real nodes/edges/strings for every live
+        // object, not a hand-rolled stub. It streams the serialized
+        // .heapsnapshot JSON (Chrome DevTools format) as byte chunks that
+        // just need concatenating.
+        let mut buf: Vec<u8> = Vec::new();
+        self.isolate.take_heap_snapshot(|chunk| {
+            buf.extend_from_slice(chunk);
+            true
         });
-
-        Ok(serde_json::to_string_pretty(&snapshot)?)
+        Ok(std::string::String::from_utf8(buf)?)
     }
 }
 

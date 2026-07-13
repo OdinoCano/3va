@@ -159,6 +159,10 @@ async fn dns_lookup_localhost_resolves() {
     .unwrap();
     for _ in 0..40 {
         e.idle().await;
+        // Timers (setTimeout, used by dns's/readline's callback deferral)
+        // only fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
         let r = e.eval_to_string("String(result)").await.unwrap();
         if r != "null" {
@@ -187,6 +191,10 @@ async fn dns_promises_lookup_localhost() {
     .unwrap();
     for _ in 0..40 {
         e.idle().await;
+        // Timers (setTimeout, used by dns's/readline's callback deferral)
+        // only fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
         let r = e.eval_to_string("String(result)").await.unwrap();
         if r != "null" {
@@ -212,6 +220,10 @@ async fn dns_resolve4_callback_form() {
     .unwrap();
     for _ in 0..40 {
         e.idle().await;
+        // Timers (setTimeout, used by dns's/readline's callback deferral)
+        // only fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
         let r = e.eval_to_string("String(result)").await.unwrap();
         if r != "null" {
@@ -244,6 +256,10 @@ async fn dns_resolve_mx_uses_real_query() {
     .unwrap();
     for _ in 0..40 {
         e.idle().await;
+        // Timers (setTimeout, used by dns's/readline's callback deferral)
+        // only fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
         let r = e.eval_to_string("String(result)").await.unwrap();
         if r != "null" {
@@ -272,6 +288,10 @@ async fn dns_resolve_soa_returns_object_not_stub_array() {
     .unwrap();
     for _ in 0..40 {
         e.idle().await;
+        // Timers (setTimeout, used by dns's/readline's callback deferral)
+        // only fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
         let r = e.eval_to_string("String(result)").await.unwrap();
         if r != "null" {
@@ -446,6 +466,10 @@ async fn stdin_read_native_binding_resolves() {
     .unwrap();
     for _ in 0..100 {
         e.idle().await;
+        // Timers (setTimeout, used by dns's/readline's callback deferral)
+        // only fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
         if e.eval_to_string("String(done)").await.unwrap() == "true" {
             let bytes = e.eval_to_string("String(bytesRead)").await.unwrap();
@@ -478,6 +502,10 @@ async fn readline_over_process_stdin_reaches_close_on_eof() {
     .unwrap();
     for _ in 0..100 {
         e.idle().await;
+        // Timers (setTimeout, used by dns's/readline's callback deferral)
+        // only fire inside run_event_loop(), not idle() — see the identical
+        // pattern in compat_priority.rs's eval_async().
+        let _ = e.run_event_loop().await;
         tokio::task::yield_now().await;
         if e.eval_to_string("String(closed)").await.unwrap() == "true" {
             return;

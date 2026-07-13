@@ -41,10 +41,24 @@ impl client::Handler for SshHandler {
 
 struct SshConn {
     handle: Handle<SshHandler>,
+    // russh spawns a background task that drives the connection (framing,
+    // keepalives, channel dispatch) onto whatever runtime `client::connect`
+    // ran on. Every op used to build its OWN throwaway `Runtime::new()` and
+    // drop it when done — which killed that driver task the moment connect()
+    // returned, so every later exec/sftp call on the same connection failed
+    // with a channel send error (the driver task was gone). Keeping the
+    // connect-time runtime alive for the connection's whole lifetime, and
+    // reusing it for every later op, is what actually keeps the session
+    // alive between calls.
+    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 struct SftpConn {
     sftp: SftpSession,
+    // Same reasoning as SshConn::runtime — an SFTP session's stream is a
+    // channel over the same SSH connection, driven by that connection's
+    // background task.
+    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 static SSH_REGISTRY: OnceLock<Mutex<HashMap<SshId, Arc<SshConn>>>> = OnceLock::new();
@@ -59,6 +73,25 @@ fn sftp_registry() -> &'static Mutex<HashMap<SftpId, Arc<SftpConn>>> {
 }
 
 fn next_ssh_id() -> SshId {
+    static C: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    C.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+// Every __ssh*/__sftp* operation below spawns a background OS thread with
+// its own throwaway tokio runtime to do real blocking network I/O (SSH
+// connect, exec, SFTP calls) — necessary since none of this is safe to
+// await on the V8 callback thread. Each op gets an id here, the spawned
+// thread stores its JSON envelope result keyed by that id when done, and
+// `__sshOpPoll` (a plain, non-blocking native function) drains it. This
+// used to be missing entirely: the native functions returned `undefined`
+// while the spawned thread's result went nowhere but an eprintln!, so
+// every `.then()` on them threw "Cannot read properties of undefined
+// (reading 'then')" instead of ever settling.
+static SSH_OPS: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+fn ssh_ops() -> &'static Mutex<HashMap<u32, String>> {
+    SSH_OPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn next_op_id() -> u32 {
     static C: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
     C.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -84,10 +117,21 @@ fn err_envelope(code: &str, message: impl std::fmt::Display) -> String {
     json!({"ok": false, "code": code, "message": message.to_string()}).to_string()
 }
 
-static INJECT_SSH_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> =
-    std::sync::OnceLock::new();
-fn permissions() -> &'static Arc<PermissionState> {
-    INJECT_SSH_PERMISSIONS.get().unwrap()
+// Thread-local, not a process-wide static — see the identical fix (and
+// rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
+// *first* engine's permissions ever created in the process, so every later
+// `JsEngine` (every other test, or a second engine in a long-lived process)
+// silently inherits the first one's grants instead of its own.
+thread_local! {
+    static INJECT_SSH_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn permissions() -> Arc<PermissionState> {
+    INJECT_SSH_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_ssh not called on this thread")
+    })
 }
 
 pub fn inject_ssh(
@@ -96,7 +140,7 @@ pub fn inject_ssh(
 ) {
     let context = scope.get_current_context();
     let global = context.global(scope);
-    INJECT_SSH_PERMISSIONS.set(permissions_param).ok();
+    INJECT_SSH_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions_param));
 
     let create_fn = v8::Function::new(
         scope,
@@ -124,43 +168,52 @@ pub fn inject_ssh(
             let port = args.get(2).uint32_value(_scope).unwrap_or(22) as u16;
             let username = args.get(3).to_rust_string_lossy(_scope);
             let password = args.get(4).to_rust_string_lossy(_scope);
+            // Read on this (callback) thread, where the thread-local is
+            // actually populated, and move the clone into the spawned
+            // thread — permissions() itself would panic if called from
+            // there (see PermissionState's doc comment above).
+            let perms_for_thread = permissions();
+            let op_id = next_op_id();
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async {
-                    if !permissions().check(&Capability::Network(host.clone())) {
-                        return Err(err_envelope(
+                // Kept alive for the connection's lifetime via SshConn — see
+                // its doc comment. Not dropped at the end of this thread.
+                let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+                let rt_for_conn = rt.clone();
+                let result: String = rt.block_on(async {
+                    if !perms_for_thread.check(&Capability::Network(host.clone())) {
+                        return err_envelope(
                             "EACCES",
                             format!("Network access denied. Run with --allow-net={}", host),
-                        ));
+                        );
                     }
 
                     let config = Arc::new(client::Config::default());
                     let mut handle =
                         match client::connect(config, (&host[..], port), SshHandler).await {
                             Ok(h) => h,
-                            Err(e) => return Err(err_envelope("ECONNREFUSED", e)),
+                            Err(e) => return err_envelope("ECONNREFUSED", e),
                         };
 
                     match handle.authenticate_password(&username, &password).await {
                         Ok(auth) if auth.success() => {
-                            ssh_registry()
-                                .lock()
-                                .unwrap()
-                                .insert(id, Arc::new(SshConn { handle }));
-                            Ok(ok_envelope(serde_json::Value::Null))
+                            ssh_registry().lock().unwrap().insert(
+                                id,
+                                Arc::new(SshConn {
+                                    handle,
+                                    runtime: rt_for_conn,
+                                }),
+                            );
+                            ok_envelope(serde_json::Value::Null)
                         }
-                        Ok(_) => Ok(err_envelope("EAUTH", "authentication failed")),
-                        Err(e) => Ok(err_envelope("EAUTH", e)),
+                        Ok(_) => err_envelope("EAUTH", "authentication failed"),
+                        Err(e) => err_envelope("EAUTH", e),
                     }
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SSH connect error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -177,27 +230,38 @@ pub fn inject_ssh(
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SshId;
             let command = args.get(1).to_rust_string_lossy(_scope);
+            let op_id = next_op_id();
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async move {
-                    let conn = match get_ssh(id) {
-                        Some(c) => c,
-                        None => return Err(err_envelope("ENOTCONN", "Invalid SSH ID")),
-                    };
-
+                let conn = match get_ssh(id) {
+                    Some(c) => c,
+                    None => {
+                        ssh_ops()
+                            .lock()
+                            .unwrap()
+                            .insert(op_id, err_envelope("ENOTCONN", "Invalid SSH ID"));
+                        return;
+                    }
+                };
+                // Reuse the connection's own runtime — see SshConn::runtime's
+                // doc comment; a fresh Runtime::new() here would drop out
+                // from under the connection's background driver task on the
+                // *previous* connect() call, breaking every op after the
+                // first.
+                let rt = conn.runtime.clone();
+                let result: String = rt.block_on(async move {
                     let mut channel = match conn.handle.channel_open_session().await {
                         Ok(ch) => ch,
                         Err(e) => {
-                            return Err(err_envelope(
+                            return err_envelope(
                                 "EIO",
                                 format!("channel_open_session failed: {}", e),
-                            ));
+                            );
                         }
                     };
 
                     if let Err(e) = channel.exec(true, command.as_bytes()).await {
-                        return Err(err_envelope("EIO", format!("exec failed: {}", e)));
+                        return err_envelope("EIO", format!("exec failed: {}", e));
                     }
 
                     let mut stdout = Vec::new();
@@ -217,19 +281,16 @@ pub fn inject_ssh(
                         }
                     }
 
-                    Ok(ok_envelope(json!({
+                    ok_envelope(json!({
                         "stdout": String::from_utf8_lossy(&stdout),
                         "stderr": String::from_utf8_lossy(&stderr),
                         "code": code.unwrap_or(0),
-                    })))
+                    }))
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SSH exec error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -245,51 +306,59 @@ pub fn inject_ssh(
               args: v8::FunctionCallbackArguments,
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SshId;
+            let op_id = next_op_id();
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async move {
-                    let conn = match get_ssh(id) {
-                        Some(c) => c,
-                        None => return Err(err_envelope("ENOTCONN", "Invalid SSH ID")),
-                    };
-
+                let conn = match get_ssh(id) {
+                    Some(c) => c,
+                    None => {
+                        ssh_ops()
+                            .lock()
+                            .unwrap()
+                            .insert(op_id, err_envelope("ENOTCONN", "Invalid SSH ID"));
+                        return;
+                    }
+                };
+                // Reuse the connection's runtime — see SshConn::runtime.
+                let rt = conn.runtime.clone();
+                let rt_for_sftp = rt.clone();
+                let result: String = rt.block_on(async move {
                     let channel = match conn.handle.channel_open_session().await {
                         Ok(ch) => ch,
                         Err(e) => {
-                            return Err(err_envelope(
+                            return err_envelope(
                                 "EIO",
                                 format!("channel_open_session failed: {}", e),
-                            ));
+                            );
                         }
                     };
                     if let Err(e) = channel.request_subsystem(true, "sftp").await {
-                        return Err(err_envelope(
+                        return err_envelope(
                             "EIO",
                             format!("sftp subsystem request failed: {}", e),
-                        ));
+                        );
                     }
                     let sftp = match SftpSession::new(channel.into_stream()).await {
                         Ok(s) => s,
                         Err(e) => {
-                            return Err(err_envelope("EIO", format!("sftp session failed: {}", e)));
+                            return err_envelope("EIO", format!("sftp session failed: {}", e));
                         }
                     };
 
                     let sftp_id = next_sftp_id();
-                    sftp_registry()
-                        .lock()
-                        .unwrap()
-                        .insert(sftp_id, Arc::new(SftpConn { sftp }));
-                    Ok(ok_envelope(json!({ "sftpId": sftp_id })))
+                    sftp_registry().lock().unwrap().insert(
+                        sftp_id,
+                        Arc::new(SftpConn {
+                            sftp,
+                            runtime: rt_for_sftp,
+                        }),
+                    );
+                    ok_envelope(json!({ "sftpId": sftp_id }))
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SSH sftp error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -306,14 +375,22 @@ pub fn inject_ssh(
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
             let path = args.get(1).to_rust_string_lossy(_scope);
+            let op_id = next_op_id();
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async move {
-                    let conn = match get_sftp(id) {
-                        Some(c) => c,
-                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
-                    };
+                let conn = match get_sftp(id) {
+                    Some(c) => c,
+                    None => {
+                        ssh_ops()
+                            .lock()
+                            .unwrap()
+                            .insert(op_id, err_envelope("ENOTCONN", "Invalid SFTP ID"));
+                        return;
+                    }
+                };
+                // Reuse the connection's runtime — see SshConn::runtime.
+                let rt = conn.runtime.clone();
+                let result: String = rt.block_on(async move {
                     match conn.sftp.read_dir(&path).await {
                         Ok(rd) => {
                             let entries: Vec<serde_json::Value> = rd
@@ -331,18 +408,15 @@ pub fn inject_ssh(
                                     })
                                 })
                                 .collect();
-                            Ok(ok_envelope(serde_json::Value::Array(entries)))
+                            ok_envelope(serde_json::Value::Array(entries))
                         }
-                        Err(e) => Ok(err_envelope("EIO", format!("readdir failed: {}", e))),
+                        Err(e) => err_envelope("EIO", format!("readdir failed: {}", e)),
                     }
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SFTP readdir error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -359,26 +433,31 @@ pub fn inject_ssh(
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
             let path = args.get(1).to_rust_string_lossy(_scope);
+            let op_id = next_op_id();
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async move {
-                    let conn = match get_sftp(id) {
-                        Some(c) => c,
-                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
-                    };
+                let conn = match get_sftp(id) {
+                    Some(c) => c,
+                    None => {
+                        ssh_ops()
+                            .lock()
+                            .unwrap()
+                            .insert(op_id, err_envelope("ENOTCONN", "Invalid SFTP ID"));
+                        return;
+                    }
+                };
+                // Reuse the connection's runtime — see SshConn::runtime.
+                let rt = conn.runtime.clone();
+                let result: String = rt.block_on(async move {
                     match conn.sftp.read(&path).await {
-                        Ok(bytes) => Ok(ok_envelope(json!(bytes))),
-                        Err(e) => Ok(err_envelope("EIO", format!("read failed: {}", e))),
+                        Ok(bytes) => ok_envelope(json!(bytes)),
+                        Err(e) => err_envelope("EIO", format!("read failed: {}", e)),
                     }
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SFTP read file error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -407,25 +486,31 @@ pub fn inject_ssh(
                 }
             };
 
+            let op_id = next_op_id();
+
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async move {
-                    let conn = match get_sftp(id) {
-                        Some(c) => c,
-                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
-                    };
+                let conn = match get_sftp(id) {
+                    Some(c) => c,
+                    None => {
+                        ssh_ops()
+                            .lock()
+                            .unwrap()
+                            .insert(op_id, err_envelope("ENOTCONN", "Invalid SFTP ID"));
+                        return;
+                    }
+                };
+                // Reuse the connection's runtime — see SshConn::runtime.
+                let rt = conn.runtime.clone();
+                let result: String = rt.block_on(async move {
                     match conn.sftp.write(&path, &data).await {
-                        Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
-                        Err(e) => Ok(err_envelope("EIO", format!("write failed: {}", e))),
+                        Ok(_) => ok_envelope(serde_json::Value::Null),
+                        Err(e) => err_envelope("EIO", format!("write failed: {}", e)),
                     }
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SFTP write file error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -442,26 +527,31 @@ pub fn inject_ssh(
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
             let path = args.get(1).to_rust_string_lossy(_scope);
+            let op_id = next_op_id();
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async move {
-                    let conn = match get_sftp(id) {
-                        Some(c) => c,
-                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
-                    };
+                let conn = match get_sftp(id) {
+                    Some(c) => c,
+                    None => {
+                        ssh_ops()
+                            .lock()
+                            .unwrap()
+                            .insert(op_id, err_envelope("ENOTCONN", "Invalid SFTP ID"));
+                        return;
+                    }
+                };
+                // Reuse the connection's runtime — see SshConn::runtime.
+                let rt = conn.runtime.clone();
+                let result: String = rt.block_on(async move {
                     match conn.sftp.create_dir(&path).await {
-                        Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
-                        Err(e) => Ok(err_envelope("EIO", format!("mkdir failed: {}", e))),
+                        Ok(_) => ok_envelope(serde_json::Value::Null),
+                        Err(e) => err_envelope("EIO", format!("mkdir failed: {}", e)),
                     }
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SFTP mkdir error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -478,26 +568,31 @@ pub fn inject_ssh(
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
             let path = args.get(1).to_rust_string_lossy(_scope);
+            let op_id = next_op_id();
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async move {
-                    let conn = match get_sftp(id) {
-                        Some(c) => c,
-                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
-                    };
+                let conn = match get_sftp(id) {
+                    Some(c) => c,
+                    None => {
+                        ssh_ops()
+                            .lock()
+                            .unwrap()
+                            .insert(op_id, err_envelope("ENOTCONN", "Invalid SFTP ID"));
+                        return;
+                    }
+                };
+                // Reuse the connection's runtime — see SshConn::runtime.
+                let rt = conn.runtime.clone();
+                let result: String = rt.block_on(async move {
                     match conn.sftp.remove_dir(&path).await {
-                        Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
-                        Err(e) => Ok(err_envelope("EIO", format!("rmdir failed: {}", e))),
+                        Ok(_) => ok_envelope(serde_json::Value::Null),
+                        Err(e) => err_envelope("EIO", format!("rmdir failed: {}", e)),
                     }
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SFTP rmdir error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -514,26 +609,31 @@ pub fn inject_ssh(
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
             let path = args.get(1).to_rust_string_lossy(_scope);
+            let op_id = next_op_id();
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async move {
-                    let conn = match get_sftp(id) {
-                        Some(c) => c,
-                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
-                    };
+                let conn = match get_sftp(id) {
+                    Some(c) => c,
+                    None => {
+                        ssh_ops()
+                            .lock()
+                            .unwrap()
+                            .insert(op_id, err_envelope("ENOTCONN", "Invalid SFTP ID"));
+                        return;
+                    }
+                };
+                // Reuse the connection's runtime — see SshConn::runtime.
+                let rt = conn.runtime.clone();
+                let result: String = rt.block_on(async move {
                     match conn.sftp.remove_file(&path).await {
-                        Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
-                        Err(e) => Ok(err_envelope("EIO", format!("unlink failed: {}", e))),
+                        Ok(_) => ok_envelope(serde_json::Value::Null),
+                        Err(e) => err_envelope("EIO", format!("unlink failed: {}", e)),
                     }
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SFTP unlink error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -551,26 +651,31 @@ pub fn inject_ssh(
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
             let old_path = args.get(1).to_rust_string_lossy(_scope);
             let new_path = args.get(2).to_rust_string_lossy(_scope);
+            let op_id = next_op_id();
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async move {
-                    let conn = match get_sftp(id) {
-                        Some(c) => c,
-                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
-                    };
+                let conn = match get_sftp(id) {
+                    Some(c) => c,
+                    None => {
+                        ssh_ops()
+                            .lock()
+                            .unwrap()
+                            .insert(op_id, err_envelope("ENOTCONN", "Invalid SFTP ID"));
+                        return;
+                    }
+                };
+                // Reuse the connection's runtime — see SshConn::runtime.
+                let rt = conn.runtime.clone();
+                let result: String = rt.block_on(async move {
                     match conn.sftp.rename(&old_path, &new_path).await {
-                        Ok(_) => Ok(ok_envelope(serde_json::Value::Null)),
-                        Err(e) => Ok(err_envelope("EIO", format!("rename failed: {}", e))),
+                        Ok(_) => ok_envelope(serde_json::Value::Null),
+                        Err(e) => err_envelope("EIO", format!("rename failed: {}", e)),
                     }
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SFTP rename error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -587,30 +692,35 @@ pub fn inject_ssh(
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SftpId;
             let path = args.get(1).to_rust_string_lossy(_scope);
+            let op_id = next_op_id();
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async move {
-                    let conn = match get_sftp(id) {
-                        Some(c) => c,
-                        None => return Err(err_envelope("ENOTCONN", "Invalid SFTP ID")),
-                    };
+                let conn = match get_sftp(id) {
+                    Some(c) => c,
+                    None => {
+                        ssh_ops()
+                            .lock()
+                            .unwrap()
+                            .insert(op_id, err_envelope("ENOTCONN", "Invalid SFTP ID"));
+                        return;
+                    }
+                };
+                // Reuse the connection's runtime — see SshConn::runtime.
+                let rt = conn.runtime.clone();
+                let result: String = rt.block_on(async move {
                     match conn.sftp.metadata(&path).await {
-                        Ok(attrs) => Ok(ok_envelope(json!({
+                        Ok(attrs) => ok_envelope(json!({
                             "size": attrs.len(),
                             "mtime": attrs.mtime.unwrap_or(0),
                             "mode": attrs.permissions.unwrap_or(0),
-                        }))),
-                        Err(e) => Ok(err_envelope("EIO", format!("stat failed: {}", e))),
+                        })),
+                        Err(e) => err_envelope("EIO", format!("stat failed: {}", e)),
                     }
                 });
-
-                if let Err(e) = result {
-                    eprintln!("SFTP stat error: {}", e);
-                }
+                ssh_ops().lock().unwrap().insert(op_id, result);
             });
 
-            rv.set(v8::undefined(_scope).into());
+            rv.set(v8::Number::new(_scope, op_id as f64).into());
         },
     )
     .unwrap();
@@ -618,6 +728,25 @@ pub fn inject_ssh(
         scope,
         v8::String::new(scope, "__sftpStat").unwrap().into(),
         stat_fn.into(),
+    );
+
+    let op_poll_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let op_id = args.get(0).uint32_value(_scope).unwrap_or(0);
+            match ssh_ops().lock().unwrap().remove(&op_id) {
+                Some(json) => rv.set(v8::String::new(_scope, &json).unwrap().into()),
+                None => rv.set(v8::null(_scope).into()),
+            }
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sshOpPoll").unwrap().into(),
+        op_poll_fn.into(),
     );
 
     let ssh_close_fn = v8::Function::new(
@@ -639,6 +768,23 @@ pub fn inject_ssh(
 
     let js_code = r#"
     (function() {
+        // Every __ssh*/__sftp* native function below is synchronous: it
+        // starts a background thread and returns an op id immediately,
+        // rather than a Promise (a native function cannot hand back a real
+        // V8 Promise here). This polls __sshOpPoll(opId) until the
+        // background thread's result is ready, wrapped as a Promise so the
+        // call sites read the same as before.
+        function _pollOp(startFn, args) {
+            var opId = startFn.apply(null, args);
+            return new Promise(function(resolve) {
+                (function check() {
+                    var r = __sshOpPoll(opId);
+                    if (r === null || r === undefined) { setTimeout(check, 5); return; }
+                    resolve(r);
+                })();
+            });
+        }
+
         function _unwrap(json) {
             var env = JSON.parse(json);
             if (env.ok) return { error: null, data: env.data };
@@ -663,7 +809,7 @@ pub fn inject_ssh(
             var password = options.password || '';
 
             this._id = __sshCreate();
-            __sshConnect(this._id, host, port, username, password).then(function(json) {
+            _pollOp(__sshConnect, [this._id, host, port, username, password]).then(function(json) {
                 var r = _unwrap(json);
                 if (r.error) { self.emit('error', r.error); return; }
                 self._connected = true;
@@ -680,7 +826,7 @@ pub fn inject_ssh(
                 if (callback) callback(err, null);
                 return this;
             }
-            __sshExec(this._id, command).then(function(json) {
+            _pollOp(__sshExec, [this._id, command]).then(function(json) {
                 var r = _unwrap(json);
                 if (r.error) { if (callback) callback(r.error, null); return; }
                 var ch = new (require('events').EventEmitter)();
@@ -711,7 +857,7 @@ pub fn inject_ssh(
                 if (callback) callback(err, null);
                 return;
             }
-            __sshSftp(this._id).then(function(json) {
+            _pollOp(__sshSftp, [this._id]).then(function(json) {
                 var r = _unwrap(json);
                 if (r.error) { if (callback) callback(r.error, null); return; }
                 if (callback) callback(null, new SftpWrapper(r.data.sftpId));
@@ -811,7 +957,7 @@ pub fn inject_ssh(
         }
 
         SftpWrapper.prototype.readdir = function(path, callback) {
-            __sftpReaddir(this._sftpId, path).then(function(json) {
+            _pollOp(__sftpReaddir, [this._sftpId, path]).then(function(json) {
                 var r = _unwrap(json);
                 if (callback) callback(r.error, r.error ? [] : r.data);
             }).catch(function(err) { if (callback) callback(err, []); });
@@ -819,7 +965,7 @@ pub fn inject_ssh(
 
         SftpWrapper.prototype.readFile = function(path, options, callback) {
             if (typeof options === 'function') { callback = options; }
-            __sftpReadFile(this._sftpId, path).then(function(json) {
+            _pollOp(__sftpReadFile, [this._sftpId, path]).then(function(json) {
                 var r = _unwrap(json);
                 if (r.error) { if (callback) callback(r.error, null); return; }
                 if (callback) callback(null, Buffer.from(r.data));
@@ -831,42 +977,42 @@ pub fn inject_ssh(
             var bytes = typeof data === 'string'
                 ? Array.from(new TextEncoder().encode(data))
                 : Array.from(data instanceof Uint8Array ? data : new Uint8Array(data));
-            __sftpWriteFile(this._sftpId, path, bytes).then(function(json) {
+            _pollOp(__sftpWriteFile, [this._sftpId, path, bytes]).then(function(json) {
                 var r = _unwrap(json);
                 if (callback) callback(r.error);
             }).catch(function(err) { if (callback) callback(err); });
         };
 
         SftpWrapper.prototype.mkdir = function(path, callback) {
-            __sftpMkdir(this._sftpId, path).then(function(json) {
+            _pollOp(__sftpMkdir, [this._sftpId, path]).then(function(json) {
                 var r = _unwrap(json);
                 if (callback) callback(r.error);
             }).catch(function(err) { if (callback) callback(err); });
         };
 
         SftpWrapper.prototype.rmdir = function(path, callback) {
-            __sftpRmdir(this._sftpId, path).then(function(json) {
+            _pollOp(__sftpRmdir, [this._sftpId, path]).then(function(json) {
                 var r = _unwrap(json);
                 if (callback) callback(r.error);
             }).catch(function(err) { if (callback) callback(err); });
         };
 
         SftpWrapper.prototype.unlink = function(path, callback) {
-            __sftpUnlink(this._sftpId, path).then(function(json) {
+            _pollOp(__sftpUnlink, [this._sftpId, path]).then(function(json) {
                 var r = _unwrap(json);
                 if (callback) callback(r.error);
             }).catch(function(err) { if (callback) callback(err); });
         };
 
         SftpWrapper.prototype.rename = function(from, to, callback) {
-            __sftpRename(this._sftpId, from, to).then(function(json) {
+            _pollOp(__sftpRename, [this._sftpId, from, to]).then(function(json) {
                 var r = _unwrap(json);
                 if (callback) callback(r.error);
             }).catch(function(err) { if (callback) callback(err); });
         };
 
         SftpWrapper.prototype.stat = function(path, callback) {
-            __sftpStat(this._sftpId, path).then(function(json) {
+            _pollOp(__sftpStat, [this._sftpId, path]).then(function(json) {
                 var r = _unwrap(json);
                 if (callback) callback(r.error, r.error ? null : r.data);
             }).catch(function(err) { if (callback) callback(err, null); });

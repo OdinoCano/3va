@@ -1,4 +1,4 @@
-use crate::builtins::v8_compat::{uint8array_from_bytes, uint8array_to_vec};
+use crate::builtins::v8_compat::{js_value_to_bytes, uint8array_from_bytes, uint8array_to_vec};
 use aes::cipher::{
     BlockDecryptMut, BlockEncryptMut, KeyIvInit, StreamCipher, block_padding::Pkcs7,
 };
@@ -185,6 +185,58 @@ fn do_rsa_verify(
     Ok(ok.is_ok())
 }
 
+fn do_rsa_pss_sign(digest_alg: &str, pem: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::pss::SigningKey;
+    use rsa::signature::{RandomizedSigner, SignatureEncoding};
+
+    let priv_key = rsa::RsaPrivateKey::from_pkcs8_pem(pem)
+        .map_err(|e| anyhow::anyhow!("RSA private key parse error: {e}"))?;
+    let mut rng = OsRng;
+    let sig_bytes: Vec<u8> = match norm_alg(digest_alg).as_str() {
+        "sha1" => SigningKey::<Sha1>::new(priv_key)
+            .sign_with_rng(&mut rng, data)
+            .to_vec(),
+        "sha224" => SigningKey::<Sha224>::new(priv_key)
+            .sign_with_rng(&mut rng, data)
+            .to_vec(),
+        "sha384" => SigningKey::<Sha384>::new(priv_key)
+            .sign_with_rng(&mut rng, data)
+            .to_vec(),
+        "sha512" => SigningKey::<Sha512>::new(priv_key)
+            .sign_with_rng(&mut rng, data)
+            .to_vec(),
+        _ => SigningKey::<Sha256>::new(priv_key)
+            .sign_with_rng(&mut rng, data)
+            .to_vec(),
+    };
+    Ok(sig_bytes)
+}
+
+fn do_rsa_pss_verify(
+    digest_alg: &str,
+    pem: &str,
+    data: &[u8],
+    sig_bytes: &[u8],
+) -> anyhow::Result<bool> {
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::pss::{Signature, VerifyingKey};
+    use rsa::signature::Verifier;
+
+    let pub_key = rsa::RsaPublicKey::from_public_key_pem(pem)
+        .map_err(|e| anyhow::anyhow!("RSA public key parse error: {e}"))?;
+    let sig = Signature::try_from(sig_bytes)
+        .map_err(|_| anyhow::anyhow!("RSA signature parse error: invalid bytes"))?;
+    let ok = match norm_alg(digest_alg).as_str() {
+        "sha1" => VerifyingKey::<Sha1>::new(pub_key).verify(data, &sig),
+        "sha224" => VerifyingKey::<Sha224>::new(pub_key).verify(data, &sig),
+        "sha384" => VerifyingKey::<Sha384>::new(pub_key).verify(data, &sig),
+        "sha512" => VerifyingKey::<Sha512>::new(pub_key).verify(data, &sig),
+        _ => VerifyingKey::<Sha256>::new(pub_key).verify(data, &sig),
+    };
+    Ok(ok.is_ok())
+}
+
 fn do_ec_sign(named_curve: &str, pem: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
     match norm_alg(named_curve).as_str() {
         "p256" | "prime256v1" | "secp256r1" => {
@@ -204,6 +256,33 @@ fn do_ec_sign(named_curve: &str, pem: &str, data: &[u8]) -> anyhow::Result<Vec<u
                 .map_err(|e| anyhow::anyhow!("P-384 private key: {e}"))?;
             let sig: Signature = key.sign(data);
             Ok(sig.to_der().as_ref().to_vec())
+        }
+        other => Err(anyhow::anyhow!("unsupported EC curve for signing: {other}")),
+    }
+}
+
+/// Same as `do_ec_sign` but returns the WebCrypto/raw fixed-length r||s
+/// encoding instead of DER — `subtle.sign` requires this exact byte length
+/// (64 for P-256, 96 for P-384), unlike `crypto.createSign` which uses DER.
+fn do_ec_sign_raw(named_curve: &str, pem: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    match norm_alg(named_curve).as_str() {
+        "p256" | "prime256v1" | "secp256r1" => {
+            use p256::ecdsa::signature::Signer;
+            use p256::ecdsa::{Signature, SigningKey};
+            use p256::pkcs8::DecodePrivateKey;
+            let key = SigningKey::from_pkcs8_pem(pem)
+                .map_err(|e| anyhow::anyhow!("P-256 private key: {e}"))?;
+            let sig: Signature = key.sign(data);
+            Ok(sig.to_bytes().to_vec())
+        }
+        "p384" | "secp384r1" => {
+            use p384::ecdsa::signature::Signer;
+            use p384::ecdsa::{Signature, SigningKey};
+            use p384::pkcs8::DecodePrivateKey;
+            let key = SigningKey::from_pkcs8_pem(pem)
+                .map_err(|e| anyhow::anyhow!("P-384 private key: {e}"))?;
+            let sig: Signature = key.sign(data);
+            Ok(sig.to_bytes().to_vec())
         }
         other => Err(anyhow::anyhow!("unsupported EC curve for signing: {other}")),
     }
@@ -528,14 +607,8 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
             let alg = args.get(0).to_rust_string_lossy(_scope);
-            let key_arg = args.get(1);
-            let key: Vec<u8> = v8::Local::<v8::Uint8Array>::try_from(key_arg)
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let data_arg = args.get(2);
-            let data: Vec<u8> = v8::Local::<v8::Uint8Array>::try_from(data_arg)
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
+            let key = js_value_to_bytes(_scope, args.get(1));
+            let data = js_value_to_bytes(_scope, args.get(2));
             match do_hmac(alg, key, data) {
                 Ok(bytes) => rv.set(uint8array_from_bytes(_scope, &bytes).into()),
                 Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
@@ -571,16 +644,8 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         |_scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
-            let a_arg = args.get(0);
-            let b_arg = args.get(1);
-            let a: Vec<u8> = a_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let b: Vec<u8> = b_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
+            let a = js_value_to_bytes(_scope, args.get(0));
+            let b = js_value_to_bytes(_scope, args.get(1));
             rv.set(v8::Boolean::new(_scope, do_timing_safe_equal(a, b)).into());
         },
     );
@@ -597,19 +662,11 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         |_scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
-            let password_arg = args.get(0);
-            let salt_arg = args.get(1);
+            let password = js_value_to_bytes(_scope, args.get(0));
+            let salt = js_value_to_bytes(_scope, args.get(1));
             let iterations = args.get(2).uint32_value(_scope).unwrap_or(0);
             let keylen = args.get(3).uint32_value(_scope).unwrap_or(0) as usize;
             let digest = args.get(4).to_rust_string_lossy(_scope);
-            let password: Vec<u8> = password_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let salt: Vec<u8> = salt_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
             std::thread::spawn(move || {
                 let _result = do_pbkdf2(password, salt, iterations, keylen, digest);
             });
@@ -627,19 +684,11 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         |_scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
-            let password_arg = args.get(0);
-            let salt_arg = args.get(1);
+            let password = js_value_to_bytes(_scope, args.get(0));
+            let salt = js_value_to_bytes(_scope, args.get(1));
             let iterations = args.get(2).uint32_value(_scope).unwrap_or(0);
             let keylen = args.get(3).uint32_value(_scope).unwrap_or(0) as usize;
             let digest = args.get(4).to_rust_string_lossy(_scope);
-            let password: Vec<u8> = password_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let salt: Vec<u8> = salt_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
             match do_pbkdf2_sync(password, salt, iterations, keylen, digest) {
                 Ok(bytes) => rv.set(uint8array_from_bytes(_scope, &bytes).into()),
                 Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
@@ -658,22 +707,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
             let alg = args.get(0).to_rust_string_lossy(_scope);
-            let key_arg = args.get(1);
-            let iv_arg = args.get(2);
-            let data_arg = args.get(3);
+            let key = js_value_to_bytes(_scope, args.get(1));
+            let iv = js_value_to_bytes(_scope, args.get(2));
+            let data = js_value_to_bytes(_scope, args.get(3));
             let encrypt = args.get(4).boolean_value(_scope);
-            let key: Vec<u8> = key_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let iv: Vec<u8> = iv_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let data: Vec<u8> = data_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
             match do_cipher_one_shot(&alg, &key, &iv, &data, encrypt) {
                 Ok(bytes) => rv.set(uint8array_from_bytes(_scope, &bytes).into()),
                 Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
@@ -694,26 +731,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
             let key_len = args.get(0).uint32_value(_scope).unwrap_or(0) as usize;
-            let key_arg = args.get(1);
-            let iv_arg = args.get(2);
-            let plaintext_arg = args.get(3);
-            let aad_arg = args.get(4);
-            let key: Vec<u8> = key_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let iv: Vec<u8> = iv_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let plaintext: Vec<u8> = plaintext_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let aad: Vec<u8> = aad_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
+            let key = js_value_to_bytes(_scope, args.get(1));
+            let iv = js_value_to_bytes(_scope, args.get(2));
+            let plaintext = js_value_to_bytes(_scope, args.get(3));
+            let aad = js_value_to_bytes(_scope, args.get(4));
             match do_aes_gcm_encrypt(key_len, key, iv, plaintext, aad) {
                 Ok(bytes) => rv.set(uint8array_from_bytes(_scope, &bytes).into()),
                 Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
@@ -734,26 +755,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
             let key_len = args.get(0).uint32_value(_scope).unwrap_or(0) as usize;
-            let key_arg = args.get(1);
-            let iv_arg = args.get(2);
-            let ciphertext_arg = args.get(3);
-            let aad_arg = args.get(4);
-            let key: Vec<u8> = key_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let iv: Vec<u8> = iv_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let ciphertext: Vec<u8> = ciphertext_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let aad: Vec<u8> = aad_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
+            let key = js_value_to_bytes(_scope, args.get(1));
+            let iv = js_value_to_bytes(_scope, args.get(2));
+            let ciphertext = js_value_to_bytes(_scope, args.get(3));
+            let aad = js_value_to_bytes(_scope, args.get(4));
             match do_aes_gcm_decrypt(key_len, key, iv, ciphertext, aad) {
                 Ok(bytes) => rv.set(uint8array_from_bytes(_scope, &bytes).into()),
                 Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
@@ -773,20 +778,12 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         |_scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
-            let password_arg = args.get(0);
-            let salt_arg = args.get(1);
+            let password = js_value_to_bytes(_scope, args.get(0));
+            let salt = js_value_to_bytes(_scope, args.get(1));
             let n = args.get(2).uint32_value(_scope).unwrap_or(0) as u64;
             let r = args.get(3).uint32_value(_scope).unwrap_or(0);
             let p = args.get(4).uint32_value(_scope).unwrap_or(0);
             let keylen = args.get(5).uint32_value(_scope).unwrap_or(0) as usize;
-            let password: Vec<u8> = password_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let salt: Vec<u8> = salt_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
             std::thread::spawn(move || {
                 let _result = do_scrypt(password, salt, n, r, p, keylen);
             });
@@ -806,11 +803,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
          mut rv: v8::ReturnValue| {
             let digest_alg = args.get(0).to_rust_string_lossy(_scope);
             let pem = args.get(1).to_rust_string_lossy(_scope);
-            let data_arg = args.get(2);
-            let data: Vec<u8> = data_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
+            let data = js_value_to_bytes(_scope, args.get(2));
             match do_rsa_sign(&digest_alg, &pem, &data) {
                 Ok(bytes) => rv.set(uint8array_from_bytes(_scope, &bytes).into()),
                 Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
@@ -830,16 +823,8 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
          mut rv: v8::ReturnValue| {
             let digest_alg = args.get(0).to_rust_string_lossy(_scope);
             let pem = args.get(1).to_rust_string_lossy(_scope);
-            let data_arg = args.get(2);
-            let sig_arg = args.get(3);
-            let data: Vec<u8> = data_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let sig: Vec<u8> = sig_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
+            let data = js_value_to_bytes(_scope, args.get(2));
+            let sig = js_value_to_bytes(_scope, args.get(3));
             match do_rsa_verify(&digest_alg, &pem, &data, &sig) {
                 Ok(ok) => rv.set(v8::Boolean::new(_scope, ok).into()),
                 Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
@@ -852,6 +837,49 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         crypto_rsa_verify.unwrap().into(),
     );
 
+    let crypto_rsa_pss_sign = v8::Function::new(
+        scope,
+        |_scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let digest_alg = args.get(0).to_rust_string_lossy(_scope);
+            let pem = args.get(1).to_rust_string_lossy(_scope);
+            let data = js_value_to_bytes(_scope, args.get(2));
+            match do_rsa_pss_sign(&digest_alg, &pem, &data) {
+                Ok(bytes) => rv.set(uint8array_from_bytes(_scope, &bytes).into()),
+                Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
+            }
+        },
+    );
+    global.set(
+        scope,
+        v8::String::new(scope, "__cryptoRsaPssSign").unwrap().into(),
+        crypto_rsa_pss_sign.unwrap().into(),
+    );
+
+    let crypto_rsa_pss_verify = v8::Function::new(
+        scope,
+        |_scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let digest_alg = args.get(0).to_rust_string_lossy(_scope);
+            let pem = args.get(1).to_rust_string_lossy(_scope);
+            let data = js_value_to_bytes(_scope, args.get(2));
+            let sig = js_value_to_bytes(_scope, args.get(3));
+            match do_rsa_pss_verify(&digest_alg, &pem, &data, &sig) {
+                Ok(ok) => rv.set(v8::Boolean::new(_scope, ok).into()),
+                Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
+            }
+        },
+    );
+    global.set(
+        scope,
+        v8::String::new(scope, "__cryptoRsaPssVerify")
+            .unwrap()
+            .into(),
+        crypto_rsa_pss_verify.unwrap().into(),
+    );
+
     let crypto_ec_sign = v8::Function::new(
         scope,
         |_scope: &mut v8::PinScope,
@@ -859,11 +887,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
          mut rv: v8::ReturnValue| {
             let named_curve = args.get(0).to_rust_string_lossy(_scope);
             let pem = args.get(1).to_rust_string_lossy(_scope);
-            let data_arg = args.get(2);
-            let data: Vec<u8> = data_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
+            let data = js_value_to_bytes(_scope, args.get(2));
             match do_ec_sign(&named_curve, &pem, &data) {
                 Ok(bytes) => rv.set(uint8array_from_bytes(_scope, &bytes).into()),
                 Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
@@ -876,6 +900,26 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         crypto_ec_sign.unwrap().into(),
     );
 
+    let crypto_ec_sign_raw = v8::Function::new(
+        scope,
+        |_scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let named_curve = args.get(0).to_rust_string_lossy(_scope);
+            let pem = args.get(1).to_rust_string_lossy(_scope);
+            let data = js_value_to_bytes(_scope, args.get(2));
+            match do_ec_sign_raw(&named_curve, &pem, &data) {
+                Ok(bytes) => rv.set(uint8array_from_bytes(_scope, &bytes).into()),
+                Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
+            }
+        },
+    );
+    global.set(
+        scope,
+        v8::String::new(scope, "__cryptoEcSignRaw").unwrap().into(),
+        crypto_ec_sign_raw.unwrap().into(),
+    );
+
     let crypto_ec_verify = v8::Function::new(
         scope,
         |_scope: &mut v8::PinScope,
@@ -883,16 +927,8 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
          mut rv: v8::ReturnValue| {
             let named_curve = args.get(0).to_rust_string_lossy(_scope);
             let pem = args.get(1).to_rust_string_lossy(_scope);
-            let data_arg = args.get(2);
-            let sig_arg = args.get(3);
-            let data: Vec<u8> = data_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let sig: Vec<u8> = sig_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
+            let data = js_value_to_bytes(_scope, args.get(2));
+            let sig = js_value_to_bytes(_scope, args.get(3));
             match do_ec_verify(&named_curve, &pem, &data, &sig) {
                 Ok(ok) => rv.set(v8::Boolean::new(_scope, ok).into()),
                 Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
@@ -910,20 +946,12 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         |_scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
-            let password_arg = args.get(0);
-            let salt_arg = args.get(1);
+            let password = js_value_to_bytes(_scope, args.get(0));
+            let salt = js_value_to_bytes(_scope, args.get(1));
             let n = args.get(2).uint32_value(_scope).unwrap_or(0) as u64;
             let r = args.get(3).uint32_value(_scope).unwrap_or(0);
             let p = args.get(4).uint32_value(_scope).unwrap_or(0);
             let keylen = args.get(5).uint32_value(_scope).unwrap_or(0) as usize;
-            let password: Vec<u8> = password_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let salt: Vec<u8> = salt_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
             if n == 0 || (n & (n - 1)) != 0 {
                 rv.set(
                     v8::String::new(_scope, "N must be a power of 2 greater than 1")
@@ -985,14 +1013,16 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
 
     let crypto_generate_keypair_sync = v8::Function::new(
         scope,
-        |_scope: &mut v8::PinScope,
-         args: v8::FunctionCallbackArguments,
-         mut rv: v8::ReturnValue| {
-            let key_type = args.get(0).to_rust_string_lossy(_scope);
-            let options_json = args.get(1).to_rust_string_lossy(_scope);
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue| {
+            let key_type = args.get(0).to_rust_string_lossy(scope);
+            let options_json = args.get(1).to_rust_string_lossy(scope);
             match do_generate_keypair_sync_inner(&key_type, &options_json) {
-                Ok(s) => rv.set(v8::String::new(_scope, &s).unwrap().into()),
-                Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
+                Ok(s) => rv.set(v8::String::new(scope, &s).unwrap().into()),
+                Err(e) => {
+                    let err_str = v8::String::new(scope, &e.to_string()).unwrap();
+                    let err = v8::Exception::error(scope, err_str);
+                    scope.throw_exception(err);
+                }
             }
         },
     );
@@ -1009,19 +1039,11 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         |_scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
-            let password_arg = args.get(0);
-            let salt_arg = args.get(1);
+            let password = js_value_to_bytes(_scope, args.get(0));
+            let salt = js_value_to_bytes(_scope, args.get(1));
             let iterations = args.get(2).uint32_value(_scope).unwrap_or(0);
             let keylen = args.get(3).uint32_value(_scope).unwrap_or(0) as usize;
             let digest = args.get(4).to_rust_string_lossy(_scope);
-            let password: Vec<u8> = password_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
-            let salt: Vec<u8> = salt_arg
-                .try_into()
-                .map(|arr| uint8array_to_vec(_scope, arr))
-                .unwrap_or_default();
             let mut out = vec![0u8; keylen];
             match norm_alg(&digest).as_str() {
                 "sha1" => pbkdf2_hmac::<Sha1>(&password, &salt, iterations, &mut out),
@@ -1096,9 +1118,13 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
     function encodeBytes(bytes, encoding) {
         if (!encoding || encoding === 'buffer') return new Uint8Array(bytes);
         if (encoding === 'hex') {
-            return bytes.map(function(b) {
-                return ('0' + b.toString(16)).slice(-2);
-            }).join('');
+            // Not bytes.map(...).join('') — on a Uint8Array (what native crypto
+            // functions return), .map() coerces the callback's string result
+            // back into a byte, silently corrupting the digest. Index instead,
+            // which works for both Array and Uint8Array.
+            var hex = '';
+            for (var hi = 0; hi < bytes.length; hi++) hex += ('0' + bytes[hi].toString(16)).slice(-2);
+            return hex;
         }
         if (encoding === 'base64') return base64Encode(bytes, false);
         if (encoding === 'base64url') return base64Encode(bytes, true);
@@ -1123,6 +1149,18 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         modp15: { prime: 'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA0510157256E5A8AACAA68FFFFFFFFFFFFFFFF' },
         modp16: { prime: 'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D04507A33A85521ABDF1CBA64ECFB850458DBEF0A8AEA71575D060C7DB3970F85A6E1E4C7ABF5AE8CDB0933D71E8C94E04A25619DCEE3D2261AD2EE6BF12FFA06D98A0864D87602733EC86A64521F2B18177B200CBBE117577A615D6C770988C0BAD946E208E24FA074E5AB3143DB5BFCE0FD108E4B82D120A92108011A723C12A787E6D788719A10BDBA5B2699C327186AF4E23C1A946834B6150BDA2583E9CA2AD44CE8DBBBC2DB04DE8EF92E8EFC141FBECAA6287C59474E6BC05D99B2964FA090C3A2233BA186515BE7ED1F612970CEE2D7AFB81BDD762170481CD0069127D5B05AA993B4EA988D8FDDC186FFB7DC90A6C08F4DF435C934063199FFFFFFFFFFFFFFFF' }
     };
+    var _dhSizeGroups = { 1024: 'modp2', 1536: 'modp5', 2048: 'modp14', 3072: 'modp15', 4096: 'modp16' };
+
+    function pemFromKeyArg(keyArg) {
+        var pem = keyArg;
+        if (keyArg && typeof keyArg === 'object' && !(keyArg instanceof Uint8Array)) {
+            if (typeof keyArg.export === 'function') pem = keyArg.export();
+            else if (keyArg._pem) pem = keyArg._pem;
+            else if (keyArg.key) pem = keyArg.key;
+        }
+        if (pem instanceof Uint8Array) pem = new TextDecoder().decode(pem);
+        return String(pem);
+    }
 
     function _bigModpow(base, exp, mod) {
         var result = 1n;
@@ -1214,6 +1252,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                         all = all.concat(chunks[i]);
                     }
                     var raw = __cryptoHash(alg, all);
+                    if (!(raw instanceof Uint8Array)) throw new Error(String(raw));
                     return encodeBytes(raw, encoding);
                 },
                 copy: function() {
@@ -1223,6 +1262,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                 }
             };
             return h;
+        },
+
+        getHashes: function() {
+            return ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512'];
         },
 
         hash: function(alg, data, outputEncoding) {
@@ -1244,9 +1287,82 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                         all = all.concat(chunks[i]);
                     }
                     var raw = __cryptoHmac(alg, keyBytes, all);
+                    if (!(raw instanceof Uint8Array)) throw new Error(String(raw));
                     return encodeBytes(raw, encoding);
                 }
             };
+        },
+
+        // createSign/createVerify/sign/verify try EC curves (P-256 then P-384)
+        // before falling back to RSA, since key objects here don't carry a
+        // type tag — __cryptoEc{Sign,Verify} return an error string (not
+        // Uint8Array/boolean) when the PEM's curve OID doesn't match the
+        // curve they were asked to use, which is what makes the trial safe.
+        createSign: function(algorithm) {
+            var digestAlg = String(algorithm).replace(/^RSA-/i, '');
+            var chunks = [];
+            return {
+                update: function(data) { chunks.push(toBytes(data)); return this; },
+                sign: function(privateKey, outputEncoding) {
+                    var all = [];
+                    for (var i = 0; i < chunks.length; i++) all = all.concat(chunks[i]);
+                    var pem = pemFromKeyArg(privateKey);
+                    var ecCurves = ['P-256', 'P-384'];
+                    for (var c = 0; c < ecCurves.length; c++) {
+                        var r = __cryptoEcSign(ecCurves[c], pem, all);
+                        if (r instanceof Uint8Array) return outputEncoding ? encodeBytes(Array.from(r), outputEncoding) : r;
+                    }
+                    var r2 = __cryptoRsaSign(digestAlg, pem, all);
+                    if (typeof r2 === 'string') throw new Error(r2);
+                    return outputEncoding ? encodeBytes(Array.from(r2), outputEncoding) : r2;
+                }
+            };
+        },
+        createVerify: function(algorithm) {
+            var digestAlg = String(algorithm).replace(/^RSA-/i, '');
+            var chunks = [];
+            return {
+                update: function(data) { chunks.push(toBytes(data)); return this; },
+                verify: function(publicKey, signature) {
+                    var all = [];
+                    for (var i = 0; i < chunks.length; i++) all = all.concat(chunks[i]);
+                    var pem = pemFromKeyArg(publicKey);
+                    var sigBytes = toBytes(signature);
+                    var ecCurves = ['P-256', 'P-384'];
+                    for (var c = 0; c < ecCurves.length; c++) {
+                        var r = __cryptoEcVerify(ecCurves[c], pem, all, sigBytes);
+                        if (typeof r === 'boolean') return r;
+                    }
+                    var r2 = __cryptoRsaVerify(digestAlg, pem, all, sigBytes);
+                    return typeof r2 === 'boolean' ? r2 : false;
+                }
+            };
+        },
+        sign: function(algorithm, data, key) {
+            var digestAlg = String(algorithm || 'sha256').replace(/^RSA-/i, '');
+            var pem = pemFromKeyArg(key);
+            var bytes = toBytes(data);
+            var ecCurves = ['P-256', 'P-384'];
+            for (var c = 0; c < ecCurves.length; c++) {
+                var r = __cryptoEcSign(ecCurves[c], pem, bytes);
+                if (r instanceof Uint8Array) return r;
+            }
+            var r2 = __cryptoRsaSign(digestAlg, pem, bytes);
+            if (typeof r2 === 'string') throw new Error(r2);
+            return r2;
+        },
+        verify: function(algorithm, data, key, signature) {
+            var digestAlg = String(algorithm || 'sha256').replace(/^RSA-/i, '');
+            var pem = pemFromKeyArg(key);
+            var bytes = toBytes(data);
+            var sigBytes = toBytes(signature);
+            var ecCurves = ['P-256', 'P-384'];
+            for (var c = 0; c < ecCurves.length; c++) {
+                var r = __cryptoEcVerify(ecCurves[c], pem, bytes, sigBytes);
+                if (typeof r === 'boolean') return r;
+            }
+            var r2 = __cryptoRsaVerify(digestAlg, pem, bytes, sigBytes);
+            return typeof r2 === 'boolean' ? r2 : false;
         },
 
         randomBytes: function(n, callback) {
@@ -1256,6 +1372,12 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                 return;
             }
             return bytes;
+        },
+
+        timingSafeEqual: function(a, b) {
+            var ab = toBytes(a), bb = toBytes(b);
+            if (ab.length !== bb.length) throw new RangeError('Input buffers must have the same byte length');
+            return __cryptoTimingSafeEqual(ab, bb);
         },
 
         randomFill: function(buf, offset, size, callback) {
@@ -1294,7 +1416,8 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             var b = __cryptoRandomBytes(16);
             b[6] = (b[6] & 0x0f) | 0x40;
             b[8] = (b[8] & 0x3f) | 0x80;
-            var h = b.map(function(x) { return ('0' + x.toString(16)).slice(-2); }).join('');
+            var h = '';
+            for (var i = 0; i < b.length; i++) h += ('0' + b[i].toString(16)).slice(-2);
             return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
         },
 
@@ -1305,9 +1428,18 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         },
 
         pbkdf2: function(password, salt, iterations, keylen, digest, callback) {
-            __cryptoPbkdf2(toBytes(password), toBytes(salt), iterations, keylen, digest)
-                .then(function(raw) { callback(null, new Uint8Array(raw)); })
-                .catch(function(err) { callback(err); });
+            // __cryptoPbkdf2 spawns a Rust thread that discards its own result
+            // and returns undefined rather than a Promise — reuse the sync
+            // native binding instead, just deferred so the callback still
+            // fires asynchronously like Node's real pbkdf2().
+            var pw = toBytes(password), s = toBytes(salt);
+            setTimeout(function() {
+                try {
+                    var raw = __cryptoPbkdf2Sync(pw, s, iterations, keylen, digest);
+                    if (typeof raw === 'string') { callback(new Error(raw)); return; }
+                    callback(null, new Uint8Array(raw));
+                } catch (e) { callback(e); }
+            }, 0);
         },
 
         pbkdf2Sync: function(password, salt, iterations, keylen, digest) {
@@ -1320,9 +1452,15 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             var N = options.N || options.cost || 16384;
             var r = options.r || options.blockSize || 8;
             var p = options.p || options.parallelization || 1;
-            __cryptoScrypt(toBytes(password), toBytes(salt), N, r, p, keylen)
-                .then(function(raw) { callback(null, new Uint8Array(raw)); })
-                .catch(function(err) { callback(err); });
+            // Same __cryptoScrypt-discards-its-result issue as pbkdf2() above.
+            var pw = toBytes(password), s = toBytes(salt);
+            setTimeout(function() {
+                try {
+                    var raw = __cryptoScryptSync(pw, s, N, r, p, keylen);
+                    if (typeof raw === 'string') { callback(new Error(raw)); return; }
+                    callback(null, new Uint8Array(raw));
+                } catch (e) { callback(e); }
+            }, 0);
         },
 
         scryptSync: function(password, salt, keylen, options) {
@@ -1451,8 +1589,8 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         },
 
         createSecretKey: function(key, encoding) {
-            var bytes = key instanceof Uint8Array ? key : toBytes(key);
-            return new crypto.KeyObject('secret', { buffer: bytes });
+            var bytes = key instanceof Uint8Array ? key : new Uint8Array(toBytes(key));
+            return new crypto.KeyObject('secret', { symmetricKeySize: bytes.length, export: function() { return bytes; } });
         },
 
         publicEncrypt: function(opts, data) {
@@ -1473,63 +1611,177 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
 
         generateKeyPair: function(type, opts, callback) {
             if (typeof opts === 'function') { callback = opts; opts = {}; }
-            __cryptoGenerateKeyPair(type, JSON.stringify(opts || {}))
-                .then(function(raw) { callback(null, JSON.parse(raw)); })
-                .catch(function(err) { callback(err); });
+            var cb = callback;
+            var promise = new Promise(function(resolve, reject) {
+                try {
+                    var result = __cryptoGenerateKeyPairSync(type, JSON.stringify(opts || {}));
+                    var parsed = JSON.parse(result);
+                    var publicKey = { export: function() { return parsed.publicKeyPem; } };
+                    var privateKey = { export: function() { return parsed.privateKeyPem; } };
+                    if (cb) cb(null, publicKey, privateKey);
+                    resolve({ publicKey: publicKey, privateKey: privateKey });
+                } catch (err) {
+                    if (cb) cb(err);
+                    reject(err);
+                }
+            });
+            return promise;
         },
 
         generateKeyPairSync: function(type, opts) {
             var result = __cryptoGenerateKeyPairSync(type, JSON.stringify(opts || {}));
-            if (typeof result === 'string') throw new Error(result);
-            return JSON.parse(result);
-        },
-
-        DiffieHellman: function(prime, generator) {
-            if (typeof prime === 'string') {
-                if (_dhGroups[prime]) {
-                    return _makeDH(_dhGroups[prime].prime, generator || 2);
-                }
-                prime = BigInt('0x' + prime);
-            }
-            var p = typeof prime === 'bigint' ? prime : BigInt(prime);
-            var g = BigInt(generator || 2);
-            var privKeyBits = 256;
-            var privateKey = null;
-            var publicKey = null;
-
-            function randomPrivate() {
-                var bytes = Math.ceil(privKeyBits / 8);
-                var randBytes = __cryptoRandomBytes(bytes);
-                var hex = Array.from(randBytes).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
-                return (BigInt('0x' + hex) % (p - 4n)) + 2n;
-            }
-
+            var parsed = JSON.parse(result);
             return {
-                generateKeys: function() {
-                    privateKey = randomPrivate();
-                    publicKey = _bigModpow(g, privateKey, p);
-                    return _bigIntToBytes(publicKey);
+                privateKey: {
+                    export: function() { return parsed.privateKeyPem; }
                 },
-                computeSecret: function(otherPublicKey) {
-                    if (privateKey === null) throw new Error('generateKeys must be called first');
-                    var otherPub = typeof otherPublicKey === 'bigint' ? otherPublicKey : BigInt('0x' + Array.from(toBytes(otherPublicKey)).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join(''));
-                    return _bigIntToBytes(_bigModpow(otherPub, privateKey, p));
-                },
-                getPublicKey: function() { return _bigIntToBytes(publicKey); },
-                getPrivateKey: function() { return _bigIntToBytes(privateKey); },
-                getPrime: function() { return _bigIntToBytes(p); },
-                getGenerator: function() { return _bigIntToBytes(g); },
-                verifyError: 0
+                publicKey: {
+                    export: function() { return parsed.publicKeyPem; }
+                }
             };
         },
 
+        DiffieHellman: function(prime, generator) {
+            if (typeof prime === 'string' && _dhGroups[prime]) {
+                return _makeDH(_dhGroups[prime].prime, generator || 2);
+            }
+            if (typeof prime === 'number') {
+                // ponytail: reuse the well-known MODP group closest to the
+                // requested bit size instead of generating a fresh random
+                // prime (slow, and Node callers rarely depend on it being novel).
+                var groupName = _dhSizeGroups[prime] || 'modp2';
+                return _makeDH(_dhGroups[groupName].prime, generator || 2);
+            }
+            var hex = typeof prime === 'string'
+                ? prime
+                : Array.from(toBytes(prime)).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+            return _makeDH(hex, generator || 2);
+        },
+
         createDiffieHellman: function(prime, generator) { return crypto.DiffieHellman(prime, generator); },
+
+        createDiffieHellmanGroup: function(name) {
+            if (!_dhGroups[name]) throw new Error('Unknown DH group: ' + name);
+            return _makeDH(_dhGroups[name].prime, 2);
+        },
+        getDiffieHellman: function(name) { return crypto.createDiffieHellmanGroup(name); },
 
         setEngine: function() {},
         constants: {},
         fips: false,
         provider: 'default'
     };
+
+    // hash/algorithm.hash may be a string ('SHA-256') or {name: 'SHA-256'};
+    // norm_alg() on the Rust side already lowercases and strips dashes, so
+    // no translation table is needed here — just unwrap to a bare string.
+    function subtleHashName(algorithm) {
+        var h = algorithm && algorithm.hash;
+        return typeof h === 'string' ? h : (h && h.name) || 'SHA-256';
+    }
+
+    crypto.webcrypto = {
+        subtle: {
+            encrypt: function() { throw new Error('Not implemented'); },
+            decrypt: function() { throw new Error('Not implemented'); },
+            sign: function(algorithm, key, data) {
+                var name = (typeof algorithm === 'string' ? algorithm : algorithm.name) || '';
+                var bytes = toBytes(data instanceof Uint8Array ? data : new Uint8Array(data));
+                var pem = key && key._pem;
+                return new Promise(function(resolve, reject) {
+                    try {
+                        var r;
+                        if (name === 'ECDSA') {
+                            r = __cryptoEcSignRaw(key._curve, pem, bytes);
+                        } else if (name === 'RSA-PSS') {
+                            r = __cryptoRsaPssSign(subtleHashName(algorithm), pem, bytes);
+                        } else {
+                            r = __cryptoRsaSign(subtleHashName(key._algorithm), pem, bytes);
+                        }
+                        if (!(r instanceof Uint8Array)) throw new Error(String(r));
+                        resolve(r.buffer.slice(r.byteOffset, r.byteOffset + r.byteLength));
+                    } catch (e) { reject(e); }
+                });
+            },
+            verify: function(algorithm, key, signature, data) {
+                var name = (typeof algorithm === 'string' ? algorithm : algorithm.name) || '';
+                var bytes = toBytes(data instanceof Uint8Array ? data : new Uint8Array(data));
+                var sigBytes = toBytes(signature instanceof Uint8Array ? signature : new Uint8Array(signature));
+                var pem = key && key._pem;
+                return new Promise(function(resolve, reject) {
+                    try {
+                        var r;
+                        if (name === 'ECDSA') {
+                            r = __cryptoEcVerify(key._curve, pem, bytes, sigBytes);
+                        } else if (name === 'RSA-PSS') {
+                            r = __cryptoRsaPssVerify(subtleHashName(algorithm), pem, bytes, sigBytes);
+                        } else {
+                            r = __cryptoRsaVerify(subtleHashName(key._algorithm), pem, bytes, sigBytes);
+                        }
+                        resolve(typeof r === 'boolean' ? r : false);
+                    } catch (e) { reject(e); }
+                });
+            },
+            digest: function(algorithm, data) {
+                var algName = typeof algorithm === 'string' ? algorithm : algorithm.name;
+                var hashName = algName.toUpperCase().replace('-', '');
+                var hashMap = { 'SHA-1': 'SHA1', 'SHA-256': 'SHA256', 'SHA-384': 'SHA384', 'SHA-512': 'SHA512' };
+                var normalizedHash = hashMap[algName] || hashName;
+                var hashAlgo = normalizedHash.startsWith('SHA') ? normalizedHash : 'SHA256';
+                var bytes = data instanceof Uint8Array ? Array.from(data) : Array.from(new TextEncoder().encode(String(data)));
+                var result = __cryptoHash(hashAlgo, bytes);
+                return Promise.resolve(new Uint8Array(result));
+            },
+            importKey: function() { throw new Error('Not implemented'); },
+            exportKey: function() { throw new Error('Not implemented'); },
+            generateKey: function(algorithm, extractable, usages) {
+                var name = algorithm.name;
+                return new Promise(function(resolve, reject) {
+                    try {
+                        var result, parsed;
+                        if (name === 'ECDSA' || name === 'ECDH') {
+                            var curve = algorithm.namedCurve || 'P-256';
+                            result = __cryptoGenerateKeyPairSync('ec', JSON.stringify({ namedCurve: curve }));
+                            parsed = JSON.parse(result);
+                            resolve({
+                                privateKey: { type: 'private', extractable: extractable, algorithm: { name: name, namedCurve: curve }, usages: usages || [], _pem: parsed.privateKeyPem, _curve: curve },
+                                publicKey: { type: 'public', extractable: true, algorithm: { name: name, namedCurve: curve }, usages: usages || [], _pem: parsed.publicKeyPem, _curve: curve },
+                            });
+                        } else if (name === 'RSASSA-PKCS1-v1_5' || name === 'RSA-PSS' || name === 'RSA-OAEP') {
+                            result = __cryptoGenerateKeyPairSync('rsa', JSON.stringify({ modulusLength: algorithm.modulusLength || 2048 }));
+                            parsed = JSON.parse(result);
+                            var hashName = subtleHashName(algorithm);
+                            resolve({
+                                privateKey: { type: 'private', extractable: extractable, algorithm: { name: name, modulusLength: algorithm.modulusLength, hash: hashName }, usages: usages || [], _pem: parsed.privateKeyPem, _algorithm: hashName },
+                                publicKey: { type: 'public', extractable: true, algorithm: { name: name, modulusLength: algorithm.modulusLength, hash: hashName }, usages: usages || [], _pem: parsed.publicKeyPem, _algorithm: hashName },
+                            });
+                        } else {
+                            reject(new Error('Unsupported algorithm: ' + name));
+                        }
+                    } catch (e) { reject(e); }
+                });
+            },
+            deriveBits: function() { return Promise.reject(new Error('Not implemented')); },
+            deriveKey: function() { return Promise.reject(new Error('Not implemented')); },
+            wrapKey: function() { return Promise.reject(new Error('Not implemented')); },
+            unwrapKey: function() { return Promise.reject(new Error('Not implemented')); }
+        },
+        getRandomValues: function(arr) {
+            if (!arr || arr.length === 0) return arr;
+            var bytes = __cryptoRandomBytes(arr.length);
+            for (var i = 0; i < arr.length; i++) arr[i] = bytes[i];
+            return arr;
+        },
+        randomUUID: function() {
+            var bytes = __cryptoRandomBytes(16);
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            var hex = Array.from(bytes).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+            return hex.slice(0,8) + '-' + hex.slice(8,12) + '-' + hex.slice(12,16) + '-' + hex.slice(16,20) + '-' + hex.slice(20);
+        }
+    };
+
+    crypto.subtle = crypto.webcrypto.subtle;
 
     globalThis.crypto = crypto;
     globalThis.Crypto = crypto;

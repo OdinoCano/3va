@@ -21,18 +21,21 @@ struct SseEvent {
     last_event_id: String,
 }
 
-static ES_MAP: std::sync::OnceLock<EsMap> = std::sync::OnceLock::new();
-fn map() -> &'static EsMap {
-    ES_MAP.get().unwrap()
+// Each JsEngine/V8 isolate stays pinned to the OS thread that created it for
+// its whole lifetime, so a thread_local map (rather than a process-wide
+// OnceLock) keeps parallel engines/tests from sharing EventSource state.
+thread_local! {
+    static ES_MAP: EsMap = Arc::new(Mutex::new(HashMap::new()));
+    static ES_COUNTER: Arc<Mutex<u32>> = Arc::new(Mutex::new(0u32));
 }
-static ES_COUNTER: std::sync::OnceLock<Arc<Mutex<u32>>> = std::sync::OnceLock::new();
-fn counter() -> &'static Arc<Mutex<u32>> {
-    ES_COUNTER.get().unwrap()
+fn map() -> EsMap {
+    ES_MAP.with(|m| m.clone())
+}
+fn counter() -> Arc<Mutex<u32>> {
+    ES_COUNTER.with(|c| c.clone())
 }
 
 pub fn inject_event_source(scope: &mut v8::ContextScope<v8::HandleScope>) {
-    ES_MAP.set(Arc::new(Mutex::new(HashMap::new()))).ok();
-    ES_COUNTER.set(Arc::new(Mutex::new(0u32))).ok();
     let context = scope.get_current_context();
     let global = context.global(scope);
 
@@ -43,7 +46,8 @@ pub fn inject_event_source(scope: &mut v8::ContextScope<v8::HandleScope>) {
               mut rv: ReturnValue| {
             let url = args.get(0).to_rust_string_lossy(scope);
 
-            let mut id_lock = counter().lock().unwrap();
+            let counter_arc = counter();
+            let mut id_lock = counter_arc.lock().unwrap();
             *id_lock += 1;
             let id = *id_lock;
             drop(id_lock);
@@ -113,7 +117,8 @@ pub fn inject_event_source(scope: &mut v8::ContextScope<v8::HandleScope>) {
                 }
             });
 
-            map().lock().unwrap().insert(
+            let map_arc = map();
+            map_arc.lock().unwrap().insert(
                 id,
                 EsEntry {
                     events: queue,
@@ -138,7 +143,8 @@ pub fn inject_event_source(scope: &mut v8::ContextScope<v8::HandleScope>) {
               mut rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
 
-            let m = map().lock().unwrap();
+            let map_arc = map();
+            let m = map_arc.lock().unwrap();
             let entry = match m.get(&id) {
                 Some(e) => e,
                 None => {
@@ -173,7 +179,8 @@ pub fn inject_event_source(scope: &mut v8::ContextScope<v8::HandleScope>) {
               args: v8::FunctionCallbackArguments,
               mut _rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
-            let mut m = map().lock().unwrap();
+            let map_arc = map();
+            let mut m = map_arc.lock().unwrap();
             if let Some(entry) = m.remove(&id) {
                 *entry.cancel.lock().unwrap() = true;
             }
