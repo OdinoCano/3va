@@ -7,6 +7,50 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+### Documentation
+
+- Audited `docs/12-roadmap/01-roadmap.md` and `docs/12-roadmap/04-compatibility.md` against
+  current code. Fixed: fuzz target count (3 → 6 real targets in `fuzz/fuzz_targets/`; the weekly
+  scheduled job in `security.yml` runs all 6, not "nightly" — only `ci.yml`'s per-PR gate smoke-runs
+  1); stale test counts (README's "1407 tests" and the roadmap's "1392 tests" were both wrong —
+  actual is 1256 as of 2026-07-13, workspace-wide `cargo test`, 0 failures); `vvva_js` doc-tests
+  claim (has doc comments, but none with a runnable code block, so it contributes 0 actual
+  doctests). Marked `docs/12-roadmap/04-compatibility.md` §4.3 (`--compat`/`--preset=node`), §4.5
+  (`--legacy-security`), and §4.7 (`3va test --compat`/`3va test-compat <pkg>`) as **not
+  implemented** — these were aspirational placeholders that don't exist in
+  `crates/cli/src/main.rs` and were never marked as such.
+
+### Fixed
+
+- **Per-package `package.json["3va"].permissions` scopes are now actually isolated.**
+  Previously every scope (`.`, `axios`, `express`, ...) was merged into one flat,
+  process-wide grant set — naming a scope after a package was documentation only, not an
+  enforcement boundary (`ponytail:` comment in `read_package_json_permissions`
+  acknowledged this). Fixed via a new `vvva_permissions::scope` thread-local tracking
+  "which package's code is currently executing," set by the `require()` wrapper in
+  `crates/js/src/builtins/modules.rs` before handing a capability-gated builtin (`fs`,
+  `fs/promises`, `net`, `tls`, `dgram`, `child_process`) to the requesting module.
+  `PermissionState` (`crates/permissions/src/capability.rs`) gained `scoped_granted`/
+  `scoped_denied` maps checked automatically inside `check()` — no call-site changes
+  needed anywhere in `fs.rs`/`tcp.rs`/etc. `fs.createReadStream`/`createWriteStream`
+  additionally capture and re-apply the creator's scope around their deferred
+  (next-tick) native I/O, since the generic wrapper only brackets the synchronous
+  factory call. Known gap: manually constructing `new require('net').Socket()` (instead
+  of `net.connect(...)`) bypasses scoping — wrapping a constructor would break
+  `instanceof`. See `docs/06-permissions/06-package-json-permissions.md` §6.3.
+
+### Changed
+
+- **`3va create`** — Generalized from a hardcoded framework enum (nuxt, solid, redwood, refine,
+  next, astro, remix, svelte) to npm's own `npm create`/`npm init <spec>` initializer resolution
+  (`init.js#execCreate`, vendored at `.compatibility/node/deps/npm/lib/commands/init.js`): plain,
+  scoped (`@scope/name`), and bare-scope (`@scope`) specs all resolve the same way npm resolves
+  them, not just a naive `create-<pkg>` string concat. `nuxt`/`solid`/`svelte` keep their own
+  generator CLI since they don't publish a `create-*` package. Added `3va create-<pkg>[@version]`
+  as an npx-style single-token alias, trailing args now forward straight to the scaffolder (e.g.
+  `3va create expo-app --template default@sdk-57`), and `-y`/`--yes` is also passed to `npx`
+  itself to skip its install-confirmation prompt. (`crates/cli/src/main.rs`)
+
 ## [v2.1.3] — 2026-07-06
 
 ### Fixed (major)

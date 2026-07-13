@@ -227,9 +227,11 @@ revokes a `package.json` grant).
 }
 ```
 
-- Scope keys (`.`, `axios`, `express`) are for human readability only — every
-  scope's grants are merged into one flat set for the whole process (the
-  capability engine has no notion of "which module is calling").
+- Scope keys are enforced, not just documentation: `.` grants apply globally
+  (the app's own code), while a package name like `axios` or `express` only
+  applies while that package's own code is executing — a dependency you
+  didn't name gets none of it, even if it's also calling `fs`/`net` from the
+  same process.
 - `deny-*` fields win over any broader `allow-*`, letting you grant a vendored
   directory by prefix while excluding one file with a known CVE.
 - Relative paths resolve against the directory containing `package.json`, not
@@ -583,10 +585,11 @@ The JavaScript engine is V8, embedded via the `v8` crate. This is the primary me
 |---------|--------|-------|
 | **2.0.0** | 2026-06-01 ✅ | Full runtime + PM + toolchain + Inspector + NAPI + WASM + PQ-TLS |
 | **2.1.0** | 2026-07 ✅ | package.json `"3va"` permissions key (`allow-*`/`deny-*`, `${VAR}` expansion, `--no-prompt`) — see [`docs/06-permissions/06-package-json-permissions.md`](docs/06-permissions/06-package-json-permissions.md) |
-| **2.2.0** | 2027 | `permissions suggest`/`learn` generate/persist the `package.json` section directly; permission profiles for common frameworks; Node.js compat v2 (full dns record resolution, repl, wasi, trace_events, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting |
-| **3.0** | TBD | Post-quantum TLS in full production mode |
+| **2.2.0** | 2027 | `permissions suggest`/`learn` generate/persist the `package.json` section directly; permission profiles for common frameworks; Node.js compat v2 (full dns record resolution, repl, wasi, trace_events, WHATWG Streams), REPL plugins, workspace v2, adaptive rate limiting; PM parity Phase A — overrides/resolutions, `3va licenses`, `3va sbom`, autoinstalling peers, hoisted `node_modules`, config dependencies |
+| **2.4.0** | 2027 | PM parity Phase B — zero-installs, dependency patching, `3va dlx`, native JSR registry support, auto-install-before-run |
+| **3.0** | TBD | Post-quantum TLS in full production mode; PM parity Phase C — lifecycle hooks (sandboxed, project-only), self-version management, Plug'n'Play |
 
-Full roadmap: [`docs/12-roadmap/`](docs/12-roadmap/)
+Full roadmap: [`docs/12-roadmap/`](docs/12-roadmap/) · Package manager parity plan: [`docs/12-roadmap/06-pm-feature-parity.md`](docs/12-roadmap/06-pm-feature-parity.md)
 
 ---
 
@@ -604,7 +607,7 @@ Every PR must pass all CI gates before merge:
 |------|-------------|
 | `cargo fmt --check` | Yes |
 | `cargo clippy -D warnings` | Yes |
-| `cargo test` (1407 tests) | Yes |
+| `cargo test` (1256+ tests, count drifts every PR) | Yes |
 | `cargo deny check` (CVEs + licenses) | Yes |
 | Gitleaks secret scanning | Yes |
 | Semgrep SAST (ERROR severity) | Yes |

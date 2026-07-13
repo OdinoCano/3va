@@ -76,19 +76,19 @@ v1.0.0 established the secure-by-default runtime foundation: permissions, post-q
 
 ---
 
-### 2.2.4 Workspace v2
+### 2.2.4 Workspace v2 — ✅ Implemented
 
 **Motivation:** The current workspace implementation (`3va workspace`) covers basic install and list operations but lacks the dependency graph and script execution coordination needed for monorepos.
 
 **Scope:**
 
-| Feature | Detail |
-|---------|--------|
-| Topological script execution | `3va workspace run build` — runs `build` in dependency order |
-| Affected-only mode | `--affected` — detects changed packages via `git diff` and runs scripts only in affected packages and their dependents |
-| Workspace graph | `3va workspace graph` — prints the inter-package dependency graph as ASCII or DOT |
-| Shared dependency hoisting | Deduplicate compatible versions into a workspace-root `node_modules` |
-| Per-package permission overrides | Each package can declare its own permission scopes in `package.json#3va.permissions` |
+| Feature | Detail | Status |
+|---------|--------|--------|
+| Topological script execution | `3va workspace run build` — runs `build` in dependency order | ✅ `workspace_v2.rs::topological_order` (Kahn's algorithm) |
+| Affected-only mode | `--affected` — detects changed packages via `git diff` and runs scripts only in affected packages and their dependents | ✅ `workspace_v2.rs::affected_packages` |
+| Workspace graph | `3va workspace graph` — prints the inter-package dependency graph as ASCII or DOT | ✅ `workspace_v2.rs` |
+| Shared dependency hoisting | Deduplicate compatible versions into a workspace-root `node_modules` | ✅ `workspace::merged_deps` picks the highest compatible version per name across all packages; `install_workspace` (`crates/pm/src/lib.rs:2100`) installs the deduplicated set once into the workspace root |
+| Per-package permission overrides | Each package can declare its own permission scopes in `package.json#3va.permissions` | ✅ **Isolated for real** (2026-07-13). Previously cosmetic — every scope merged into one flat, process-wide grant set (`ponytail:` comment in `read_package_json_permissions` admitted this). Fixed without V8 stack introspection: `vvva_permissions::scope` tracks "which package's code is executing" in a thread-local, set by the `require()` wrapper in `crates/js/src/builtins/modules.rs` right before handing a capability-gated builtin (`fs`, `fs/promises`, `net`, `tls`, `dgram`, `child_process`) to the requesting module — derived from the requesting module's own `node_modules/<pkg>` path, no code-execution-flow changes needed at any of the ~40 `perms().check(...)` call sites in `fs.rs`/`tcp.rs`/etc. `PermissionState` (`crates/permissions/src/capability.rs`) now stores `scoped_granted`/`scoped_denied` maps alongside the existing global sets; `check()` consults both automatically. `crates/cli/src/main.rs`'s `read_package_json_permissions`/`build_permissions` route non-`"."` scopes through `grant_scoped`/`deny_scoped` instead of merging them. **Known residual gap:** long-lived class instances obtained by requiring the class directly (`new require('net').Socket()` instead of calling `net.connect(...)`) bypass the wrapper, since wrapping a constructor with a plain closure would break `instanceof` — the common functional API (`net.connect`, `createServer`, `dgram.createSocket`, `child_process.exec/spawn`) is covered, prototype methods on manually-constructed instances are not. `fs.createReadStream`/`createWriteStream`'s deferred native I/O (fires on a later tick, after the synchronous wrapper call already reverted) is explicitly patched to re-capture and re-apply the creator's scope — see the `__streamScope` comments in `fs.rs`. Verified with a real running binary: a scoped-grant dependency can read/connect where the app's own unscoped code is denied the identical capability. |
 
 ---
 

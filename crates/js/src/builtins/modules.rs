@@ -290,6 +290,28 @@ pub fn inject_require(
         read_file_fn.unwrap().into(),
     );
 
+    // ── __setCallerScope(name) ────────────────────────────────────────────────
+    // Backs the require() wrapper below: right before handing a
+    // capability-gated builtin (fs, net, ...) to the module that required it,
+    // JS calls this to record "which package's code is executing" so
+    // PermissionState::check() can apply package.json["3va"].permissions.<pkg>
+    // grants without applying them process-wide. Pass "." to clear back to
+    // the app-level scope. See vvva_permissions::scope for the actual storage.
+    let set_caller_scope_fn = Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut _rv: ReturnValue| {
+            let name = args.get(0).to_rust_string_lossy(scope);
+            vvva_permissions::set_current_scope(&name);
+        },
+    );
+    global.set(
+        scope,
+        V8String::new(scope, "__setCallerScope").unwrap().into(),
+        set_caller_scope_fn.unwrap().into(),
+    );
+
     let require_resolve_fn = Function::new(
         scope,
         move |scope: &mut PinScope<'_, '_>,
@@ -2654,18 +2676,97 @@ pub fn inject_require(
     let require_js = r#"
     (function() {
         globalThis.__loadedModules = globalThis.__loadedModules || {};
+        // Mirrors the Rust-side thread-local scope (vvva_permissions::scope)
+        // so wrapped builtins can read/restore the *previous* scope on their
+        // own (see __wrapForScope below) without a round-trip native getter.
+        globalThis.__currentCallerScope = globalThis.__currentCallerScope || '.';
 
         function bareName(specifier) {
             return specifier.indexOf('node:') === 0 ? specifier.slice(5) : specifier;
         }
 
+        // Package-level permission scoping (package.json["3va"].permissions.<name>) ──
+        // Extracts the innermost node_modules package name from a directory
+        // path, e.g. ".../node_modules/express/lib" -> "express",
+        // ".../node_modules/@babel/core/lib" -> "@babel/core". Nested deps use
+        // the last (innermost) segment: the package whose own code is
+        // literally about to call require(), not one of its ancestors.
+        // Paths outside any node_modules (the app's own code) map to '.'.
+        function __pkgScopeFor(dir) {
+            if (!dir || typeof dir !== 'string') return '.';
+            var re = /[\/\\]node_modules[\/\\](@[^\/\\]+[\/\\][^\/\\]+|[^\/\\]+)/g;
+            var last = null, m;
+            while ((m = re.exec(dir)) !== null) { last = m[1]; }
+            return last || '.';
+        }
+
+        // Only builtins that themselves perform capability-gated native calls
+        // (perms().check(...) in the Rust bindings) need scoping — wrapping
+        // every required module would be pure overhead for no benefit, since
+        // plain JS/data modules never touch PermissionState.
+        var __SCOPE_GATED_MODULES = {
+            fs: true, 'fs/promises': true, net: true, tls: true,
+            dgram: true, child_process: true,
+        };
+
+        // Shallow-wraps lowercase-named function properties (heuristic for
+        // "plain function", as opposed to a PascalCase constructor/class like
+        // net.Socket — wrapping a constructor with a plain closure would
+        // break `instanceof` and is skipped) so each call brackets itself
+        // with the requesting package's scope. Recurses one level into plain
+        // nested objects (covers fs.promises.readFile etc.) without touching
+        // arrays or class instances.
+        function __wrapForScope(obj, scopeName, depth) {
+            if (!obj || typeof obj !== 'object' || Array.isArray(obj) || depth > 1) return obj;
+            var out = {};
+            for (var key in obj) {
+                var val = obj[key];
+                if (typeof val === 'function' && key.length > 0
+                    && key.charAt(0) === key.charAt(0).toLowerCase()) {
+                    out[key] = (function(fn) {
+                        return function() {
+                            var prevScope = globalThis.__currentCallerScope;
+                            globalThis.__currentCallerScope = scopeName;
+                            __setCallerScope(scopeName);
+                            try {
+                                return fn.apply(this, arguments);
+                            } finally {
+                                globalThis.__currentCallerScope = prevScope;
+                                __setCallerScope(prevScope);
+                            }
+                        };
+                    })(val);
+                } else if (val && typeof val === 'object' && !Array.isArray(val)) {
+                    out[key] = __wrapForScope(val, scopeName, depth + 1);
+                } else {
+                    out[key] = val;
+                }
+            }
+            return out;
+        }
+
+        // Memoized per (module, scope) pair — requireFrom is called every
+        // time a module does `require('fs')`, so this avoids re-wrapping on
+        // every call.
+        var __scopedModuleCache = Object.create(null);
+        function __scopedModule(bare, mod, scopeName) {
+            if (scopeName === '.' || !Object.prototype.hasOwnProperty.call(__SCOPE_GATED_MODULES, bare)) {
+                return mod;
+            }
+            var cacheKey = bare + ' ' + scopeName;
+            if (!Object.prototype.hasOwnProperty.call(__scopedModuleCache, cacheKey)) {
+                __scopedModuleCache[cacheKey] = __wrapForScope(mod, scopeName, 0);
+            }
+            return __scopedModuleCache[cacheKey];
+        }
+
         function requireFrom(specifier, dir) {
             var bare = bareName(specifier);
             if (Object.prototype.hasOwnProperty.call(globalThis.__requireCache, specifier)) {
-                return globalThis.__requireCache[specifier];
+                return __scopedModule(bare, globalThis.__requireCache[specifier], __pkgScopeFor(dir));
             }
             if (Object.prototype.hasOwnProperty.call(globalThis.__requireCache, bare)) {
-                return globalThis.__requireCache[bare];
+                return __scopedModule(bare, globalThis.__requireCache[bare], __pkgScopeFor(dir));
             }
             if (Object.prototype.hasOwnProperty.call(globalThis.__fallbackModules, specifier)) {
                 return globalThis.__fallbackModules[specifier];

@@ -38,9 +38,9 @@ wired into `build_permissions()`.
 }
 ```
 
-Each key under `permissions` is a **scope** (conventionally `"."` for the
-project root, or a package name for readability). Scopes are cosmetic only —
-see §6.3 for why.
+Each key under `permissions` is a **scope**: `"."` for the project root
+(applies globally, no matter what code is executing), or a package name —
+enforced, see §6.3.
 
 Per-scope fields, one per capability category, mirroring the CLI flags:
 
@@ -63,19 +63,42 @@ Top-level (outside `permissions`):
 
 ---
 
-## 6.3 Scopes Are Merged, Not Isolated
+## 6.3 Scopes Are Isolated Per Package
 
-`vvva_permissions::PermissionState` has no notion of "which module is
-currently executing" — every `Capability` check is global to the process.
-Because of that, `read_package_json_permissions()` unions every scope's
-`allow-*`/`deny-*` into one flat set; it does **not** restrict `express`'s
-`allow-net` to code running inside the `express` package. Naming a scope
-`"express"` is documentation for humans, not an enforcement boundary.
+`vvva_permissions::scope` tracks "which package's code is currently
+executing" in a thread-local (one `JsEngine` per thread, so this is safe).
+`PermissionState` (`crates/permissions/src/capability.rs`) stores each
+non-`"."` scope's `allow-*`/`deny-*` separately (`scoped_granted`/
+`scoped_denied`) instead of merging it into the global set — `express`'s
+`allow-net` only applies while `express`'s own code is running, never to any
+other dependency or the app itself.
 
-True per-package isolation would require threading the calling module through
-every `PermissionState::check()` call site — a much larger change than
-reading a config file. If that's a hard requirement, treat it as a separate
-feature request.
+The scope is set by the `require()` wrapper in
+`crates/js/src/builtins/modules.rs`: when a module does
+`require('fs')`/`require('net')`/etc., it derives the requesting package's
+name from the requesting module's own path (the innermost
+`node_modules/<pkg>` segment; anything outside `node_modules` is `"."`) and
+hands back a version of that builtin wrapped to bracket every call with
+`__setCallerScope(pkgName)` / restore-on-exit — no changes needed at any of
+the ~40 `perms().check(...)` call sites in `fs.rs`/`tcp.rs`/etc., since
+`PermissionState::check()` reads the active scope internally.
+
+Only the builtins that themselves perform capability-gated native calls are
+wrapped: `fs`, `fs/promises`, `net`, `tls`, `dgram`, `child_process`. Wrapping
+is skipped entirely (zero overhead) whenever a project declares no
+non-`"."` scopes, which is the common case.
+
+**Known residual gap:** the wrapper only intercepts plain factory functions
+(`net.connect`, `createServer`, `dgram.createSocket`, `child_process.exec`/
+`spawn`) — a PascalCase constructor like `net.Socket` is deliberately left
+unwrapped (wrapping a constructor with a plain closure breaks `instanceof`),
+so `new require('net').Socket()` followed by manually calling
+`.connect()` on it bypasses scoping. `fs.createReadStream`/`createWriteStream`
+are a special case: their actual native read/write happens on a later tick,
+after the synchronous wrapper call has already reverted the scope, so those
+two specifically capture and re-apply the creator's scope around the
+deferred call (see the `__streamScope` comments in `fs.rs`) rather than
+relying on the generic wrapper.
 
 ---
 
