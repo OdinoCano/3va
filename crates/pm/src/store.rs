@@ -208,6 +208,68 @@ impl ContentStore {
         Ok(virtual_pkg_dir)
     }
 
+    /// Copy/hardlink a package straight into the flat top-level
+    /// `node_modules/{name}/` — no `.3va/` CAS indirection, no symlink.
+    /// Used by `--node-linker=hoisted`, the classic npm/Yarn-classic layout.
+    pub fn link_hoisted(
+        &self,
+        registry: &str,
+        name: &str,
+        version: &str,
+        node_modules: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        let src = self.package_path(registry, name, version);
+        if !src.exists() {
+            anyhow::bail!(
+                "Package {}@{} not in global store — call store_tarball first",
+                name,
+                version
+            );
+        }
+
+        let dest = node_modules.join(name); // preserves @scope/pkg structure
+        if dest.join("package.json").exists() {
+            return Ok(dest); // already linked — idempotent
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if dest.exists() {
+            std::fs::remove_dir_all(&dest)?;
+        }
+        link_or_copy_dir(&src, &dest)?;
+        Ok(dest)
+    }
+
+    /// Link a config-only dependency into `.3va/config-deps/{name}@{version}/`.
+    /// Never touches `node_modules` and is never symlinked in — build tooling
+    /// reads the path directly, there is no execution path through here at all.
+    pub fn link_config_dep(
+        &self,
+        registry: &str,
+        name: &str,
+        version: &str,
+        config_deps_root: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        let src = self.package_path(registry, name, version);
+        if !src.exists() {
+            anyhow::bail!(
+                "Package {}@{} not in global store — call store_tarball first",
+                name,
+                version
+            );
+        }
+
+        let entry = format!("{}@{}", virtual_entry_name(name), version);
+        let dest = config_deps_root.join(entry);
+        if dest.join("package.json").exists() {
+            return Ok(dest); // already linked — idempotent
+        }
+        std::fs::create_dir_all(&dest)?;
+        link_or_copy_dir(&src, &dest)?;
+        Ok(dest)
+    }
+
     // ── Maintenance ───────────────────────────────────────────────────────────
 
     /// Verify every entry in the store has a `package.json` (i.e., was
@@ -397,6 +459,27 @@ fn fmt_bytes(b: u64) -> String {
 /// `@scope/pkg` → `@scope+pkg`  (mirrors pnpm's convention)
 pub fn virtual_entry_name(name: &str) -> String {
     name.replace('/', "+")
+}
+
+/// Recursively copy a directory using real file copies — never a hardlink.
+/// Used for `3va patch`'s editable scratch copy, since a hardlinked file
+/// would alias the shared global-store bytes and editing it would corrupt
+/// every other project using that package.
+pub fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", src.display(), e))?
+    {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn link_or_copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
@@ -643,6 +726,84 @@ mod tests {
             vpath.join("index.js").exists(),
             "index.js must be in virtual store"
         );
+    }
+
+    #[test]
+    fn link_hoisted_creates_flat_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::with_root(tmp.path().join("store"));
+        let node_modules = tmp.path().join("nm");
+        std::fs::create_dir_all(&node_modules).unwrap();
+
+        let pkg_path = store.package_path("npm", "lodash", "4.17.21");
+        std::fs::create_dir_all(&pkg_path).unwrap();
+        std::fs::write(
+            pkg_path.join("package.json"),
+            r#"{"name":"lodash","version":"4.17.21"}"#,
+        )
+        .unwrap();
+        std::fs::write(pkg_path.join("index.js"), "module.exports = {};").unwrap();
+
+        let dest = store
+            .link_hoisted("npm", "lodash", "4.17.21", &node_modules)
+            .unwrap();
+
+        // Flat layout: node_modules/lodash directly, no .3va/ indirection.
+        assert_eq!(dest, node_modules.join("lodash"));
+        assert!(dest.join("package.json").exists());
+        assert!(dest.join("index.js").exists());
+        assert!(
+            !node_modules.join(".3va").exists(),
+            "hoisted linker must not create the CAS virtual store"
+        );
+    }
+
+    #[test]
+    fn link_hoisted_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::with_root(tmp.path().join("store"));
+        let node_modules = tmp.path().join("nm");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        let pkg_path = store.package_path("npm", "ms", "2.1.3");
+        std::fs::create_dir_all(&pkg_path).unwrap();
+        std::fs::write(
+            pkg_path.join("package.json"),
+            r#"{"name":"ms","version":"2.1.3"}"#,
+        )
+        .unwrap();
+
+        store
+            .link_hoisted("npm", "ms", "2.1.3", &node_modules)
+            .unwrap();
+        let dest = store
+            .link_hoisted("npm", "ms", "2.1.3", &node_modules)
+            .unwrap();
+        assert!(dest.join("package.json").exists());
+    }
+
+    #[test]
+    fn link_config_dep_never_touches_node_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::with_root(tmp.path().join("store"));
+        let project_root = tmp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        let pkg_path = store.package_path("npm", "build-tool", "1.0.0");
+        std::fs::create_dir_all(&pkg_path).unwrap();
+        std::fs::write(
+            pkg_path.join("package.json"),
+            r#"{"name":"build-tool","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let config_deps_root = project_root.join(".3va").join("config-deps");
+        let dest = store
+            .link_config_dep("npm", "build-tool", "1.0.0", &config_deps_root)
+            .unwrap();
+
+        assert_eq!(dest, config_deps_root.join("build-tool@1.0.0"));
+        assert!(dest.join("package.json").exists());
+        assert!(!project_root.join("node_modules").exists());
     }
 
     #[test]

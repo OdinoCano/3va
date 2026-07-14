@@ -3123,6 +3123,16 @@ enum Commands {
         /// Registry host to allow network access to (e.g. registry.npmjs.org). Use --allow-net= to allow all.
         #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
         allow_net: Option<Vec<String>>,
+
+        /// How packages are linked into node_modules: "isolated" (default,
+        /// CAS + symlink) or "hoisted" (flat, classic npm-style layout).
+        #[arg(long = "node-linker", default_value = "isolated")]
+        node_linker: String,
+
+        /// Install `configDependencies` instead of regular deps — parked in
+        /// `.3va/config-deps/` for build tooling, never linked into node_modules.
+        #[arg(long = "config")]
+        config: bool,
     },
     /// Remove an installed package
     #[command(aliases = ["rm", "uninstall"])]
@@ -3152,6 +3162,55 @@ enum Commands {
     /// Show why a package is installed
     Why {
         /// Package name to explain
+        package: String,
+    },
+    /// Fetch a package and run it once through the same sandbox as `3va run`
+    /// — deny-by-default, prompts for any capability, never a special case.
+    Dlx {
+        /// Package to fetch and run (e.g. cowsay or cowsay@1.6.0)
+        package: String,
+
+        /// Registry host to allow network access to. Use --allow-net= to allow all.
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_net: Option<Vec<String>>,
+
+        /// Allow read access to specified paths. Use --allow-read= (no value) to allow all paths.
+        #[arg(long = "allow-read", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_read: Option<Vec<String>>,
+
+        /// Allow write access to specified paths. Use --allow-write= (no value) to allow all paths.
+        #[arg(long = "allow-write", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_write: Option<Vec<String>>,
+
+        /// Allow environment variable access.
+        #[arg(long = "allow-env", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_env: Option<Vec<String>>,
+
+        /// Allow spawning child processes
+        #[arg(long = "allow-child-process")]
+        allow_child_process: bool,
+
+        /// Allow FFI calls to native libraries.
+        #[arg(long = "allow-ffi", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_ffi: Option<Vec<String>>,
+
+        /// Never prompt for ungranted permissions — silently deny them instead.
+        #[arg(long = "no-prompt")]
+        no_prompt: bool,
+
+        /// Arguments to pass to the package's bin script (after --)
+        #[arg(last = true)]
+        script_args: Vec<String>,
+    },
+    /// Open an editable copy of an installed package for patching
+    Patch {
+        /// Package name (must already be installed)
+        package: String,
+    },
+    /// Diff an in-progress `3va patch` against the pristine package and save it
+    #[command(name = "patch-commit")]
+    PatchCommit {
+        /// Package name passed to a prior `3va patch`
         package: String,
     },
 
@@ -3358,6 +3417,18 @@ enum Commands {
         /// Output results as JSON (for CI/CD pipelines).
         #[arg(long = "json")]
         json: bool,
+    },
+    /// List the license of every installed package
+    Licenses {
+        /// Output results as JSON (for CI/CD pipelines).
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Generate a CycloneDX SBOM from the lockfile
+    Sbom {
+        /// Output path (default: stdout)
+        #[arg(long = "out", value_name = "PATH")]
+        out: Option<PathBuf>,
     },
     /// Analyze a .cpuprofile file produced by `3va run --prof`
     Prof {
@@ -3740,9 +3811,76 @@ fn rewrite_create_dash_alias(mut args: Vec<String>) -> Vec<String> {
     args
 }
 
+/// If `package.json`'s dependencies have changed since the last install,
+/// prompt once before running — never implicit, never silent. The human's
+/// "y" at this prompt is the only thing that grants the auto-install
+/// network access (scoped to `--allow-net` if the caller already has one).
+async fn maybe_auto_install(project_root: &std::path::Path, interactive: bool) {
+    if !vvva_pm::needs_install(project_root) {
+        return;
+    }
+    if !interactive {
+        eprintln!(
+            "⚠ Dependencies may be out of date — run `3va install` to sync. (auto-install skipped: not interactive)"
+        );
+        return;
+    }
+    eprint!("Dependencies changed — install now? [y/N] ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() || !answer.trim().eq_ignore_ascii_case("y")
+    {
+        return;
+    }
+    if let Err(e) = vvva_pm::install_from_manifest(project_root, Some(&[])).await {
+        eprintln!("✗ auto-install failed: {e}");
+    }
+}
+
+/// clap's built-in `-V`/`--version` only knows the compile-time version
+/// string — it can't include a hash of the binary it's actually running
+/// from. Intercept it before clap sees it so the printed hash is always of
+/// *this* file on disk, letting a user confirm the binary they're running
+/// matches one they trust (e.g. one they hashed right after installing).
+///
+/// ponytail: this hashes the raw executable; CI's published `.sha256` files
+/// hash the packaged release archive (tar.gz/zip), not the extracted
+/// binary, so the two will never match byte-for-byte — that's noted in the
+/// output rather than silently confusing anyone who tries to diff them.
+fn print_version_with_hash() {
+    let version = env!("CARGO_PKG_VERSION");
+    println!("3va {version}");
+    match std::env::current_exe().ok().and_then(|exe| {
+        vvva_pm::SignatureVerifier::sha256()
+            .compute_hash(&exe)
+            .ok()
+            .map(|h| (exe, h))
+    }) {
+        Some((exe, hash)) => {
+            println!("SHA-256: {hash}");
+            println!("  ({})", exe.display());
+            println!("  This is a hash of the running binary itself — compare it against a value");
+            println!("  you trust to confirm it hasn't been modified. It will NOT match a release");
+            println!("  archive's .sha256 (that hashes the packaged tar.gz/zip, not the binary).");
+        }
+        None => {
+            eprintln!("  (could not hash the running binary)");
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let raw_args = rewrite_create_dash_alias(std::env::args().collect());
+
+    if raw_args
+        .get(1)
+        .map(|a| a == "-V" || a == "--version")
+        .unwrap_or(false)
+    {
+        print_version_with_hash();
+        return Ok(());
+    }
 
     let cli = match Cli::try_parse_from(&raw_args) {
         Ok(cli) => cli,
@@ -3804,6 +3942,12 @@ async fn main() -> anyhow::Result<()> {
             heap_snapshot,
             script_args,
         } => {
+            maybe_auto_install(
+                file.parent().unwrap_or(std::path::Path::new(".")),
+                std::io::stderr().is_terminal() && !*no_prompt,
+            )
+            .await;
+
             // Resolve port: CLI flag > config file > env (set PORT so scripts see it)
             let effective_port = port.or_else(|| {
                 ProjectConfig::discover(
@@ -3990,8 +4134,22 @@ async fn main() -> anyhow::Result<()> {
         Commands::Install {
             packages,
             allow_net,
+            node_linker,
+            config,
         } => {
-            if packages.is_empty() {
+            if node_linker == "hoisted" {
+                // SAFETY: single-threaded at this point in `main`, before any
+                // install task is spawned — no concurrent env access yet.
+                unsafe { std::env::set_var("_3VA_NODE_LINKER", "hoisted") };
+            } else if node_linker != "isolated" {
+                anyhow::bail!(
+                    "--node-linker must be \"isolated\" or \"hoisted\", got \"{node_linker}\""
+                );
+            }
+            if *config {
+                let cwd = std::env::current_dir()?;
+                vvva_pm::install_config_deps(&cwd, allow_net.as_deref()).await?;
+            } else if packages.is_empty() {
                 let cwd = std::env::current_dir()?;
                 if vvva_pm::WorkspaceConfig::discover(&cwd)?.is_some() {
                     info!("Workspace detected — installing all packages...");
@@ -4232,6 +4390,8 @@ async fn main() -> anyhow::Result<()> {
             reporter,
             reporter_file,
         } => {
+            maybe_auto_install(&std::env::current_dir()?, std::io::stderr().is_terminal()).await;
+
             let target_paths = if paths.is_empty() {
                 vec![PathBuf::from(".")]
             } else {
@@ -4308,6 +4468,45 @@ async fn main() -> anyhow::Result<()> {
                 run_audit_human(*deny, *update_cache, *secrets).await?;
             }
         }
+        Commands::Licenses { json } => {
+            let rows = vvva_pm::list_licenses()?;
+            if *json {
+                let out: Vec<_> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "name": r.name,
+                            "version": r.version,
+                            "license": r.license,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if rows.is_empty() {
+                println!("No packages installed.");
+            } else {
+                println!();
+                for r in &rows {
+                    println!("{:<40} {:<12} {}", r.name, r.version, r.license);
+                }
+                println!();
+                println!("{} package(s).", rows.len());
+            }
+        }
+        Commands::Sbom { out } => {
+            let lockfile_path = std::path::Path::new("3va-lock.json");
+            let lockfile = vvva_pm::Lockfile::load(lockfile_path)
+                .map_err(|_| anyhow::anyhow!("No 3va-lock.json found. Run '3va install' first."))?;
+            let bom = vvva_pm::generate_sbom(&lockfile);
+            let json = serde_json::to_string_pretty(&bom)?;
+            match out {
+                Some(path) => {
+                    std::fs::write(path, json)?;
+                    println!("SBOM written to {}", path.display());
+                }
+                None => println!("{}", json),
+            }
+        }
         Commands::Prof {
             file,
             top,
@@ -4358,6 +4557,7 @@ async fn main() -> anyhow::Result<()> {
             no_csp,
         } => {
             let cwd = std::env::current_dir()?;
+            maybe_auto_install(&cwd, std::io::stderr().is_terminal()).await;
             let cfg_dev = ProjectConfig::discover(cwd)
                 .ok()
                 .flatten()
@@ -4619,6 +4819,59 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Why { package } => {
             pm_why(package)?;
+        }
+        Commands::Dlx {
+            package,
+            allow_net,
+            allow_read,
+            allow_write,
+            allow_env,
+            allow_child_process,
+            allow_ffi,
+            no_prompt,
+            script_args,
+        } => {
+            let cwd = std::env::current_dir()?;
+            let pkg_dir = vvva_pm::dlx_fetch(&cwd, package, allow_net.as_deref()).await?;
+            let entry = vvva_pm::dlx_entry(&pkg_dir)?;
+
+            // No package.json permissions are read here on purpose: a dlx'd
+            // package only ever gets what the user explicitly grants on this
+            // invocation, never capabilities it declares for itself.
+            let pkg_permissions = ThreeVaPermissions::default();
+            let permissions = build_permissions(
+                allow_read.as_deref(),
+                allow_write.as_deref(),
+                allow_net.as_deref(),
+                allow_env.as_deref(),
+                *allow_child_process,
+                allow_ffi.as_deref(),
+                std::io::stderr().is_terminal() && !*no_prompt,
+                &pkg_permissions,
+            );
+            let permissions = Arc::new(permissions);
+
+            let mut engine = vvva_js::JsEngine::new_with_firewall_and_inspector(
+                permissions.clone(),
+                Firewall::new(FirewallConfig::default()),
+                None,
+            )
+            .await?;
+            engine.eval_file_with_args(&entry, script_args).await?;
+        }
+        Commands::Patch { package } => {
+            let cwd = std::env::current_dir()?;
+            let work_dir = vvva_pm::patch_start(&cwd, package)?;
+            println!("Editable copy ready at:");
+            println!("  {}", work_dir.display());
+            println!();
+            println!("Edit the files, then run: 3va patch-commit {}", package);
+        }
+        Commands::PatchCommit { package } => {
+            let cwd = std::env::current_dir()?;
+            let patch_dir = vvva_pm::patch_commit(&cwd, package)?;
+            println!("✓ Patch saved to {}", patch_dir.display());
+            println!("  Applied automatically on the next 3va install.");
         }
         Commands::Remove { packages } => {
             let mut any_failed = false;
