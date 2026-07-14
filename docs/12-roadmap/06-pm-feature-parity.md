@@ -14,17 +14,17 @@ all, or (b) routes through the same deny-by-default permission sandbox that
 
 | Feature | Have it? | Plan |
 |---|---|---|
-| Overrides / resolutions | ❌ | Phase A |
-| Listing licenses | ❌ | Phase A |
-| SBOM generation | ❌ | Phase A |
-| Autoinstalling peers | ❌ | Phase A |
-| Hoisted `node_modules` | ❌ | Phase A |
-| Config dependencies | ❌ | Phase A |
-| Zero-Installs | ❌ | Phase B |
-| Patching dependencies | ❌ | Phase B |
-| Dynamic package execution (`dlx`) | ❌ | Phase B |
-| JSR native registry support | partial (npm-compat shim) | Phase B |
-| Auto-install before script run | ❌ | Phase B |
+| Overrides / resolutions | ✅ | Phase A — shipped |
+| Listing licenses | ✅ | Phase A — shipped |
+| SBOM generation | ✅ | Phase A — shipped |
+| Autoinstalling peers | ✅ | Phase A — shipped |
+| Hoisted `node_modules` | ✅ | Phase A — shipped |
+| Config dependencies | ✅ | Phase A — shipped |
+| Zero-Installs | ✅ | Phase B — shipped |
+| Patching dependencies | ✅ | Phase B — shipped |
+| Dynamic package execution (`dlx`) | ✅ | Phase B — shipped |
+| JSR native registry support | partial (npm-compat shim) | kept as-is — see 6.5 |
+| Auto-install before script run | ✅ | Phase B — shipped |
 | Hooks | ❌ | Phase C |
 | Managing versions of itself | ❌ | Phase C |
 | Plug'n'Play | ❌ | Phase C |
@@ -57,8 +57,7 @@ like `3va run` does for any other script.
 | **Zero-Installs** | Commit compressed store archives under `.3va/cache/` (like Yarn's `.yarn/cache`). `3va install` checks this cache before touching the network at all — this *strengthens* the security story, since a checked-in, hash-verified cache means zero supply-chain exposure on CI/fresh clones. |
 | **Patching dependencies** | `3va patch <pkg>` opens an editable copy from the store; `3va patch-commit <pkg>` diffs it against the pristine version and stores the diff under `patches/`. Diffs are pure file diffs applied at install time — no script, no exec, reviewable in PRs like any other file. |
 | **`3va dlx <pkg>`** | Fetches into the store (same signature verification as `install`) and runs it through the *existing* `3va run` sandbox — deny-by-default, prompts for any capability, same as running a local script. Not a special case. |
-| **JSR native registry support** | Replace the `npm.jsr.io` compatibility shim (`lookup_jsr`/`lookup_jsr_with_deps` in `lib.rs`) with JSR's own package API, including JSR's provenance/signature format via `signature_verifier.rs`. |
-| **Auto-install before script run** | `3va run`/`3va test`/`3va dev` compare a hash of the manifest against the lockfile's recorded hash; on mismatch, prompt once ("dependencies changed, install now? [y/N]") before running — never implicit, never silent. |
+| **Auto-install before script run** | `3va run`/`3va test`/`3va dev` compare a hash of `package.json`'s dependency fields against the hash recorded by the last successful install; on mismatch, prompt once ("Dependencies changed — install now? [y/N]") before running — never implicit, never silent. |
 
 ## 6.4 Phase C — larger design, target 3.x
 
@@ -77,14 +76,15 @@ not just a flag.
 |---|---|
 | **Managing runtimes** | 3va *is* the runtime (single static binary). There is no separate Node/Bun/Deno version to manage underneath it — the feature has no object to act on. |
 | **Side-effects cache** | This cache exists in pnpm to memoize the filesystem side effects of install/build scripts. 3va disables those scripts unconditionally (see README § Package Manager), so there are no side effects to cache. Adding this would require first reintroducing script execution — a regression, not a feature. |
+| **JSR native registry support** | Investigated for 2.4.0 and kept as the `npm.jsr.io` shim instead. JSR's native per-version metadata (`jsr.io/@scope/name/<version>_meta.json`) has no single-tarball `dist` field at all — a package is a `manifest` of individual source files, each with its own checksum, plus an `exports` map; there's no `package.json`. Every install-path primitive in `store.rs`/`lib.rs` (`store_tarball`, `extract_tarball`, `link_to_virtual_store`, dependency parsing) assumes one tarball → one `package.json`. Supporting JSR natively means a second package shape threaded through the whole pipeline and the ESM resolver, for a registry `npm.jsr.io` already serves faithfully — that's JSR's own officially-maintained npm-compatibility layer, not a workaround, and it already gets the same signature verification (`signature_verifier.rs`) as any other install. Revisit only if JSR's npm-compat layer is deprecated or a real correctness gap shows up in practice. |
 
 ---
 
 ## 6.6 Sequencing
 
 ```
-2.2.0  Phase A (overrides, licenses, sbom, peer autoinstall, hoisted linker, config deps)
-2.4.0  Phase B (zero-installs, patch, dlx, JSR native, auto-install-before-run)
+2.2.0  Phase A — shipped (overrides, licenses, sbom, peer autoinstall, hoisted linker, config deps)
+2.4.0  Phase B — shipped (zero-installs, patch, dlx, auto-install-before-run); JSR native kept as-is, see 6.5
 3.x    Phase C (hooks, self-version-management, PnP)
 ```
 
