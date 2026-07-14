@@ -285,14 +285,9 @@ async fn lookup_npm_version(
     version_meta.insert(resolved_ver.clone(), VersionMeta { tarball, integrity });
 
     // Collect transitive dep specs (name + version range) from the registry response.
-    let mut dep_specs: Vec<(String, String)> = Vec::new();
-    if let Some(deps) = meta["dependencies"].as_object() {
-        for (dep_name, dep_ver) in deps {
-            if let Some(dv) = dep_ver.as_str() {
-                dep_specs.push((dep_name.clone(), dv.to_string()));
-            }
-        }
-    }
+    // Peers are installed the same way regular deps are — same BFS, same
+    // --allow-net grant the user already gave, no separate prompt.
+    let dep_specs = collect_dep_specs(&meta);
 
     let info = RegistryInfo {
         versions: vec![resolved_ver],
@@ -300,6 +295,23 @@ async fn lookup_npm_version(
         version_meta,
     };
     Ok((info, dep_specs))
+}
+
+/// Pull `dependencies` + `peerDependencies` (name, range) pairs out of an
+/// npm registry version object. Peers are treated identically to regular
+/// deps so autoinstall reuses the same BFS and permission grant.
+fn collect_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)> {
+    let mut dep_specs = Vec::new();
+    for key in ["dependencies", "peerDependencies"] {
+        if let Some(deps) = meta[key].as_object() {
+            for (dep_name, dep_ver) in deps {
+                if let Some(dv) = dep_ver.as_str() {
+                    dep_specs.push((dep_name.clone(), dv.to_string()));
+                }
+            }
+        }
+    }
+    dep_specs
 }
 
 async fn lookup_npm_compat_with_deps(
@@ -544,6 +556,445 @@ async fn download_tarball_with_client(
         MAX_RETRIES + 1,
         url
     )))
+}
+
+// ── Zero-Installs ──────────────────────────────────────────────────────────────
+// A `.3va/cache/` directory meant to be committed to the repo (like Yarn's
+// `.yarn/cache`): every tarball fetched here is written back with a sidecar
+// `.sha512` file recording the exact integrity hash it was verified against.
+// On a later install — including a fresh clone or CI checkout — the tarball
+// bytes are re-verified against that sidecar hash before being trusted, so a
+// checked-in cache never becomes an unverified trust root.
+//
+// ponytail: this only skips the *tarball download*, not the registry
+// metadata call that resolves a version range to an exact version — true
+// fully-offline install would need the BFS to consult the lockfile before
+// ever hitting the network. Add that if a project asks for real offline CI.
+
+fn zero_install_cache_enabled(manifest_val: Option<&serde_json::Value>) -> bool {
+    std::env::var("_3VA_ZERO_INSTALL_CACHE").as_deref() == Ok("1")
+        || manifest_val.and_then(|val| val["3va"]["zeroInstallCache"].as_bool()) == Some(true)
+}
+
+fn zero_install_cache_paths(project_root: &Path, name: &str, version: &str) -> (PathBuf, PathBuf) {
+    let dir = project_root.join(".3va").join("cache");
+    let base = format!("{}@{}.tgz", store::virtual_entry_name(name), version);
+    (dir.join(&base), dir.join(format!("{}.sha512", base)))
+}
+
+/// Read + verify a tarball from the committed zero-install cache. Returns the
+/// bytes only if they hash-match the sidecar recorded at cache-write time.
+fn read_zero_install_cache(project_root: &Path, name: &str, version: &str) -> Option<Vec<u8>> {
+    let (tgz_path, hash_path) = zero_install_cache_paths(project_root, name, version);
+    let bytes = std::fs::read(&tgz_path).ok()?;
+    let integrity = std::fs::read_to_string(&hash_path).ok()?;
+    match SignatureVerifier::sha512().verify_tarball(&bytes, integrity.trim()) {
+        VerificationStatus::Verified => Some(bytes),
+        _ => None,
+    }
+}
+
+/// Write an already-verified tarball into the committed zero-install cache.
+fn write_zero_install_cache(
+    project_root: &Path,
+    name: &str,
+    version: &str,
+    bytes: &[u8],
+    integrity: &str,
+) {
+    let (tgz_path, hash_path) = zero_install_cache_paths(project_root, name, version);
+    if let Some(dir) = tgz_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&tgz_path, bytes);
+    let _ = std::fs::write(&hash_path, integrity);
+}
+
+// ── dlx ───────────────────────────────────────────────────────────────────────
+// `3va dlx <pkg>`: fetch through the exact same verified-download path as
+// `install`, then hand the entry file to the caller so it can be executed
+// through the *existing* `3va run` sandbox — not a special case, no new
+// execution surface.
+
+/// Resolve, download, verify, and store `spec` (e.g. `cowsay` or
+/// `cowsay@1.6.0`), then return the path to a read-execute scratch copy of
+/// the package (a real copy, not a store hardlink, so nothing the package
+/// does at runtime can touch the shared global store).
+pub async fn dlx_fetch(
+    project_root: &Path,
+    spec: &str,
+    allow_net: Option<&[String]>,
+) -> anyhow::Result<PathBuf> {
+    let (name, requested_ver) = parse_package_spec(spec)?;
+    let allowed_host = match allow_net {
+        None => anyhow::bail!("Network access denied: --allow-net not specified"),
+        Some(hosts) => hosts.first().map(|s| s.as_str()).unwrap_or("").to_string(),
+    };
+    let registry = Registry::from_allowed_host(&allowed_host);
+    let reg_name = registry.display_name().to_string();
+    let base_url = registry.base_url().to_string();
+    let client = reqwest::Client::builder().gzip(true).build()?;
+    let version_to_fetch = requested_ver.as_deref().unwrap_or("latest");
+
+    let (info, _deps) = match &registry {
+        Registry::Jsr => lookup_jsr_with_deps(&client, &name, version_to_fetch).await?,
+        Registry::Npm | Registry::Yarn | Registry::Custom(_) => {
+            lookup_npm_version(&client, &base_url, &name, version_to_fetch).await?
+        }
+    };
+    let ver = select_best_version(&info.versions, version_to_fetch, info.latest.as_deref());
+    let Some(meta) = info.version_meta.get(&ver) else {
+        anyhow::bail!("No version of '{}' satisfies '{}'", name, version_to_fetch);
+    };
+
+    let global_store = store::ContentStore::global();
+    if !global_store.is_cached(&reg_name, &name, &ver) {
+        let bytes = download_tarball_with_client(&client, &meta.tarball).await?;
+        let verifier = SignatureVerifier::sha512();
+        if let Some(int_hash) = &meta.integrity
+            && matches!(
+                verifier.verify_from_registry(&bytes, Some(int_hash)),
+                VerificationStatus::Mismatch | VerificationStatus::Failed(_)
+            )
+        {
+            anyhow::bail!("Integrity check failed for {}@{}", name, ver);
+        }
+        global_store.store_tarball(&bytes, &reg_name, &name, &ver)?;
+    }
+
+    let entry = format!("{}@{}", store::virtual_entry_name(&name), ver);
+    let run_dir = project_root.join(".3va").join("dlx").join(&entry);
+    if !run_dir.join("package.json").exists() {
+        let pristine = global_store.package_path(&reg_name, &name, &ver);
+        store::copy_dir_recursive(&pristine, &run_dir)?;
+    }
+    Ok(run_dir)
+}
+
+/// Resolve a dlx-fetched package's executable entry: its `bin` field if
+/// present (string or the first entry of an object), else `main`, else
+/// `index.js`.
+pub fn dlx_entry(pkg_dir: &Path) -> anyhow::Result<PathBuf> {
+    let content = std::fs::read_to_string(pkg_dir.join("package.json"))?;
+    let val: serde_json::Value = serde_json::from_str(&content)?;
+    let rel = match &val["bin"] {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(obj) => {
+            let name = val["name"].as_str().unwrap_or("");
+            let short_name = name.rsplit('/').next().unwrap_or(name);
+            obj.get(short_name)
+                .or_else(|| obj.values().next())
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow::anyhow!("Package has no usable 'bin' entry"))?
+        }
+        _ => val["main"].as_str().unwrap_or("index.js").to_string(),
+    };
+    Ok(pkg_dir.join(rel))
+}
+
+// ── Auto-install before script run ──────────────────────────────────────────
+// `3va run` / `test` / `dev` compare a hash of package.json's dependency
+// fields against the hash recorded by the last successful install. On a
+// mismatch the CLI prompts once before running — never implicit, never
+// silent; the human's "y" at that prompt is the only thing that grants the
+// auto-install network access.
+
+fn manifest_dep_fields(val: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for key in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+        "overrides",
+        "resolutions",
+        "configDependencies",
+    ] {
+        if let Some(v) = val.get(key) {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Serialize with sorted object keys so field/key reordering in
+/// `package.json` never spuriously changes the hash.
+fn sorted_json_string(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            let inner: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{:?}:{}", k, sorted_json_string(v)))
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        }
+        serde_json::Value::Array(arr) => {
+            let inner: Vec<String> = arr.iter().map(sorted_json_string).collect();
+            format!("[{}]", inner.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
+/// SHA-256 (hex) of every dependency-related field in `package.json`.
+/// `None` if there's no parseable `package.json` at all.
+pub fn manifest_dep_hash(project_root: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let content = std::fs::read_to_string(project_root.join("package.json")).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let canonical = sorted_json_string(&manifest_dep_fields(&val));
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+fn install_hash_marker(project_root: &Path) -> PathBuf {
+    project_root.join("node_modules").join(".3va-install-hash")
+}
+
+/// Record the current dependency hash as "installed". Call after any
+/// successful install that touches `package.json`'s dependency fields.
+pub fn record_install_hash(project_root: &Path) {
+    if let Some(hash) = manifest_dep_hash(project_root) {
+        let _ = std::fs::create_dir_all(project_root.join("node_modules"));
+        let _ = std::fs::write(install_hash_marker(project_root), hash);
+    }
+}
+
+/// True if `package.json`'s dependency fields have changed since the last
+/// recorded install.
+///
+/// ponytail: a missing marker with an existing `node_modules/` (e.g. a
+/// project installed before this version, or `node_modules` from another
+/// tool) is treated as "up to date" rather than forcing a prompt on every
+/// run — the marker gets created on the next explicit `3va install` and the
+/// check becomes authoritative from then on. Upgrade path if that's ever
+/// wrong often enough to matter: hash the installed tree itself instead of
+/// trusting the marker's mere presence.
+pub fn needs_install(project_root: &Path) -> bool {
+    let Some(current) = manifest_dep_hash(project_root) else {
+        return false;
+    };
+    match std::fs::read_to_string(install_hash_marker(project_root)) {
+        Ok(recorded) => recorded.trim() != current,
+        Err(_) => !project_root.join("node_modules").exists(),
+    }
+}
+
+// ── Patching dependencies ────────────────────────────────────────────────────
+// `3va patch <pkg>` / `3va patch-commit <pkg>`: pure file diffs, applied at
+// install time by overwriting/removing files — never a script, never code
+// execution. The "diff" is deliberately not unified-diff text: it's the full
+// contents of every changed file plus a list of removed paths, stored under
+// `patches/{name}@{version}/`. Simpler to generate and apply than parsing or
+// emitting patch syntax, and still fully reviewable in a PR.
+
+fn resolve_installed_registry(project_root: &Path, name: &str) -> String {
+    if let Ok(lock) = Lockfile::load(&project_root.join("3va-lock.json"))
+        && let Some(dep) = lock.dependencies.get(name)
+        && let Some(reg) = &dep.registry
+    {
+        return reg.clone();
+    }
+    Registry::Npm.display_name().to_string()
+}
+
+/// `3va patch <pkg>`: copy the installed package into an editable scratch
+/// directory (a real copy, never a store hardlink) and return its path.
+pub fn patch_start(project_root: &Path, name: &str) -> anyhow::Result<PathBuf> {
+    let node_modules = project_root.join("node_modules");
+    let installed_dir = node_modules.join(name);
+    if !installed_dir.join("package.json").exists() {
+        anyhow::bail!("'{}' is not installed — run 3va install first.", name);
+    }
+    let version = read_package_version(&installed_dir);
+    let registry = resolve_installed_registry(project_root, name);
+    let store = store::ContentStore::global();
+    let pristine = store.package_path(&registry, name, &version);
+    if !pristine.exists() {
+        anyhow::bail!("'{}@{}' not found in the global store.", name, version);
+    }
+
+    let entry = format!("{}@{}", store::virtual_entry_name(name), version);
+    let work_dir = project_root.join(".3va").join("patch-work").join(&entry);
+    if work_dir.exists() {
+        std::fs::remove_dir_all(&work_dir)?;
+    }
+    store::copy_dir_recursive(&pristine, &work_dir)?;
+    Ok(work_dir)
+}
+
+/// `3va patch-commit <pkg>`: diff the edited scratch copy against the
+/// pristine store version and write the result under `patches/`.
+pub fn patch_commit(project_root: &Path, name: &str) -> anyhow::Result<PathBuf> {
+    let node_modules = project_root.join("node_modules");
+    let installed_dir = node_modules.join(name);
+    let version = read_package_version(&installed_dir);
+    let registry = resolve_installed_registry(project_root, name);
+    let store = store::ContentStore::global();
+    let pristine = store.package_path(&registry, name, &version);
+
+    let entry = format!("{}@{}", store::virtual_entry_name(name), version);
+    let work_dir = project_root.join(".3va").join("patch-work").join(&entry);
+    if !work_dir.exists() {
+        anyhow::bail!(
+            "No in-progress patch for '{}' — run '3va patch {}' first.",
+            name,
+            name
+        );
+    }
+
+    let patch_dir = project_root.join("patches").join(&entry);
+    if patch_dir.exists() {
+        std::fs::remove_dir_all(&patch_dir)?;
+    }
+
+    let mut changed = 0usize;
+    let mut removed_paths = Vec::new();
+    diff_dirs(
+        &pristine,
+        &work_dir,
+        Path::new(""),
+        &patch_dir,
+        &mut changed,
+        &mut removed_paths,
+    )?;
+
+    if !removed_paths.is_empty() {
+        std::fs::create_dir_all(&patch_dir)?;
+        std::fs::write(patch_dir.join(".removed"), removed_paths.join("\n"))?;
+    }
+
+    std::fs::remove_dir_all(&work_dir)?;
+
+    if changed == 0 && removed_paths.is_empty() {
+        anyhow::bail!("No changes detected for '{}' — nothing to commit.", name);
+    }
+    Ok(patch_dir)
+}
+
+/// Diff `pristine` vs `edited`, writing every changed/added file (at its
+/// matching relative path) into `patch_dir`, and appending removed paths
+/// (present in pristine, missing in edited) to `removed`.
+fn diff_dirs(
+    pristine: &Path,
+    edited: &Path,
+    rel: &Path,
+    patch_dir: &Path,
+    changed: &mut usize,
+    removed: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    use std::collections::HashSet;
+
+    let pristine_dir = pristine.join(rel);
+    let edited_dir = edited.join(rel);
+
+    let mut names: HashSet<std::ffi::OsString> = HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(&pristine_dir) {
+        names.extend(entries.flatten().map(|e| e.file_name()));
+    }
+    if let Ok(entries) = std::fs::read_dir(&edited_dir) {
+        names.extend(entries.flatten().map(|e| e.file_name()));
+    }
+
+    for name in names {
+        let rel_child = rel.join(&name);
+        let p_path = pristine_dir.join(&name);
+        let e_path = edited_dir.join(&name);
+        let e_exists = e_path.exists();
+
+        if p_path.is_dir() || e_path.is_dir() {
+            if e_exists {
+                diff_dirs(pristine, edited, &rel_child, patch_dir, changed, removed)?;
+            } else {
+                collect_all_files(&p_path, &rel_child, removed);
+            }
+            continue;
+        }
+
+        if !e_exists {
+            removed.push(rel_child.to_string_lossy().replace('\\', "/"));
+            continue;
+        }
+
+        let p_bytes = std::fs::read(&p_path).unwrap_or_default();
+        let e_bytes = std::fs::read(&e_path)?;
+        if p_bytes != e_bytes {
+            let dest = patch_dir.join(&rel_child);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&dest, &e_bytes)?;
+            *changed += 1;
+        }
+    }
+    Ok(())
+}
+
+fn collect_all_files(dir: &Path, rel: &Path, removed: &mut Vec<String>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let rel_child = rel.join(entry.file_name());
+            if p.is_dir() {
+                collect_all_files(&p, &rel_child, removed);
+            } else {
+                removed.push(rel_child.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+}
+
+/// Apply a committed patch (if one exists) to a freshly-linked package.
+/// Always deletes-then-rewrites each changed file, so a hardlink into the
+/// shared global store is broken before any byte is written — the store
+/// itself is never mutated by a patch.
+fn apply_patch_if_present(project_root: &Path, node_modules: &Path, name: &str, version: &str) {
+    let entry = format!("{}@{}", store::virtual_entry_name(name), version);
+    let patch_dir = project_root.join("patches").join(&entry);
+    if !patch_dir.exists() {
+        return;
+    }
+
+    let link_path = node_modules.join(name);
+    let target_dir = std::fs::canonicalize(&link_path).unwrap_or(link_path);
+
+    apply_patch_files(&patch_dir, Path::new(""), &target_dir);
+
+    if let Ok(removed) = std::fs::read_to_string(patch_dir.join(".removed")) {
+        for rel in removed.lines().filter(|l| !l.is_empty()) {
+            let _ = std::fs::remove_file(target_dir.join(rel));
+        }
+    }
+    println!("  ✓ patch applied: {}@{}", name, version);
+}
+
+fn apply_patch_files(patch_dir: &Path, rel: &Path, target_dir: &Path) {
+    let dir = patch_dir.join(rel);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let name = entry.file_name();
+        if name == ".removed" {
+            continue;
+        }
+        let rel_child = rel.join(&name);
+        if p.is_dir() {
+            apply_patch_files(patch_dir, &rel_child, target_dir);
+        } else if let Ok(bytes) = std::fs::read(&p) {
+            let dest = target_dir.join(&rel_child);
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::remove_file(&dest); // break any hardlink to the store
+            let _ = std::fs::write(&dest, &bytes);
+        }
+    }
 }
 
 /// Download a tarball with up to `MAX_RETRIES` retries and exponential backoff.
@@ -823,8 +1274,80 @@ pub async fn install_from_manifest(
         );
     }
 
+    record_install_hash(project_root);
     println!();
     println!("✓ All dependencies installed.");
+    Ok(())
+}
+
+/// Install every entry in `package.json`'s `configDependencies` map into
+/// `.3va/config-deps/{name}@{version}/` — for build tooling to read, never
+/// linked into `node_modules`, never on any module-resolution path, so
+/// there is no execution surface here at all. Not transitive: each entry
+/// is fetched and stored exactly as requested, same as a normal install,
+/// just parked in a side store instead of `node_modules`.
+pub async fn install_config_deps(
+    project_root: &Path,
+    allow_net: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let pkg_json = project_root.join("package.json");
+    let content = std::fs::read_to_string(&pkg_json).unwrap_or_default();
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+    let Some(deps) = val["configDependencies"].as_object() else {
+        println!("Nothing to install — package.json has no configDependencies.");
+        return Ok(());
+    };
+    if deps.is_empty() {
+        println!("Nothing to install — package.json has no configDependencies.");
+        return Ok(());
+    }
+
+    let allowed_host = match allow_net {
+        None => anyhow::bail!("Network access denied: --allow-net not specified"),
+        Some(hosts) => hosts.first().map(|s| s.as_str()).unwrap_or("").to_string(),
+    };
+    let registry = Registry::from_allowed_host(&allowed_host);
+    let reg_name = registry.display_name().to_string();
+    let base_url = registry.base_url().to_string();
+    let client = reqwest::Client::builder().gzip(true).build()?;
+    let global_store = ContentStore::global();
+    let verifier = SignatureVerifier::sha512();
+    let config_deps_root = project_root.join(".3va").join("config-deps");
+
+    for (name, range) in deps {
+        let Some(range) = range.as_str() else {
+            continue;
+        };
+        let (info, _deps) = match &registry {
+            Registry::Jsr => lookup_jsr_with_deps(&client, name, range).await?,
+            Registry::Npm | Registry::Yarn | Registry::Custom(_) => {
+                lookup_npm_version(&client, &base_url, name, range).await?
+            }
+        };
+        let ver = select_best_version(&info.versions, range, info.latest.as_deref());
+        let Some(meta) = info.version_meta.get(&ver) else {
+            anyhow::bail!("No version of '{}' satisfies '{}'", name, range);
+        };
+
+        if !global_store.is_cached(&reg_name, name, &ver) {
+            let bytes = download_tarball_with_client(&client, &meta.tarball).await?;
+            if let Some(int_hash) = &meta.integrity
+                && matches!(
+                    verifier.verify_from_registry(&bytes, Some(int_hash)),
+                    VerificationStatus::Mismatch | VerificationStatus::Failed(_)
+                )
+            {
+                anyhow::bail!("Integrity check failed for {}@{}", name, ver);
+            }
+            global_store.store_tarball(&bytes, &reg_name, name, &ver)?;
+        }
+
+        global_store.link_config_dep(&reg_name, name, &ver, &config_deps_root)?;
+        println!("  ✓ {}@{} (config-only)", name, ver);
+    }
+
+    println!();
+    println!("✓ All config dependencies installed.");
     Ok(())
 }
 
@@ -892,6 +1415,39 @@ async fn install_with_transitive(
     let mut resolved: Map<String, (String, String, Option<String>)> = Map::new();
     let mut visited: HashSet<String> = HashSet::new();
 
+    let manifest_val: Option<serde_json::Value> =
+        std::fs::read_to_string(project_root.join("package.json"))
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok());
+
+    // `overrides` (npm) / `resolutions` (Yarn): forces a package's resolved
+    // version range regardless of what any dependent requested. Same
+    // precedence as npm — an override always wins for the whole install,
+    // since this resolver already keeps a single flat version per name.
+    let overrides: Map<String, String> = manifest_val
+        .as_ref()
+        .and_then(|val| {
+            ["overrides", "resolutions"]
+                .into_iter()
+                .find_map(|key| val[key].as_object().cloned())
+        })
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // `--node-linker=hoisted` (env var set by the CLI flag) or the
+    // project's own `"3va": {"nodeLinker": "hoisted"}` manifest key selects
+    // a flat top-level node_modules instead of the isolated CAS/symlink
+    // layout. Isolated stays the default either way.
+    let hoisted = std::env::var("_3VA_NODE_LINKER").as_deref() == Ok("hoisted")
+        || manifest_val
+            .as_ref()
+            .and_then(|val| val["3va"]["nodeLinker"].as_str())
+            == Some("hoisted");
+
     // Start with the root package
     let (root_name, root_requested_ver) = parse_package_spec(root_spec)?;
     let mut current_wave: Vec<(String, Option<String>)> =
@@ -905,6 +1461,10 @@ async fn install_with_transitive(
         let wave: Vec<(String, Option<String>)> = current_wave
             .drain(..)
             .filter(|(name, _)| !visited.contains(name.as_str()))
+            .map(|(name, ver)| {
+                let ver = apply_override(&overrides, &name, ver);
+                (name, ver)
+            })
             .collect();
 
         if wave.is_empty() {
@@ -940,14 +1500,9 @@ async fn install_with_transitive(
                             (ver.to_string(), tarball, None)
                         });
                     }
-                    if let Some(deps) = val["dependencies"].as_object() {
-                        for (dep_name, dep_ver) in deps {
-                            if !visited.contains(dep_name.as_str()) {
-                                current_wave.push((
-                                    dep_name.clone(),
-                                    dep_ver.as_str().map(|s| s.to_string()),
-                                ));
-                            }
+                    for (dep_name, dep_range) in collect_dep_specs(&val) {
+                        if !visited.contains(dep_name.as_str()) {
+                            current_wave.push((dep_name, Some(dep_range)));
                         }
                     }
                 }
@@ -1004,13 +1559,10 @@ async fn install_with_transitive(
                     if dest.join("package.json").exists()
                         && let Ok(content) = std::fs::read_to_string(dest.join("package.json"))
                         && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
-                        && let Some(deps) = val["dependencies"].as_object()
                     {
-                        for (dep_name, dep_ver) in deps {
+                        for (dep_name, dep_range) in collect_dep_specs(&val) {
                             if !visited.contains(dep_name.as_str()) {
-                                next_wave_deps
-                                    .entry(dep_name.clone())
-                                    .or_insert_with(|| dep_ver.as_str().unwrap_or("*").to_string());
+                                next_wave_deps.entry(dep_name).or_insert(dep_range);
                             }
                         }
                     }
@@ -1071,6 +1623,8 @@ async fn install_with_transitive(
         std::fs::create_dir_all(&cache_dir)?;
         let node_modules = project_root.join("node_modules");
         std::fs::create_dir_all(&node_modules)?;
+        let zero_install_on = zero_install_cache_enabled(manifest_val.as_ref());
+        let project_root_owned = project_root.to_path_buf();
 
         #[allow(clippy::type_complexity)]
         let mut dl_set: JoinSet<(
@@ -1085,9 +1639,17 @@ async fn install_with_transitive(
             let cached_path = cache_dir.join(format!("{}-{}.tgz", safe_pkg, ver));
             let gs = global_store.clone();
             let rn = reg_name.clone();
+            let root = project_root_owned.clone();
 
             dl_set.spawn(async move {
                 let result = async {
+                    // Zero-install cache: committed, hash-verified — checked
+                    // before any network call, including the global store.
+                    if zero_install_on
+                        && let Some(bytes) = read_zero_install_cache(&root, &pkg_name, &ver)
+                    {
+                        return Ok((bytes, integrity));
+                    }
                     // Check global store first (zero network)
                     if gs.is_cached(&rn, &pkg_name, &ver) {
                         return Ok((Vec::new(), integrity));
@@ -1134,19 +1696,24 @@ async fn install_with_transitive(
                         }
                         // Store globally
                         let _ = global_store.store_tarball(&bytes, &reg_name, &pkg_name, &ver);
+                        if zero_install_on && let Some(int_hash) = &integrity {
+                            write_zero_install_cache(
+                                project_root,
+                                &pkg_name,
+                                &ver,
+                                &bytes,
+                                int_hash,
+                            );
+                        }
                         bytes
                     };
 
-                    // Link into per-project virtual store
-                    let virtual_path = match global_store.link_to_virtual_store(
-                        &reg_name,
-                        &pkg_name,
-                        &ver,
-                        &node_modules,
-                    ) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            // If store link fails (bytes not in store), extract directly
+                    // Link into node_modules — hoisted (flat copy/hardlink) or
+                    // isolated (CAS + symlink, the default).
+                    if hoisted {
+                        if let Err(e) =
+                            global_store.link_hoisted(&reg_name, &pkg_name, &ver, &node_modules)
+                        {
                             let dest = node_modules.join(&pkg_name);
                             if !final_bytes.is_empty() {
                                 if let Err(e2) = extract_tarball(&final_bytes, &dest) {
@@ -1154,24 +1721,54 @@ async fn install_with_transitive(
                                         "Extract failed for {}@{}: {}",
                                         pkg_name, ver, e2
                                     ));
+                                    continue;
                                 }
                             } else {
                                 errors.push(format!(
                                     "Store link failed for {}@{}: {}",
                                     pkg_name, ver, e
                                 ));
+                                continue;
                             }
-                            println!("  ✓ {}@{}", pkg_name, ver);
+                        }
+                    } else {
+                        let virtual_path = match global_store.link_to_virtual_store(
+                            &reg_name,
+                            &pkg_name,
+                            &ver,
+                            &node_modules,
+                        ) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                // If store link fails (bytes not in store), extract directly
+                                let dest = node_modules.join(&pkg_name);
+                                if !final_bytes.is_empty() {
+                                    if let Err(e2) = extract_tarball(&final_bytes, &dest) {
+                                        errors.push(format!(
+                                            "Extract failed for {}@{}: {}",
+                                            pkg_name, ver, e2
+                                        ));
+                                    }
+                                } else {
+                                    errors.push(format!(
+                                        "Store link failed for {}@{}: {}",
+                                        pkg_name, ver, e
+                                    ));
+                                }
+                                println!("  ✓ {}@{}", pkg_name, ver);
+                                continue;
+                            }
+                        };
+
+                        if let Err(e) =
+                            create_virtual_symlink(&pkg_name, &ver, &node_modules, &virtual_path)
+                        {
+                            errors.push(format!("Symlink failed for {}@{}: {}", pkg_name, ver, e));
                             continue;
                         }
-                    };
-
-                    if let Err(e) =
-                        create_virtual_symlink(&pkg_name, &ver, &node_modules, &virtual_path)
-                    {
-                        errors.push(format!("Symlink failed for {}@{}: {}", pkg_name, ver, e));
-                        continue;
                     }
+
+                    apply_patch_if_present(project_root, &node_modules, &pkg_name, &ver);
 
                     // ── Lifecycle scripts (postinstall / install) ─────────────────
                     // Security: blocked by default; opt-in via 3VA_ALLOW_SCRIPTS=1
@@ -1320,6 +1917,7 @@ fn update_manifest_only(root_spec: &str, project_root: &Path) -> anyhow::Result<
         &pkg_json_path,
         serde_json::to_string_pretty(&manifest)? + "\n",
     )?;
+    record_install_hash(project_root);
 
     Ok(())
 }
@@ -1376,6 +1974,108 @@ fn read_package_version(pkg_dir: &Path) -> String {
     } else {
         "unknown".to_string()
     }
+}
+
+/// One row of `3va licenses`: package name, resolved version, license
+/// identifier (or "UNKNOWN" if the package declares none).
+pub struct PackageLicense {
+    pub name: String,
+    pub version: String,
+    pub license: String,
+}
+
+/// List the license of every installed package, read straight from each
+/// package's own `package.json` in `node_modules/` — no new fetch, no
+/// license metadata cached anywhere else.
+pub fn list_licenses() -> anyhow::Result<Vec<PackageLicense>> {
+    let node_modules = PathBuf::from("node_modules");
+    if !node_modules.exists() {
+        anyhow::bail!("node_modules/ not found. Run '3va install' first.");
+    }
+
+    let installed = collect_installed(&node_modules)?;
+    Ok(installed
+        .into_iter()
+        .map(|(name, version, _registry)| {
+            let license = read_package_license(&node_modules.join(&name));
+            PackageLicense {
+                name,
+                version,
+                license,
+            }
+        })
+        .collect())
+}
+
+fn read_package_license(pkg_dir: &Path) -> String {
+    let pkg_json = pkg_dir.join("package.json");
+    let Ok(content) = std::fs::read_to_string(&pkg_json) else {
+        return "UNKNOWN".to_string();
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return "UNKNOWN".to_string();
+    };
+    // Modern packages use a "license" string (SPDX id). Older packages used
+    // a "licenses" array of {type, url} objects — join those if present.
+    if let Some(s) = val["license"].as_str() {
+        return s.to_string();
+    }
+    if let Some(obj) = val["license"].as_object()
+        && let Some(t) = obj["type"].as_str()
+    {
+        return t.to_string();
+    }
+    if let Some(arr) = val["licenses"].as_array() {
+        let types: Vec<&str> = arr.iter().filter_map(|l| l["type"].as_str()).collect();
+        if !types.is_empty() {
+            return types.join(" OR ");
+        }
+    }
+    "UNKNOWN".to_string()
+}
+
+/// Build a CycloneDX 1.5 SBOM (as JSON) from the resolved lockfile. Pure
+/// data transform — no network, no re-resolution.
+pub fn generate_sbom(lockfile: &Lockfile) -> serde_json::Value {
+    let components: Vec<serde_json::Value> = lockfile
+        .dependencies
+        .iter()
+        .map(|(name, dep)| {
+            let purl = format!("pkg:npm/{}@{}", name, dep.version);
+            let mut component = serde_json::json!({
+                "type": "library",
+                "name": name,
+                "version": dep.version,
+                "purl": purl,
+            });
+            if let Some(integrity) = &dep.integrity
+                && let Some((alg, hash)) = integrity.split_once('-')
+            {
+                let alg = match alg {
+                    "sha512" => "SHA-512",
+                    "sha256" => "SHA-256",
+                    "sha1" => "SHA-1",
+                    other => other,
+                };
+                component["hashes"] = serde_json::json!([{"alg": alg, "content": hash}]);
+            }
+            component
+        })
+        .collect();
+
+    serde_json::json!({
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "application",
+                "name": lockfile.name,
+                "version": lockfile.version,
+            }
+        },
+        "components": components,
+    })
 }
 
 pub fn audit_packages() -> anyhow::Result<bool> {
@@ -2215,4 +2915,475 @@ pub fn store_status() {
         println!("  Every project sharing a package version reads the same bytes from disk.");
     }
     println!();
+}
+
+/// `overrides`/`resolutions` always win over whatever version range a
+/// dependent requested — same precedence npm uses.
+fn apply_override(
+    overrides: &std::collections::HashMap<String, String>,
+    name: &str,
+    requested: Option<String>,
+) -> Option<String> {
+    overrides.get(name).cloned().or(requested)
+}
+
+#[cfg(test)]
+mod auto_install_tests {
+    use super::{manifest_dep_hash, needs_install, record_install_hash};
+
+    fn write_pkg(dir: &std::path::Path, body: &str) {
+        std::fs::write(dir.join("package.json"), body).unwrap();
+    }
+
+    #[test]
+    fn hash_ignores_key_order() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        write_pkg(
+            a.path(),
+            r#"{"dependencies":{"a":"1.0.0","b":"2.0.0"},"devDependencies":{}}"#,
+        );
+        write_pkg(
+            b.path(),
+            r#"{"devDependencies":{},"dependencies":{"b":"2.0.0","a":"1.0.0"}}"#,
+        );
+        assert_eq!(manifest_dep_hash(a.path()), manifest_dep_hash(b.path()));
+    }
+
+    #[test]
+    fn hash_ignores_unrelated_fields() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        write_pkg(
+            a.path(),
+            r#"{"name":"x","dependencies":{"lodash":"^4.0.0"}}"#,
+        );
+        write_pkg(
+            b.path(),
+            r#"{"name":"y","version":"9.9.9","dependencies":{"lodash":"^4.0.0"}}"#,
+        );
+        assert_eq!(manifest_dep_hash(a.path()), manifest_dep_hash(b.path()));
+    }
+
+    #[test]
+    fn hash_changes_when_deps_change() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pkg(dir.path(), r#"{"dependencies":{"lodash":"^4.0.0"}}"#);
+        let h1 = manifest_dep_hash(dir.path());
+        write_pkg(dir.path(), r#"{"dependencies":{"lodash":"^4.1.0"}}"#);
+        let h2 = manifest_dep_hash(dir.path());
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn no_package_json_needs_no_install() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!needs_install(dir.path()));
+    }
+
+    #[test]
+    fn missing_node_modules_needs_install() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pkg(dir.path(), r#"{"dependencies":{"lodash":"^4.0.0"}}"#);
+        assert!(needs_install(dir.path()));
+    }
+
+    #[test]
+    fn recorded_hash_matches_current_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pkg(dir.path(), r#"{"dependencies":{"lodash":"^4.0.0"}}"#);
+        record_install_hash(dir.path());
+        assert!(!needs_install(dir.path()));
+    }
+
+    #[test]
+    fn changed_deps_after_install_needs_reinstall() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pkg(dir.path(), r#"{"dependencies":{"lodash":"^4.0.0"}}"#);
+        record_install_hash(dir.path());
+        write_pkg(dir.path(), r#"{"dependencies":{"lodash":"^4.1.0"}}"#);
+        assert!(needs_install(dir.path()));
+    }
+
+    #[test]
+    fn stale_node_modules_without_marker_is_not_nagged() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pkg(dir.path(), r#"{"dependencies":{"lodash":"^4.0.0"}}"#);
+        std::fs::create_dir_all(dir.path().join("node_modules")).unwrap();
+        assert!(!needs_install(dir.path()));
+    }
+}
+
+#[cfg(test)]
+mod dlx_entry_tests {
+    use super::dlx_entry;
+
+    fn write_pkg(body: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), body).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolves_string_bin() {
+        let dir = write_pkg(r#"{"name":"cowsay","bin":"./cli.js"}"#);
+        assert_eq!(dlx_entry(dir.path()).unwrap(), dir.path().join("./cli.js"));
+    }
+
+    #[test]
+    fn resolves_object_bin_matching_package_name() {
+        let dir = write_pkg(r#"{"name":"cowsay","bin":{"cowsay":"./bin/cowsay.js"}}"#);
+        assert_eq!(
+            dlx_entry(dir.path()).unwrap(),
+            dir.path().join("./bin/cowsay.js")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_main_without_bin() {
+        let dir = write_pkg(r#"{"name":"lib-only","main":"./index.js"}"#);
+        assert_eq!(
+            dlx_entry(dir.path()).unwrap(),
+            dir.path().join("./index.js")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_index_js_without_bin_or_main() {
+        let dir = write_pkg(r#"{"name":"bare"}"#);
+        assert_eq!(dlx_entry(dir.path()).unwrap(), dir.path().join("index.js"));
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::{apply_patch_if_present, diff_dirs};
+    use std::path::Path;
+
+    #[test]
+    fn diff_captures_changed_added_and_removed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pristine = tmp.path().join("pristine");
+        let edited = tmp.path().join("edited");
+        let patch_dir = tmp.path().join("patch");
+
+        std::fs::create_dir_all(pristine.join("lib")).unwrap();
+        std::fs::create_dir_all(edited.join("lib")).unwrap();
+
+        std::fs::write(pristine.join("index.js"), "original").unwrap();
+        std::fs::write(edited.join("index.js"), "patched").unwrap();
+
+        std::fs::write(pristine.join("lib/keep.js"), "same").unwrap();
+        std::fs::write(edited.join("lib/keep.js"), "same").unwrap();
+
+        std::fs::write(pristine.join("lib/gone.js"), "bye").unwrap();
+        // edited/lib/gone.js intentionally absent
+
+        std::fs::write(edited.join("new.js"), "brand new").unwrap();
+
+        let mut changed = 0usize;
+        let mut removed = Vec::new();
+        diff_dirs(
+            &pristine,
+            &edited,
+            Path::new(""),
+            &patch_dir,
+            &mut changed,
+            &mut removed,
+        )
+        .unwrap();
+
+        assert_eq!(changed, 2, "index.js changed + new.js added");
+        assert_eq!(
+            std::fs::read_to_string(patch_dir.join("index.js")).unwrap(),
+            "patched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(patch_dir.join("new.js")).unwrap(),
+            "brand new"
+        );
+        assert!(!patch_dir.join("lib/keep.js").exists());
+        assert_eq!(removed, vec!["lib/gone.js".to_string()]);
+    }
+
+    #[test]
+    fn apply_patch_writes_changes_and_removals_without_touching_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let node_modules = project_root.join("node_modules");
+        let installed = node_modules.join("left-pad");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(installed.join("index.js"), "original").unwrap();
+        std::fs::write(installed.join("extra.js"), "will be removed").unwrap();
+
+        let patch_dir = project_root.join("patches").join("left-pad@1.3.0");
+        std::fs::create_dir_all(&patch_dir).unwrap();
+        std::fs::write(patch_dir.join("index.js"), "patched").unwrap();
+        std::fs::write(patch_dir.join(".removed"), "extra.js").unwrap();
+
+        apply_patch_if_present(project_root, &node_modules, "left-pad", "1.3.0");
+
+        assert_eq!(
+            std::fs::read_to_string(installed.join("index.js")).unwrap(),
+            "patched"
+        );
+        assert!(!installed.join("extra.js").exists());
+    }
+
+    #[test]
+    fn no_patch_dir_is_a_silent_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_modules = tmp.path().join("node_modules");
+        std::fs::create_dir_all(node_modules.join("left-pad")).unwrap();
+        // Should not panic when patches/ doesn't exist.
+        apply_patch_if_present(tmp.path(), &node_modules, "left-pad", "1.3.0");
+    }
+}
+
+#[cfg(test)]
+mod zero_install_cache_tests {
+    use super::{read_zero_install_cache, write_zero_install_cache, zero_install_cache_enabled};
+
+    fn sri_sha512(bytes: &[u8]) -> String {
+        use base64::Engine;
+        use sha2::{Digest, Sha512};
+        let mut h = Sha512::new();
+        h.update(bytes);
+        format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(h.finalize())
+        )
+    }
+
+    #[test]
+    fn disabled_by_default() {
+        assert!(!zero_install_cache_enabled(None));
+        let val = serde_json::json!({});
+        assert!(!zero_install_cache_enabled(Some(&val)));
+    }
+
+    #[test]
+    fn enabled_via_manifest_key() {
+        let val = serde_json::json!({"3va": {"zeroInstallCache": true}});
+        assert!(zero_install_cache_enabled(Some(&val)));
+    }
+
+    #[test]
+    fn round_trips_a_verified_tarball() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"fake tarball bytes";
+        let integrity = sri_sha512(bytes);
+
+        write_zero_install_cache(dir.path(), "left-pad", "1.3.0", bytes, &integrity);
+        let restored = read_zero_install_cache(dir.path(), "left-pad", "1.3.0");
+        assert_eq!(restored.as_deref(), Some(bytes.as_slice()));
+    }
+
+    #[test]
+    fn rejects_tampered_cache_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"fake tarball bytes";
+        let integrity = sri_sha512(bytes);
+        write_zero_install_cache(dir.path(), "left-pad", "1.3.0", bytes, &integrity);
+
+        // Tamper with the cached tarball after it was written.
+        let (tgz_path, _) = super::zero_install_cache_paths(dir.path(), "left-pad", "1.3.0");
+        std::fs::write(&tgz_path, b"tampered bytes").unwrap();
+
+        assert!(read_zero_install_cache(dir.path(), "left-pad", "1.3.0").is_none());
+    }
+
+    #[test]
+    fn missing_cache_entry_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_zero_install_cache(dir.path(), "left-pad", "1.3.0").is_none());
+    }
+}
+
+#[cfg(test)]
+mod config_deps_tests {
+    use super::install_config_deps;
+
+    #[tokio::test]
+    async fn no_configdependencies_key_returns_early_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#).unwrap();
+        // No --allow-net given: if this tried to hit the network it would
+        // bail on missing permission instead of returning Ok.
+        install_config_deps(dir.path(), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_configdependencies_returns_early_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","configDependencies":{}}"#,
+        )
+        .unwrap();
+        install_config_deps(dir.path(), None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod peer_dep_tests {
+    use super::collect_dep_specs;
+
+    #[test]
+    fn merges_dependencies_and_peer_dependencies() {
+        let meta = serde_json::json!({
+            "dependencies": {"lodash": "^4.0.0"},
+            "peerDependencies": {"react": "^18.0.0"},
+        });
+        let mut specs = collect_dep_specs(&meta);
+        specs.sort();
+        assert_eq!(
+            specs,
+            vec![
+                ("lodash".to_string(), "^4.0.0".to_string()),
+                ("react".to_string(), "^18.0.0".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_peer_dependencies_is_fine() {
+        let meta = serde_json::json!({"dependencies": {"lodash": "^4.0.0"}});
+        assert_eq!(
+            collect_dep_specs(&meta),
+            vec![("lodash".to_string(), "^4.0.0".to_string())]
+        );
+    }
+}
+
+#[cfg(test)]
+mod sbom_tests {
+    use super::generate_sbom;
+    use crate::lockfile::{Lockfile, LockfileDep, LockfilePackage};
+    use std::collections::HashMap;
+
+    fn sample_lockfile() -> Lockfile {
+        let mut dependencies = HashMap::new();
+        dependencies.insert(
+            "left-pad".to_string(),
+            LockfileDep {
+                version: "1.3.0".to_string(),
+                resolved: Some("https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".into()),
+                integrity: Some("sha512-abc123==".to_string()),
+                dependencies: None,
+                dev: None,
+                registry: None,
+            },
+        );
+        let mut packages = HashMap::new();
+        packages.insert(
+            "".to_string(),
+            LockfilePackage {
+                version: "1.0.0".to_string(),
+                resolved: None,
+                integrity: None,
+                dev: None,
+                registry: None,
+            },
+        );
+        Lockfile {
+            lockfile_version: 1,
+            name: "demo".to_string(),
+            version: "1.0.0".to_string(),
+            packages,
+            dependencies,
+        }
+    }
+
+    #[test]
+    fn emits_cyclonedx_shape() {
+        let bom = generate_sbom(&sample_lockfile());
+        assert_eq!(bom["bomFormat"], "CycloneDX");
+        assert_eq!(bom["specVersion"], "1.5");
+        assert_eq!(bom["metadata"]["component"]["name"], "demo");
+        let components = bom["components"].as_array().unwrap();
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0]["name"], "left-pad");
+        assert_eq!(components[0]["purl"], "pkg:npm/left-pad@1.3.0");
+        assert_eq!(components[0]["hashes"][0]["alg"], "SHA-512");
+        assert_eq!(components[0]["hashes"][0]["content"], "abc123==");
+    }
+}
+
+#[cfg(test)]
+mod license_tests {
+    use super::read_package_license;
+    use std::io::Write;
+
+    fn write_pkg_json(dir: &std::path::Path, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut f = std::fs::File::create(dir.join("package.json")).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn reads_spdx_string_license() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pkg_json(dir.path(), r#"{"license": "MIT"}"#);
+        assert_eq!(read_package_license(dir.path()), "MIT");
+    }
+
+    #[test]
+    fn reads_legacy_license_object() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pkg_json(dir.path(), r#"{"license": {"type": "ISC", "url": "x"}}"#);
+        assert_eq!(read_package_license(dir.path()), "ISC");
+    }
+
+    #[test]
+    fn reads_legacy_licenses_array() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pkg_json(
+            dir.path(),
+            r#"{"licenses": [{"type": "MIT"}, {"type": "Apache-2.0"}]}"#,
+        );
+        assert_eq!(read_package_license(dir.path()), "MIT OR Apache-2.0");
+    }
+
+    #[test]
+    fn missing_package_json_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_package_license(dir.path()), "UNKNOWN");
+    }
+}
+
+#[cfg(test)]
+mod overrides_tests {
+    use super::apply_override;
+    use std::collections::HashMap;
+
+    #[test]
+    fn override_wins_over_requested_range() {
+        let mut overrides = HashMap::new();
+        overrides.insert("left-pad".to_string(), "1.3.0".to_string());
+
+        assert_eq!(
+            apply_override(&overrides, "left-pad", Some("^1.0.0".to_string())),
+            Some("1.3.0".to_string())
+        );
+    }
+
+    #[test]
+    fn requested_range_passes_through_without_override() {
+        let overrides = HashMap::new();
+        assert_eq!(
+            apply_override(&overrides, "left-pad", Some("^1.0.0".to_string())),
+            Some("^1.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn override_applies_even_with_no_requested_range() {
+        let mut overrides = HashMap::new();
+        overrides.insert("left-pad".to_string(), "1.3.0".to_string());
+        assert_eq!(
+            apply_override(&overrides, "left-pad", None),
+            Some("1.3.0".to_string())
+        );
+    }
 }
