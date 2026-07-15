@@ -657,6 +657,84 @@ async fn esm_named_export_import() {
 }
 
 #[tokio::test]
+async fn dynamic_import_from_entry_point_resolves_module_namespace() {
+    let temp = TempDir::new().unwrap();
+
+    std::fs::write(
+        temp.path().join("math.js"),
+        "export function add(a, b) { return a + b; }\nexport default 'math-default';",
+    )
+    .unwrap();
+
+    let entry = temp.path().join("entry.js");
+    std::fs::write(
+        &entry,
+        "import('./math.js').then(function(mod) {\n\
+         globalThis._dyn_sum = mod.add(10, 32);\n\
+         globalThis._dyn_default = mod.default;\n\
+         });",
+    )
+    .unwrap();
+
+    let mut engine = engine_with_read(&temp).await;
+    engine
+        .eval_file(&entry)
+        .await
+        .expect("dynamic import() must not throw ReferenceError for __importAsync");
+
+    let sum = wait_global(&mut engine, "globalThis._dyn_sum").await;
+    assert_eq!(
+        sum, "42",
+        "dynamic import()'d named export must be callable"
+    );
+
+    let default = wait_global(&mut engine, "globalThis._dyn_default").await;
+    assert_eq!(
+        default, "math-default",
+        "dynamic import() must expose .default"
+    );
+}
+
+#[tokio::test]
+async fn dynamic_import_from_required_module_resolves_relative_to_its_own_dir() {
+    let temp = TempDir::new().unwrap();
+    let sub = temp.path().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    // Sibling of sub/loader.js, not of the entry file — proves the dynamic
+    // import resolved relative to the requiring module's own directory.
+    std::fs::write(
+        sub.join("sibling.js"),
+        "export const value = 'from-sibling';",
+    )
+    .unwrap();
+    std::fs::write(
+        sub.join("loader.js"),
+        "module.exports.load = function() {\n\
+         return import('./sibling.js').then(function(mod) { return mod.value; });\n\
+         };",
+    )
+    .unwrap();
+
+    let entry = temp.path().join("entry.js");
+    std::fs::write(
+        &entry,
+        "var loader = require('./sub/loader.js');\n\
+         loader.load().then(function(v) { globalThis._dyn_rel = v; });",
+    )
+    .unwrap();
+
+    let mut engine = engine_with_read(&temp).await;
+    engine
+        .eval_file(&entry)
+        .await
+        .expect("required module's own dynamic import() must resolve");
+
+    let value = wait_global(&mut engine, "globalThis._dyn_rel").await;
+    assert_eq!(value, "from-sibling");
+}
+
+#[tokio::test]
 async fn esm_default_export_import() {
     let temp = TempDir::new().unwrap();
 

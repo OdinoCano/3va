@@ -44,7 +44,28 @@ pub fn source_is_esm(code: &str, path: &str) -> bool {
             || t.starts_with("export ")
             || t.starts_with("export{")
             || t.starts_with("export default")
+            || has_dynamic_import(t)
         {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if `line` contains a bare `import(` call (dynamic import) not
+/// preceded by an identifier character — catches `await import(...)`,
+/// `const x = import(...)`, etc., not just the static `import`/`export`
+/// declarations the line-prefix checks above catch. Without this, a file
+/// using only dynamic import (no static import/export) never gets routed
+/// through transpile_to_cjs, and the transpiler's `import(` → `__importAsync(`
+/// rewrite (which only runs on the ESM path) never fires.
+fn has_dynamic_import(line: &str) -> bool {
+    if let Some(pos) = line.find("import(") {
+        let before_ok = pos == 0 || {
+            let prev = line.as_bytes()[pos - 1];
+            !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'$')
+        };
+        if before_ok {
             return true;
         }
     }
@@ -311,8 +332,22 @@ mod tests {
     }
 
     #[test]
-    fn import_inside_function_body_is_not_top_level_esm() {
+    fn dynamic_import_inside_function_body_still_needs_esm_transpile() {
+        // Unlike static import/export (spec-required to be top-level),
+        // dynamic import() is valid anywhere an expression is — but it still
+        // must route through transpile_to_cjs so the `import(` ->
+        // `__importAsync(` rewrite fires; otherwise it reaches V8 as
+        // unsupported native dynamic import and throws.
         let src = "function load() { return import('x'); }\nmodule.exports = load;\n";
+        assert!(source_is_esm(src, "index.js"));
+    }
+
+    #[test]
+    fn identifier_ending_in_import_is_not_treated_as_dynamic_import() {
+        // "doimport(" contains the substring "import(" but is preceded by
+        // an identifier char ('o'), so the boundary check in
+        // has_dynamic_import must reject it.
+        let src = "function doimport(x) { return x; }\nmodule.exports = doimport;\n";
         assert!(!source_is_esm(src, "index.js"));
     }
 

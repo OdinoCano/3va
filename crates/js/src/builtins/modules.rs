@@ -2685,6 +2685,29 @@ pub fn inject_require(
             return specifier.indexOf('node:') === 0 ? specifier.slice(5) : specifier;
         }
 
+        // Backs transpiled dynamic `import(x)` calls: static_esm_to_cjs (Rust
+        // side) only rewrites *declarations* (`import x from 'y'`), since
+        // `import(x)` is an expression; the transpiler instead rewrites it to
+        // `__importAsync(x)`, resolved here to a Promise of the same object
+        // require(x) would return, with `.default` guaranteed present — the
+        // async equivalent of the `.default` unwrap static default-imports
+        // already get in convert_import() (transpiler.rs).
+        function __makeImportAsync(requireFn) {
+            return function(specifier) {
+                return new Promise(function(resolve, reject) {
+                    try {
+                        var mod = requireFn(specifier);
+                        if (mod && typeof mod === 'object' && mod.default === undefined) {
+                            mod = Object.assign({}, mod, { default: mod });
+                        }
+                        resolve(mod);
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+            };
+        }
+
         // Package-level permission scoping (package.json["3va"].permissions.<name>) ──
         // Extracts the innermost node_modules package name from a directory
         // path, e.g. ".../node_modules/express/lib" -> "express",
@@ -2804,6 +2827,10 @@ pub fn inject_require(
             var localRequire = function(id) { return requireFrom(id, moduleDir); };
             localRequire.resolve = function(id) { return __requireResolve(id, moduleDir); };
             localRequire.cache = globalThis.__loadedModules;
+            // Backs this module's own transpiled dynamic `import(x)` calls —
+            // must resolve relative to *this* module's directory via
+            // localRequire, not the entry script's, same as require() above.
+            var localImportAsync = __makeImportAsync(localRequire);
 
             var source = __readFile(resolved);
             try {
@@ -2816,8 +2843,8 @@ pub fn inject_require(
                 var ownMetaUrl = /^[A-Za-z]:[\\/]/.test(resolved)
                     ? 'file:///' + resolved.replace(/\\/g, '/')
                     : 'file://' + resolved;
-                var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', source);
-                fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl);
+                var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', '__importAsync', source);
+                fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl, localImportAsync);
             } catch (e) {
                 delete globalThis.__loadedModules[resolved];
                 throw e;
@@ -2843,6 +2870,13 @@ pub fn inject_require(
             return globalThis.__vvva_require_resolve_from(specifier, globalThis.__dirname || undefined);
         };
         globalThis.require.main = globalThis.require.main || undefined;
+
+        // Entry-point script's own transpiled dynamic `import(x)` calls —
+        // required modules get their own per-directory version instead (see
+        // localImportAsync in requireFrom), passed as a shadowing parameter.
+        globalThis.__importAsync = __makeImportAsync(function(specifier) {
+            return requireFrom(specifier, globalThis.__dirname || undefined);
+        });
     })();
     "#;
     let require_source = V8String::new(scope, require_js).unwrap();
