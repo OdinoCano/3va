@@ -509,7 +509,27 @@ fn is_esm_source(code: &str) -> bool {
             || trimmed.starts_with("export ")
             || trimmed.starts_with("export{")
             || trimmed.starts_with("export default")
+            || has_dynamic_import(trimmed)
         {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if `line` contains a bare `import(` call (dynamic import) not
+/// preceded by an identifier character — see the matching helper in
+/// `esm.rs` for why this is needed: without it, a file using only dynamic
+/// `import()` (no static import/export) never gets routed through
+/// transpile_to_cjs, so the transpiler's `import(` → `__importAsync(`
+/// rewrite never fires and V8 chokes on unsupported native dynamic import.
+fn has_dynamic_import(line: &str) -> bool {
+    if let Some(pos) = line.find("import(") {
+        let before_ok = pos == 0 || {
+            let prev = line.as_bytes()[pos - 1];
+            !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'$')
+        };
+        if before_ok {
             return true;
         }
     }
