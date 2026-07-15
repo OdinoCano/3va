@@ -9,7 +9,9 @@ review: it is a request for maintainer sign-off, not an implementation plan.
 Nothing in Phase C should be coded until the open questions below are
 answered and this doc (or a follow-up) records the decision.
 
-Status: **unreviewed — do not implement against this doc yet.**
+Status: **reviewed — see § 7.5 for per-item verdicts. 7.1 may proceed under
+the stated conditions; 7.2 is blocked; 7.3 is technically unblocked but
+deprioritized pending a real use case.**
 
 ---
 
@@ -242,3 +244,69 @@ risk relative to the original draft of this review. 7.2 (self-versioning)
 still has the least-resolved open question of the three: the release
 signing/key-management decision in §7.2 is explicitly out of scope for this
 review to decide and blocks implementation regardless of sequencing.
+
+---
+
+## 7.5 Maintainer verdicts
+
+### 7.1 Hooks — **approved, conditionally**
+The design is sound and the invariant (root-manifest-only) is enforceable
+with the fixes already listed. But the open questions in § 7.1 aren't
+optional polish — they're the actual gate, and I'm answering them here
+rather than leaving them open:
+
+1. **Opt-in is mandatory, not a nice-to-have.** 3va disables lifecycle
+   scripts by default specifically because "install-time code runs without
+   the user deciding that, right now, is when they want it to run" is the
+   exact failure mode this project exists to close. Merely declaring a
+   `hooks` key must not be sufficient for it to fire — the first run after a
+   `hooks` key is added or changed must interactively confirm (same pattern
+   as the auto-install prompt in [06 § 6.3](06-pm-feature-parity.md)), and
+   `--no-prompt`/non-interactive contexts must skip execution with a warning,
+   never silently run it. This is the single condition I'd block a PR on.
+2. **Audit logging is mandatory, not "probably."** Force `AuditLog` on for
+   any hook invocation, unconditionally — no flag to disable it. A hook is
+   unattended code execution at install time; that's precisely what audit
+   logging is for.
+3. **Default capability set is narrower than `3va run`'s.** A hook gets
+   whatever the *root* `package.json["3va"].permissions` grants, same as any
+   other root-scope code — but `SpawnProcess` and `FFI` must require an
+   *additional*, explicit `"3va": {"hooks": {"allowProcess": true}}`-style
+   opt-in beyond the general permissions block. Reasoning: getting a
+   malicious `hooks` entry merged into a project's own `package.json`
+   (via a compromised contributor account, a sloppily-reviewed PR, etc.) is
+   a lower bar than getting a malicious *dependency* into the graph, so the
+   ceiling on what a hook can do by default should be lower too, not equal
+   to what an explicitly-invoked `3va run` gets.
+
+Before merge: the two tests named in § 7.1 (nested-manifest-never-read,
+hook-require-scope-isolation) must exist and be named clearly enough that a
+future refactor can't silently break either invariant without a red test.
+
+### 7.2 Self-versioning — **blocked, not a "no"**
+Not approved for implementation. This isn't a technical gap this review can
+close — it's an infrastructure decision (who holds a release-signing key,
+how it's rotated, whether GitHub Actions OIDC / sigstore / a hardware key is
+the answer) that has to be made by whoever actually operates the release
+pipeline, not decided in a design doc. Building `3va self update` against
+"verify the hash the download server happens to return" would ship a
+feature whose entire security property is cosmetic. Revisit once a signing
+mechanism exists as infrastructure, independent of this feature.
+
+### 7.3 Plug'n'Play — **technically unblocked, product-deprioritized**
+The scoping risk that made this the highest-risk item is resolved: there is
+exactly one path-based scope-inference site (`__pkgScopeFor`) to give a
+PnP-aware equivalent, not an open-ended audit. If this gets built, build it
+per § 7.3 with that fix landing in the same PR as PnP itself, not after.
+
+But I'd push back on building it at all right now, separate from the
+security question — this is a YAGNI call, not a safety one. 3va already
+ships two working linker modes (isolated CAS, hoisted) from Phase A. PnP's
+historical value proposition (Yarn) is resolver startup latency on very
+large monorepos; nothing in this project's usage so far indicates that's a
+real bottleneck for 3va users, and no existing tooling in the 3va ecosystem
+expects `.pnp.json` the way the Node/Yarn ecosystem expects `.pnp.cjs`. I'd
+defer this until a concrete user complaint or benchmark motivates it, rather
+than build speculative resolver complexity because the roadmap listed it.
+Keeping § 7.3's finding on record means the eventual work, if it happens, 
+starts from a solved security question instead of an open one.
