@@ -1,0 +1,9 @@
+{
+  "firewall": {
+    "enabled": true,
+    "rateLimitRps": 1000000,
+    "rateLimitBurst": 1000000,
+    "maxConnectionsPerIp": 5000,
+    "maxConnectionsTotal": 20000
+  }
+}

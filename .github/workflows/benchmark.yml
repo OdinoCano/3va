@@ -1,0 +1,54 @@
+name: Benchmark
+
+# Runs bench/run.sh and publishes the result table to the job summary.
+#
+# GitHub-hosted runners are noisier and weaker than a dedicated machine, so
+# treat these numbers as regression signal against previous runs of this
+# workflow, not as the headline figures for the README — see bench/README.md
+# for the reference run those figures are backed by.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Run benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install benchmark tools
+        run: cargo install hyperfine oha --locked
+
+      - name: Build 3va (release)
+        run: cargo build --release -p vvva_cli
+
+      - name: Run benchmarks
+        run: |
+          {
+            echo "# Benchmark results"
+            echo
+            echo "Runner: $(nproc) vCPU, $(free -h | awk '/Mem:/ {print $2}') RAM, $(uname -r)"
+            echo "Commit: \`${{ github.sha }}\`"
+            echo
+            bash bench/run.sh
+          } | tee "$GITHUB_STEP_SUMMARY"
