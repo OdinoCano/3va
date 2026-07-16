@@ -158,9 +158,13 @@ jobs:
             npm publish dist/npm/hub --access public --provenance
           fi
 
-  # ── Update Formula/ and bucket/ in this repo ─────────────────────────────────
+  # ── Update Formula/, bucket/, dist/nix/, dist/homebrew/, dist/chocolatey/ ─────
+  # in this repo. These four manifests are the ones this repo hand-maintains
+  # between releases (see docs/CHANGELOG.md's "2.4.0" entry for the winget/
+  # nix/homebrew "vv" URL and PackageVersion-placeholder bugs that motivated
+  # wiring this job up properly instead of leaving them stale by hand).
   update-homebrew-and-scoop:
-    name: Update Formula and Scoop manifest
+    name: Update Formula, Scoop, Nix, and Chocolatey VERIFICATION manifests
     needs: collect-hashes
     runs-on: ubuntu-latest
     steps:
@@ -168,6 +172,22 @@ jobs:
         with:
           # Use the built-in token — no extra secrets needed.
           token: ${{ github.token }}
+
+      - name: Compute homebrew-core source tarball hash
+        id: source_hash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ env.VERSION }}
+        run: |
+          [[ "$VER" != v* ]] && VER="v${VER}"
+          # dist/homebrew/Formula/3va.rb builds from source (the
+          # homebrew-core-style formula, distinct from the precompiled-binary
+          # Formula/3va.rb above) — it needs the GitHub-generated source
+          # archive's hash, which collect-hashes doesn't have since that job
+          # only covers the compiled release binaries.
+          curl -sL "https://github.com/OdinoCano/3va/archive/refs/tags/${VER}.tar.gz" -o source.tar.gz
+          echo "hash=$(sha256sum source.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          rm -f source.tar.gz
 
       - name: Generate Formula/3va.rb
         env:
@@ -256,13 +276,159 @@ jobs:
           }
           JSON
 
+      - name: Generate dist/homebrew/Formula/3va.rb
+        env:
+          SOURCE_HASH: ${{ steps.source_hash.outputs.hash }}
+          VER: ${{ env.VERSION }}
+        run: |
+          [[ "$VER" != v* ]] && VER="v${VER}"
+          cat > dist/homebrew/Formula/3va.rb <<FORMULA
+          class ThreeVa < Formula
+            desc "Secure-by-default JavaScript and TypeScript runtime"
+            homepage "https://github.com/OdinoCano/3va"
+            url "https://github.com/OdinoCano/3va/archive/refs/tags/${VER}.tar.gz"
+            sha256 "${SOURCE_HASH}"
+            license "MIT"
+
+            depends_on "pkgconf" => :build
+            depends_on "rust" => :build
+
+            uses_from_macos "zlib"
+
+            def install
+              system "cargo", "install", *std_cargo_args(path: "crates/cli")
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/3va --version")
+            end
+          end
+          FORMULA
+
+      - name: Generate dist/nix/default.nix
+        env:
+          LINUX_X64:    ${{ needs.collect-hashes.outputs.linux_x64 }}
+          LINUX_ARM64:  ${{ needs.collect-hashes.outputs.linux_arm64 }}
+          DARWIN_X64:   ${{ needs.collect-hashes.outputs.darwin_x64 }}
+          DARWIN_ARM64: ${{ needs.collect-hashes.outputs.darwin_arm64 }}
+          VER: ${{ env.VERSION }}
+        run: |
+          [[ "$VER" != v* ]] && VER="v${VER}"
+          VER_BARE="${VER#v}"
+          # `version` is intentionally bare (no "v" prefix): the URL
+          # templates below add their own "v${version}" — a version string
+          # that already had "v" baked in previously produced double-"vv"
+          # URLs that 404'd (see docs/CHANGELOG.md's 2.4.0 entry).
+          cat > dist/nix/default.nix <<NIX
+          { lib, stdenv, fetchurl, autoPatchelfHook }:
+
+          let
+            version = "${VER_BARE}";
+            pname   = "three-va";
+
+            assets = {
+              "x86_64-linux" = {
+                url    = "https://github.com/OdinoCano/3va/releases/download/v\${version}/3va-v\${version}-x86_64-unknown-linux-gnu.tar.gz";
+                sha256 = "${LINUX_X64}";
+              };
+              "aarch64-linux" = {
+                url    = "https://github.com/OdinoCano/3va/releases/download/v\${version}/3va-v\${version}-aarch64-unknown-linux-gnu.tar.gz";
+                sha256 = "${LINUX_ARM64}";
+              };
+              "x86_64-darwin" = {
+                url    = "https://github.com/OdinoCano/3va/releases/download/v\${version}/3va-v\${version}-x86_64-apple-darwin.tar.gz";
+                sha256 = "${DARWIN_X64}";
+              };
+              "aarch64-darwin" = {
+                url    = "https://github.com/OdinoCano/3va/releases/download/v\${version}/3va-v\${version}-aarch64-apple-darwin.tar.gz";
+                sha256 = "${DARWIN_ARM64}";
+              };
+            };
+
+            system = stdenv.hostPlatform.system;
+            asset  = assets.\${system} or (throw "3va: unsupported system \${system}");
+
+          in stdenv.mkDerivation {
+            inherit pname version;
+
+            src = fetchurl {
+              inherit (asset) url sha256;
+            };
+
+            nativeBuildInputs = lib.optionals stdenv.isLinux [ autoPatchelfHook ];
+
+            # The archive contains only the bare \`3va\` binary.
+            unpackPhase = ''
+              tar xzf \$src
+            '';
+
+            installPhase = ''
+              install -Dm755 3va \$out/bin/3va
+            '';
+
+            meta = {
+              description = "Secure-by-default JavaScript and TypeScript runtime. Deny-by-default permissions, no pm2 needed, post-install scripts blocked unconditionally.";
+              homepage    = "https://github.com/OdinoCano/3va";
+              license     = lib.licenses.mit;
+              maintainers = [];
+              platforms   = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+              mainProgram = "3va";
+            };
+          }
+          NIX
+
+      - name: Generate dist/chocolatey/VERIFICATION.txt
+        env:
+          WINDOWS_X64: ${{ needs.collect-hashes.outputs.windows_x64 }}
+          VER: ${{ env.VERSION }}
+        run: |
+          [[ "$VER" != v* ]] && VER="v${VER}"
+          VER_BARE="${VER#v}"
+          # Full regeneration, not a sed patch: this is prose with several
+          # version-bearing substrings on the same lines (e.g. a version
+          # number that itself contains dots breaks naive `[^.]*`-style sed
+          # patterns — hit exactly that bug once already, see
+          # docs/CHANGELOG.md's 2.4.0 entry).
+          cat > dist/chocolatey/VERIFICATION.txt <<VERIFICATION_TXT_EOF
+          VERIFICATION
+          Verification is intended to assist the Chocolatey moderators and community
+          in verifying that this package's contents are trustworthy.
+
+          Package: 3va
+          Version: ${VER_BARE}
+
+          The binary distributed by this package is built by the upstream CI pipeline
+          (GitHub Actions) from the source code at:
+
+            https://github.com/OdinoCano/3va
+
+          The canonical download location is the GitHub Release page:
+
+            https://github.com/OdinoCano/3va/releases/tag/${VER}
+
+          File: 3va-${VER}-x86_64-pc-windows-msvc.zip
+
+          1. Visit https://github.com/OdinoCano/3va/releases/download/${VER}/3va-${VER}-x86_64-pc-windows-msvc.zip
+          2. Download the file.
+          3. Verify SHA256:
+               PowerShell: (Get-FileHash '.\3va-${VER}-x86_64-pc-windows-msvc.zip' -Algorithm SHA256).Hash
+             Expected:    ${WINDOWS_X64}
+
+          The SHA256 is also published alongside each release asset as
+            3va-${VER}-x86_64-pc-windows-msvc.zip.sha256
+          at the same GitHub Releases URL.
+
+          License: MIT
+          License URL: https://github.com/OdinoCano/3va/blob/main/LICENSE
+          VERIFICATION_TXT_EOF
+
       - name: Commit and push
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/3va.rb bucket/3va.json
+          git add Formula/3va.rb bucket/3va.json dist/homebrew/Formula/3va.rb dist/nix/default.nix dist/chocolatey/VERIFICATION.txt
           git diff --cached --quiet && exit 0
-          git commit -m "chore: update Formula and Scoop manifest for ${{ env.VERSION }}"
+          git commit -m "chore: update Formula, Scoop, Nix, and Chocolatey VERIFICATION manifests for ${{ env.VERSION }}"
           git push origin HEAD:main
 
   # ── Publish to Chocolatey ────────────────────────────────────────────────────
