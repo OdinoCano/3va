@@ -11,6 +11,11 @@ fn set_fn(
     obj.set(scope, key, func.into());
 }
 
+// `libc::gethostname` is POSIX-only — the `libc` crate doesn't bind it on
+// Windows at all (it's not a winsock function), so a single shared
+// implementation doesn't compile there. Windows always sets COMPUTERNAME
+// for the current session, so there's no need for a raw FFI call at all.
+#[cfg(unix)]
 fn hostname() -> String {
     unsafe {
         let mut buf = [0u8; 256];
@@ -20,6 +25,11 @@ fn hostname() -> String {
         }
     }
     "localhost".to_string()
+}
+
+#[cfg(windows)]
+fn hostname() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string())
 }
 
 #[cfg(target_os = "linux")]
