@@ -8,7 +8,7 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
         // ── self and navigator ──────────────────────────────────────────────────
         globalThis.self = globalThis;
         globalThis.navigator = {
-            userAgent: '3va/2.1.3',
+            userAgent: '3va/2.4.0',
             onLine: true,
         };
 

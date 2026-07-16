@@ -7,6 +7,82 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+## [v2.4.0] — 2026-07-16
+
+### Added
+
+- **PM feature-parity roadmap, Phase A** (`docs/12-roadmap/06-pm-feature-parity.md`): overrides/
+  resolutions (`package.json["overrides"/"resolutions"]`, applied in `install_with_transitive`'s
+  BFS wave dedup — an override wins for the whole install since the resolver already keeps one
+  flat version per name); `3va licenses` (reads each installed package's own `license`/`licenses`
+  field, no new fetch); `3va sbom` (CycloneDX 1.5 JSON generated straight from the lockfile, zero
+  network); peer-dependency autoinstall (`peerDependencies` now flow through the same BFS as
+  regular deps, same `--allow-net` grant, no new prompt); `--node-linker=hoisted` (flat
+  copy/hardlink into `node_modules` instead of the isolated CAS+symlink layout — isolated stays
+  default); `configDependencies` (installed into `.3va/config-deps/`, never linked into
+  `node_modules`, no execution path at all). (`crates/pm/src/lib.rs`, `crates/pm/src/store.rs`,
+  `crates/cli/src/main.rs`)
+- **PM feature-parity roadmap, Phase B**: zero-installs (`.3va/cache/`, a committed hash-verified
+  tarball cache checked before any network call — opt-in via `_3VA_ZERO_INSTALL_CACHE=1` or
+  `"3va": {"zeroInstallCache": true}`); `3va patch <pkg>` / `3va patch-commit <pkg>` (diffs stored
+  as full changed-file contents plus a `.removed` list under `patches/`, not unified-diff syntax —
+  applied at install time by deleting-then-rewriting each file, which breaks any hardlink into the
+  global store before writing so the shared store is never mutated); `3va dlx <pkg>` (fetches
+  through the same verified-download path as `install`, executes through the *existing* `3va run`
+  sandbox via the same `build_permissions` builder — no package.json permissions are read from the
+  dlx'd package itself, only what the invocation explicitly grants); auto-install-before-run (`3va
+  run`/`test`/`dev` compare a SHA-256 of `package.json`'s dependency fields against the hash
+  recorded by the last install, prompting once — `[y/N]` — on a mismatch; never implicit, skipped
+  entirely when not interactive). JSR native registry support was investigated and kept as the
+  `npm.jsr.io` compatibility shim instead — see §6.5 of the roadmap doc for why. (`crates/pm/src/
+  lib.rs`, `crates/pm/src/store.rs`, `crates/cli/src/main.rs`)
+- **`3va -V`/`--version` now prints a SHA-256 of the running binary itself**, intercepted before
+  clap's built-in version handling (which only knows the compile-time version string and can't
+  hash the file it's actually running from). Lets a user confirm the binary they're running
+  matches one they trust; explicitly does *not* match a release archive's published `.sha256`,
+  which hashes the packaged tar.gz/zip, not the extracted binary — noted in the output itself so
+  the two aren't confused. (`crates/cli/src/main.rs`)
+- **`docs/12-roadmap/07-pm-phase-c-security-review.md`**: the written security-model review the PM
+  roadmap's own gate requires before Phase C (hooks, self-version-management, Plug'n'Play) can be
+  implemented. Verdicts recorded: hooks approved conditionally (mandatory opt-in confirmation +
+  forced audit logging + `SpawnProcess`/`FFI` need an explicit opt-in beyond the general
+  permissions block); self-update blocked (release-signing key management is an infrastructure
+  decision this repo hasn't made, not something a design doc can resolve); Plug'n'Play technically
+  unblocked (the one scoping risk has a concrete, single-site fix) but deprioritized — no use case
+  yet justifies the resolver complexity over the isolated/hoisted linkers Phase A already ships.
+- **`bench/` — a reproducible benchmark suite** (`bench/run.sh`, `hyperfine` for startup/install,
+  `oha` for HTTP throughput, `/proc/<pid>/status` for memory) replacing the README's previously
+  unreproducible, debug-build performance claims. `.github/workflows/benchmark.yml` runs it on
+  release tags, `workflow_dispatch`, and weekly, publishing to the job summary for regression
+  tracking (GitHub-hosted runners are noisier than a dedicated machine, so CI's absolute numbers
+  aren't the headline figures — see `bench/README.md`).
+
+### Fixed
+
+- **Dynamic `import()` was completely broken — always threw `ReferenceError: __importAsync is not
+  defined`.** The transpiler rewrites `import(x)` to `__importAsync(x)` (dynamic import is an
+  expression, not a declaration, so the static ESM→CJS converter doesn't touch it), but nothing
+  ever defined `__importAsync`. Fixed by defining it — an entry-point global version and a
+  per-required-module version closed over that module's own `require()`, mirroring how
+  `require`/`__dirname` are already scoped per module (`crates/js/src/builtins/modules.rs`).
+  Separately, files using *only* dynamic `import()` (no static `import`/`export`) were never being
+  routed through `transpile_to_cjs` at all — the ESM-detection heuristic only checked for static
+  import/export syntax — so the rewrite never even ran; extended the heuristic in `esm.rs`/`lib.rs`
+  to also recognize a bare `import(` call.
+- **HTTP server memory grew ~8.5× under sustained load (30MB → 255MB at 1,000 concurrent
+  connections) and never recovered, even long after load stopped.** Root cause: V8 manages its own
+  heap independently of Rust's global allocator (confirmed by testing mimalloc as the allocator —
+  zero effect), and nothing in the engine ever called `Isolate::low_memory_notification()`, the
+  only API that prompts V8 to actually try to free memory back to the OS. Each request's
+  collectible garbage (parsed headers, JSON, Promise/closure objects) pushed the heap to its burst
+  high-water mark, which then just... stayed. Fixed: `run_event_loop` now calls
+  `low_memory_notification()` on a 5-second throttle — frequent enough to reclaim memory under
+  sustained load, not so frequent that a full-GC pause on every tick would cost throughput.
+  Verified: post-load RSS at c=1000 dropped to 93–138MB across repeated runs; throughput unchanged
+  (16,100 req/s, 99.94% success, measured before and after). mimalloc stays wired in as the global
+  allocator regardless — a reasonable default for a busy server even though it wasn't the fix for
+  this specific bug. (`crates/js/src/lib.rs`, `Cargo.toml`, `crates/cli/src/main.rs`)
+
 ### Documentation
 
 - Audited `docs/12-roadmap/01-roadmap.md` and `docs/12-roadmap/04-compatibility.md` against
