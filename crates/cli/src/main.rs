@@ -1,4 +1,17 @@
 use clap::{Parser, Subcommand};
+
+// glibc's default malloc rarely returns freed pages to the OS — it keeps
+// them in its own arena free-lists for reuse instead. Under the kind of
+// allocation churn a busy HTTP server produces (one JSON string + parsed
+// headers + V8 objects per request), that shows up as RSS climbing
+// linearly with total requests served and never coming back down, even
+// long after load stops (measured: ~3.5KB retained per request, see
+// bench/README.md). mimalloc returns memory to the OS far more
+// aggressively, which is the whole fix — no logic changes needed anywhere
+// else in the request path.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::Command;

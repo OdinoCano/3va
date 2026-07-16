@@ -39,19 +39,19 @@ The JavaScript ecosystem has a supply chain security problem. Post-install scrip
 | NAPI native addons | ✓ | ✓ | ✓ |
 | WebAssembly (WASI) | partial | ✓ | ✓ |
 | Post-quantum TLS (ML-KEM-768) | ✗ | ✗ | ✓ |
-| Startup time (hello world) | 14.3 ms | **6.7 ms** | 28.0 ms |
-| HTTP throughput (100k req, c=1000) | 73,050 req/s | **133,720 req/s** | 15,817 req/s³ |
-| Memory, idle → under load | 45.9 → 81.8 MB | 38.5 → **48.7 MB** | **30.3** → 255.1 MB⁴ |
-| Install time (warm) | — | — | 11.7 ms |
+| Startup time (hello world) | 14.8 ms | **7.0 ms** | 30.1 ms |
+| HTTP throughput (100k req, c=1000) | 69,274 req/s | **124,879 req/s** | 12,999 req/s³ |
+| Memory, idle → under load | 45.0 → 81.2 MB | 34.4 → **44.6 MB** | **31.9** → 92.7 MB⁴ |
+| Install time (warm) | — | — | 12.0 ms |
 
 ¹ npm v12 (shipping July 2026) disables install scripts by default; npm 11 and earlier run them.  
 ² Bun's `trustedDependencies` allowlist skips scripts for untrusted packages, but a non-registry specifier (`file:`/`git:`/`github:`) sharing a trusted package's name could bypass it (CVE-2026-24910, fixed in 1.3.5).  
 ³ Measured against 3va's HTTP server with its firewall's per-IP connection/rate limits raised — at the shipped defaults (100 req/s, 50 connections per source IP) a single-machine load test like this one is mostly rejected with `403`, which is the firewall working as intended, not a bug.  
-⁴ 3va starts lightest and ends heaviest: ~8.5× memory growth from idle to 1,000 concurrent connections, versus ~1.8× for Node and ~1.3× for Bun. This reproduced across repeated runs — not a one-off spike — and is an open question, not yet root-caused. See [`bench/README.md`](bench/README.md).
+⁴ Was 255 MB (~8.5× growth) before a real fix: V8's heap was never told to shrink (no `low_memory_notification()` call anywhere), so a request's collectible garbage — parsed headers, JSON, Promise objects — pushed the heap to its burst high-water mark and it stayed there. Fixed by calling it on a 5-second throttle in the event loop; verified no throughput cost. See [`bench/README.md`](bench/README.md#memory-under-load-root-cause-and-fix) for the full investigation, including mimalloc as a dead end (V8 manages its own heap outside Rust's allocator).
 
 All performance rows are release builds (`cargo build --release`), measured together on the same machine, reproducible with [`bench/run.sh`](bench/) — clone the repo and run it yourself rather than taking these numbers on faith. See [`bench/README.md`](bench/README.md) for exact hardware, methodology, and what each number does and doesn't mean.
 
-**Where Bun wins:** startup latency, raw HTTP throughput, and memory growth under load — by a wide margin on all three. 3va trades this for security guarantees Bun's allowlist model doesn't provide (see the CVE above), but the performance gap is real and the memory-under-load result specifically needs investigation, not just an asterisk.
+**Where Bun wins:** startup latency and raw HTTP throughput, by a wide margin. 3va trades this for security guarantees Bun's allowlist model doesn't provide (see the CVE above).
 
 **Where 3va wins:** idle memory footprint; permission grants scoped to the dependency that requested them, not the whole process; an install path with no allowlist to spoof in the first place.
 
