@@ -52,12 +52,14 @@ jobs:
             xcode: '15.4'
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-          # Android / Termux — API 24 (Android 7.0) covers ~99 % of active devices.
-          # cargo-ndk sets up the NDK linker and sysroot automatically.
-          - target: aarch64-linux-android
-            os: ubuntu-latest
-            ndk: true
-            ndk_api: 24
+          # Android/Termux (aarch64-linux-android) is intentionally absent:
+          # rusty_v8 ships no prebuilt Android binaries, and building V8 from
+          # source for Android hits an upstream bug (the vendored config.gni
+          # never declares android_ndk_version via declare_args(), despite
+          # BUILD.gn referencing it). Android is released from the
+          # `android-pre-v8` branch instead — see its
+          # ANDROID_FALLBACK_HANDOFF.md for the full diagnosis and this
+          # branch's README for install instructions.
 
     steps:
       - uses: actions/checkout@v4
@@ -81,19 +83,6 @@ jobs:
         if: matrix.xcode
         run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
 
-      - name: Setup Android NDK
-        if: matrix.ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-          add-to-path: true
-
-      - name: Install cargo-ndk
-        if: matrix.ndk
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-ndk
-
       - name: Install cross
         if: matrix.cross
         uses: taiki-e/install-action@v2
@@ -101,21 +90,12 @@ jobs:
           tool: cross
 
       # NOTE: --locked ensures reproducible builds by using Cargo.lock as committed.
-      # rusty_v8 publishes no prebuilt Android binaries (denoland/rusty_v8#1640),
-      # so this target must build V8 from source. V8_FROM_SOURCE=1 makes the v8
-      # crate's build.rs fetch depot_tools and run gn/ninja itself.
-      - name: Build (Android NDK)
-        if: matrix.ndk
-        env:
-          V8_FROM_SOURCE: "1"
-        run: cargo ndk --target ${{ matrix.target }} --platform ${{ matrix.ndk_api }} -- build --release --locked --bin 3va
-
       - name: Build (cross, aarch64-linux)
         if: matrix.cross
         run: cross build --release --locked --target ${{ matrix.target }} --bin 3va
 
       - name: Build (native / macOS cross)
-        if: ${{ !matrix.cross && !matrix.ndk }}
+        if: ${{ !matrix.cross }}
         run: cargo build --release --locked --target ${{ matrix.target }} --bin 3va
 
       - name: Package binary (Unix)
