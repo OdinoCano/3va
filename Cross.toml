@@ -1,0 +1,7 @@
+# cross's default image per target tracks the installed `cross` tool version
+# and can be years old (built against an intentionally old glibc for broad
+# compatibility). rusty_v8's prebuilt static lib for linux-arm64 requires
+# glibc 2.27+ (memfd_create), which that old image lacks, causing a link
+# failure. The `:main` tag is a recent rolling build with a modern glibc.
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
