@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $packageName = '3va'
-$version     = '2.1.3'
+$version     = '2.4.0'
 $url64       = "https://github.com/OdinoCano/3va/releases/download/v$version/3va-v$version-x86_64-pc-windows-msvc.zip"
 $checksum64  = '30aa420c2e12635122432d0591c22e26f1c136c40eb05754f1607c3f90e7dff0'
 
