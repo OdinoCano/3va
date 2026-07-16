@@ -6,14 +6,21 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release tag (e.g. v2.0.0)'
+        description: 'Release tag to run against (e.g. v2.1.3 — an existing tag is safest for a dry run, since collect-hashes needs real published .sha256 files)'
         required: true
+      dry_run:
+        description: 'Run every generation/patch step but skip anything that actually publishes or commits (npm publish, choco push, wingetcreate submit, git push). Manifests are uploaded as a workflow artifact instead so you can inspect them.'
+        type: boolean
+        default: true
 
 permissions:
   contents: write   # commit Formula/ and bucket/ back to this repo
 
 env:
   VERSION: ${{ github.event.inputs.version || github.event.release.tag_name }}
+  # Only ever true for a manual workflow_dispatch run that opted in — a real
+  # `release: published` event has no `inputs`, so this is always false then.
+  DRY_RUN: ${{ github.event.inputs.dry_run == 'true' }}
 
 jobs:
   # ── Collect SHA256 hashes from the GitHub Release assets ─────────────────────
@@ -130,6 +137,7 @@ jobs:
           sed -i "s/PLATFORM_VERSION/${VER_BARE}/g" dist/npm/hub/package.json
 
       - name: Publish platform packages
+        if: env.DRY_RUN != 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VER: ${{ env.VERSION }}
@@ -146,6 +154,7 @@ jobs:
           done
 
       - name: Publish hub package
+        if: env.DRY_RUN != 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VER: ${{ env.VERSION }}
@@ -157,6 +166,14 @@ jobs:
           else
             npm publish dist/npm/hub --access public --provenance
           fi
+
+      - name: Upload staged packages (dry run)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-npm-packages
+          path: dist/npm/
+          retention-days: 7
 
   # ── Update Formula/, bucket/, dist/nix/, dist/homebrew/, dist/chocolatey/ ─────
   # in this repo. These four manifests are the ones this repo hand-maintains
@@ -422,7 +439,21 @@ jobs:
           License URL: https://github.com/OdinoCano/3va/blob/main/LICENSE
           VERIFICATION_TXT_EOF
 
+      - name: Upload generated manifests (dry run)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-manifests
+          path: |
+            Formula/3va.rb
+            bucket/3va.json
+            dist/homebrew/Formula/3va.rb
+            dist/nix/default.nix
+            dist/chocolatey/VERIFICATION.txt
+          retention-days: 7
+
       - name: Commit and push
+        if: env.DRY_RUN != 'true'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -467,7 +498,16 @@ jobs:
       - name: Pack
         run: choco pack dist\chocolatey\3va.nuspec --out dist\chocolatey\
 
+      - name: Upload nupkg (dry run)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-chocolatey-nupkg
+          path: dist/chocolatey/*.nupkg
+          retention-days: 7
+
       - name: Push to Chocolatey
+        if: env.DRY_RUN != 'true'
         shell: pwsh
         run: |
           if (-not $env:CHOCO_API_KEY) {
@@ -506,7 +546,8 @@ jobs:
           $url = "https://github.com/microsoft/winget-create/releases/latest/download/wingetcreate.exe"
           Invoke-WebRequest -Uri $url -OutFile wingetcreate.exe
 
-      - name: Patch manifests and submit
+      - name: Patch manifests
+        id: patch
         env:
           VER: ${{ env.VERSION }}
           WINDOWS_X64: ${{ needs.collect-hashes.outputs.windows_x64 }}
@@ -531,6 +572,22 @@ jobs:
             }
           }
 
+          "dest_dir=$DestDir" >> $env:GITHUB_OUTPUT
+
+      - name: Upload patched manifests (dry run)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-winget-manifests
+          path: ${{ steps.patch.outputs.dest_dir }}
+          retention-days: 7
+
+      - name: Submit to winget
+        if: env.DRY_RUN != 'true'
+        env:
+          DEST_DIR: ${{ steps.patch.outputs.dest_dir }}
+        shell: pwsh
+        run: |
           # wingetcreate submit works for both new packages and version updates.
-          .\wingetcreate.exe submit "$DestDir" `
+          .\wingetcreate.exe submit "$env:DEST_DIR" `
             --token $env:WINGET_TOKEN
