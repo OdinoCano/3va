@@ -2,8 +2,8 @@ name: Android Backport Check
 
 # Severity-triggered, not calendar-triggered in spirit: this runs monthly
 # only as a *reminder scan*, not a mandate to release. It flags security-
-# relevant commits on `main` (permissions, crypto, firewall, dependency
-# advisory bumps) that may need manual review/cherry-pick onto
+# relevant commits on `main` (permissions, crypto, firewall, package
+# manager, dependency advisory bumps) that may need manual review/cherry-pick onto
 # `android-pre-v8` (the QuickJS-era fallback branch — see
 # ANDROID_FALLBACK_HANDOFF.md on that branch). It never backports
 # automatically: the two JS engines differ enough that every candidate
@@ -45,7 +45,7 @@ jobs:
           COMMITS=""
           if [ "$SINCE" != "$HEAD_SHA" ]; then
             COMMITS=$(git log "${SINCE}..${HEAD_SHA}" --oneline -- \
-              crates/permissions crates/crypto crates/firewall Cargo.lock \
+              crates/permissions crates/crypto crates/firewall crates/pm Cargo.lock \
               2>/dev/null || true)
           fi
 
@@ -73,7 +73,7 @@ jobs:
                 "Android fallback — see `ANDROID_FALLBACK_HANDOFF.md` on that branch).",
               "",
               "These touch `crates/permissions`, `crates/crypto`, `crates/firewall`, " +
-                "or `Cargo.lock` (dependency/advisory bumps). Review each: if it " +
+                "`crates/pm`, or `Cargo.lock` (dependency/advisory bumps). Review each: if it " +
                 "closes a real security gap and applies under QuickJS (not a " +
                 "V8-specific fix), cherry-pick it onto `android-pre-v8` and cut a " +
                 "new `android-x.y.z` tag there.",
