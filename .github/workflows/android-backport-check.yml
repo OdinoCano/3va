@@ -1,0 +1,105 @@
+name: Android Backport Check
+
+# Severity-triggered, not calendar-triggered in spirit: this runs monthly
+# only as a *reminder scan*, not a mandate to release. It flags security-
+# relevant commits on `main` (permissions, crypto, firewall, dependency
+# advisory bumps) that may need manual review/cherry-pick onto
+# `android-pre-v8` (the QuickJS-era fallback branch — see
+# ANDROID_FALLBACK_HANDOFF.md on that branch). It never backports
+# automatically: the two JS engines differ enough that every candidate
+# needs a human judgment call.
+
+on:
+  schedule:
+    - cron: "0 9 1 * *"   # 1st of each month, 09:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout android-pre-v8
+        uses: actions/checkout@v4
+        with:
+          ref: android-pre-v8
+          fetch-depth: 0
+
+      - name: Fetch main
+        run: git fetch origin main --quiet
+
+      - name: Find security-relevant commits since last sync
+        id: diff
+        shell: bash
+        run: |
+          SINCE=$(cat .backport-sync 2>/dev/null || true)
+          if [ -z "$SINCE" ]; then
+            SINCE=$(git merge-base HEAD origin/main)
+          fi
+          HEAD_SHA=$(git rev-parse origin/main)
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
+          COMMITS=""
+          if [ "$SINCE" != "$HEAD_SHA" ]; then
+            COMMITS=$(git log "${SINCE}..${HEAD_SHA}" --oneline -- \
+              crates/permissions crates/crypto crates/firewall Cargo.lock \
+              2>/dev/null || true)
+          fi
+
+          {
+            echo "commits<<BACKPORT_EOF"
+            echo "$COMMITS"
+            echo "BACKPORT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ -n "$COMMITS" ]; then
+            echo "has_commits=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_commits=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open backport review issue
+        if: steps.diff.outputs.has_commits == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commits = `${{ steps.diff.outputs.commits }}`;
+            const body = [
+              "Security-relevant commits landed on `main` since the last check " +
+                "that may need review for `android-pre-v8` (the QuickJS-era " +
+                "Android fallback — see `ANDROID_FALLBACK_HANDOFF.md` on that branch).",
+              "",
+              "These touch `crates/permissions`, `crates/crypto`, `crates/firewall`, " +
+                "or `Cargo.lock` (dependency/advisory bumps). Review each: if it " +
+                "closes a real security gap and applies under QuickJS (not a " +
+                "V8-specific fix), cherry-pick it onto `android-pre-v8` and cut a " +
+                "new `android-x.y.z` tag there.",
+              "",
+              "```",
+              commits.trim(),
+              "```",
+            ].join("\n");
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Android backport check: ${new Date().toISOString().slice(0, 10)}`,
+              body,
+              labels: ["android-backport"],
+            });
+
+      - name: Advance sync marker
+        shell: bash
+        run: |
+          HEAD_SHA="${{ steps.diff.outputs.head_sha }}"
+          echo "$HEAD_SHA" > .backport-sync
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .backport-sync
+          if ! git diff --cached --quiet; then
+            git commit -m "Advance Android backport-check marker to ${HEAD_SHA}"
+            git push origin HEAD:android-pre-v8
+          fi
