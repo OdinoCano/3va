@@ -1,6 +1,6 @@
 [package]
 name = "vvva_bundler"
-version = "2.1.3"
+version = "2.4.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "TypeScript/JavaScript bundler and hot-module-reload dev server for the 3va runtime (oxc-based)"
@@ -16,8 +16,8 @@ anyhow.workspace = true
 tracing.workspace = true
 regex-lite = "0.1"
 notify = "6.1"
-vvva_pm = { version = "2.1.3", path = "../pm" }
-vvva_js = { version = "2.1.3", path = "../js" }
+vvva_pm = { version = "2.4.0", path = "../pm" }
+vvva_js = { version = "2.4.0", path = "../js" }
 oxc_allocator = "0.132.0"
 oxc_parser = "0.132.0"
 oxc_ast = "0.132.0"
@@ -29,4 +29,4 @@ oxc_span = "0.132.0"
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
-vvva_permissions = { version = "2.1.3", path = "../permissions" }
+vvva_permissions = { version = "2.4.0", path = "../permissions" }

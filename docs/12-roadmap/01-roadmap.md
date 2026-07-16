@@ -6,7 +6,7 @@
 
 ---
 
-## 1.2 Current Status (vv2.1.3 · 2026-06-22)
+## 1.2 Current Status (v2.4.0 · 2026-07-16)
 
 ### Implemented and functional
 
@@ -104,6 +104,7 @@
 | 1.0.0 LTS | **2026-06-01** | Inspector/CDP + WASM + NAPI + PQ-TLS + stable API | ✅ **Released** |
 | 2.0.0 | **2026-06-10** | Performance profiling + Node.js compat improvements + workspace v2 + REPL plugins | ✅ **Released** |
 | 2.1.0 | **2026-06-22** | timers/promises + stream/web + dns + readline (full Node.js compat) + `3va create` + heap snapshot + SLSA Level 2 + automated security audit | ✅ **Released** |
+| 2.4.0 | **2026-07-16** | PM feature-parity roadmap Phases A+B (overrides, `licenses`, `sbom`, peer autoinstall, hoisted linker, config deps, zero-installs, `patch`/`patch-commit`, `dlx`, auto-install-before-run) + self-hash in `3va -V` + dynamic `import()` fix + HTTP server memory-under-load fix + reproducible benchmark suite | ✅ **Released** |
 
 ---
 

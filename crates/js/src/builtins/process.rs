@@ -632,7 +632,7 @@ pub fn inject_process(
     let process = v8::Object::new(scope);
 
     // Strings and numbers
-    set_str(scope, process, "version", "3va/2.1.3");
+    set_str(scope, process, "version", "3va/2.4.0");
     {
         let key = v8::String::new(scope, "pid").unwrap().into();
         let val = v8::Integer::new_from_unsigned(scope, std::process::id()).into();
@@ -640,7 +640,7 @@ pub fn inject_process(
     }
 
     let versions = v8::Object::new(scope);
-    set_str(scope, versions, "3va", "2.1.3");
+    set_str(scope, versions, "3va", "2.4.0");
     // Expose fake Node.js-compatible version strings so packages checking
     // process.versions.node / process.versions.v8 don't crash.
     set_str(scope, versions, "node", "20.0.0");
