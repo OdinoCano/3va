@@ -29,26 +29,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux — native and cross via cross Docker image.
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: true
-          # macos-13 is deprecated (fully unsupported Dec 2025) — long queues.
-          # macos-14 (M1) is the current runner. Xcode 15 is pinned explicitly
-          # because libffi-sys 2.3.0 (wasmtime dep) fails with Xcode 16's
-          # stricter CFI validation on arm64 Mach-O assembly.
-          - target: aarch64-apple-darwin
-            os: macos-14
-            xcode: '15.4'
-          - target: x86_64-apple-darwin
-            os: macos-14
-            xcode: '15.4'
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-          # Android / Termux — API 24 (Android 7.0) covers ~99 % of active devices.
-          # cargo-ndk sets up the NDK linker and sysroot automatically.
+          # This branch (android-pre-v8) exists solely as a QuickJS-era
+          # fallback for Android arm64, which the V8 migration on `main`
+          # broke (see ANDROID_FALLBACK_HANDOFF.md). Its CI only needs to
+          # validate the one platform it's kept around for — the other five
+          # targets are already built and released off `main`.
           - target: aarch64-linux-android
             os: ubuntu-latest
             ndk: true
