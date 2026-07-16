@@ -69,7 +69,20 @@ pub struct JsEngine {
     profiler: Option<Profiler>,
     profiler_interval_ms: u32,
     ws_pool: builtins::websocket::WsPool,
+    // V8 manages its own heap independently of Rust's global allocator, so
+    // switching that allocator (e.g. to mimalloc) has zero effect on V8's
+    // memory footprint. Left unprompted, V8 grows its heap to whatever
+    // high-water mark a burst of allocation reaches and never shrinks back
+    // down on its own — measured as ~3.5KB of RSS retained per HTTP request
+    // served, indefinitely, under sustained load (see bench/README.md).
+    // `low_memory_notification()` is the only thing that tells V8 to
+    // actually try to free memory; run_event_loop calls it on a throttle
+    // (LOW_MEMORY_HINT_INTERVAL) so busy periods aren't paused by a full
+    // GC on every single tick.
+    last_low_memory_hint: std::time::Instant,
 }
+
+const LOW_MEMORY_HINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl JsEngine {
     pub async fn new(permissions: Arc<PermissionState>) -> anyhow::Result<Self> {
@@ -135,6 +148,7 @@ impl JsEngine {
             profiler,
             profiler_interval_ms: prof_interval_ms.unwrap_or(100),
             ws_pool: ws_pool.clone(),
+            last_low_memory_hint: std::time::Instant::now(),
         };
 
         engine.initialize(permissions, timer_manager, firewall, ws_pool)?;
@@ -428,6 +442,11 @@ impl JsEngine {
             }
             pump_v8_platform_tasks(&self.isolate);
             self.isolate.perform_microtask_checkpoint();
+
+            if self.last_low_memory_hint.elapsed() >= LOW_MEMORY_HINT_INTERVAL {
+                self.isolate.low_memory_notification();
+                self.last_low_memory_hint = std::time::Instant::now();
+            }
 
             let expired = self.runtime_core.lock().unwrap().poll_timers();
             for timer in expired {

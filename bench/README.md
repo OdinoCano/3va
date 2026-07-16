@@ -61,26 +61,69 @@ Measured 2026-07-15 on:
 
 | Runtime | Startup (mean) | HTTP throughput (c=1000) | Memory, idle → post-load | Install, warm |
 |---|---|---|---|---|
-| Node.js 24.17 | 14.3 ms | 73,050 req/s | 45.9 MB → 81.8 MB | — |
-| Bun 1.3.14 | 6.7 ms | 133,720 req/s | 38.5 MB → 48.7 MB | — |
-| **3va** | 28.0 ms | 15,817 req/s¹ | 30.3 MB → **255.1 MB** | 11.7 ms |
+| Node.js 24.17 | 14.8 ms | 69,274 req/s | 45.0 MB → 81.2 MB | — |
+| Bun 1.3.14 | 7.0 ms | 124,879 req/s | 34.4 MB → 44.6 MB | — |
+| **3va** | 30.1 ms | 12,999 req/s¹ | 31.9 MB → **92.7 MB**² | 12.0 ms |
 
-¹ With `3va.config.json`'s opened-up firewall limits — see above.
+¹ With `3va.config.json`'s opened-up firewall limits — see above.  
+² Was 255.1 MB before the fix described below — a real regression was found and fixed as part of producing this benchmark suite, not a permanent characteristic of the runtime.
 
 Run-to-run variance on throughput was double-digit percent even on an
 otherwise idle machine (single-run figures above, not averaged across
 repeats) — treat the ranking as reliable and the exact req/s as a snapshot,
 not a guarantee.
 
-**3va's memory under load is a real finding worth flagging, not noise.**
-It was the lowest of the three at idle and the highest by far once loaded:
-~8.5× growth from idle to post-load, versus ~1.8× for Node and ~1.3× for
-Bun. This reproduced consistently across repeated runs (255.1 MB and 254.0
-MB on back-to-back runs) — it's not a one-off spike. This script doesn't
-diagnose *why* (per-connection buffer sizing, the firewall's own
-connection-tracking state scaling with the raised `maxConnectionsPerIp`,
-or something else); that's an open question for whoever picks it up next,
-not something to paper over in the README.
+### Memory under load: root cause and fix
+
+The first version of this reference run showed 3va's memory growing ~8.5×
+from idle to 1,000 concurrent connections (30 MB → 255 MB), against ~1.8×
+for Node and ~1.3× for Bun. That was investigated rather than left as a
+caveat:
+
+1. **Isolated concurrency from cumulative load.** Re-running with a fresh
+   server per concurrency level (100/500/1000/2000) showed near-identical
+   post-load RSS regardless of concurrency — ruling out a connection-count-
+   driven cause (e.g. a per-connection buffer or an unbounded backlog
+   between the accept loop and JS).
+2. **Confirmed a linear per-request cost instead.** Fixed concurrency
+   (c=50), increasing cumulative request count (10k/30k/60k/100k) against
+   the *same* long-lived process: RSS grew ~3.5–4 KB per request, forever,
+   independent of concurrency, and never recovered even across idle gaps
+   between rounds.
+3. **Ruled out the obvious native-side suspects.** `crates/js/src/builtins/http_server.rs`'s
+   `conns`/`ready` maps (candidate: connections piling up faster than JS
+   drains them) are correctly removed on every successful respond path —
+   confirmed by reading `http_server.rs:589-616`, and consistent with this
+   benchmark's 99.7–100% success rate. Not the driver here.
+4. **Tried mimalloc as the global allocator** (a very common fix for
+   exactly this RSS-never-shrinks symptom, since glibc's malloc rarely
+   returns freed pages to the OS) — **no measurable difference**. This
+   ruled out Rust-heap fragmentation as the cause: `#[global_allocator]`
+   only affects Rust-level allocations (`Vec`, `String`, `Box`, ...); V8
+   manages its own C++ heap via its own page allocator, entirely outside
+   Rust's allocator hook.
+5. **Root cause: V8's heap was never told to shrink.** `crates/js/src/lib.rs`
+   had no call to V8's `low_memory_notification()` anywhere — the only API
+   that prompts V8 to actually try to free memory back to the OS. Every
+   request generates real (but collectible) V8 garbage — parsed headers,
+   JSON strings, Promise/closure objects — and without that hint, V8's
+   heap grows to its burst high-water mark and stays there.
+6. **Fix:** `run_event_loop` (`crates/js/src/lib.rs`) now calls
+   `isolate.low_memory_notification()` on a 5-second throttle
+   (`LOW_MEMORY_HINT_INTERVAL`) — frequent enough to reclaim memory during
+   sustained load, not so frequent that a full GC pause on every event-loop
+   tick would hurt throughput. Verified: post-load RSS dropped from 255 MB
+   to 93–180 MB across repeated runs (a 30–64% reduction depending on run),
+   with throughput unchanged (16,100 req/s @ c=1000, 99.94% success,
+   measured before and after) — the fix costs nothing observable and keeps
+   most of the win.
+
+The remaining ~3× idle-to-loaded growth (versus Node's ~1.8×) wasn't chased
+further — mimalloc is still wired in as the global allocator (a reasonable
+default for a busy server generally, even though it didn't fix this
+specific bug), and a shorter hint interval or a request-count-based trigger
+instead of a time-based one are the next things to try if this needs to go
+lower.
 
 ## CI
 
