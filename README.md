@@ -107,9 +107,21 @@ nix run "github:OdinoCano/3va?dir=dist/nix"
 
 ### Termux (Android)
 
-```bash
-bash <(curl -fsSL https://github.com/OdinoCano/3va/releases/latest/download/termux-install.sh)
-```
+> **Not currently available from `main`.** The V8 migration (v2.2.0)
+> dropped Android arm64 support — `rusty_v8` ships no prebuilt Android
+> binaries, and building V8 from source for Android hits an upstream bug
+> (full diagnosis in `ANDROID_FALLBACK_HANDOFF.md` on the branch below).
+> Android/Termux users should build from the
+> [`android-pre-v8`](https://github.com/OdinoCano/3va/tree/android-pre-v8)
+> branch instead, which is pinned to the last pre-V8 (QuickJS) commit:
+>
+> ```bash
+> pkg install rust git
+> git clone --branch android-pre-v8 https://github.com/OdinoCano/3va.git
+> cd 3va
+> cargo build --release
+> cp target/release/3va $PREFIX/bin/
+> ```
 
 ### Build from source
 
@@ -131,7 +143,9 @@ Pre-built binaries for every platform are attached to each [GitHub Release](http
 | macOS x64 | `3va-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
 | macOS arm64 (M-series) | `3va-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
 | Windows x64 | `3va-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
-| Android arm64 | `3va-vX.Y.Z-aarch64-linux-android.tar.gz` |
+
+Android arm64 is not built from `main` — see the
+[Termux (Android)](#termux-android) section above.
 
 ---
 
