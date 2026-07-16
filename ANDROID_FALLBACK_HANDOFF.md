@@ -73,6 +73,18 @@ specifically off this QuickJS-era branch as a separate release channel. The
 last explicit direction from the project owner, mid-investigation, was to
 preserve this branch before making that call — no path has been chosen yet.
 
+**Security backport policy:** this branch does not auto-track `main`.
+`.github/workflows/android-backport-check.yml` (lives on `main`, since
+scheduled workflows must be defined on the default branch) runs monthly and
+diffs `main` against this branch's last-reviewed point — tracked in the
+`.backport-sync` marker file at this repo's root, updated by that workflow
+after each run — for commits touching `crates/permissions`, `crates/crypto`,
+`crates/firewall`, or `Cargo.lock` (dependency/advisory bumps). If any match,
+it opens a GitHub issue listing them for manual review; it never cherry-picks
+or bumps this branch's version automatically. This branch's own versioning
+is independent of `main`'s (`android-x.y.z`, not `main`'s `2.x`) — cut a new
+tag here only after a reviewed backport actually lands.
+
 **Your task:** pick up from here. Read `docs/12-roadmap/06-pm-feature-parity.md`
 and any memory files under the project's memory directory for full context on
 concurrent work (a large PM feature-parity effort landed on `main` around the
