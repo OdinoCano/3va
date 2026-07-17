@@ -2216,3 +2216,260 @@ pub fn store_status() {
     }
     println!();
 }
+
+// ── Patch support ──────────────────────────────────────────────────────────────
+
+fn resolve_installed_registry(project_root: &Path, name: &str) -> String {
+    if let Ok(lock) = Lockfile::load(&project_root.join("3va-lock.json"))
+        && let Some(dep) = lock.dependencies.get(name)
+        && let Some(reg) = &dep.registry
+    {
+        return reg.clone();
+    }
+    Registry::Npm.display_name().to_string()
+}
+
+/// `3va patch <pkg>`: copy the installed package into an editable scratch
+/// directory (a real copy, never a store hardlink) and return its path.
+pub fn patch_start(project_root: &Path, name: &str) -> anyhow::Result<PathBuf> {
+    let node_modules = project_root.join("node_modules");
+    let installed_dir = node_modules.join(name);
+    if !installed_dir.join("package.json").exists() {
+        anyhow::bail!("'{}' is not installed — run 3va install first.", name);
+    }
+    let version = read_package_version(&installed_dir);
+    let registry = resolve_installed_registry(project_root, name);
+    let store = store::ContentStore::global();
+    let pristine = store.package_path(&registry, name, &version);
+    if !pristine.exists() {
+        anyhow::bail!("'{}@{}' not found in the global store.", name, version);
+    }
+
+    let entry = format!("{}@{}", store::virtual_entry_name(name), version);
+    let work_dir = project_root.join(".3va").join("patch-work").join(&entry);
+    if work_dir.exists() {
+        std::fs::remove_dir_all(&work_dir)?;
+    }
+    store::link_or_copy_dir(&pristine, &work_dir)?;
+    Ok(work_dir)
+}
+
+/// `3va patch-commit <pkg>`: diff the edited scratch copy against the
+/// pristine store version and write the result under `patches/`.
+pub fn patch_commit(project_root: &Path, name: &str) -> anyhow::Result<PathBuf> {
+    let node_modules = project_root.join("node_modules");
+    let installed_dir = node_modules.join(name);
+    let version = read_package_version(&installed_dir);
+    let registry = resolve_installed_registry(project_root, name);
+    let store = store::ContentStore::global();
+    let pristine = store.package_path(&registry, name, &version);
+
+    let entry = format!("{}@{}", store::virtual_entry_name(name), version);
+    let work_dir = project_root.join(".3va").join("patch-work").join(&entry);
+    if !work_dir.exists() {
+        anyhow::bail!(
+            "No in-progress patch for '{}' — run '3va patch {}' first.",
+            name,
+            name
+        );
+    }
+
+    let patch_dir = project_root.join("patches").join(&entry);
+    if patch_dir.exists() {
+        std::fs::remove_dir_all(&patch_dir)?;
+    }
+
+    let mut changed = 0usize;
+    let mut removed_paths = Vec::new();
+    diff_dirs(
+        &pristine,
+        &work_dir,
+        Path::new(""),
+        &patch_dir,
+        &mut changed,
+        &mut removed_paths,
+    )?;
+
+    if !removed_paths.is_empty() {
+        std::fs::create_dir_all(&patch_dir)?;
+        std::fs::write(patch_dir.join(".removed"), removed_paths.join("\n"))?;
+    }
+
+    std::fs::remove_dir_all(&work_dir)?;
+
+    if changed == 0 && removed_paths.is_empty() {
+        anyhow::bail!("No changes detected for '{}' — nothing to commit.", name);
+    }
+    Ok(patch_dir)
+}
+
+fn diff_dirs(
+    pristine: &Path,
+    edited: &Path,
+    rel: &Path,
+    patch_dir: &Path,
+    changed: &mut usize,
+    removed: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    use std::collections::HashSet;
+
+    let pristine_dir = pristine.join(rel);
+    let edited_dir = edited.join(rel);
+
+    let mut names: HashSet<std::ffi::OsString> = HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(&pristine_dir) {
+        names.extend(entries.flatten().map(|e| e.file_name()));
+    }
+    if let Ok(entries) = std::fs::read_dir(&edited_dir) {
+        names.extend(entries.flatten().map(|e| e.file_name()));
+    }
+
+    for name in names {
+        let rel_child = rel.join(&name);
+        let p_path = pristine_dir.join(&name);
+        let e_path = edited_dir.join(&name);
+        let e_exists = e_path.exists();
+
+        if p_path.is_dir() || e_path.is_dir() {
+            if e_exists {
+                diff_dirs(pristine, edited, &rel_child, patch_dir, changed, removed)?;
+            } else {
+                collect_all_files(&p_path, &rel_child, removed);
+            }
+            continue;
+        }
+
+        if !e_exists {
+            removed.push(rel_child.to_string_lossy().replace('\\', "/"));
+            continue;
+        }
+
+        let p_bytes = std::fs::read(&p_path).unwrap_or_default();
+        let e_bytes = std::fs::read(&e_path)?;
+        if p_bytes != e_bytes {
+            let dest = patch_dir.join(&rel_child);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&dest, &e_bytes)?;
+            *changed += 1;
+        }
+    }
+    Ok(())
+}
+
+fn collect_all_files(dir: &Path, rel: &Path, removed: &mut Vec<String>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let rel_child = rel.join(entry.file_name());
+            if p.is_dir() {
+                collect_all_files(&p, &rel_child, removed);
+            } else {
+                removed.push(rel_child.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+}
+
+// ── Licenses ─────────────────────────────────────────────────────────────────
+
+pub struct PackageLicense {
+    pub name: String,
+    pub version: String,
+    pub license: String,
+}
+
+fn read_package_license(pkg_dir: &Path) -> String {
+    let pkg_json = pkg_dir.join("package.json");
+    let Ok(content) = std::fs::read_to_string(&pkg_json) else {
+        return "UNKNOWN".to_string();
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return "UNKNOWN".to_string();
+    };
+    if let Some(s) = val["license"].as_str() {
+        return s.to_string();
+    }
+    if let Some(obj) = val["license"].as_object()
+        && let Some(t) = obj["type"].as_str()
+    {
+        return t.to_string();
+    }
+    if let Some(arr) = val["licenses"].as_array() {
+        let types: Vec<&str> = arr.iter().filter_map(|l| l["type"].as_str()).collect();
+        if !types.is_empty() {
+            return types.join(" OR ");
+        }
+    }
+    "UNKNOWN".to_string()
+}
+
+/// List the license of every installed package, read straight from each
+/// package's own `package.json` in `node_modules/` — no new fetch, no
+/// license metadata cached anywhere else.
+pub fn list_licenses() -> anyhow::Result<Vec<PackageLicense>> {
+    let node_modules = PathBuf::from("node_modules");
+    if !node_modules.exists() {
+        anyhow::bail!("node_modules/ not found. Run '3va install' first.");
+    }
+
+    let installed = collect_installed(&node_modules)?;
+    Ok(installed
+        .into_iter()
+        .map(|(name, version, _registry)| {
+            let license = read_package_license(&node_modules.join(&name));
+            PackageLicense {
+                name,
+                version,
+                license,
+            }
+        })
+        .collect())
+}
+
+// ── SBOM ─────────────────────────────────────────────────────────────────────
+
+/// Build a CycloneDX 1.5 SBOM (as JSON) from the resolved lockfile. Pure
+/// data transform — no network, no re-resolution.
+pub fn generate_sbom(lockfile: &Lockfile) -> serde_json::Value {
+    let components: Vec<serde_json::Value> = lockfile
+        .dependencies
+        .iter()
+        .map(|(name, dep)| {
+            let purl = format!("pkg:npm/{}@{}", name, dep.version);
+            let mut component = serde_json::json!({
+                "type": "library",
+                "name": name,
+                "version": dep.version,
+                "purl": purl,
+            });
+            if let Some(integrity) = &dep.integrity
+                && let Some((alg, hash)) = integrity.split_once('-')
+            {
+                let alg = match alg {
+                    "sha512" => "SHA-512",
+                    "sha256" => "SHA-256",
+                    "sha1" => "SHA-1",
+                    other => other,
+                };
+                component["hashes"] = serde_json::json!([{"alg": alg, "content": hash}]);
+            }
+            component
+        })
+        .collect();
+
+    serde_json::json!({
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "application",
+                "name": lockfile.name,
+                "version": lockfile.version,
+            }
+        },
+        "components": components,
+    })
+}
