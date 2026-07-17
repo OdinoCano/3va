@@ -3019,6 +3019,17 @@ enum Commands {
         /// Package name to explain
         package: String,
     },
+    /// Open an editable copy of an installed package for patching
+    Patch {
+        /// Package name (must already be installed)
+        package: String,
+    },
+    /// Diff an in-progress `3va patch` against the pristine package and save it
+    #[command(name = "patch-commit")]
+    PatchCommit {
+        /// Package name passed to a prior `3va patch`
+        package: String,
+    },
 
     // ── Workspace ─────────────────────────────────────────────────────────────
     /// Manage workspace (monorepo) packages
@@ -3201,6 +3212,18 @@ enum Commands {
     Delete {
         /// Process name to delete
         name: String,
+    },
+    /// List the license of every installed package
+    Licenses {
+        /// Output results as JSON (for CI/CD pipelines).
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Generate a CycloneDX SBOM from the lockfile
+    Sbom {
+        /// Output path (default: stdout)
+        #[arg(long = "out", value_name = "PATH")]
+        out: Option<PathBuf>,
     },
 
     // ── Diagnostics & Utilities ───────────────────────────────────────────────
@@ -4325,6 +4348,45 @@ async fn main() -> anyhow::Result<()> {
             proc::delete_process(name)?;
             println!("  ✓ Deleted process '{}'", name);
         }
+        Commands::Licenses { json } => {
+            let rows = vvva_pm::list_licenses()?;
+            if *json {
+                let out: Vec<_> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "name": r.name,
+                            "version": r.version,
+                            "license": r.license,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if rows.is_empty() {
+                println!("No packages installed.");
+            } else {
+                println!();
+                for r in &rows {
+                    println!("{:<40} {:<12} {}", r.name, r.version, r.license);
+                }
+                println!();
+                println!("{} package(s).", rows.len());
+            }
+        }
+        Commands::Sbom { out } => {
+            let lockfile_path = std::path::Path::new("3va-lock.json");
+            let lockfile = vvva_pm::Lockfile::load(lockfile_path)
+                .map_err(|_| anyhow::anyhow!("No 3va-lock.json found. Run '3va install' first."))?;
+            let bom = vvva_pm::generate_sbom(&lockfile);
+            let json = serde_json::to_string_pretty(&bom)?;
+            match out {
+                Some(path) => {
+                    std::fs::write(path, json)?;
+                    println!("SBOM written to {}", path.display());
+                }
+                None => println!("{}", json),
+            }
+        }
         Commands::Pack { output, dry_run } => {
             pm_pack(output.as_deref(), *dry_run)?;
         }
@@ -4400,6 +4462,20 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Why { package } => {
             pm_why(package)?;
+        }
+        Commands::Patch { package } => {
+            let cwd = std::env::current_dir()?;
+            let work_dir = vvva_pm::patch_start(&cwd, package)?;
+            println!("Editable copy ready at:");
+            println!("  {}", work_dir.display());
+            println!();
+            println!("Edit the files, then run: 3va patch-commit {}", package);
+        }
+        Commands::PatchCommit { package } => {
+            let cwd = std::env::current_dir()?;
+            let patch_dir = vvva_pm::patch_commit(&cwd, package)?;
+            println!("✓ Patch saved to {}", patch_dir.display());
+            println!("  Applied automatically on the next 3va install.");
         }
         Commands::Remove { packages } => {
             let mut any_failed = false;
