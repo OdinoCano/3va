@@ -1682,8 +1682,38 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
 
     crypto.webcrypto = {
         subtle: {
-            encrypt: function() { throw new Error('Not implemented'); },
-            decrypt: function() { throw new Error('Not implemented'); },
+            encrypt: function(algorithm, key, data) {
+                var name = typeof algorithm === 'string' ? algorithm : algorithm.name;
+                if (name === 'AES-GCM') {
+                    return new Promise(function(resolve, reject) {
+                        try {
+                            var iv = toBytes(algorithm.iv);
+                            var keyBytes = key._raw;
+                            var plaintext = data instanceof Uint8Array ? Array.from(data) : Array.from(new Uint8Array(data));
+                            var aad = algorithm.additionalData ? Array.from(toBytes(algorithm.additionalData)) : [];
+                            var result = __cryptoAesGcmEncrypt(keyBytes.length, Array.from(keyBytes), Array.from(iv), plaintext, aad);
+                            resolve(new Uint8Array(result).buffer);
+                        } catch (e) { reject(e); }
+                    });
+                }
+                return Promise.reject(new Error('Unsupported algorithm: ' + name));
+            },
+            decrypt: function(algorithm, key, data) {
+                var name = typeof algorithm === 'string' ? algorithm : algorithm.name;
+                if (name === 'AES-GCM') {
+                    return new Promise(function(resolve, reject) {
+                        try {
+                            var iv = toBytes(algorithm.iv);
+                            var keyBytes = key._raw;
+                            var cipherAndTag = data instanceof Uint8Array ? Array.from(data) : Array.from(new Uint8Array(data));
+                            var aad = algorithm.additionalData ? Array.from(toBytes(algorithm.additionalData)) : [];
+                            var result = __cryptoAesGcmDecrypt(keyBytes.length, Array.from(keyBytes), Array.from(iv), cipherAndTag, aad);
+                            resolve(new Uint8Array(result).buffer);
+                        } catch (e) { reject(e); }
+                    });
+                }
+                return Promise.reject(new Error('Unsupported algorithm: ' + name));
+            },
             sign: function(algorithm, key, data) {
                 var name = (typeof algorithm === 'string' ? algorithm : algorithm.name) || '';
                 var bytes = toBytes(data instanceof Uint8Array ? data : new Uint8Array(data));
@@ -1732,14 +1762,34 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                 var result = __cryptoHash(hashAlgo, bytes);
                 return Promise.resolve(new Uint8Array(result));
             },
-            importKey: function() { throw new Error('Not implemented'); },
-            exportKey: function() { throw new Error('Not implemented'); },
+            importKey: function(format, keyData, algorithm, extractable, usages) {
+                var name = typeof algorithm === 'string' ? algorithm : algorithm.name;
+                if (name === 'AES-GCM' && format === 'raw') {
+                    return new Promise(function(resolve, reject) {
+                        try {
+                            var raw = keyData instanceof Uint8Array ? keyData : new Uint8Array(keyData);
+                            resolve({ type: 'secret', extractable: extractable, algorithm: { name: name, length: raw.length * 8 }, usages: usages || [], _raw: raw });
+                        } catch (e) { reject(e); }
+                    });
+                }
+                return Promise.reject(new Error('importKey: unsupported format/algorithm: ' + format + '/' + name));
+            },
+            exportKey: function(format, key) {
+                if (format === 'raw' && key._raw) {
+                    return Promise.resolve(key._raw.buffer.slice(key._raw.byteOffset, key._raw.byteOffset + key._raw.byteLength));
+                }
+                return Promise.reject(new Error('exportKey: unsupported format: ' + format));
+            },
             generateKey: function(algorithm, extractable, usages) {
                 var name = algorithm.name;
                 return new Promise(function(resolve, reject) {
                     try {
                         var result, parsed;
-                        if (name === 'ECDSA' || name === 'ECDH') {
+                        if (name === 'AES-GCM' || name === 'AES-CBC' || name === 'AES-CTR') {
+                            var keyLen = (algorithm.length || 256) >> 3;
+                            var raw = new Uint8Array(__cryptoRandomBytes(keyLen));
+                            resolve({ type: 'secret', extractable: extractable, algorithm: { name: name, length: algorithm.length || 256 }, usages: usages || [], _raw: raw });
+                        } else if (name === 'ECDSA' || name === 'ECDH') {
                             var curve = algorithm.namedCurve || 'P-256';
                             result = __cryptoGenerateKeyPairSync('ec', JSON.stringify({ namedCurve: curve }));
                             parsed = JSON.parse(result);

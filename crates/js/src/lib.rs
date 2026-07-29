@@ -384,6 +384,7 @@ impl JsEngine {
                globalThis.__vvva_meta_resolve__ = function(s) {{ return require.resolve(s); }};\
              if (typeof globalThis.__vvva_meta_glob__ === 'undefined') \
                globalThis.__vvva_meta_glob__ = function() {{ return {{}}; }};\
+             globalThis.__vvva_import_meta__ = {{url: globalThis.__vvva_meta_url__, env: globalThis.__vvva_meta_env__, hot: undefined, glob: globalThis.__vvva_meta_glob__, resolve: globalThis.__vvva_meta_resolve__, require: globalThis.require, dirname: globalThis.__dirname, filename: globalThis.__filename, main: false}};\
              if (globalThis.process && Array.isArray(globalThis.process.argv) \
              && globalThis.process.argv.length < 2) \
              {{ globalThis.process.argv.push('{f}'); }}\

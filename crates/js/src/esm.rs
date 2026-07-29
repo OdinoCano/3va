@@ -1,9 +1,30 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::builtins::modules;
 
+/// Collapse `.` and `..` components without hitting the filesystem (no symlink resolution).
+pub fn normalize_path(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn find_in_node_modules(start_dir: &Path, name: &str) -> Option<PathBuf> {
-    let mut dir = start_dir.to_path_buf();
+    // Canonicalize to resolve pnpm symlinks — otherwise traversal from
+    // node_modules/pkg/... misses sibling packages in the pnpm virtual store
+    // at node_modules/.pnpm/<pkg@ver>/node_modules/<sibling>.
+    let canonical = start_dir
+        .canonicalize()
+        .unwrap_or_else(|_| start_dir.to_path_buf());
+    let mut dir = canonical;
     loop {
         let pkg_dir = dir.join("node_modules").join(name);
         if pkg_dir.exists() {
@@ -36,7 +57,10 @@ pub fn source_is_esm(code: &str, path: &str) -> bool {
             continue;
         }
         if t.starts_with("/*") {
-            in_block = true;
+            // Only enter block-comment mode if closing */ is NOT on the same line
+            if !t.contains("*/") {
+                in_block = true;
+            }
             continue;
         }
         if t.starts_with("import ")
@@ -45,8 +69,24 @@ pub fn source_is_esm(code: &str, path: &str) -> bool {
             || t.starts_with("export{")
             || t.starts_with("export default")
             || has_dynamic_import(t)
+            || has_inline_esm(t)
         {
             return true;
+        }
+    }
+    false
+}
+
+/// True if the line contains an inline ESM export/import that wasn't at the
+/// line start — catches minified bundles like `var x=1;export{x as y}`.
+fn has_inline_esm(line: &str) -> bool {
+    let b = line.as_bytes();
+    for i in 0..b.len().saturating_sub(6) {
+        if matches!(b[i], b';' | b'}') {
+            let rest = &b[i + 1..];
+            if rest.starts_with(b"export ") || rest.starts_with(b"export{") {
+                return true;
+            }
         }
     }
     false
@@ -84,8 +124,13 @@ pub fn resolve_esm(base: &str, specifier: &str) -> PathBuf {
 /// directory (not a file whose parent needs to be taken first). Used by
 /// `require()`, which tracks the current module's directory directly.
 pub fn resolve_esm_from_dir(dir: &str, specifier: &str) -> PathBuf {
-    if specifier.starts_with("./") || specifier.starts_with("../") {
-        resolve_relative(&Path::new(dir).join(specifier))
+    if specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier == "."
+        || specifier == ".."
+    {
+        let joined = normalize_path(&Path::new(dir).join(specifier));
+        resolve_relative(&joined)
     } else if specifier.starts_with('/') || Path::new(specifier).is_absolute() {
         resolve_relative(&PathBuf::from(specifier))
     } else {
@@ -100,10 +145,18 @@ fn resolve_relative(base: &Path) -> PathBuf {
     if base.is_file() {
         return base.to_path_buf();
     }
-    for ext in &["js", "mjs", "ts", "tsx", "jsx", "cjs"] {
-        let p = base.with_extension(ext);
-        if p.is_file() {
-            return p;
+    for ext in &["js", "mjs", "ts", "tsx", "jsx", "cjs", "json"] {
+        // Node.js always APPENDS the extension (bind.decorator → bind.decorator.js).
+        // Rust's with_extension() REPLACES it (bind.decorator → bind.js). Use
+        // string append so filenames like `bind.decorator` resolve correctly.
+        let appended = PathBuf::from(format!("{}.{}", base.display(), ext));
+        if appended.is_file() {
+            return appended;
+        }
+        // Also try replacing for the common case where the stem has no dot.
+        let replaced = base.with_extension(ext);
+        if replaced != appended && replaced.is_file() {
+            return replaced;
         }
     }
     for index in &[
@@ -137,11 +190,20 @@ fn resolve_exports_root(json: &serde_json::Value, pkg_dir: &Path) -> Option<Path
     if path.is_file() { Some(path) } else { None }
 }
 
-fn resolve_condition(val: &serde_json::Value) -> Option<String> {
+pub fn resolve_condition(val: &serde_json::Value) -> Option<String> {
     if let Some(s) = val.as_str() {
         return Some(s.to_string());
     }
-    for key in &["import", "module", "default"] {
+    // Array: try each element in order (e.g. exports: ["./x.js", ...])
+    if let Some(arr) = val.as_array() {
+        for item in arr {
+            if let Some(s) = resolve_condition(item) {
+                return Some(s);
+            }
+        }
+        return None;
+    }
+    for key in &["require", "node", "default", "import", "module"] {
         if let Some(s) = val[key].as_str() {
             return Some(s.to_string());
         }
@@ -217,6 +279,14 @@ fn resolve_node_module_esm(start_dir: &Path, name: &str) -> PathBuf {
         if let Some(path) = exports_entry {
             return path;
         }
+        // Node.js uses "main" for CJS require; "module" is bundler-only and ignored by Node.
+        // Check "main" before "module" to match Node.js behavior.
+        if let Some(main) = j.get("main").and_then(|v| v.as_str()) {
+            let path = resolve_relative(&pkg_dir.join(main));
+            if path.is_file() {
+                return path;
+            }
+        }
         if let Some(rn) = j.get("react-native").and_then(|v| v.as_str()) {
             let path = resolve_relative(&pkg_dir.join(rn));
             if path.is_file() {
@@ -225,12 +295,6 @@ fn resolve_node_module_esm(start_dir: &Path, name: &str) -> PathBuf {
         }
         if let Some(mod_entry) = j.get("module").and_then(|v| v.as_str()) {
             let path = resolve_relative(&pkg_dir.join(mod_entry));
-            if path.is_file() {
-                return path;
-            }
-        }
-        if let Some(main) = j.get("main").and_then(|v| v.as_str()) {
-            let path = resolve_relative(&pkg_dir.join(main));
             if path.is_file() {
                 return path;
             }

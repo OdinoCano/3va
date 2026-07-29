@@ -1,9 +1,26 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use v8::{
     ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, Script,
     String as V8String,
 };
 use vvva_permissions::{Capability, PermissionState};
+
+struct StreamChild {
+    stdin: Option<std::process::ChildStdin>,
+    stdout_buf: Arc<Mutex<Vec<u8>>>,
+    done: Arc<AtomicBool>,
+    _child: std::process::Child,
+}
+
+static CHILD_TABLE: OnceLock<Mutex<HashMap<u32, StreamChild>>> = OnceLock::new();
+static NEXT_CHILD_ID: AtomicU32 = AtomicU32::new(1);
+
+fn child_table() -> &'static Mutex<HashMap<u32, StreamChild>> {
+    CHILD_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 pub fn inject_child_process(
     scope: &mut ContextScope<HandleScope>,
@@ -451,6 +468,189 @@ pub fn inject_child_process(
         spawn_sync_with_stdin_fn.into(),
     );
 
+    // ── __spawnCreate(cmd, args) → child_id ──────────────────────────────────
+    let spawn_create_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let perms = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const PermissionState)
+            };
+            if !perms.check(&Capability::SpawnProcess) {
+                let e = V8String::new(scope, "Process spawn denied").unwrap();
+                scope.throw_exception(e.into());
+                return;
+            }
+            let cmd = args.get(0).to_rust_string_lossy(scope);
+            let args_arr = args.get(1);
+            let arg_vec: Vec<String> = if args_arr.is_array() {
+                let arr = v8::Local::<v8::Array>::try_from(args_arr).unwrap();
+                (0..arr.length())
+                    .filter_map(|i| {
+                        arr.get_index(scope, i)
+                            .map(|v| v.to_rust_string_lossy(scope))
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            let child_result = std::process::Command::new(&cmd)
+                .args(&arg_vec)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::inherit())
+                .spawn();
+
+            match child_result {
+                Ok(mut child) => {
+                    let stdin = child.stdin.take().unwrap();
+                    let stdout = child.stdout.take().unwrap();
+                    let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+                    let done = Arc::new(AtomicBool::new(false));
+                    let buf2 = buf.clone();
+                    let done2 = done.clone();
+                    std::thread::spawn(move || {
+                        use std::io::Read;
+                        let mut reader = stdout;
+                        let mut tmp = [0u8; 4096];
+                        loop {
+                            match reader.read(&mut tmp) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => buf2.lock().unwrap().extend_from_slice(&tmp[..n]),
+                            }
+                        }
+                        done2.store(true, Ordering::SeqCst);
+                    });
+                    let id = NEXT_CHILD_ID.fetch_add(1, Ordering::SeqCst);
+                    child_table().lock().unwrap().insert(
+                        id,
+                        StreamChild {
+                            stdin: Some(stdin),
+                            stdout_buf: buf,
+                            done,
+                            _child: child,
+                        },
+                    );
+                    rv.set(v8::Integer::new_from_unsigned(scope, id).into());
+                }
+                Err(e) => {
+                    let msg = V8String::new(scope, &format!("spawn error: {}", e)).unwrap();
+                    scope.throw_exception(msg.into());
+                }
+            }
+        },
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__spawnCreate").unwrap().into(),
+        spawn_create_fn.into(),
+    );
+
+    // ── __spawnWrite(id, bytes: Uint8Array) ───────────────────────────────────
+    let spawn_write_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let bytes = crate::builtins::v8_compat::js_value_to_bytes(scope, args.get(1));
+            let mut table = child_table().lock().unwrap();
+            if let Some(child) = table.get_mut(&id)
+                && let Some(stdin) = child.stdin.as_mut()
+            {
+                let _ = stdin.write_all(&bytes);
+                let _ = stdin.flush();
+            }
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__spawnWrite").unwrap().into(),
+        spawn_write_fn.into(),
+    );
+
+    // ── __spawnEnd(id) — close the child's stdin pipe so it can finish ────────
+    let spawn_end_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let mut table = child_table().lock().unwrap();
+            if let Some(child) = table.get_mut(&id) {
+                // Closing the pipe is what allows `cat` to flush its stdout
+                // and exit. Drop the stdin handle to send EOF to the child.
+                let _ = child.stdin.take();
+            }
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__spawnEnd").unwrap().into(),
+        spawn_end_fn.into(),
+    );
+
+    // ── __spawnPollOut(id) → Uint8Array of buffered stdout data ──────────────
+    let spawn_poll_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let table = child_table().lock().unwrap();
+            if let Some(child) = table.get(&id) {
+                let mut buf = child.stdout_buf.lock().unwrap();
+                if !buf.is_empty() {
+                    let data = buf.drain(..).collect::<Vec<u8>>();
+                    drop(buf);
+                    drop(table);
+                    let arr = crate::builtins::v8_compat::uint8array_from_bytes(scope, &data);
+                    rv.set(arr.into());
+                }
+            }
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__spawnPollOut").unwrap().into(),
+        spawn_poll_fn.into(),
+    );
+
+    // ── __spawnIsDone(id) → bool ──────────────────────────────────────────────
+    let spawn_done_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let table = child_table().lock().unwrap();
+            let done = table
+                .get(&id)
+                .map(|c| c.done.load(Ordering::SeqCst))
+                .unwrap_or(true);
+            rv.set(v8::Boolean::new(scope, done).into());
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__spawnIsDone").unwrap().into(),
+        spawn_done_fn.into(),
+    );
+
+    // ── __spawnKill(id) ───────────────────────────────────────────────────────
+    let spawn_kill_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            child_table().lock().unwrap().remove(&id);
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__spawnKill").unwrap().into(),
+        spawn_kill_fn.into(),
+    );
+
     let js_code = r#"
         (function() {
             function parseOpts(cmd, opts, cb) {
@@ -462,7 +662,7 @@ pub fn inject_child_process(
             var child_process = {
                 exec: function(command, opts, cb) {
                     var p = parseOpts(command, opts, cb);
-                    __execShellAsync(command).then(function(raw) {
+                    Promise.resolve(__execShellAsync(command)).then(function(raw) {
                         var r = JSON.parse(raw);
                         if (p.cb) {
                             if (r.code !== 0) {
@@ -485,7 +685,7 @@ pub fn inject_child_process(
                     if (typeof args === 'function') { cb = args; args = []; opts = {}; }
                     else if (typeof opts === 'function') { cb = opts; opts = {}; }
                     args = args || [];
-                    __execAsync(file, args, 0).then(function(raw) {
+                    Promise.resolve(__execAsync(file, args, 0)).then(function(raw) {
                         var r = JSON.parse(raw);
                         if (cb) {
                             if (r.code !== 0) {
@@ -503,55 +703,96 @@ pub fn inject_child_process(
                 spawn: function(command, args, opts) {
                     args = args || [];
                     opts = opts || {};
-                    var stdinChunks = [];
-                    var started = false;
+                    var id = __spawnCreate(command, args);
+                    var pollTimer = null;
 
-                    function runWith(stdinData) {
-                        if (stdinData) {
-                            try {
-                                var r = JSON.parse(__spawnWithInput(command, args, stdinData));
-                                if (r.stdout) cp.stdout._listeners.forEach(function(fn) { fn(r.stdout); });
-                                if (r.stderr) cp.stderr._listeners.forEach(function(fn) { fn(r.stderr); });
-                                cp._exitListeners.forEach(function(fn) { fn(r.code, null); });
-                            } catch (e) {
-                                cp._exitListeners.forEach(function(fn) { fn(1, null); });
-                            }
-                        } else {
-                            __execAsync(command, args, 0).then(function(raw) {
-                                var r = JSON.parse(raw);
-                                if (r.stdout) cp.stdout._listeners.forEach(function(fn) { fn(r.stdout); });
-                                if (r.stderr) cp.stderr._listeners.forEach(function(fn) { fn(r.stderr); });
-                                cp._exitListeners.forEach(function(fn) { fn(r.code, null); });
-                            }).catch(function(e) {
-                                cp._exitListeners.forEach(function(fn) { fn(1, null); });
-                            });
+                    function toBytes(chunk) {
+                        if (typeof chunk === 'string') {
+                            if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(chunk));
+                            var out = [];
+                            for (var i = 0; i < chunk.length; i++) out.push(chunk.charCodeAt(i) & 0xff);
+                            return out;
+                        }
+                        return chunk;
+                    }
+                    function bytesToChunk(data) {
+                        if (data == null) return data;
+                        if (typeof Buffer !== 'undefined') return Buffer.from(data);
+                        try { return new TextDecoder('utf-8', { fatal: false }).decode(data); }
+                        catch (e) {
+                            var s = '';
+                            for (var i = 0; i < data.length; i++) s += String.fromCharCode(data[i]);
+                            return s;
                         }
                     }
-
-                    var cp = {
-                        _stdout: '', _stderr: '', _code: null,
-                        stdout: { _listeners: [], on: function(ev, fn) { if (ev==='data') this._listeners.push(fn); return this; }, pipe: function() {} },
-                        stderr: { _listeners: [], on: function(ev, fn) { if (ev==='data') this._listeners.push(fn); return this; }, pipe: function() {} },
-                        stdin: {
-                            write: function(chunk) {
-                                stdinChunks.push(typeof chunk === 'string' ? chunk : String(chunk));
-                                return true;
-                            },
-                            end: function(chunk) {
-                                if (chunk !== undefined) stdinChunks.push(typeof chunk === 'string' ? chunk : String(chunk));
-                                if (started) return;
-                                started = true;
-                                runWith(stdinChunks.join(''));
-                            }
+                    function drainAndFinish() {
+                        var data = __spawnPollOut(id);
+                        if (data) stdout._dataListeners.forEach(function(fn) { fn(bytesToChunk(data)); });
+                        if (__spawnIsDone(id)) {
+                            var tail = __spawnPollOut(id);
+                            if (tail) stdout._dataListeners.forEach(function(fn) { fn(bytesToChunk(tail)); });
+                            stdout._endListeners.forEach(function(fn) { fn(); });
+                            cp._closeListeners.forEach(function(fn) { fn(0, null); });
+                            __spawnKill(id);
+                            return true;
+                        }
+                        return false;
+                    }
+                    function schedulePoll() {
+                        Promise.resolve().then(function() {
+                            if (drainAndFinish()) return;
+                            if (typeof setTimeout === 'function') setTimeout(schedulePoll, 0);
+                        });
+                    }
+                    var stdin = {
+                        write: function(chunk, cb) {
+                            __spawnWrite(id, toBytes(chunk));
+                            if (cb) cb(null);
+                            return true;
                         },
-                        _exitListeners: [],
-                        on: function(ev, fn) { if (ev==='exit'||ev==='close') this._exitListeners.push(fn); return this; },
-                        kill: function() {}
+                        on: function(ev, fn) { return this; },
+                        end: function(chunk) {
+                            if (chunk !== undefined && chunk !== null) __spawnWrite(id, toBytes(chunk));
+                            __spawnEnd(id);
+                            schedulePoll();
+                            return this;
+                        },
+                        destroy: function() { __spawnKill(id); },
+                        unref: function() {}
+                    };
+                    var stdout = {
+                        _dataListeners: [],
+                        _endListeners: [],
+                        on: function(ev, fn) {
+                            if (ev === 'data') this._dataListeners.push(fn);
+                            else if (ev === 'end') this._endListeners.push(fn);
+                            return this;
+                        },
+                        destroy: function() {},
+                        unref: function() {}
+                    };
+                    var stderr = {
+                        _listeners: [],
+                        on: function(ev, fn) { if (ev === 'data') this._listeners.push(fn); return this; },
+                        destroy: function() {},
+                        unref: function() {}
+                    };
+                    var cp = {
+                        stdin: stdin,
+                        stdout: stdout,
+                        stderr: stderr,
+                        _closeListeners: [],
+                        _errorListeners: [],
+                        on: function(ev, fn) {
+                            if (ev === 'close' || ev === 'exit') this._closeListeners.push(fn);
+                            else if (ev === 'error') this._errorListeners.push(fn);
+                            return this;
+                        },
+                        kill: function() { __spawnKill(id); },
+                        ref: function() {},
+                        unref: function() {}
                     };
 
-                    Promise.resolve().then(function() {
-                        if (!started) { started = true; runWith(''); }
-                    });
                     return cp;
                 },
 

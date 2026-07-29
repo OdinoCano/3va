@@ -28,7 +28,18 @@ if (typeof globalThis.TextDecoder === 'undefined') {
     globalThis.TextDecoder = function TextDecoder(enc) { this.encoding = enc || 'utf-8'; };
     globalThis.TextDecoder.prototype.decode = function(buf) {
         if (!buf) return '';
-        var bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+        var bytes;
+        if (buf instanceof Uint8Array) {
+            bytes = buf;
+        } else if (buf instanceof DataView) {
+            bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+        } else if (buf instanceof ArrayBuffer) {
+            bytes = new Uint8Array(buf);
+        } else if (ArrayBuffer.isView(buf)) {
+            bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+        } else {
+            bytes = new Uint8Array(buf);
+        }
         var str = '', i = 0;
         while (i < bytes.length) {
             var b = bytes[i++];
