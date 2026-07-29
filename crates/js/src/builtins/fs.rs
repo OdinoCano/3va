@@ -132,13 +132,7 @@ fn fs_err<'s>(
         std::io::ErrorKind::IsADirectory => "EISDIR",
         _ => "EIO",
     };
-    let msg = format!(
-        "{}: {} (os error {}): '{}'",
-        code,
-        io_err,
-        io_err.raw_os_error().unwrap_or(0),
-        path
-    );
+    let msg = format!("{}: {}: '{}'", code, io_err, path);
     let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
     let escaped_path = path.replace('\\', "\\\\").replace('"', "\\\"");
     let src = format!(
@@ -271,7 +265,7 @@ pub fn inject_fs(
                     rv.set(v8::Integer::new(scope, fd).into());
                 }
                 Err(e) => {
-                    let err = js_err(scope, format!("ENOENT: open '{}': {}", path_str, e));
+                    let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
             }
@@ -427,7 +421,7 @@ pub fn inject_fs(
             match std::fs::create_dir_all(&unique) {
                 Ok(()) => rv.set(v8::String::new(scope, &unique).unwrap().into()),
                 Err(e) => {
-                    let err = js_err(scope, e.to_string());
+                    let err = fs_err(scope, &e, &unique);
                     scope.throw_exception(err);
                 }
             }
@@ -450,7 +444,7 @@ pub fn inject_fs(
             match std::fs::read_to_string(&path) {
                 Ok(content) => rv.set(v8::String::new(scope, &content).unwrap().into()),
                 Err(e) => {
-                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
             }
@@ -475,7 +469,7 @@ pub fn inject_fs(
                 std::fs::create_dir_all(parent).ok();
             }
             if let Err(e) = std::fs::write(&path, &data) {
-                let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
         },
@@ -500,7 +494,7 @@ pub fn inject_fs(
                     rv.set(v8::String::new(scope, &json).unwrap().into());
                 }
                 Err(e) => {
-                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
             }
@@ -525,7 +519,7 @@ pub fn inject_fs(
                 std::fs::create_dir_all(parent).ok();
             }
             if let Err(e) = std::fs::write(&path, content) {
-                let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
         },
@@ -552,12 +546,12 @@ pub fn inject_fs(
             match file {
                 Ok(mut file) => {
                     if let Err(e) = file.write_all(content.as_bytes()) {
-                        let err = js_err(scope, format!("{}: '{}'", e, path_str));
+                        let err = fs_err(scope, &e, &path_str);
                         scope.throw_exception(err);
                     }
                 }
                 Err(e) => {
-                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
             }
@@ -606,7 +600,7 @@ pub fn inject_fs(
                         .into(),
                 ),
                 Err(e) => {
-                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
             }
@@ -652,7 +646,7 @@ pub fn inject_fs(
             match std::fs::canonicalize(&path) {
                 Ok(p) => rv.set(v8::String::new(scope, &p.to_string_lossy()).unwrap().into()),
                 Err(e) => {
-                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
             }
@@ -703,7 +697,7 @@ pub fn inject_fs(
                 return;
             }
             if let Err(e) = std::fs::create_dir_all(&path) {
-                let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
         },
@@ -728,7 +722,7 @@ pub fn inject_fs(
                 std::fs::remove_file(&path)
             };
             if let Err(e) = result {
-                let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
         },
@@ -748,7 +742,7 @@ pub fn inject_fs(
                 return;
             }
             if let Err(e) = std::fs::remove_file(&path) {
-                let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
         },
@@ -775,7 +769,7 @@ pub fn inject_fs(
                 return;
             }
             if let Err(e) = std::fs::rename(&from, &to) {
-                let err = js_err(scope, format!("ENOENT: {}", e));
+                let err = fs_err(scope, &e, &from_str);
                 scope.throw_exception(err);
             }
         },
@@ -817,7 +811,7 @@ pub fn inject_fs(
                 Ok(())
             }
             if let Err(e) = copy_all(&src, &dest) {
-                let err = js_err(scope, format!("ENOENT: {e}"));
+                let err = fs_err(scope, &e, &src_str);
                 scope.throw_exception(err);
             }
         },
@@ -844,7 +838,7 @@ pub fn inject_fs(
                 return;
             }
             if let Err(e) = std::fs::copy(&src, &dest) {
-                let err = js_err(scope, format!("ENOENT: {}", e));
+                let err = fs_err(scope, &e, &src_str);
                 scope.throw_exception(err);
             }
         },
@@ -877,7 +871,7 @@ pub fn inject_fs(
                 if let Err(e) =
                     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
                 {
-                    let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                    let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
             }
@@ -888,12 +882,12 @@ pub fn inject_fs(
                         let mut perms_obj = meta.permissions();
                         perms_obj.set_readonly(mode & 0o200 == 0);
                         if let Err(e) = std::fs::set_permissions(&path, perms_obj) {
-                            let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                            let err = fs_err(scope, &e, &path_str);
                             scope.throw_exception(err);
                         }
                     }
                     Err(e) => {
-                        let err = js_err(scope, format!("ENOENT: {}: '{}'", e, path_str));
+                        let err = fs_err(scope, &e, &path_str);
                         scope.throw_exception(err);
                     }
                 }
@@ -924,7 +918,7 @@ pub fn inject_fs(
                 "symlink not supported on this platform",
             ));
             if let Err(e) = result {
-                let err = js_err(scope, format!("EEXIST: {}: '{}'", e, path_str));
+                let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
         },
@@ -1102,7 +1096,7 @@ pub fn inject_fs(
                         .into(),
                 ),
                 Err(e) => {
-                    let err = js_err(scope, format!("ENOENT: {e}"));
+                    let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
             }
@@ -1209,8 +1203,20 @@ pub fn inject_fs(
                 }
                 return names;
             },
-            mkdirSync: function(p, opts) { return __fsMkdirSync(__fsPath(p)); },
-            rmSync: function(p) { return __fsRmSync(__fsPath(p)); },
+            mkdirSync: function(p, opts) {
+                p = __fsPath(p);
+                try { __fsMkdirSync(p); }
+                catch(e) {
+                    if (!(opts && opts.recursive && e && (e.code === 'EEXIST' || (e.message && e.message.indexOf('exists') !== -1)))) throw e;
+                }
+            },
+            rmSync: function(p, opts) {
+                p = __fsPath(p);
+                try { __fsRmSync(p); }
+                catch(e) {
+                    if (!(opts && opts.force && e && (e.message && e.message.indexOf('ENOENT') !== -1))) throw e;
+                }
+            },
             unlinkSync: function(p) { return __fsUnlinkSync(__fsPath(p)); },
             renameSync: function(f, t) { return __fsRenameSync(__fsPath(f), __fsPath(t)); },
             copyFileSync: function(s, d) { return __fsCopyFileSync(__fsPath(s), __fsPath(d)); },
@@ -1219,7 +1225,7 @@ pub fn inject_fs(
             symlinkSync: function(target, p) { return __fsSymlinkSync(target, __fsPath(p)); },
             statSync: function(p) { return parseStat(__fsStatSync(__fsPath(p), 'true')); },
             lstatSync: function(p) { return parseStat(__fsStatSync(__fsPath(p), 'false')); },
-            realpathSync: function(p) { return __fsRealpathSync(__fsPath(p)); },
+            realpathSync: (function() { var fn = function(p) { return __fsRealpathSync(__fsPath(p)); }; fn.native = fn; return fn; })(),
             accessSync: function(p, mode) {
                 var result = __fsAccessSync(__fsPath(p), String(mode === undefined ? 0 : mode));
                 if (result !== 'ok') throw new Error(result);
@@ -1255,9 +1261,44 @@ pub fn inject_fs(
                 if (cb) { result.then(function() { cb(null); }).catch(function(e) { cb(e); }); return; }
                 return result;
             },
-            readdir:     wrapAsync(function(p, opts) { return JSON.parse(__fsReaddirSync(p)); }),
-            mkdir:       wrapAsync(function(p, opts) { return __fsMkdirSync(p); }),
-            rm:          wrapAsync(function(p) { return __fsRmSync(p); }),
+            readdir:     wrapAsync(function(p, opts) {
+                var names = JSON.parse(__fsReaddirSync(p));
+                if (opts && opts.withFileTypes) {
+                    return names.map(function(n) {
+                        var stat; try { stat = JSON.parse(__fsStatSync(p + '/' + n, 'false')); } catch(e) { stat = null; }
+                        return { name: n, path: p, isFile: function() { return stat ? stat.isFile : true; }, isDirectory: function() { return stat ? stat.isDirectory : false; }, isSymbolicLink: function() { return stat ? stat.isSymbolicLink : false; }, isBlockDevice: function() { return false; }, isCharacterDevice: function() { return false; }, isFIFO: function() { return false; }, isSocket: function() { return false; } };
+                    });
+                }
+                return names;
+            }),
+            mkdir: function(p, opts, cb) {
+                if (typeof opts === 'function') { cb = opts; opts = null; }
+                p = __fsPath(p);
+                var recursive = opts && opts.recursive;
+                var promise = new Promise(function(resolve, reject) {
+                    try { __fsMkdirSync(p); resolve(); }
+                    catch(e) {
+                        if (recursive && e && e.message && (e.message.indexOf('exists') !== -1 || e.message.indexOf('EEXIST') !== -1)) resolve();
+                        else reject(e);
+                    }
+                });
+                if (cb) { promise.then(function() { cb(null); }).catch(function(e) { cb(e); }); return; }
+                return promise;
+            },
+            rm: function(p, opts, cb) {
+                if (typeof opts === 'function') { cb = opts; opts = null; }
+                p = __fsPath(p);
+                var force = opts && opts.force;
+                var promise = new Promise(function(resolve, reject) {
+                    try { __fsRmSync(p); resolve(); }
+                    catch(e) {
+                        if (force && e && e.message && e.message.indexOf('ENOENT') !== -1) resolve();
+                        else reject(e);
+                    }
+                });
+                if (cb) { promise.then(function() { cb(null); }).catch(function(e) { cb(e); }); return; }
+                return promise;
+            },
             unlink:      wrapAsync(function(p) { return __fsUnlinkSync(p); }),
             rename:      wrapAsync(function(f, t) { return __fsRenameSync(f, t); }),
             copyFile:    wrapAsync(function(s, d) { return __fsCopyFileSync(s, d); }),
@@ -1295,7 +1336,7 @@ pub fn inject_fs(
                 try { __fsFdClose(fd); } catch(e) { if (cb) cb(e); return; }
                 if (cb) setTimeout(function() { cb(null); }, 0);
             },
-            closeSync: function(fd) { __fsFdClose(fd); },
+            closeSync: function(fd) { if (fd > 2) __fsFdClose(fd); },
             read: function(fd, buffer, offset, length, position, cb) {
                 try {
                     var bytes = __fsFdRead(fd, length, position >= 0 ? position : null);
@@ -1334,22 +1375,37 @@ pub fn inject_fs(
             writeSync: function(fd, buffer, offset, length, position) {
                 var data;
                 if (typeof buffer === 'string') {
-                    data = Array.from(new TextEncoder().encode(buffer));
+                    data = new TextEncoder().encode(buffer);
                 } else {
                     var start = offset || 0;
                     var end   = length != null ? start + length : buffer.length;
-                    data = Array.from(buffer.slice(start, end));
+                    data = buffer.slice ? buffer.slice(start, end) : buffer;
                 }
-                return __fsFdWrite(fd, data, position >= 0 ? position : null);
+                if (fd <= 2) {
+                    // stdin/stdout/stderr: decode and write to console
+                    var text = typeof data === 'string' ? data : new TextDecoder().decode(data);
+                    if (fd === 2) process.stderr.write ? process.stderr.write(text) : console.error(text);
+                    else if (fd === 1) process.stdout.write ? process.stdout.write(text) : console.log(text);
+                    return data.byteLength || data.length || 0;
+                }
+                return __fsFdWrite(fd, Array.from(data), position != null && position >= 0 ? position : null);
             },
             fstat: function(fd, cb) {
+                if (fd <= 2) {
+                    var s = {dev:0,mode:0x21a4,nlink:1,uid:0,gid:0,rdev:fd,blksize:4096,ino:fd,size:0,blocks:0,atime:new Date(0),mtime:new Date(0),ctime:new Date(0),birthtime:new Date(0),atimeMs:0,mtimeMs:0,ctimeMs:0,birthtimeMs:0,isFile:function(){return false;},isDirectory:function(){return false;},isBlockDevice:function(){return false;},isCharacterDevice:function(){return true;},isSymbolicLink:function(){return false;},isFIFO:function(){return false;},isSocket:function(){return false;}};
+                    if (cb) setTimeout(function() { cb(null, s); }, 0); else return s;
+                    return;
+                }
                 try {
                     var s = parseStat(__fsFdStat(fd));
                     if (cb) setTimeout(function() { cb(null, s); }, 0);
                     else return s;
                 } catch(e) { if (cb) cb(e); }
             },
-            fstatSync: function(fd) { return parseStat(__fsFdStat(fd)); },
+            fstatSync: function(fd) {
+                if (fd <= 2) return {dev:0,mode:0x21a4,nlink:1,uid:0,gid:0,rdev:fd,blksize:4096,ino:fd,size:0,blocks:0,atime:new Date(0),mtime:new Date(0),ctime:new Date(0),birthtime:new Date(0),atimeMs:0,mtimeMs:0,ctimeMs:0,birthtimeMs:0,isFile:function(){return false;},isDirectory:function(){return false;},isBlockDevice:function(){return false;},isCharacterDevice:function(){return true;},isSymbolicLink:function(){return false;},isFIFO:function(){return false;},isSocket:function(){return false;}};
+                return parseStat(__fsFdStat(fd));
+            },
             fsync: function(fd, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
             fsyncSync: function(fd) {},
             fdatasync: function(fd, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },

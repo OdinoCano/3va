@@ -255,6 +255,19 @@ pub fn inject_require(
                     // it contains bare `import`/`export` declarations.
                     let is_esm =
                         path_str.ends_with(".mjs") || crate::esm::source_is_esm(&source, &path_str);
+                    let _zod_core_debug = path_str.contains("zod") && path_str.contains("core.js");
+                    if _zod_core_debug {
+                        eprintln!("[ZOD-CORE] path={} is_esm={}", path_str, is_esm);
+                    }
+                    if path_str.contains("micromark-util-character") {
+                        eprintln!(
+                            "[MMARK] loaded path={} is_esm={} first_export={:?}",
+                            path_str,
+                            is_esm,
+                            source.lines().find(|l| l.trim().starts_with("export "))
+                        );
+                    }
+                    let _mmark_debug = path_str.contains("micromark-util-character");
                     let transpiled = if path_str.ends_with(".cjs")
                         || path_str.ends_with(".json")
                         || source.contains("@exodus/bytes")
@@ -272,6 +285,58 @@ pub fn inject_require(
                     } else {
                         crate::transpiler::transpile_js(&source)
                     };
+                    if _zod_core_debug {
+                        let has_bare = transpiled.lines().any(|l| l.trim().starts_with("export "));
+                        eprintln!(
+                            "[ZOD-CORE] transpiled len={} has_bare_export={}",
+                            transpiled.len(),
+                            has_bare
+                        );
+                        let _ =
+                            std::fs::write("/tmp/zod_core_transpiled.js", transpiled.as_bytes());
+                    }
+                    if _mmark_debug {
+                        let _ = std::fs::write("/tmp/mmark_transpiled.js", transpiled.as_bytes());
+                        eprintln!(
+                            "[MMARK] transpiled len={} has_export={}",
+                            transpiled.len(),
+                            transpiled.contains("\nexport ")
+                        );
+                    }
+                    if std::env::var("DEBUG_TRANSPILE").is_ok() {
+                        let has_bare = transpiled.lines().any(|l| l.trim().starts_with("export "));
+                        if has_bare {
+                            let ex: Vec<_> = transpiled
+                                .lines()
+                                .filter(|l| l.trim().starts_with("export "))
+                                .take(2)
+                                .collect();
+                            eprintln!("[DEBUG] Bare: {} — {:?}", path_str, ex);
+                        }
+                        if path_str.contains("chunks/config.js") {
+                            let _ =
+                                std::fs::write("/tmp/config_transpiled.js", transpiled.as_bytes());
+                            eprintln!("[DEBUG] Wrote chunks/config.js: {}", path_str);
+                        }
+                        if path_str.contains("property-information/lib/html.js") {
+                            let _ =
+                                std::fs::write("/tmp/html_transpiled.js", transpiled.as_bytes());
+                            eprintln!(
+                                "[DEBUG] Wrote html.js transpiled to /tmp/html_transpiled.js"
+                            );
+                        }
+                        if path_str.contains("micromark-util-character/index.js") {
+                            let _ = std::fs::write(
+                                "/tmp/micromark_transpiled.js",
+                                transpiled.as_bytes(),
+                            );
+                            eprintln!(
+                                "[DEBUG] Wrote micromark-util-character transpiled, has_export={}",
+                                transpiled.contains("export ")
+                            );
+                        }
+                    }
+
                     let result = V8String::new(scope, &transpiled).unwrap();
                     rv.set(result.into());
                 }
@@ -690,9 +755,29 @@ pub fn inject_require(
                 },
                 stripVTControlCharacters: function(str) {
                     return String(str).replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+                },
+                styleText: function(format, text) {
+                    var codes = {
+                        reset: [0, 0], bold: [1, 22], dim: [2, 22], italic: [3, 23],
+                        underline: [4, 24], overline: [53, 55], inverse: [7, 27],
+                        strikethrough: [9, 29], hidden: [8, 28],
+                        black: [30, 39], red: [31, 39], green: [32, 39], yellow: [33, 39],
+                        blue: [34, 39], magenta: [35, 39], cyan: [36, 39], white: [37, 39],
+                        gray: [90, 39], grey: [90, 39],
+                        bgBlack: [40, 49], bgRed: [41, 49], bgGreen: [42, 49], bgYellow: [43, 49],
+                        bgBlue: [44, 49], bgMagenta: [45, 49], bgCyan: [46, 49], bgWhite: [47, 49]
+                    };
+                    var formats = Array.isArray(format) ? format : [format];
+                    var open = '', close = '';
+                    for (var i = formats.length - 1; i >= 0; i--) {
+                        var c = codes[formats[i]];
+                        if (c) { open = '\x1b[' + c[0] + 'm' + open; close = close + '\x1b[' + c[1] + 'm'; }
+                    }
+                    return open + String(text) + close;
                 }
             };
             globalThis.__requireCache['util'] = util;
+            globalThis.__requireCache['node:util'] = util;
 
             function EventEmitter() { this._events = Object.create(null); this._maxListeners = 10; }
             function _ensureEvents(self) { if (!self._events) self._events = Object.create(null); }
@@ -775,6 +860,7 @@ pub fn inject_require(
                 };
             };
             globalThis.__requireCache['events'] = EventEmitter;
+            globalThis.__requireCache['node:events'] = EventEmitter;
 
             // ── assert ───────────────────────────────────────────────────────────
             (function() {
@@ -943,6 +1029,65 @@ pub fn inject_require(
                 globalThis.__requireCache['node:assert'] = assert;
                 globalThis.__requireCache['assert/strict'] = assert;
                 globalThis.__requireCache['node:assert/strict'] = assert;
+            })();
+
+            // ── diagnostics_channel ─────────────────────────────────────────────────
+            (function() {
+                var _channels = Object.create(null);
+                function Channel(name) {
+                    this.name = name;
+                    this._subscribers = [];
+                }
+                Object.defineProperty(Channel.prototype, 'hasSubscribers', {
+                    get: function() { return this._subscribers.length > 0; }
+                });
+                Channel.prototype.subscribe = function(fn) { this._subscribers.push(fn); };
+                Channel.prototype.unsubscribe = function(fn) {
+                    var i = this._subscribers.indexOf(fn);
+                    if (i >= 0) this._subscribers.splice(i, 1);
+                    return i >= 0;
+                };
+                Channel.prototype.publish = function(data) {
+                    for (var i = 0; i < this._subscribers.length; i++) {
+                        try { this._subscribers[i](data, this.name); } catch(e) {}
+                    }
+                };
+                Channel.prototype.bindStore = function() {};
+                Channel.prototype.unbindStore = function() {};
+                Channel.prototype.runStores = function(ctx, fn) { return fn(); };
+                function channel(name) {
+                    if (!_channels[name]) _channels[name] = new Channel(name);
+                    return _channels[name];
+                }
+                function hasSubscribers(name) { return !!(_channels[name] && _channels[name].hasSubscribers); }
+                function subscribe(name, fn) { channel(name).subscribe(fn); }
+                function unsubscribe(name, fn) { return channel(name).unsubscribe(fn); }
+                function tracingChannel(prefix) {
+                    return {
+                        start: channel(prefix + '.start'),
+                        end: channel(prefix + '.end'),
+                        asyncStart: channel(prefix + '.asyncStart'),
+                        asyncEnd: channel(prefix + '.asyncEnd'),
+                        error: channel(prefix + '.error'),
+                    };
+                }
+                var dc = { channel: channel, hasSubscribers: hasSubscribers, subscribe: subscribe, unsubscribe: unsubscribe, tracingChannel: tracingChannel, Channel: Channel };
+                globalThis.__requireCache['diagnostics_channel'] = dc;
+                globalThis.__requireCache['node:diagnostics_channel'] = dc;
+            })();
+
+            // ── http2 stub (used only when http2:true option is set) ────────────────
+            (function() {
+                function notImpl(name) { return function() { throw new Error('http2.' + name + ' not implemented in 3va'); }; }
+                var http2 = {
+                    createServer: notImpl('createServer'),
+                    createSecureServer: notImpl('createSecureServer'),
+                    connect: notImpl('connect'),
+                    constants: {},
+                    sensitiveHeaders: Symbol('sensitiveHeaders'),
+                };
+                globalThis.__requireCache['http2'] = http2;
+                globalThis.__requireCache['node:http2'] = http2;
             })();
 
             // ── timers / timers/promises ────────────────────────────────────────────
@@ -1607,7 +1752,54 @@ pub fn inject_require(
             Duplex.prototype.destroy = Writable.prototype.destroy;
             Duplex.prototype._destroy = Writable.prototype._destroy;
 
-            globalThis.__requireCache['stream'] = { Readable: Readable, Writable: Writable, Transform: Transform, PassThrough: PassThrough, Duplex: Duplex, Stream: Stream };
+            // Node.js: require('stream') returns the Stream class itself with sub-classes as properties
+            Stream.Readable = Readable;
+            Stream.Writable = Writable;
+            Stream.Transform = Transform;
+            Stream.PassThrough = PassThrough;
+            Stream.Duplex = Duplex;
+            Stream.Stream = Stream;
+            globalThis.__requireCache['stream'] = Stream;
+            globalThis.__requireCache['node:stream'] = Stream;
+
+            (function() {
+                var streamPromises = {
+                    pipeline: function() {
+                        var streams = Array.prototype.slice.call(arguments);
+                        return new Promise(function(resolve, reject) {
+                            if (streams.length < 2) { reject(new Error('pipeline: need at least 2 streams')); return; }
+                            var i = 0;
+                            function pump() {
+                                if (i >= streams.length - 1) { resolve(); return; }
+                                var src = streams[i], dst = streams[i + 1];
+                                i++;
+                                if (src && typeof src.pipe === 'function') {
+                                    src.on('error', reject);
+                                    dst.on('error', reject);
+                                    src.pipe(dst, { end: i === streams.length - 1 });
+                                    dst.on('finish', pump);
+                                } else {
+                                    pump();
+                                }
+                            }
+                            pump();
+                        });
+                    },
+                    finished: function(stream, options) {
+                        return new Promise(function(resolve, reject) {
+                            if (!stream || typeof stream.on !== 'function') { resolve(); return; }
+                            stream.on('end', resolve);
+                            stream.on('finish', resolve);
+                            stream.on('error', reject);
+                            stream.on('close', function() {
+                                if (!stream.destroyed) resolve();
+                            });
+                        });
+                    }
+                };
+                globalThis.__requireCache['stream/promises'] = streamPromises;
+                globalThis.__requireCache['node:stream/promises'] = streamPromises;
+            })();
 
             // ── process.stdout/stderr as real Writable streams, process.env as a
             // real Proxy — process.rs sets plain placeholders (see its comments),
@@ -1943,12 +2135,122 @@ pub fn inject_require(
                 win32Path.posix = posixPath;
                 win32Path.win32 = win32Path;
                 globalThis.__requireCache['path'] = posixPath;
+                globalThis.__requireCache['node:path'] = posixPath;
                 globalThis.__requireCache['path/posix'] = posixPath;
+                globalThis.__requireCache['node:path/posix'] = posixPath;
                 globalThis.__requireCache['path/win32'] = win32Path;
+                globalThis.__requireCache['node:path/win32'] = win32Path;
             })();
 
-            globalThis.__requireCache['buffer'] = globalThis.Buffer;
+            // ── module (node:module) ─────────────────────────────────────────────
+            // Minimal stub: provides createRequire(filename) which returns the
+            // global require shim (already set up by the 3va CJS wrapper).
+            (function() {
+                var modMod = {
+                    createRequire: function(filename) {
+                        // Build a require scoped to the directory of `filename`.
+                        // Strip file:// URL prefix if present.
+                        var fsPath = (typeof filename === 'string')
+                            ? filename.replace(/^file:\/\/\/?/, '/')
+                            : (globalThis.__dirname || '');
+                        var dir = fsPath.replace(/[/\\][^/\\]*$/, '') || globalThis.__dirname || '';
+                        var scopedRequire = function(id) {
+                            return globalThis.__vvva_require_from
+                                ? globalThis.__vvva_require_from(id, dir)
+                                : globalThis.require(id);
+                        };
+                        scopedRequire.resolve = function(id) {
+                            return __requireResolve(id, dir);
+                        };
+                        scopedRequire.cache = globalThis.__loadedModules || {};
+                        return scopedRequire;
+                    },
+                    builtinModules: [
+                        'assert','async_hooks','buffer','child_process','cluster',
+                        'console','crypto','dgram','diagnostics_channel','dns',
+                        'domain','events','fs','http','http2','https','inspector',
+                        'module','net','os','path','perf_hooks','process','punycode',
+                        'querystring','readline','repl','stream','string_decoder',
+                        'sys','timers','tls','tty','url','util','v8','vm','wasi',
+                        'worker_threads','zlib',
+                    ],
+                    isBuiltin: function(id) {
+                        var bare = id.startsWith('node:') ? id.slice(5) : id;
+                        return modMod.builtinModules.indexOf(bare) !== -1;
+                    },
+                    syncBuiltinESMExports: function() {},
+                    register: function() {},
+                    Module: { _resolveFilename: function(r) { return r; }, builtinModules: [] },
+                };
+                globalThis.__requireCache['module'] = modMod;
+                globalThis.__requireCache['node:module'] = modMod;
+            })();
+
+            // Node.js require('buffer') returns { Buffer, SlowBuffer, constants, ...staticMethods }
+            (function() {
+                var B = globalThis.Buffer;
+                var bufMod = { Buffer: B, SlowBuffer: B, constants: { MAX_LENGTH: 2147483647, MAX_STRING_LENGTH: 1073741823 } };
+                ['from','alloc','allocUnsafe','allocUnsafeSlow','isBuffer','isEncoding','byteLength','concat','compare'].forEach(function(k) {
+                    if (B[k]) bufMod[k] = B[k].bind(B);
+                });
+                globalThis.__requireCache['buffer'] = bufMod;
+                globalThis.__requireCache['node:buffer'] = bufMod;
+            })();
             globalThis.__requireCache['stream'] = globalThis.__requireCache['stream'] || Stream;
+
+            // ── querystring ──────────────────────────────────────────────────────
+            (function() {
+                function encode(obj, sep, eq) {
+                    sep = sep || '&'; eq = eq || '=';
+                    return Object.keys(obj || {}).map(function(k) {
+                        var v = obj[k];
+                        if (Array.isArray(v)) return v.map(function(vi) { return encodeURIComponent(k) + eq + encodeURIComponent(vi); }).join(sep);
+                        return encodeURIComponent(k) + eq + encodeURIComponent(v == null ? '' : v);
+                    }).join(sep);
+                }
+                function decode(str, sep, eq) {
+                    sep = sep || '&'; eq = eq || '=';
+                    var obj = {};
+                    String(str || '').split(sep).forEach(function(pair) {
+                        if (!pair) return;
+                        var idx = pair.indexOf(eq);
+                        var k = idx < 0 ? pair : pair.slice(0, idx);
+                        var v = idx < 0 ? '' : pair.slice(idx + 1);
+                        k = decodeURIComponent(k.replace(/\+/g, ' '));
+                        v = decodeURIComponent(v.replace(/\+/g, ' '));
+                        if (obj[k] === undefined) obj[k] = v;
+                        else if (Array.isArray(obj[k])) obj[k].push(v);
+                        else obj[k] = [obj[k], v];
+                    });
+                    return obj;
+                }
+                var qs = { stringify: encode, parse: decode, encode: encode, decode: decode, escape: encodeURIComponent, unescape: decodeURIComponent };
+                globalThis.__requireCache['querystring'] = qs;
+                globalThis.__requireCache['node:querystring'] = qs;
+            })();
+
+            // ── perf_hooks ───────────────────────────────────────────────────────
+            (function() {
+                var perf = (typeof globalThis.performance !== 'undefined') ? globalThis.performance : { now: function() { return Date.now(); } };
+                var perfHooks = { performance: perf, PerformanceObserver: globalThis.PerformanceObserver || function() {}, constants: {} };
+                globalThis.__requireCache['perf_hooks'] = perfHooks;
+                globalThis.__requireCache['node:perf_hooks'] = perfHooks;
+            })();
+
+            // ── whatwg-url ───────────────────────────────────────────────────────
+            // ponytail: wraps V8 native URL/URLSearchParams; only URL+URLSearchParams
+            // are used by mongodb-connection-string-url; add more if needed
+            (function() {
+                var whatwgUrl = {
+                    URL: globalThis.URL,
+                    URLSearchParams: globalThis.URLSearchParams,
+                    parseURL: function(url) { try { return new globalThis.URL(url); } catch(e) { return null; } },
+                    serializeURL: function(u) { return u ? u.href : ''; },
+                    basicURLParse: function(url, base) { try { return new globalThis.URL(url, base); } catch(e) { return null; } },
+                    serializeURLOrigin: function(u) { return u ? u.origin : ''; },
+                };
+                globalThis.__requireCache['whatwg-url'] = whatwgUrl;
+            })();
 
             // ── url ──────────────────────────────────────────────────────────────
             (function() {
@@ -1965,12 +2267,50 @@ pub fn inject_require(
                     }
                     return href.slice('file://'.length).split('/').map(decodeURIComponent).join('/');
                 }
+                function urlParse(urlStr, parseQueryString, slashesDenoteHost) {
+                    try {
+                        var u = new globalThis.URL(String(urlStr));
+                        var obj = {
+                            href: u.href,
+                            protocol: u.protocol,
+                            slashes: u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'ftp:',
+                            auth: u.username ? (u.password ? u.username + ':' + u.password : u.username) : null,
+                            host: u.host,
+                            port: u.port || null,
+                            hostname: u.hostname,
+                            hash: u.hash || null,
+                            search: u.search || null,
+                            query: parseQueryString ? Object.fromEntries(u.searchParams) : (u.search ? u.search.slice(1) : null),
+                            pathname: u.pathname,
+                            path: u.pathname + (u.search || ''),
+                        };
+                        return obj;
+                    } catch(e) { return { href: urlStr, protocol: null, host: null, hostname: null, pathname: urlStr, path: urlStr, query: null, hash: null }; }
+                }
+                function urlFormat(obj) {
+                    if (typeof obj === 'string') return obj;
+                    if (obj && obj.href) return obj.href;
+                    var s = (obj.protocol || '') + '//';
+                    if (obj.auth) s += obj.auth + '@';
+                    s += (obj.host || obj.hostname || '');
+                    if (obj.port) s += ':' + obj.port;
+                    s += (obj.pathname || '/');
+                    if (obj.search) s += obj.search;
+                    else if (obj.query && typeof obj.query === 'object') s += '?' + Object.entries(obj.query).map(function(kv) { return encodeURIComponent(kv[0]) + '=' + encodeURIComponent(kv[1]); }).join('&');
+                    if (obj.hash) s += obj.hash;
+                    return s;
+                }
+                function urlResolve(from, to) {
+                    try { return new globalThis.URL(to, from).href; } catch(e) { return to; }
+                }
                 globalThis.__requireCache['url'] = {
                     URL: globalThis.URL,
                     URLSearchParams: globalThis.URLSearchParams,
                     pathToFileURL: pathToFileURL,
                     fileURLToPath: fileURLToPath,
-                    format: function(u) { return (u && u.href) ? u.href : String(u); },
+                    parse: urlParse,
+                    format: urlFormat,
+                    resolve: urlResolve,
                 };
             })();
 
@@ -2001,7 +2341,7 @@ pub fn inject_require(
                     if (self.destroyed || self._connId === null) return;
                     var chunk = __tcpRead(self._connId, 65536);
                     if (chunk instanceof Uint8Array) {
-                        self.push(chunk);
+                        self.push(Buffer.from(chunk));
                     } else if (chunk instanceof Error && chunk.code === 'EAGAIN') {
                         // no data available yet — keep polling
                     } else if (chunk instanceof Error && chunk.code === 'EOF') {
@@ -2027,8 +2367,16 @@ pub fn inject_require(
 
             Socket.prototype.connect = function(port, host, cb) {
                 var self = this;
-                if (typeof host === 'function') { cb = host; host = 'localhost'; }
-                host = host || 'localhost';
+                // Support options object form: connect({host, port}[, cb])
+                if (port && typeof port === 'object') {
+                    if (typeof host === 'function') cb = host;
+                    var opts = port;
+                    port = opts.port;
+                    host = opts.host || 'localhost';
+                } else {
+                    if (typeof host === 'function') { cb = host; host = 'localhost'; }
+                    host = host || 'localhost';
+                }
                 if (typeof cb === 'function') self.once('connect', cb);
                 self.connecting = true;
                 var result = __tcpConnect(host, port);
@@ -2112,6 +2460,12 @@ pub fn inject_require(
                 }, 5);
             };
 
+            Server.prototype.setTimeout = function(ms, cb) { if (cb) this.once('timeout', cb); return this; };
+            Server.prototype.keepAliveTimeout = 5000;
+            Server.prototype.requestTimeout = 0;
+            Server.prototype.headersTimeout = 60000;
+            Server.prototype.maxHeadersCount = null;
+            Server.prototype.maxConnections = 0;
             Server.prototype.close = function(cb) {
                 if (this._acceptTimer) { clearInterval(this._acceptTimer); this._acceptTimer = null; }
                 if (this._listenerId !== null) { __netClose(this._listenerId); this._listenerId = null; }
@@ -2126,7 +2480,12 @@ pub fn inject_require(
             };
 
             function netCreateServer(opts, connListener) { return new Server(opts, connListener); }
-            function netConnect(port, host, cb) { return new Socket({}).connect(port, host, cb); }
+            function netConnect(port, host, cb) {
+                var sock = new Socket({});
+                // Allow options object as first arg
+                if (port && typeof port === 'object') return sock.connect(port, host);
+                return sock.connect(port, host, cb);
+            }
 
             globalThis.__requireCache['net'] = {
                 Socket: Socket,
@@ -2365,6 +2724,12 @@ pub fn inject_require(
                 return { port: this._port, address: this._host, family: this._host.indexOf(':') !== -1 ? 'IPv6' : 'IPv4' };
             };
             httpServer.prototype.getConnections = function(cb) { cb(null, 0); };
+            httpServer.prototype.setTimeout = function(ms, cb) { if (cb) this.once('timeout', cb); return this; };
+            httpServer.prototype.keepAliveTimeout = 5000;
+            httpServer.prototype.requestTimeout = 0;
+            httpServer.prototype.headersTimeout = 60000;
+            httpServer.prototype.maxHeadersCount = null;
+            httpServer.prototype.maxConnections = 0;
             httpServer.prototype.ref = function() { return this; };
             httpServer.prototype.unref = function() { return this; };
             httpServer.prototype.listenOnServerHandler = function(socket) {};
@@ -2413,7 +2778,7 @@ pub fn inject_require(
                 var symbol = Symbol.for('Reflect.metadata');
 
                 function assertFunction(fn) {
-                    if (typeof fn !== 'function') throw new TypeError('argument must be a function');
+                    if (fn === null || fn === undefined || (typeof fn !== 'function' && typeof fn !== 'object')) throw new TypeError('argument must be a function');
                 }
 
                 var ReflectMetadata = {
@@ -2630,12 +2995,12 @@ pub fn inject_require(
                 this.type = type;
                 this._frame = __acsGet();
             }
-            AsyncResource.prototype.runInAsyncScope = function(fn) {
-                var args = Array.prototype.slice.call(arguments, 1);
+            AsyncResource.prototype.runInAsyncScope = function(fn, thisArg) {
+                var args = Array.prototype.slice.call(arguments, 2);
                 var prevFrame = __acsGet();
                 __acsSet(this._frame);
                 try {
-                    return fn.apply(null, args);
+                    return fn.apply(thisArg || null, args);
                 } finally {
                     __acsSet(prevFrame);
                 }
@@ -2643,6 +3008,13 @@ pub fn inject_require(
             AsyncResource.prototype.emitDestroy = function() { return this; };
             AsyncResource.prototype.asyncId = function() { return 0; };
             AsyncResource.prototype.triggerAsyncId = function() { return 0; };
+            AsyncResource.prototype.bind = function(fn) {
+                var self = this;
+                return function() {
+                    var args = arguments, thisArg = this;
+                    return self.runInAsyncScope(fn, thisArg, ...args);
+                };
+            };
             AsyncResource.bind = function(fn, type) {
                 var res = new AsyncResource(type || fn.name || 'bound-anonymous-fn');
                 return function() {
@@ -2662,6 +3034,68 @@ pub fn inject_require(
                 },
             };
             globalThis.__requireCache['node:async_hooks'] = globalThis.__requireCache['async_hooks'];
+
+        // Stub for native Rollup binary — 3va can't load .node addons.
+        // Hash functions use FNV-1a; parse/parseAsync throw so callers fall back
+        // to the JS-only path if one exists, or Vite skips parsing at dev time.
+        (function() {
+            function fnv1a(s) {
+                var h = 2166136261;
+                var buf = typeof s === 'string' ? s : String(s);
+                for (var i = 0; i < buf.length; i++) {
+                    h ^= buf.charCodeAt(i);
+                    h = (h * 16777619) >>> 0;
+                }
+                return h;
+            }
+            var rollupNativeStub = {
+                parse: function() { throw new Error('Native Rollup parse unavailable in 3va'); },
+                parseAsync: function() { return Promise.reject(new Error('Native Rollup parse unavailable in 3va')); },
+                xxhashBase64Url: function(s) { return btoa(String(fnv1a(s))).replace(/=+$/,''); },
+                xxhashBase36: function(s) { return fnv1a(s).toString(36); },
+                xxhashBase16: function(s) { return fnv1a(s).toString(16); },
+            };
+            globalThis.__requireCache['@rollup/rollup-linux-x64-gnu'] = rollupNativeStub;
+            globalThis.__requireCache['@rollup/rollup-linux-x64-musl'] = rollupNativeStub;
+            globalThis.__requireCache['@rollup/rollup-linux-arm64-gnu'] = rollupNativeStub;
+            globalThis.__requireCache['@rollup/rollup-darwin-x64'] = rollupNativeStub;
+            globalThis.__requireCache['@rollup/rollup-darwin-arm64'] = rollupNativeStub;
+            globalThis.__requireCache['@rollup/rollup-win32-x64-msvc'] = rollupNativeStub;
+        })();
+
+        // Stub for rollup/parseAst — Vite uses parseAstAsync in ssrTransform to
+        // rewrite import/export for the module runner. Use @babel/parser (installed
+        // as a dep of @babel/types which ships with Astro) with the estree plugin
+        // so it outputs ESTree-compatible nodes that Vite's ssrTransform expects.
+        (function() {
+            var _babelParser = null;
+            function getBabelParser() {
+                if (!_babelParser) {
+                    _babelParser = globalThis.require('@babel/parser');
+                }
+                return _babelParser;
+            }
+            var parseAstStub = {
+                parseAst: function(code, opts) {
+                    var parser = getBabelParser();
+                    return parser.parse(code, {
+                        plugins: ['estree'],
+                        sourceType: 'module',
+                        allowReturnOutsideFunction: !!(opts && opts.allowReturnOutsideFunction),
+                        allowImportExportEverywhere: true,
+                        errorRecovery: true,
+                    });
+                },
+                parseAstAsync: function(code, opts) {
+                    try {
+                        return Promise.resolve(parseAstStub.parseAst(code, opts));
+                    } catch (e) {
+                        return Promise.reject(e);
+                    }
+                },
+            };
+            globalThis.__requireCache['rollup/parseAst'] = parseAstStub;
+        })();
         })();
     "#;
     let source = V8String::new(scope, js_code).unwrap();
@@ -2697,8 +3131,18 @@ pub fn inject_require(
                 return new Promise(function(resolve, reject) {
                     try {
                         var mod = requireFn(specifier);
-                        if (mod && typeof mod === 'object' && mod.default === undefined) {
-                            mod = Object.assign({}, mod, { default: mod });
+                        // ESM interop: CJS modules need a synthetic .default export so that
+                        // `import foo from 'cjs-pkg'` and module-runner's importedNames
+                        // check finds 'default'. Works for both object exports and function
+                        // exports (e.g. picomatch exports a function).
+                        if (mod != null && !('default' in Object(mod))) {
+                            if (typeof mod === 'function' || typeof mod === 'object') {
+                                var wrapped = Object.assign(Object.create(null), mod);
+                                wrapped.default = mod;
+                                mod = wrapped;
+                            } else {
+                                mod = { default: mod };
+                            }
                         }
                         resolve(mod);
                     } catch (e) {
@@ -2747,7 +3191,7 @@ pub fn inject_require(
                 if (typeof val === 'function' && key.length > 0
                     && key.charAt(0) === key.charAt(0).toLowerCase()) {
                     out[key] = (function(fn) {
-                        return function() {
+                        var w = function() {
                             var prevScope = globalThis.__currentCallerScope;
                             globalThis.__currentCallerScope = scopeName;
                             __setCallerScope(scopeName);
@@ -2758,6 +3202,10 @@ pub fn inject_require(
                                 __setCallerScope(prevScope);
                             }
                         };
+                        for (var p in fn) {
+                            if (Object.prototype.hasOwnProperty.call(fn, p)) { w[p] = fn[p]; }
+                        }
+                        return w;
                     })(val);
                 } else if (val && typeof val === 'object' && !Array.isArray(val)) {
                     out[key] = __wrapForScope(val, scopeName, depth + 1);
@@ -2784,6 +3232,18 @@ pub fn inject_require(
         }
 
         function requireFrom(specifier, dir) {
+            // Normalize file:// URLs: strip scheme, host, and query/fragment
+            if (specifier && specifier.indexOf('file://') === 0) {
+                var stripped = specifier.slice('file://'.length);
+                // Remove Windows triple-slash prefix (file:///C:/ → C:/)
+                if (stripped.indexOf('/') === 0 && stripped[2] === ':') stripped = stripped.slice(1);
+                // Strip ?query and #fragment
+                var qi = stripped.indexOf('?'); if (qi !== -1) stripped = stripped.slice(0, qi);
+                var hi = stripped.indexOf('#'); if (hi !== -1) stripped = stripped.slice(0, hi);
+                // Decode percent-encoded characters (e.g. %40 → @ in pnpm paths)
+                try { stripped = decodeURIComponent(stripped); } catch(e) {}
+                specifier = stripped;
+            }
             var bare = bareName(specifier);
             if (Object.prototype.hasOwnProperty.call(globalThis.__requireCache, specifier)) {
                 return __scopedModule(bare, globalThis.__requireCache[specifier], __pkgScopeFor(dir));
@@ -2820,6 +3280,13 @@ pub fn inject_require(
                 return parsed;
             }
 
+            if (resolved.slice(-5) === '.node') {
+                // ponytail: stub native addons as empty objects; callers fail at use-time, not load-time
+                var stub = {};
+                globalThis.__loadedModules[resolved] = { exports: stub };
+                return stub;
+            }
+
             var moduleDir = resolved.replace(/[\/\\][^\/\\]*$/, '') || '.';
             var mod = { exports: {} };
             globalThis.__loadedModules[resolved] = mod;
@@ -2833,6 +3300,26 @@ pub fn inject_require(
             var localImportAsync = __makeImportAsync(localRequire);
 
             var source = __readFile(resolved);
+            // Rewrite bare import() calls so they use our runtime's __importAsync.
+            // V8's new Function() doesn't support native dynamic import(), so any
+            // import( that wasn't already rewritten by the Rust transpiler (e.g. raw
+            // .cjs files) would throw "Not supported" at runtime.
+            source = source.replace(/(?<![a-zA-Z0-9_$\.])import\s*\(/g, function(match, offset, str) {
+                // Don't replace shorthand method definitions: { import(params) { ... } }
+                var rest = str.slice(offset + match.length);
+                var depth = 1, i = 0;
+                while (i < rest.length && depth > 0) {
+                    var c = rest[i];
+                    if (c === '(') depth++;
+                    else if (c === ')') depth--;
+                    i++;
+                }
+                if (depth === 0 && /^\s*\{/.test(rest.slice(i))) return match;
+                return '__importAsync(';
+            });
+            if (resolved.indexOf('module-loader/vite') !== -1 || resolved.indexOf('module-runner') !== -1) {
+                __fsWriteFileSync('/tmp/debug_' + resolved.replace(/[^a-zA-Z0-9]/g, '_') + '.js', source);
+            }
             try {
                 // A required file's own `import.meta.url` must be ITS path,
                 // not the entry script's — replace_import_meta() rewrites
@@ -2843,10 +3330,12 @@ pub fn inject_require(
                 var ownMetaUrl = /^[A-Za-z]:[\\/]/.test(resolved)
                     ? 'file:///' + resolved.replace(/\\/g, '/')
                     : 'file://' + resolved;
-                var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', '__importAsync', source);
-                fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl, localImportAsync);
+                var __vvva_import_meta__ = {url: ownMetaUrl, env: globalThis.__vvva_meta_env__, hot: undefined, glob: globalThis.__vvva_meta_glob__, resolve: globalThis.__vvva_meta_resolve__, require: localRequire, dirname: moduleDir, filename: resolved, main: false};
+                var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', '__importAsync', '__vvva_import_meta__', source + '\n//# sourceURL=' + resolved);
+                fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl, localImportAsync, __vvva_import_meta__);
             } catch (e) {
                 delete globalThis.__loadedModules[resolved];
+                e.message = (e.message || String(e)) + ' (in ' + resolved + ')';
                 throw e;
             }
             return mod.exports;
@@ -2901,6 +3390,18 @@ pub fn resolve_path_from_esm(
     specifier: &str,
     basedir: Option<&str>,
 ) -> std::result::Result<PathBuf, String> {
+    // Node.js package `imports` field: `#specifier` → look up in nearest package.json
+    if specifier.starts_with('#') {
+        let base = basedir
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        if let Some(resolved) = resolve_package_imports(specifier, &base) {
+            return Ok(resolved);
+        }
+        return Err(format!("package import not resolved: {}", specifier));
+    }
+
     let path = PathBuf::from(specifier);
     if path.is_absolute() {
         return Ok(path);
@@ -2919,6 +3420,31 @@ pub fn resolve_path_from_esm(
         Ok(joined)
     } else {
         Err(format!("not found: {}", joined.display()))
+    }
+}
+
+/// Resolve a `#`-prefixed package-internal import via the `imports` field in
+/// the nearest `package.json` ancestor of `start_dir`.
+fn resolve_package_imports(specifier: &str, start_dir: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = start_dir.to_path_buf();
+    loop {
+        let pkg_json = dir.join("package.json");
+        if pkg_json.is_file()
+            && let Ok(content) = std::fs::read_to_string(&pkg_json)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(imports) = json.get("imports")
+            && let Some(val) = imports.get(specifier)
+            && let Some(s) = crate::esm::resolve_condition(val)
+        {
+            let resolved = dir.join(s.trim_start_matches("./"));
+            if resolved.is_file() {
+                return Some(resolved);
+            }
+        }
+        match dir.parent() {
+            Some(p) if p != dir => dir = p.to_path_buf(),
+            _ => return None,
+        }
     }
 }
 
@@ -2958,7 +3484,76 @@ pub fn resolve_exports_value(
             return path.ok();
         }
     }
+    // Array: try each element in order
+    if let Some(arr) = val.as_array() {
+        for item in arr {
+            if let Some(path) = resolve_exports_value(item, pkg_dir, _is_dir) {
+                return Some(path);
+            }
+        }
+        return None;
+    }
+    // If the value is a conditions object { "require": ..., "import": ..., "default": ... },
+    // resolve using the same priority as resolve_condition in esm.rs: require > node > default
+    if val.is_object()
+        && let Some(s) = crate::esm::resolve_condition(val)
+    {
+        let path = resolve_path_from(&s, Some(&pkg_dir.to_string_lossy()));
+        if path.is_ok() {
+            return path.ok();
+        }
+        // Also try joining with pkg_dir directly
+        let joined = pkg_dir.join(s.trim_start_matches("./"));
+        if joined.is_file() {
+            return Some(joined);
+        }
+    }
     None
+}
+
+/// Substitute the wildcard capture into a JSON value (string or conditions object).
+fn substitute_exports_wildcard(
+    val: &serde_json::Value,
+    capture: &str,
+    pkg_dir: &Path,
+) -> Option<PathBuf> {
+    match val {
+        serde_json::Value::String(s) => {
+            let s2 = s.replace('*', capture);
+            let p = pkg_dir.join(s2.trim_start_matches("./"));
+            if p.is_file() {
+                Some(p)
+            } else {
+                let j = PathBuf::from(format!("{}.json", p.display()));
+                if j.is_file() { Some(j) } else { Some(p) }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if let Some(p) = substitute_exports_wildcard(item, capture, pkg_dir)
+                    && p.is_file()
+                {
+                    return Some(p);
+                }
+            }
+            None
+        }
+        serde_json::Value::Object(obj) => {
+            for key in &["require", "node", "default", "import", "module"] {
+                if let Some(v) = obj.get(*key)
+                    && let Some(p) = substitute_exports_wildcard(v, capture, pkg_dir)
+                {
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                    // Return even if not a file (fallback)
+                    return Some(p);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 pub fn resolve_exports_pattern(
@@ -2966,23 +3561,28 @@ pub fn resolve_exports_pattern(
     subpath: &str,
     pkg_dir: &Path,
 ) -> Option<Option<PathBuf>> {
-    let pattern_key = subpath.replace('*', "x");
+    // Node.js exports wildcard matching: key may contain exactly one '*'
+    // e.g. "./drivers/*" with value {"require": "./drivers/*.cjs", "import": "./drivers/*.mjs"}
     for (key, val) in exports {
-        let pattern = key.replace('*', "x");
-        if pattern == pattern_key
-            && let Some(s) = val.as_str()
-        {
-            let resolved = pkg_dir.join(s.trim_start_matches("./"));
+        let Some(star) = key.find('*') else { continue };
+        let prefix = &key[..star];
+        let suffix = &key[star + 1..];
+        let n = subpath.len();
+        let plen = prefix.len();
+        let slen = suffix.len();
+        if n < plen + slen {
+            continue;
+        }
+        if !subpath.starts_with(prefix) {
+            continue;
+        }
+        if !suffix.is_empty() && !subpath.ends_with(suffix) {
+            continue;
+        }
+        let capture = &subpath[plen..n - slen];
+        if let Some(resolved) = substitute_exports_wildcard(val, capture, pkg_dir) {
             return Some(Some(resolved));
         }
-    }
-    let wildcard_key = pattern_key.replace("x", "*");
-    if let Some(val) = exports.get(&wildcard_key)
-        && let Some(s) = val.as_str()
-    {
-        let result = subpath.replace('*', "");
-        let resolved = pkg_dir.join(s.replace('*', &result));
-        return Some(Some(resolved));
     }
     Some(None)
 }

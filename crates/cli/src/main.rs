@@ -814,25 +814,71 @@ fn detect_framework() -> Option<&'static FrameworkInfo> {
     None
 }
 
-/// Locate a CLI binary (local node_modules first, then PATH).
-fn find_binary(bin_name: &str) -> Option<PathBuf> {
+/// Resolve a framework's `.bin/<name>` to the actual JS entry file.
+///
+/// Handles three layouts:
+/// - npm symlink: `.bin/<name>` → `../pkg/dist/cli/index.js`
+/// - pnpm shell stub: contains `# cmd-shim-target=<abs_path>` or `exec node "<path>" "$@"`
+/// - Fallback: the bin file itself if it is already JS
+fn find_framework_js_entry(bin_name: &str) -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    let local = cwd.join("node_modules/.bin").join(bin_name);
-    if local.exists() {
-        return Some(local);
-    }
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(bin_name);
-            if candidate.exists() {
-                return Some(candidate);
+    let bin_dir = cwd.join("node_modules/.bin");
+    let bin_path = bin_dir.join(bin_name);
+
+    // npm layout: .bin/<name> is a symlink to the actual JS file
+    if bin_path.is_symlink() {
+        if let Ok(link_target) = std::fs::read_link(&bin_path) {
+            let resolved = if link_target.is_absolute() {
+                link_target
+            } else {
+                vvva_js::esm::normalize_path(&bin_dir.join(&link_target))
+            };
+            if resolved.is_file() {
+                return Some(resolved);
             }
         }
     }
+
+    // pnpm / npm-legacy layout: .bin/<name> is a shell script
+    if let Ok(content) = std::fs::read_to_string(&bin_path) {
+        // pnpm embeds the target in a comment: `# cmd-shim-target=<abs_path>`
+        for line in content.lines().rev() {
+            if let Some(target) = line.strip_prefix("# cmd-shim-target=") {
+                let p = PathBuf::from(target.trim());
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+        // Fallback: parse `exec node  "<path>" "$@"` line
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("exec node") || trimmed.starts_with("exec \"$basedir/node\"") {
+                // Extract the quoted path between the binary and "$@"
+                if let Some(start) = trimmed.find('"') {
+                    let rest = &trimmed[start + 1..];
+                    if let Some(end) = rest.find('"') {
+                        let raw_path = &rest[..end];
+                        // Resolve $basedir/../... references
+                        let resolved = if raw_path.starts_with("$basedir") {
+                            let rel = raw_path.replace("$basedir_win", "").replace("$basedir", "");
+                            vvva_js::esm::normalize_path(&bin_dir.join(rel.trim_start_matches('/')))
+                        } else {
+                            PathBuf::from(raw_path)
+                        };
+                        if resolved.is_file() {
+                            return Some(resolved);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     None
 }
 
-/// Run a framework's dev server as a child process, forwarding flags and signals.
+/// Run a framework's dev server inside 3va's V8 runtime.
 async fn run_framework_dev_server(
     fw: &FrameworkInfo,
     port: u16,
@@ -840,7 +886,7 @@ async fn run_framework_dev_server(
     open: bool,
 ) -> anyhow::Result<()> {
     let banner = format!("{} project detected", fw.name);
-    let msg = format!("Delegating to {}'s dev server...", fw.name);
+    let msg = format!("Running {} inside 3va V8 runtime...", fw.name);
     let inner = banner.len().max(msg.len()) + 2;
 
     println!();
@@ -850,50 +896,35 @@ async fn run_framework_dev_server(
     println!("  ╚{}╝", "═".repeat(inner + 2));
     println!();
 
-    let mut cmd = if let Some(bin) = find_binary(fw.bin) {
-        let mut c = tokio::process::Command::new(bin);
-        c.args(fw.dev_args);
-        c
-    } else {
-        let mut c = tokio::process::Command::new("npx");
-        let mut args = vec![fw.bin];
-        args.extend(fw.dev_args);
-        c.args(&args);
-        c
-    };
+    let js_entry = find_framework_js_entry(fw.bin).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Cannot find {} entry point. Run '3va install' first.",
+            fw.name
+        )
+    })?;
 
-    cmd.arg("--port")
-        .arg(port.to_string())
-        .arg("--host")
-        .arg(&host);
-
+    // Build argv the framework CLI expects: [...dev_args, --port, N, --host, H]
+    let mut argv: Vec<String> = fw.dev_args.iter().map(|s| s.to_string()).collect();
+    argv.push("--port".to_string());
+    argv.push(port.to_string());
+    argv.push("--host".to_string());
+    argv.push(host);
     if open {
-        cmd.arg("--open");
+        argv.push("--open".to_string());
     }
 
-    cmd.stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .kill_on_drop(true);
+    // Grant all permissions for dev servers (user-trusted local code)
+    use vvva_permissions::Capability;
+    let permissions = vvva_permissions::PermissionState::new();
+    permissions.grant(Capability::FileRead(PathBuf::from("/")));
+    permissions.grant(Capability::FileWrite(PathBuf::from("/")));
+    permissions.grant(Capability::Network("*".to_string()));
+    permissions.grant(Capability::EnvAccess);
+    permissions.grant(Capability::SpawnProcess);
 
-    let mut child = cmd.spawn()?;
-
-    tokio::select! {
-        status = child.wait() => {
-            match status {
-                Ok(s) if !s.success() => {
-                    anyhow::bail!("{} dev server exited with status: {}", fw.name, s);
-                }
-                Err(e) => {
-                    anyhow::bail!("Error waiting for {} dev server: {}", fw.name, e);
-                }
-                _ => {}
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            println!("\n[dev] Shutting down (killing {})...", fw.name);
-            let _ = child.start_kill();
-        }
-    }
+    let permissions = Arc::new(permissions);
+    let mut engine = vvva_js::JsEngine::new(permissions).await?;
+    engine.eval_file_with_args(&js_entry, &argv).await?;
 
     Ok(())
 }

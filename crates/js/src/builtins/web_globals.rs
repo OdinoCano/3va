@@ -176,6 +176,8 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
             this._pathname = parsed.pathname;
             this._search = parsed.search;
             this._hash = parsed.hash;
+            this._username = parsed.username || '';
+            this._password = parsed.password || '';
             this._searchParams = null;
         }
         Object.defineProperty(URL.prototype, 'searchParams', {
@@ -187,9 +189,9 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
             }
         });
         URL._parse = function(url, base) {
-            var href = url;
+            // WHATWG: input may be a URL object (has .href) or a stringifiable value.
+            var href = (url instanceof URL) ? url.href : (url == null ? '' : String(url));
             var hash = '';
-            var query = '';
             var pathname = '/';
             var host = '';
             var hostname = '';
@@ -197,28 +199,57 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
             var protocol = '';
             var origin = '';
             var search = '';
-            if (base && !href.match(/^[a-z]+:\/\//)) {
+            var username = '';
+            var password = '';
+            // Normalize file:/path → file:///path (WHATWG spec: file: with no/one slash)
+            if (href.match(/^file:\/(?!\/)/)) {
+                href = 'file://' + href.slice(5); // "file:/foo" → "file:///foo"
+            }
+            if (base && !href.match(/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\//)) {
                 href = URL._resolve(base, href);
             }
-            var match = href.match(/^([a-z]+):\/\/([^\/:]*)(?::(\d+))?(\/.*)?$/);
+            // Match scheme://[user[:pass]@]host[:port][/path][?query][#hash]
+            var match = href.match(/^([a-zA-Z][a-zA-Z0-9+\-.]*):\/\/([^\/]*)(\/.*)?$/);
             if (match) {
                 protocol = match[1] + ':';
-                hostname = match[2];
-                port = match[3] || '';
-                var isDefaultPort = (protocol === 'https:' && port === '443') ||
-                                    (protocol === 'http:' && port === '80');
-                host = hostname + (port && !isDefaultPort ? ':' + port : '');
-                pathname = match[4] || '/';
+                var authority = match[2]; // may be user:pass@host:port
+                pathname = match[3] || '/';
+                // Extract hash
                 var hashIdx = pathname.indexOf('#');
                 if (hashIdx !== -1) {
                     hash = pathname.substring(hashIdx);
                     pathname = pathname.substring(0, hashIdx);
                 }
+                // Extract query
                 var queryIdx = pathname.indexOf('?');
                 if (queryIdx !== -1) {
                     search = pathname.substring(queryIdx);
                     pathname = pathname.substring(0, queryIdx);
                 }
+                // Parse authority: [userinfo@]host[:port]
+                var atIdx = authority.lastIndexOf('@');
+                if (atIdx !== -1) {
+                    var userinfo = authority.substring(0, atIdx);
+                    authority = authority.substring(atIdx + 1);
+                    var colonIdx = userinfo.indexOf(':');
+                    if (colonIdx !== -1) {
+                        username = userinfo.substring(0, colonIdx);
+                        password = userinfo.substring(colonIdx + 1);
+                    } else {
+                        username = userinfo;
+                    }
+                }
+                // Parse host[:port]
+                var portMatch = authority.match(/^(.*):(\d+)$/);
+                if (portMatch) {
+                    hostname = portMatch[1];
+                    port = portMatch[2];
+                } else {
+                    hostname = authority;
+                }
+                var isDefaultPort = (protocol === 'https:' && port === '443') ||
+                                    (protocol === 'http:' && port === '80');
+                host = hostname + (port && !isDefaultPort ? ':' + port : '');
                 origin = protocol + '//' + hostname + (port && !isDefaultPort ? ':' + port : '');
             } else if (href.indexOf('#') !== -1) {
                 var parts = href.split('#');
@@ -236,17 +267,20 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
                 port: port,
                 pathname: pathname,
                 search: search,
-                hash: hash
+                hash: hash,
+                username: username,
+                password: password
             };
         };
         URL._resolve = function(base, href) {
+            if (typeof base !== 'string') base = base.href || String(base);
             if (href.indexOf('://') !== -1) return href;
             if (href.startsWith('//')) {
-                var baseMatch = base.match(/^([a-z]+):\/\//);
+                var baseMatch = base.match(/^([a-zA-Z][a-zA-Z0-9+\-.]*):\/\//);
                 if (baseMatch) return baseMatch[1] + ':' + href;
             }
             if (href.startsWith('/')) {
-                var baseMatch = base.match(/^[a-z]+:\/\/[^\/]+/);
+                var baseMatch = base.match(/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\/[^\/]+/);
                 if (baseMatch) return baseMatch[0] + href;
             }
             var basePath = base.split('/');
@@ -260,15 +294,74 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
         };
         URL.prototype.toString = function() { return this.href; };
         URL.prototype.toJSON = function() { return this.href; };
-        Object.defineProperty(URL.prototype, 'href', { get: function() { return this._href; } });
+        URL.prototype._rebuild = function() {
+            var isDefaultPort = (this._protocol === 'https:' && this._port === '443') ||
+                                (this._protocol === 'http:' && this._port === '80');
+            this._host = this._hostname + (this._port && !isDefaultPort ? ':' + this._port : '');
+            this._origin = this._protocol + '//' + this._hostname + (this._port && !isDefaultPort ? ':' + this._port : '');
+            var auth = '';
+            if (this._username || this._password) {
+                auth = this._username + (this._password ? ':' + this._password : '') + '@';
+            }
+            this._href = this._protocol + '//' + auth + this._host + this._pathname + this._search + this._hash;
+        };
+        Object.defineProperty(URL.prototype, 'href', {
+            get: function() { return this._href; },
+            set: function(v) {
+                var p = URL._parse(String(v));
+                this._href = p.href; this._origin = p.origin; this._protocol = p.protocol;
+                this._host = p.host; this._hostname = p.hostname; this._port = p.port;
+                this._pathname = p.pathname; this._search = p.search; this._hash = p.hash;
+                this._username = p.username || ''; this._password = p.password || '';
+                this._searchParams = null;
+            }
+        });
         Object.defineProperty(URL.prototype, 'origin', { get: function() { return this._origin; } });
-        Object.defineProperty(URL.prototype, 'protocol', { get: function() { return this._protocol; } });
-        Object.defineProperty(URL.prototype, 'host', { get: function() { return this._host; } });
-        Object.defineProperty(URL.prototype, 'hostname', { get: function() { return this._hostname; } });
-        Object.defineProperty(URL.prototype, 'port', { get: function() { return this._port; } });
-        Object.defineProperty(URL.prototype, 'pathname', { get: function() { return this._pathname; } });
-        Object.defineProperty(URL.prototype, 'search', { get: function() { return this._search; } });
-        Object.defineProperty(URL.prototype, 'hash', { get: function() { return this._hash; } });
+        Object.defineProperty(URL.prototype, 'protocol', {
+            get: function() { return this._protocol; },
+            set: function(v) { this._protocol = (v && v[v.length-1] === ':') ? v : v + ':'; this._rebuild(); }
+        });
+        Object.defineProperty(URL.prototype, 'host', {
+            get: function() { return this._host; },
+            set: function(v) {
+                v = String(v);
+                var m = v.match(/^(.*):(\d+)$/);
+                if (m) { this._hostname = m[1]; this._port = m[2]; }
+                else { this._hostname = v; this._port = ''; }
+                this._rebuild();
+            }
+        });
+        Object.defineProperty(URL.prototype, 'hostname', {
+            get: function() { return this._hostname; },
+            set: function(v) { this._hostname = String(v); this._rebuild(); }
+        });
+        Object.defineProperty(URL.prototype, 'port', {
+            get: function() { return this._port; },
+            set: function(v) { this._port = String(v); this._rebuild(); }
+        });
+        Object.defineProperty(URL.prototype, 'pathname', {
+            get: function() { return this._pathname; },
+            set: function(v) { this._pathname = String(v) || '/'; this._rebuild(); }
+        });
+        Object.defineProperty(URL.prototype, 'search', {
+            get: function() { return this._search; },
+            set: function(v) {
+                v = String(v);
+                this._search = v ? (v[0] === '?' ? v : '?' + v) : '';
+                this._searchParams = null;
+                this._rebuild();
+            }
+        });
+        Object.defineProperty(URL.prototype, 'hash', {
+            get: function() { return this._hash; },
+            set: function(v) {
+                v = String(v);
+                this._hash = v ? (v[0] === '#' ? v : '#' + v) : '';
+                this._rebuild();
+            }
+        });
+        Object.defineProperty(URL.prototype, 'username', { get: function() { return this._username; }, set: function(v) { this._username = String(v); this._rebuild(); } });
+        Object.defineProperty(URL.prototype, 'password', { get: function() { return this._password; }, set: function(v) { this._password = String(v); this._rebuild(); } });
         URL.createObjectURL = function(blob) {
             return 'blob:' + Math.random().toString(36).substr(2);
         };
@@ -286,13 +379,18 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
             this._params = [];
             if (typeof init === 'string') {
                 if (init.indexOf('?') === 0) init = init.substr(1);
-                var pairs = init.split('&');
-                for (var i = 0; i < pairs.length; i++) {
-                    var pair = pairs[i].split('=');
-                    this._params.push({
-                        key: decodeURIComponent(pair[0] || ''),
-                        value: decodeURIComponent(pair[1] || '')
-                    });
+                if (init) {
+                    var pairs = init.split('&');
+                    for (var i = 0; i < pairs.length; i++) {
+                        if (!pairs[i]) continue;
+                        var eqIdx = pairs[i].indexOf('=');
+                        var k = eqIdx < 0 ? pairs[i] : pairs[i].slice(0, eqIdx);
+                        var v = eqIdx < 0 ? '' : pairs[i].slice(eqIdx + 1);
+                        this._params.push({
+                            key: decodeURIComponent(k.replace(/\+/g, ' ')),
+                            value: decodeURIComponent(v.replace(/\+/g, ' '))
+                        });
+                    }
                 }
             } else if (Array.isArray(init)) {
                 for (var i = 0; i < init.length; i++) {
@@ -361,6 +459,21 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
                     return { value: undefined, done: true };
                 }
             };
+        };
+        URLSearchParams.prototype.keys = function() {
+            var keys = this._params.map(function(p) { return p.key; });
+            var i = 0;
+            return { next: function() { return i < keys.length ? { value: keys[i++], done: false } : { value: undefined, done: true }; }, [Symbol.iterator]: function() { return this; } };
+        };
+        URLSearchParams.prototype.values = function() {
+            var vals = this._params.map(function(p) { return p.value; });
+            var i = 0;
+            return { next: function() { return i < vals.length ? { value: vals[i++], done: false } : { value: undefined, done: true }; }, [Symbol.iterator]: function() { return this; } };
+        };
+        URLSearchParams.prototype.entries = function() {
+            var pairs = this._params.map(function(p) { return [p.key, p.value]; });
+            var i = 0;
+            return { next: function() { return i < pairs.length ? { value: pairs[i++], done: false } : { value: undefined, done: true }; }, [Symbol.iterator]: function() { return this; } };
         };
         URLSearchParams.prototype.toString = function() {
             return this._params.map(function(p) {
