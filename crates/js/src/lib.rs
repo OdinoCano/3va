@@ -69,6 +69,7 @@ pub struct JsEngine {
     profiler: Option<Profiler>,
     profiler_interval_ms: u32,
     ws_pool: builtins::websocket::WsPool,
+    server_mode: bool,
     // V8 manages its own heap independently of Rust's global allocator, so
     // switching that allocator (e.g. to mimalloc) has zero effect on V8's
     // memory footprint. Left unprompted, V8 grows its heap to whatever
@@ -149,6 +150,7 @@ impl JsEngine {
             profiler_interval_ms: prof_interval_ms.unwrap_or(100),
             ws_pool: ws_pool.clone(),
             last_low_memory_hint: std::time::Instant::now(),
+            server_mode: false,
         };
 
         engine.initialize(permissions, timer_manager, firewall, ws_pool)?;
@@ -420,9 +422,19 @@ impl JsEngine {
         Ok(())
     }
 
+    /// Call before eval_file_with_args for long-running servers (3va dev).
+    /// Removes the iteration cap so the event loop runs until process.exit() or SIGINT.
+    pub fn set_server_mode(&mut self, enabled: bool) {
+        self.server_mode = enabled;
+    }
+
     pub async fn run_event_loop(&mut self) -> anyhow::Result<()> {
-        let max_iterations = 100_000;
-        let mut iterations = 0;
+        let max_iterations = if self.server_mode {
+            usize::MAX
+        } else {
+            100_000
+        };
+        let mut iterations = 0usize;
         let has_pending_async = true;
 
         while (self.timer_manager.has_pending()

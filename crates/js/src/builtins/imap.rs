@@ -166,28 +166,45 @@ impl ImapStateInner {
 }
 
 fn parse_mailbox_list(response: &[String]) -> Vec<String> {
+    // Every slice below uses `.get(range)` instead of `line[range]` — a
+    // malicious/malformed IMAP server response (e.g. `)` appearing before
+    // `(`, or a mailbox name whose bytes land on a UTF-8 char boundary the
+    // fixed `+1`/`+2` offsets don't expect) must never panic the whole
+    // process just because a remote server sent a weird LIST reply.
     let mut mailboxes = Vec::new();
     for line in response {
         let line = line.trim();
-        if line.starts_with("* LIST ")
-            && let Some(start) = line.find('(')
-            && let Some(end) = line.rfind(')')
-        {
-            let _flags = &line[start..=end];
-            let rest = line[end + 1..].trim();
-            if let Some(rest) = rest.strip_prefix('"') {
-                if let Some(end_quote) = rest.find('"') {
-                    let _delimiter = &rest[1..=end_quote];
-                    let mailbox = rest[end_quote + 2..].trim().to_string();
-                    if !mailbox.is_empty() {
-                        mailboxes.push(mailbox);
-                    }
-                }
-            } else {
-                let mailbox = rest.trim().to_string();
-                if !mailbox.is_empty() {
-                    mailboxes.push(mailbox);
-                }
+        if !line.starts_with("* LIST ") {
+            continue;
+        }
+        let Some(start) = line.find('(') else {
+            continue;
+        };
+        let Some(end) = line.rfind(')') else {
+            continue;
+        };
+        if end < start {
+            continue; // malformed: closing paren before opening paren
+        }
+        let Some(rest) = line.get(end + 1..) else {
+            continue;
+        };
+        let rest = rest.trim();
+        if let Some(after_quote) = rest.strip_prefix('"') {
+            let Some(end_quote) = after_quote.find('"') else {
+                continue;
+            };
+            let Some(mailbox) = after_quote.get(end_quote + 2..) else {
+                continue;
+            };
+            let mailbox = mailbox.trim().to_string();
+            if !mailbox.is_empty() {
+                mailboxes.push(mailbox);
+            }
+        } else {
+            let mailbox = rest.trim().to_string();
+            if !mailbox.is_empty() {
+                mailboxes.push(mailbox);
             }
         }
     }
@@ -264,8 +281,16 @@ pub fn inject_imap(
 
             let perms = perms().clone();
             let inner = inner().clone();
+            // vvva_permissions::scope is a thread-local set by the require()
+            // wrapper on the JS engine's own thread; a freshly spawned
+            // std::thread::spawn thread never had it set, so perms.check()
+            // below would silently evaluate against ROOT_SCOPE instead of
+            // whichever package actually called imap.connect() — capture it
+            // here and re-apply it on the new thread before the check.
+            let scope_for_thread = vvva_permissions::current_scope();
 
             std::thread::spawn(move || {
+                vvva_permissions::set_current_scope(&scope_for_thread);
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let result: Result<(), String> = (|| {
                     if !perms.check(&Capability::Network(host.clone())) {
@@ -1919,5 +1944,45 @@ pub fn inject_imap(
     let source = v8::String::new(scope, js_code).unwrap();
     if let Some(script) = v8::Script::compile(scope, source, None) {
         let _ = script.run(scope);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_mailbox_list_handles_normal_response() {
+        // Pre-existing behavior (not touched by the panic-safety fix below):
+        // the mailbox name keeps its surrounding quote characters as-is.
+        let lines = vec![r#"* LIST (\HasNoChildren) "/" "INBOX""#.to_string()];
+        assert_eq!(parse_mailbox_list(&lines), vec!["\"INBOX\"".to_string()]);
+    }
+
+    #[test]
+    fn parse_mailbox_list_does_not_panic_on_reversed_parens() {
+        // A malformed/malicious response where ')' appears before '(' used to
+        // panic: `line[start..=end]` with start > end.
+        let lines = vec![r#"* LIST )stuff( "/" "x""#.to_string()];
+        assert_eq!(parse_mailbox_list(&lines), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_mailbox_list_does_not_panic_on_missing_closing_quote() {
+        let lines = vec![r#"* LIST (\HasNoChildren) "/" "unterminated"#.to_string()];
+        // No panic; result is whatever falls out of the defensive parsing.
+        let _ = parse_mailbox_list(&lines);
+    }
+
+    #[test]
+    fn parse_mailbox_list_does_not_panic_on_quote_at_end_of_line() {
+        let lines = vec![r#"* LIST (\HasNoChildren) "/" ""#.to_string()];
+        let _ = parse_mailbox_list(&lines);
+    }
+
+    #[test]
+    fn parse_mailbox_list_ignores_non_list_lines() {
+        let lines = vec!["* OK IMAP4rev1 Service Ready".to_string()];
+        assert_eq!(parse_mailbox_list(&lines), Vec::<String>::new());
     }
 }

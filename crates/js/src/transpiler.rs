@@ -759,6 +759,7 @@ fn replace_only_inside_strings(source: &str, from: &str, to: &str) -> String {
 ///
 /// Also rewrites `import.meta.*` to runtime stubs (see [`replace_import_meta`]).
 pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
+    let is_devalue = source.contains("./src/uneval.js") && source.contains("./src/parse.js");
     let is_cf_plugin = source.contains("assertWranglerVersion");
     if is_cf_plugin {
         eprintln!("[TLA-CF] transpile_to_cjs ENTER len={}", source.len());
@@ -807,6 +808,7 @@ pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
         }
         replaced.clone()
     });
+    let is_clack = source.contains("@clack/core") && source.contains("node:util");
     // OXC 0.132 leaves a bare `export {};` in CJS output to flag the file as an
     // ES module in bundlers that inspect the AST. V8 script mode rejects it.
     // Strip it — the CJS require() shim does not need this marker.
@@ -817,7 +819,31 @@ pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
     if is_cf_plugin {
         eprintln!("[TLA-CF] before static_esm_to_cjs");
     }
+    if is_devalue {
+        eprintln!(
+            "[DEVALUE] pre-sesm len={} has_export={} content={:?}",
+            out.len(),
+            out.contains("export "),
+            &out[..out.len().min(500)]
+        );
+    }
     let out = static_esm_to_cjs(&out);
+    if is_devalue {
+        eprintln!(
+            "[DEVALUE] post-sesm len={} has_parse={} content={:?}",
+            out.len(),
+            out.contains("module.exports.parse"),
+            &out[..out.len().min(500)]
+        );
+    }
+    if is_clack {
+        let _ = std::fs::write("/tmp/clack_transpiled.js", out.as_bytes());
+        eprintln!(
+            "[CLACK] final out len={} has_import={}",
+            out.len(),
+            out.contains("import{") || out.contains("import ")
+        );
+    }
     if is_cf_plugin {
         eprintln!("[TLA-CF] static_esm_to_cjs done");
     }
@@ -828,6 +854,13 @@ pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
     } else {
         out
     };
+    if debug_config_js {
+        let _ = std::fs::write("/tmp/config_final.js", out.as_bytes());
+        eprintln!(
+            "[DEBUG] Wrote final config to /tmp/config_final.js len={}",
+            out.len()
+        );
+    }
     if source.contains("assertWranglerVersion") {
         let _ = std::fs::write("/tmp/cloudflare_plugin_out.js", out.as_bytes());
         let still_has_tla = out.contains("\nawait ") || out.starts_with("await ");
@@ -984,7 +1017,24 @@ pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
 /// Handles `${...}` expressions (with nested strings/templates) so that a backtick
 /// inside `${}` does not prematurely close the outer template.
 /// Returns the new `i` (positioned after the closing backtick).
-fn consume_template(src: &[u8], mut i: usize, len: usize, out: &mut Vec<u8>) -> usize {
+/// Nested `${` `` ` `` interpolation depth beyond this is treated as plain
+/// text instead of recursing further — no real-world source nests template
+/// literals anywhere close to this deep, but a crafted/generated file could,
+/// and unbounded recursion here is a stack-overflow crash reachable from any
+/// file this transpiler processes (including on-demand dev-server requests).
+const MAX_TEMPLATE_NESTING: u32 = 200;
+
+fn consume_template(src: &[u8], i: usize, len: usize, out: &mut Vec<u8>) -> usize {
+    consume_template_at_depth(src, i, len, out, 0)
+}
+
+fn consume_template_at_depth(
+    src: &[u8],
+    mut i: usize,
+    len: usize,
+    out: &mut Vec<u8>,
+    nest_depth: u32,
+) -> usize {
     while i < len {
         let c = src[i];
         match c {
@@ -1052,7 +1102,13 @@ fn consume_template(src: &[u8], mut i: usize, len: usize, out: &mut Vec<u8>) -> 
                         b'`' => {
                             out.push(d);
                             i += 1;
-                            i = consume_template(src, i, len, out);
+                            if nest_depth < MAX_TEMPLATE_NESTING {
+                                i = consume_template_at_depth(src, i, len, out, nest_depth + 1);
+                            }
+                            // At the nesting cap: leave the inner backtick as
+                            // plain text rather than recursing further — the
+                            // outer `${...}`/quote/depth tracking above still
+                            // closes out normally once the source does.
                             last_nonws = Some(b'`');
                         }
                         b'/' if i + 1 < len && src[i + 1] != b'/' && src[i + 1] != b'*' => {
@@ -1226,7 +1282,11 @@ fn collect_export_block_names(source: &str) -> Vec<String> {
 /// | `export * as X from 'mod'` | `module.exports.X = require('mod');` |
 /// | `export function/class/const/let/var name` | declaration + `module.exports.name = name;` |
 pub fn static_esm_to_cjs(source: &str) -> String {
-    if !source.contains("import ") && !source.contains("export ") {
+    if !source.contains("import ")
+        && !source.contains("import{")
+        && !source.contains("export ")
+        && !source.contains("export{")
+    {
         return source.to_string();
     }
     let debug = std::env::var("DEBUG_TRANSPILE").is_ok()
@@ -1462,7 +1522,10 @@ pub fn static_esm_to_cjs(source: &str) -> String {
             if kw_at(src, i, b"import") {
                 let after = i + 6;
                 if after < len
-                    && matches!(src[after], b' ' | b'\t' | b'\n' | b'"' | b'\'')
+                    && matches!(
+                        src[after],
+                        b' ' | b'\t' | b'\n' | b'"' | b'\'' | b'{' | b'*'
+                    )
                     && let Some((conv, ni)) = convert_import(src, i, len)
                 {
                     out.extend_from_slice(conv.as_bytes());
@@ -1679,7 +1742,8 @@ fn find_from(s: &str) -> Option<usize> {
             }
             _ => {
                 if depth == 0 && i + 4 <= len && &b[i..i + 4] == b"from" {
-                    let pre_ok = i == 0 || matches!(b[i - 1], b' ' | b'\t');
+                    let pre_ok =
+                        i == 0 || matches!(b[i - 1], b' ' | b'\t' | b'}' | b']' | b'"' | b'\'');
                     let post_ok = i + 4 >= len || matches!(b[i + 4], b' ' | b'\t' | b'"' | b'\'');
                     if pre_ok && post_ok {
                         return Some(i);
@@ -2002,7 +2066,15 @@ fn convert_export(src: &[u8], start: usize, len: usize) -> Option<(String, usize
         let inner = rest[1..close].trim();
         let after = rest[close + 1..].trim().trim_start_matches(';').trim();
 
-        if let Some(mod_part) = after.strip_prefix("from ") {
+        // Support both `from 'mod'` and minified `from"mod"` / `from'mod'`
+        let from_mod_part = if let Some(s) = after.strip_prefix("from ") {
+            Some(s)
+        } else if after.starts_with("from\"") || after.starts_with("from'") {
+            Some(&after[4..])
+        } else {
+            None
+        };
+        if let Some(mod_part) = from_mod_part {
             let m = extract_quoted(mod_part.trim())?;
             let tmp = format!("_re_{}", mangle_mod(m));
             let mut o = format!("var {tmp} = require(\"{m}\");\n");
@@ -2129,7 +2201,46 @@ fn transpile_inner(source: &str, jsx: bool, _flow: bool) -> String {
     try_transpile_inner(source, jsx, false).unwrap_or_else(|_| source.to_string())
 }
 
+/// Cheap pre-scan for pathologically deep `` ` `` / `${` nesting.
+///
+/// oxc's parser (like any recursive-descent parser, including our own
+/// byte-scanner fallback in `consume_template`) recurses once per nesting
+/// level with no depth limit — a source file nesting template literals a
+/// few thousand levels deep overflows the stack and aborts the whole
+/// process. That's a hard Rust abort, not a panic `catch_unwind` can
+/// intercept, so the only real mitigation is refusing to hand such input to
+/// the parser at all. This is a coarse byte counter, not real parsing — it
+/// only needs to catch depths no legitimate source ever reaches; false
+/// positives just fall back to returning the source unchanged (same as any
+/// other parse failure), not a crash.
+const MAX_TRANSPILER_NESTING: u32 = 500;
+
+fn nesting_too_deep(source: &str) -> bool {
+    let mut depth: u32 = 0;
+    let mut max_depth: u32 = 0;
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'`' | b'{' => {
+                depth += 1;
+                max_depth = max_depth.max(depth);
+            }
+            b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if max_depth > MAX_TRANSPILER_NESTING {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn try_transpile_inner(source: &str, jsx: bool, to_cjs: bool) -> Result<String, ()> {
+    if nesting_too_deep(source) {
+        return Err(());
+    }
     let allocator = Allocator::default();
 
     let source_type = if jsx {
@@ -2551,6 +2662,53 @@ fn is_ident_byte(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── consume_template recursion bound ──────────────────────────────────────
+
+    #[test]
+    fn deeply_nested_template_literals_do_not_overflow_the_stack() {
+        // Regression test for an unbounded-recursion stack-overflow DoS:
+        // consume_template used to recurse once per nested `${\`...\`}` level
+        // with no depth limit, so a file with enough nesting would crash the
+        // whole process. 5,000 levels is far past MAX_TEMPLATE_NESTING (200);
+        // this must transpile without crashing, not necessarily "correctly".
+        let depth = 5000;
+        let mut src = String::from("const x = ");
+        for _ in 0..depth {
+            src.push('`');
+            src.push_str("${");
+        }
+        src.push('1');
+        for _ in 0..depth {
+            src.push('}');
+            src.push('`');
+        }
+        src.push(';');
+        let out = static_esm_to_cjs(&src);
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn deeply_nested_template_via_full_transpile_js_does_not_crash() {
+        // Same attack shape, but through the real public entry point
+        // (transpile_js), which tries the oxc-based parser first — this is
+        // what a crafted file served through the dev server / require()
+        // actually goes through.
+        let depth = 3000;
+        let mut src = String::from("const x = ");
+        for _ in 0..depth {
+            src.push('`');
+            src.push_str("${");
+        }
+        src.push('1');
+        for _ in 0..depth {
+            src.push('}');
+            src.push('`');
+        }
+        src.push(';');
+        let out = transpile_js(&src);
+        assert!(!out.is_empty());
+    }
 
     // ── static_esm_to_cjs ─────────────────────────────────────────────────────
 

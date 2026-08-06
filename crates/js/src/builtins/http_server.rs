@@ -733,6 +733,38 @@ pub fn inject_http_server(
         );
     }
 
+    {
+        let servers_ptr = Box::leak(Box::new(servers.clone()))
+            as *const Arc<Mutex<HashMap<u32, Arc<TcpListener>>>>
+            as *mut std::ffi::c_void;
+        let external = v8::External::new(scope, servers_ptr);
+        let http_server_port_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let servers = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const Arc<Mutex<HashMap<u32, Arc<TcpListener>>>>)
+                };
+                let server_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let port = servers
+                    .lock()
+                    .unwrap()
+                    .get(&server_id)
+                    .and_then(|l| l.local_addr().ok())
+                    .map(|a| a.port() as u32)
+                    .unwrap_or(0);
+                rv.set(v8::Integer::new_from_unsigned(scope, port).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpServerPort").unwrap().into(),
+            http_server_port_fn.into(),
+        );
+    }
+
     Ok(())
 }
 

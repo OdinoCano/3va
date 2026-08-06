@@ -98,46 +98,6 @@ pub fn inject_all(
     .ok_or_else(|| anyhow::anyhow!("compile error"))?;
     let _ = script.run(scope);
 
-    // Stub rollup/parseAst using @babel/parser (which IS installed in pnpm projects).
-    // Vite imports parseAst/parseAstAsync from "rollup/parseAst" and uses them for SSR transforms.
-    // @babel/parser with the 'estree' plugin returns { type:"File", program:{type:"Program",body:[...]} };
-    // Vite expects the Program node directly (ast.body iterable), so we unwrap .program.
-    let parse_ast_stub = r#"(function() {
-    var _babelParser = null;
-    function getBabelParser() {
-        if (!_babelParser) {
-            try { _babelParser = globalThis.require('@babel/parser'); }
-            catch(e) { console.error('[parseAstStub] @babel/parser load failed:', e && e.message); throw e; }
-        }
-        return _babelParser;
-    }
-    function doParse(code, opts) {
-        var parser = getBabelParser();
-        var result = parser.parse(code, {
-            plugins: ['estree'],
-            sourceType: 'module',
-            allowReturnOutsideFunction: !!(opts && opts.allowReturnOutsideFunction),
-            allowImportExportEverywhere: true,
-            errorRecovery: true,
-        });
-        // @babel/parser wraps Program in a File node; Vite needs the Program directly.
-        return result && result.program ? result.program : result;
-    }
-    var parseAstStub = {
-        parseAst: function(code, opts) { return doParse(code, opts); },
-        parseAstAsync: function(code, opts) {
-            try { return Promise.resolve(doParse(code, opts)); }
-            catch(e) { return Promise.reject(e); }
-        },
-    };
-    console.error('[3va] Registering parseAstStub for rollup/parseAst');
-    globalThis.__requireCache['rollup/parseAst'] = parseAstStub;
-    globalThis.__requireCache['rollup'] = globalThis.__requireCache['rollup'] || {};
-})();"#;
-    let script = v8::Script::compile(scope, v8::String::new(scope, parse_ast_stub).unwrap(), None)
-        .ok_or_else(|| anyhow::anyhow!("compile error"))?;
-    let _ = script.run(scope);
-
     buffer::inject_buffer(scope)?;
     process::inject_process(scope, permissions.clone())?;
 

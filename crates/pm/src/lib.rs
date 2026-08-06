@@ -512,11 +512,48 @@ fn parse_package_spec(input: &str) -> anyhow::Result<(String, Option<String>)> {
 
 // ── Download + extract ────────────────────────────────────────────────────────
 
+/// A registry response's `dist.tarball` is attacker-controlled (a
+/// compromised/malicious registry can put anything there) and is otherwise
+/// used verbatim — reject anything that isn't a plain `http(s)://` URL
+/// before it reaches the HTTP client, rather than relying on reqwest's
+/// default scheme support as the only guard.
+fn validate_tarball_url(url: &str) -> anyhow::Result<()> {
+    let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("");
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        anyhow::bail!("Refusing to download tarball with non-http(s) URL: {url}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tarball_url_tests {
+    use super::validate_tarball_url;
+
+    #[test]
+    fn accepts_http_and_https() {
+        assert!(validate_tarball_url("https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz").is_ok());
+        assert!(validate_tarball_url("http://registry.example.com/pkg.tgz").is_ok());
+    }
+
+    #[test]
+    fn rejects_file_scheme() {
+        assert!(validate_tarball_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn rejects_other_schemes_and_schemeless_urls() {
+        assert!(validate_tarball_url("ftp://mirror.example.com/pkg.tgz").is_err());
+        assert!(validate_tarball_url("not-a-url-at-all").is_err());
+        assert!(validate_tarball_url("").is_err());
+    }
+}
+
 /// Download a tarball with a pre-built client (for parallel installs).
 async fn download_tarball_with_client(
     client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<Vec<u8>> {
+    validate_tarball_url(url)?;
     let mut last_err = anyhow::anyhow!("unreachable");
 
     for attempt in 0..=MAX_RETRIES {
@@ -548,7 +585,33 @@ async fn download_tarball_with_client(
             continue;
         }
 
-        return Ok(resp.bytes().await?.to_vec());
+        // A compromised/malicious registry (or a MITM'd mirror) streaming an
+        // unbounded body would otherwise exhaust process memory. Reject
+        // early when the server honestly reports an oversized Content-Length;
+        // ponytail: reqwest isn't built with the `stream` feature here, so a
+        // server that lies about Content-Length (or omits it) still gets
+        // fully buffered before this check — add streaming + an incremental
+        // cap if that turns out to matter in practice.
+        if let Some(len) = resp.content_length()
+            && len > MAX_TARBALL_BYTES
+        {
+            anyhow::bail!(
+                "Refusing to download {}: reported size {} bytes exceeds the {}-byte limit",
+                url,
+                len,
+                MAX_TARBALL_BYTES
+            );
+        }
+        let bytes = resp.bytes().await?;
+        if bytes.len() as u64 > MAX_TARBALL_BYTES {
+            anyhow::bail!(
+                "Refusing tarball from {}: {} bytes exceeds the {}-byte limit",
+                url,
+                bytes.len(),
+                MAX_TARBALL_BYTES
+            );
+        }
+        return Ok(bytes.to_vec());
     }
 
     Err(last_err.context(format!(
@@ -578,7 +641,11 @@ fn zero_install_cache_enabled(manifest_val: Option<&serde_json::Value>) -> bool 
 
 fn zero_install_cache_paths(project_root: &Path, name: &str, version: &str) -> (PathBuf, PathBuf) {
     let dir = project_root.join(".3va").join("cache");
-    let base = format!("{}@{}.tgz", store::virtual_entry_name(name), version);
+    let base = format!(
+        "{}@{}.tgz",
+        store::virtual_entry_name(name),
+        store::safe_version(version)
+    );
     (dir.join(&base), dir.join(format!("{}.sha512", base)))
 }
 
@@ -818,7 +885,11 @@ pub fn patch_start(project_root: &Path, name: &str) -> anyhow::Result<PathBuf> {
         anyhow::bail!("'{}@{}' not found in the global store.", name, version);
     }
 
-    let entry = format!("{}@{}", store::virtual_entry_name(name), version);
+    let entry = format!(
+        "{}@{}",
+        store::virtual_entry_name(name),
+        store::safe_version(&version)
+    );
     let work_dir = project_root.join(".3va").join("patch-work").join(&entry);
     if work_dir.exists() {
         std::fs::remove_dir_all(&work_dir)?;
@@ -837,7 +908,11 @@ pub fn patch_commit(project_root: &Path, name: &str) -> anyhow::Result<PathBuf> 
     let store = store::ContentStore::global();
     let pristine = store.package_path(&registry, name, &version);
 
-    let entry = format!("{}@{}", store::virtual_entry_name(name), version);
+    let entry = format!(
+        "{}@{}",
+        store::virtual_entry_name(name),
+        store::safe_version(&version)
+    );
     let work_dir = project_root.join(".3va").join("patch-work").join(&entry);
     if !work_dir.exists() {
         anyhow::bail!(
@@ -953,7 +1028,11 @@ fn collect_all_files(dir: &Path, rel: &Path, removed: &mut Vec<String>) {
 /// shared global store is broken before any byte is written — the store
 /// itself is never mutated by a patch.
 fn apply_patch_if_present(project_root: &Path, node_modules: &Path, name: &str, version: &str) {
-    let entry = format!("{}@{}", store::virtual_entry_name(name), version);
+    let entry = format!(
+        "{}@{}",
+        store::virtual_entry_name(name),
+        store::safe_version(version)
+    );
     let patch_dir = project_root.join("patches").join(&entry);
     if !patch_dir.exists() {
         return;
@@ -966,7 +1045,24 @@ fn apply_patch_if_present(project_root: &Path, node_modules: &Path, name: &str, 
 
     if let Ok(removed) = std::fs::read_to_string(patch_dir.join(".removed")) {
         for rel in removed.lines().filter(|l| !l.is_empty()) {
-            let _ = std::fs::remove_file(target_dir.join(rel));
+            // `.removed` is project-authored (committed under patches/), but a
+            // line containing `../` or an absolute path would still delete a
+            // file outside the package directory — reject those defensively
+            // rather than trusting every line blindly.
+            let rel_path = Path::new(rel);
+            let is_unsafe = rel_path.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            });
+            if is_unsafe {
+                tracing::warn!("Skipping unsafe path in .removed: {:?}", rel);
+                continue;
+            }
+            let _ = std::fs::remove_file(target_dir.join(rel_path));
         }
     }
     println!("  ✓ patch applied: {}@{}", name, version);
@@ -1002,8 +1098,12 @@ fn apply_patch_files(patch_dir: &Path, rel: &Path, target_dir: &Path) {
 /// on 4xx (package not found, auth errors, etc.).
 const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_MS: u64 = 400;
+/// No real npm package tarball approaches this size — a generous ceiling
+/// against a compromised/malicious registry trying to exhaust memory.
+const MAX_TARBALL_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 
 async fn download_tarball(url: &str) -> anyhow::Result<Vec<u8>> {
+    validate_tarball_url(url)?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .gzip(false) // tarballs are already gzipped at file level — don't double-decompress
@@ -1066,6 +1166,11 @@ pub(crate) fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()>
         std::fs::remove_dir_all(dest)?;
     }
     std::fs::create_dir_all(dest)?;
+    // Canonical dest, used below to verify no entry's resolved path escapes it —
+    // a compromised/malicious registry can serve a tarball with `../../etc/foo`
+    // or symlink entries (classic "zip slip"); `tar::Entry::unpack` alone
+    // does not reject those.
+    let dest_canonical = std::fs::canonicalize(dest).unwrap_or_else(|_| dest.clone());
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -1075,7 +1180,52 @@ pub(crate) fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()>
         if cleaned.as_os_str().is_empty() {
             continue;
         }
+
+        // Reject path traversal / absolute paths before they ever touch the filesystem.
+        let is_unsafe = cleaned.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        });
+        if is_unsafe {
+            tracing::warn!("Skipping unsafe path in package tarball: {:?}", path);
+            continue;
+        }
+
         let out = dest.join(&cleaned);
+
+        // Belt-and-suspenders: verify the resolved path still stays under dest,
+        // resolving symlinks on whichever ancestor already exists (the file
+        // itself doesn't exist yet, so walk up to the nearest real directory).
+        let check_base = {
+            let mut p = out.clone();
+            loop {
+                if p.exists() {
+                    break std::fs::canonicalize(&p).unwrap_or_else(|_| dest_canonical.clone());
+                }
+                if !p.pop() {
+                    break dest_canonical.clone();
+                }
+            }
+        };
+        if !check_base.starts_with(&dest_canonical) {
+            tracing::warn!("Skipping path that escapes package directory: {:?}", path);
+            continue;
+        }
+
+        // Symlinks from an untrusted package are a supply-chain risk on their
+        // own (can point anywhere on disk) — never materialize them.
+        if matches!(
+            entry.header().entry_type(),
+            tar::EntryType::Symlink | tar::EntryType::Link
+        ) {
+            tracing::debug!("Skipping symlink in package: {:?}", cleaned);
+            continue;
+        }
+
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2378,7 +2528,11 @@ fn create_virtual_symlink(
 
     #[cfg(unix)]
     {
-        let entry = format!("{}@{}", store::virtual_entry_name(name), version);
+        let entry = format!(
+            "{}@{}",
+            store::virtual_entry_name(name),
+            store::safe_version(version)
+        );
         // Relative path from the symlink's containing directory to the virtual-store pkg.
         // Non-scoped: link at node_modules/pkg       → .3va/pkg@ver/node_modules/pkg
         // Scoped:     link at node_modules/@s/pkg    → ../.3va/@s+pkg@ver/node_modules/@s/pkg
@@ -2515,7 +2669,11 @@ async fn install_package_impl(
         .map_err(|e| anyhow::anyhow!("Cannot create cache directory: {}", e))?;
 
     let safe_pkg = pkg_name.replace('/', "-").trim_matches('-').to_string();
-    let cached_tarball = cache_dir.join(format!("{}-{}.tgz", safe_pkg, resolved_version));
+    let cached_tarball = cache_dir.join(format!(
+        "{}-{}.tgz",
+        safe_pkg,
+        store::safe_version(&resolved_version)
+    ));
     let node_modules = project_root.join("node_modules");
     let node_modules_dest = node_modules.join(&pkg_name);
 

@@ -289,6 +289,8 @@ pub fn inject_worker_threads_native(scope: &mut PinScope, permissions: Arc<Permi
         globalThis.__requireCache['worker_threads'].Worker = Worker;
         globalThis.__requireCache['worker_threads'].MessageChannel = MessageChannel;
         globalThis.__requireCache['worker_threads'].MessagePort = MessagePort;
+        globalThis.MessagePort = MessagePort;
+        globalThis.MessageChannel = MessageChannel;
         globalThis.__requireCache['worker_threads'].isMainThread = true;
         globalThis.__requireCache['worker_threads'].SHARE_ENV = Symbol('nodejs.worker_threads.SHARE_ENV');
         globalThis.__requireCache['worker_threads'].workerData = null;

@@ -570,6 +570,10 @@ pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> 
                     var endCb = null;
                     var pending = 0;
                     var piped = [];
+                    // Eagerly buffer data/end so asyncIterator never misses events
+                    var _iterQueue = [], _iterDone = false, _iterWaiting = null;
+                    // Buffer incoming chunks; decompress all at once on end
+                    var _inputBuf = [];
                     var stream = {
                         readable: true, writable: true,
                         on: function(ev, fn) {
@@ -590,6 +594,13 @@ pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> 
                         off: function(ev, fn) { return this.removeListener(ev, fn); },
                         emit: function(ev) {
                             var args = Array.prototype.slice.call(arguments, 1);
+                            if (ev === 'data') {
+                                if (_iterWaiting) { var w = _iterWaiting; _iterWaiting = null; w({ value: args[0], done: false }); }
+                                else _iterQueue.push(args[0]);
+                            } else if (ev === 'end') {
+                                _iterDone = true;
+                                if (_iterWaiting) { var w2 = _iterWaiting; _iterWaiting = null; w2({ done: true }); }
+                            }
                             var fns = (listeners[ev] || []).slice();
                             fns.forEach(function(f) { f.apply(null, args); });
                             piped.forEach(function(dest) {
@@ -599,46 +610,43 @@ pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> 
                             return fns.length > 0;
                         },
                         write: function(chunk, _enc, cb) {
-                            var self = this;
+                            // Buffer chunks; actual decompression happens in end() once all data arrives
                             var data;
-                            if (chunk instanceof Uint8Array) data = Array.from(chunk);
-                            else if (typeof chunk === 'string') data = Array.from(new TextEncoder().encode(chunk));
-                            else data = Array.from(chunk);
-                            pending++;
-                            setTimeout(function() {
-                                var result = processFn(data);
-                                pending--;
-                                if (typeof result === 'string') {
-                                    self.emit('error', new Error(result));
-                                    if (typeof cb === 'function') cb(new Error(result));
-                                } else {
-                                    self.emit('data', Buffer.from(result));
-                                    if (typeof cb === 'function') cb(null);
-                                    if (pending === 0 && ended) self._finish();
-                                }
-                            }, 0);
+                            if (chunk instanceof Uint8Array) data = chunk;
+                            else if (typeof chunk === 'string') data = new TextEncoder().encode(chunk);
+                            else data = new Uint8Array(chunk);
+                            _inputBuf.push(data);
+                            if (typeof cb === 'function') setTimeout(cb, 0);
                             return true;
                         },
                         _finish: function() {
+                            var self = this;
+                            if (_inputBuf.length > 0) {
+                                // Concatenate all buffered input and decompress once
+                                var totalLen = _inputBuf.reduce(function(s, b) { return s + b.length; }, 0);
+                                var merged = new Uint8Array(totalLen);
+                                var offset = 0;
+                                _inputBuf.forEach(function(b) { merged.set(b, offset); offset += b.length; });
+                                _inputBuf = [];
+                                var result = processFn(Array.from(merged));
+                                if (typeof result === 'string') {
+                                    self.emit('error', new Error(result));
+                                    if (typeof endCb === 'function') { var f = endCb; endCb = null; f(new Error(result)); }
+                                    return;
+                                }
+                                self.emit('data', Buffer.from(result));
+                            }
                             this.emit('end');
                             this.emit('finish');
-                            if (typeof endCb === 'function') { var f = endCb; endCb = null; f(null); }
+                            if (typeof endCb === 'function') { var f2 = endCb; endCb = null; f2(null); }
                         },
                         end: function(chunk, enc, cb) {
                             if (typeof chunk === 'function') { cb = chunk; chunk = null; }
                             if (typeof enc === 'function') { cb = enc; enc = null; }
                             endCb = cb || null;
-                            var self = this;
-                            if (chunk != null) {
-                                this.write(chunk, enc, function(e) {
-                                    if (e) { if (typeof cb === 'function') cb(e); return; }
-                                    ended = true;
-                                    if (pending === 0) self._finish();
-                                });
-                            } else {
-                                ended = true;
-                                if (pending === 0) this._finish();
-                            }
+                            if (chunk != null) this.write(chunk, enc, null);
+                            // All chunks are buffered; decompress now
+                            this._finish();
                         },
                         pipe: function(dest) { piped.push(dest); return dest; },
                         unpipe: function(dest) {
@@ -653,6 +661,18 @@ pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> 
                         },
                         setEncoding: function() { return this; },
                         read: function() { return null; },
+                    };
+                    stream[Symbol.asyncIterator] = function() {
+                        return {
+                            next: function() {
+                                return new Promise(function(resolve) {
+                                    if (_iterQueue.length) return resolve({ value: _iterQueue.shift(), done: false });
+                                    if (_iterDone) return resolve({ done: true });
+                                    _iterWaiting = resolve;
+                                });
+                            },
+                            return: function() { _iterDone = true; return Promise.resolve({ done: true }); }
+                        };
                     };
                     return stream;
                 },

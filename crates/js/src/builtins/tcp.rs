@@ -191,9 +191,11 @@ pub fn inject_tcp(
                             return;
                         }
                         let id = alloc_id(pool(), next_id(), TcpConn::Plain(stream));
+                        eprintln!("[3va-tcp] connected {}:{} id={}", host, port, id);
                         rv.set(v8::Integer::new_from_unsigned(_scope, id).into());
                     }
                     Err(e) => {
+                        eprintln!("[3va-tcp] FAILED {}:{} => {}", host, port, e);
                         let err = js_code_err(_scope, "ECONNREFUSED", e.to_string());
                         rv.set(err);
                     }
@@ -289,10 +291,12 @@ pub fn inject_tcp(
                     vec![]
                 };
 
+                eprintln!("[3va-tcp] __tcpWrite id={} len={}", id, data.len());
                 let mut guard = pool().lock().unwrap();
                 match guard.get_mut(&id) {
                     Some(conn) => {
                         if let Err(e) = conn.write_all(&data) {
+                            eprintln!("[3va-tcp] write error id={}: {}", id, e);
                             let err = js_code_err(_scope, "EPIPE", e.to_string());
                             rv.set(err);
                         } else {

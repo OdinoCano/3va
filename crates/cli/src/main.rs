@@ -924,6 +924,7 @@ async fn run_framework_dev_server(
 
     let permissions = Arc::new(permissions);
     let mut engine = vvva_js::JsEngine::new(permissions).await?;
+    engine.set_server_mode(true);
     engine.eval_file_with_args(&js_entry, &argv).await?;
 
     Ok(())
