@@ -251,6 +251,24 @@ pub fn inject_require(
                 return;
             }
 
+            // Node.js: require() of a .mjs file throws ERR_REQUIRE_ESM
+            // instead of silently transpiling it. Match that contract so
+            // user code (and the test suite) can branch on e.code.
+            if path_str.ends_with(".mjs") {
+                let msg = format!(
+                    "require() of ES module {} not supported. Use import() instead.",
+                    full_path.display()
+                );
+                let err_str = V8String::new(scope, &msg).unwrap();
+                let err = v8::Exception::error(scope, err_str);
+                let err_obj = err.to_object(scope).unwrap();
+                let code_key = V8String::new(scope, "code").unwrap();
+                let code_val = V8String::new(scope, "ERR_REQUIRE_ESM").unwrap();
+                err_obj.set(scope, code_key.into(), code_val.into());
+                scope.throw_exception(err);
+                return;
+            }
+
             match std::fs::read_to_string(&full_path) {
                 Ok(mut source) => {
                     // Strip shebang so V8 doesn't see it as a syntax error.
