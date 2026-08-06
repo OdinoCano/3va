@@ -157,6 +157,12 @@ pub fn inject_require(
     let source_code = r#"
         globalThis.__requireCache = globalThis.__requireCache || {};
         globalThis.__fallbackModules = globalThis.__fallbackModules || {};
+        // node:console — set early so it's available before js_code's IIFE runs.
+        (function() {
+            var _con = globalThis.console || { log: function(){}, error: function(){}, warn: function(){} };
+            globalThis.__requireCache['console'] = globalThis.__requireCache['console'] || _con;
+            globalThis.__requireCache['node:console'] = _con;
+        })();
         globalThis.module = { exports: {} };
         globalThis.exports = globalThis.module.exports;
         globalThis.__filename = '';
@@ -246,7 +252,15 @@ pub fn inject_require(
             }
 
             match std::fs::read_to_string(&full_path) {
-                Ok(source) => {
+                Ok(mut source) => {
+                    // Strip shebang so V8 doesn't see it as a syntax error.
+                    if source.starts_with("#!") {
+                        if let Some(nl) = source.find('\n') {
+                            source = source[nl + 1..].to_string();
+                        } else {
+                            source = String::new();
+                        }
+                    }
                     let is_jsx = path_str.ends_with(".tsx") || path_str.ends_with(".jsx");
                     // A required file with real static import/export syntax
                     // must go through ESM→CJS conversion too — same fix as
@@ -271,6 +285,8 @@ pub fn inject_require(
                     let transpiled = if path_str.ends_with(".cjs")
                         || path_str.ends_with(".json")
                         || source.contains("@exodus/bytes")
+                        || path_str.contains("/dist/cjs/")
+                        || path_str.contains("/cjs/dist/")
                     {
                         source
                     } else if is_esm {
@@ -393,8 +409,46 @@ pub fn inject_require(
                 dir_arg.to_rust_string_lossy(scope)
             };
 
-            let resolved = crate::esm::resolve_esm_from_dir(&dir, &specifier);
+            // For node: builtins, skip filesystem resolution and return the
+            // specifier itself as a sentinel.  requireFrom's fast-path below
+            // catches it and looks up __requireCache / returns an empty stub.
+            if specifier.starts_with("node:") {
+                let result = V8String::new(scope, &specifier).unwrap();
+                rv.set(result.into());
+                return;
+            }
+            // file:// URLs come from Vite's fetchModule (pathToFileURL). Strip
+            // the scheme so the path resolver handles them as absolute paths.
+            let specifier_stripped;
+            let specifier = if specifier.starts_with("file:///") {
+                specifier_stripped = specifier[7..].to_string(); // "file://" → ""
+                &specifier_stripped
+            } else if specifier.starts_with("file://") {
+                specifier_stripped = specifier[6..].to_string();
+                &specifier_stripped
+            } else {
+                &specifier
+            };
+            let resolved = crate::esm::resolve_esm_from_dir(&dir, specifier);
             if !resolved.is_file() {
+                // Bare node.js built-in names (without node: prefix) also
+                // return as sentinel so requireFrom can find them in cache.
+                const NODE_BUILTINS: &[&str] = &[
+                    "assert","async_hooks","buffer","child_process","cluster",
+                    "console","crypto","dgram","diagnostics_channel","dns","domain",
+                    "events","fs","http","http2","https","inspector","module","net",
+                    "os","path","perf_hooks","process","punycode","querystring",
+                    "readline","repl","stream","string_decoder","sys","timers",
+                    "tls","tty","url","util","v8","vm","wasi","worker_threads","zlib",
+                ];
+                let bare = specifier.strip_prefix("node:").unwrap_or(&specifier);
+                // Also match sub-path builtins like timers/promises, stream/consumers
+                let root = bare.split('/').next().unwrap_or(bare);
+                if NODE_BUILTINS.contains(&root) {
+                    let result = V8String::new(scope, &specifier).unwrap();
+                    rv.set(result.into());
+                    return;
+                }
                 let msg = format!("Cannot find module '{}' imported from '{}'", specifier, dir);
                 let err_str = V8String::new(scope, &msg).unwrap();
                 let err = v8::Exception::error(scope, err_str);
@@ -738,7 +792,43 @@ pub fn inject_require(
                     if (config.tokens) result.tokens = tokens;
                     return result;
                 },
-                types: { isRegExp: function(v) { return v instanceof RegExp; }, isDate: function(v) { return v instanceof Date; } },
+                types: (function() {
+                    var t = {
+                        isRegExp: function(v) { return v instanceof RegExp; },
+                        isDate: function(v) { return v instanceof Date; },
+                        isNativeError: function(v) { return v instanceof Error; },
+                        isMap: function(v) { return v instanceof Map; },
+                        isSet: function(v) { return v instanceof Set; },
+                        isPromise: function(v) { return v && typeof v === 'object' && typeof v.then === 'function'; },
+                        isProxy: function(v) { return false; },
+                        isArrayBuffer: function(v) { return v instanceof ArrayBuffer; },
+                        isSharedArrayBuffer: function(v) { return typeof SharedArrayBuffer !== 'undefined' && v instanceof SharedArrayBuffer; },
+                        isDataView: function(v) { return v instanceof DataView; },
+                        isTypedArray: function(v) { return ArrayBuffer.isView(v) && !(v instanceof DataView); },
+                        isUint8Array: function(v) { return v instanceof Uint8Array; },
+                        isUint16Array: function(v) { return v instanceof Uint16Array; },
+                        isUint32Array: function(v) { return v instanceof Uint32Array; },
+                        isInt8Array: function(v) { return v instanceof Int8Array; },
+                        isInt16Array: function(v) { return v instanceof Int16Array; },
+                        isInt32Array: function(v) { return v instanceof Int32Array; },
+                        isFloat32Array: function(v) { return v instanceof Float32Array; },
+                        isFloat64Array: function(v) { return v instanceof Float64Array; },
+                        isBigInt64Array: function(v) { return v instanceof BigInt64Array; },
+                        isBigUint64Array: function(v) { return v instanceof BigUint64Array; },
+                        isMapIterator: function(v) { return false; },
+                        isSetIterator: function(v) { return false; },
+                        isGeneratorObject: function(v) { return false; },
+                        isAsyncFunction: function(v) { return false; },
+                        isGeneratorFunction: function(v) { return false; },
+                        isArgumentsObject: function(v) { return false; },
+                        isBoxedPrimitive: function(v) { return v instanceof Number || v instanceof String || v instanceof Boolean || v instanceof Symbol || v instanceof BigInt; },
+                        isWeakMap: function(v) { return v instanceof WeakMap; },
+                        isWeakSet: function(v) { return v instanceof WeakSet; },
+                        isExternal: function(v) { return false; },
+                        isModuleNamespaceObject: function(v) { return false; },
+                    };
+                    return t;
+                })(),
                 TextEncoder: globalThis.TextEncoder,
                 TextDecoder: globalThis.TextDecoder,
                 debuglog: function(section) {
@@ -778,6 +868,8 @@ pub fn inject_require(
             };
             globalThis.__requireCache['util'] = util;
             globalThis.__requireCache['node:util'] = util;
+            globalThis.__requireCache['util/types'] = util.types;
+            globalThis.__requireCache['node:util/types'] = util.types;
 
             function EventEmitter() { this._events = Object.create(null); this._maxListeners = 10; }
             function _ensureEvents(self) { if (!self._events) self._events = Object.create(null); }
@@ -807,7 +899,7 @@ pub fn inject_require(
                 _ensureEvents(this);
                 var args = Array.prototype.slice.call(arguments, 1);
                 var listeners = (this._events[ev] || []).slice();
-                listeners.forEach(function(fn) { fn.apply(null, args); });
+                listeners.forEach(function(fn) { fn.apply(this, args); }, this);
                 return listeners.length > 0;
             };
             EventEmitter.prototype.listeners = function(ev) {
@@ -1494,8 +1586,13 @@ pub fn inject_require(
                 if (chunk === null) {
                     this._readableState.ended = true;
                     this.emit('end');
+                    this.emit('readable');
                 } else {
-                    this._readableState.buffer.push(chunk);
+                    var hasDataL = this._events && this._events['data'] && this._events['data'].length > 0;
+                    if (!hasDataL) this._readableState.buffer.push(chunk);
+                    if (this._events && this._events['readable'] && this._events['readable'].length) {
+                        this.emit('readable');
+                    }
                     this.emit('data', chunk);
                 }
                 return !this._readableState.ended;
@@ -1520,6 +1617,9 @@ pub fn inject_require(
                     next: function() {
                         return new Promise(function(resolve) {
                             if (done) return resolve({ done: true });
+                            if (self._readableState.buffer.length)
+                                return resolve({ value: self._readableState.buffer.shift(), done: false });
+                            if (self._readableState.ended) { done = true; return resolve({ done: true }); }
                             self.once('data', function(chunk) { resolve({ value: chunk, done: false }); });
                             self.once('end', function() { done = true; resolve({ done: true }); });
                         });
@@ -1759,6 +1859,46 @@ pub fn inject_require(
             Stream.PassThrough = PassThrough;
             Stream.Duplex = Duplex;
             Stream.Stream = Stream;
+            Stream.isDisturbed = function(s) {
+                return !!(s && s._readableState && (s._readableState.disturbed || s._readableState.ended || s._readableState.aborted));
+            };
+            Stream.isErrored = function(s) {
+                return !!(s && s._readableState && s._readableState.errored != null);
+            };
+            Stream.isReadable = function(s) {
+                return !!(s && typeof s.read === 'function' && s._readableState && !s._readableState.ended && !s._readableState.errored);
+            };
+            // callback-based pipeline: pipeline(src, ...transforms, dst, cb) returns dst
+            Stream.pipeline = function() {
+                var args = Array.prototype.slice.call(arguments);
+                var cb = typeof args[args.length - 1] === 'function' ? args.pop() : function(err) { if (err) console.error('[3va-pipeline] error:', err); };
+                if (args.length < 2) { cb(new Error('pipeline: need at least 2 streams')); return args[0] || new PassThrough(); }
+                var done = false;
+                function finish(err) { if (!done) { done = true; cb(err || null); } }
+                for (var i = 0; i < args.length - 1; i++) {
+                    (function(src, dst) {
+                        if (src && typeof src.pipe === 'function') {
+                            src.on('error', finish);
+                            if (dst && typeof dst.on === 'function') dst.on('error', finish);
+                            src.pipe(dst);
+                        }
+                    })(args[i], args[i + 1]);
+                }
+                var last = args[args.length - 1];
+                if (last && typeof last.on === 'function') last.on('finish', function() { finish(null); });
+                if (last && typeof last.on === 'function') last.on('end', function() { finish(null); });
+                return last;
+            };
+            Stream.finished = function(stream, options, cb) {
+                if (typeof options === 'function') { cb = options; options = {}; }
+                cb = cb || function() {};
+                if (!stream || typeof stream.on !== 'function') { cb(); return function() {}; }
+                function done(err) { stream.removeListener('end', done); stream.removeListener('finish', done); stream.removeListener('error', done); cb(err); }
+                stream.once('end', function() { done(null); });
+                stream.once('finish', function() { done(null); });
+                stream.once('error', done);
+                return function() { done(new Error('aborted')); };
+            };
             globalThis.__requireCache['stream'] = Stream;
             globalThis.__requireCache['node:stream'] = Stream;
 
@@ -1799,6 +1939,68 @@ pub fn inject_require(
                 };
                 globalThis.__requireCache['stream/promises'] = streamPromises;
                 globalThis.__requireCache['node:stream/promises'] = streamPromises;
+            })();
+
+            // node:console — just the global console object.
+            (function() {
+                var consoleStub = globalThis.console || {};
+                globalThis.__requireCache['console'] = globalThis.__requireCache['console'] || consoleStub;
+                globalThis.__requireCache['node:console'] = consoleStub;
+            })();
+
+            // node:stream/consumers — text()/json()/buffer()/blob() helpers.
+            (function() {
+                var streamConsumers = {
+                    text: function(stream) {
+                        return new Promise(function(resolve, reject) {
+                            var chunks = [];
+                            stream.on('data', function(c) { chunks.push(typeof c === 'string' ? c : Buffer.from(c).toString()); });
+                            stream.on('end', function() { resolve(chunks.join('')); });
+                            stream.on('error', reject);
+                        });
+                    },
+                    json: function(stream) {
+                        return streamConsumers.text(stream).then(JSON.parse);
+                    },
+                    buffer: function(stream) {
+                        return new Promise(function(resolve, reject) {
+                            var chunks = [];
+                            stream.on('data', function(c) { chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)); });
+                            stream.on('end', function() { resolve(Buffer.concat(chunks)); });
+                            stream.on('error', reject);
+                        });
+                    },
+                    blob: function(stream) {
+                        return streamConsumers.buffer(stream).then(function(b) { return new Blob([b]); });
+                    },
+                    arrayBuffer: function(stream) {
+                        return streamConsumers.buffer(stream).then(function(b) { return b.buffer; });
+                    },
+                };
+                globalThis.__requireCache['stream/consumers'] = streamConsumers;
+                globalThis.__requireCache['node:stream/consumers'] = streamConsumers;
+            })();
+
+            // node:stream/web — Web Streams API; 3va exposes these as globals already.
+            (function() {
+                var streamWeb = {
+                    ReadableStream: globalThis.ReadableStream,
+                    WritableStream: globalThis.WritableStream,
+                    TransformStream: globalThis.TransformStream,
+                    ReadableStreamDefaultReader: globalThis.ReadableStreamDefaultReader,
+                    ReadableStreamBYOBReader: globalThis.ReadableStreamBYOBReader,
+                    ReadableStreamDefaultController: globalThis.ReadableStreamDefaultController,
+                    ReadableByteStreamController: globalThis.ReadableByteStreamController,
+                    WritableStreamDefaultWriter: globalThis.WritableStreamDefaultWriter,
+                    WritableStreamDefaultController: globalThis.WritableStreamDefaultController,
+                    TransformStreamDefaultController: globalThis.TransformStreamDefaultController,
+                    ByteLengthQueuingStrategy: globalThis.ByteLengthQueuingStrategy,
+                    CountQueuingStrategy: globalThis.CountQueuingStrategy,
+                    TextEncoderStream: globalThis.TextEncoderStream,
+                    TextDecoderStream: globalThis.TextDecoderStream,
+                };
+                globalThis.__requireCache['stream/web'] = streamWeb;
+                globalThis.__requireCache['node:stream/web'] = streamWeb;
             })();
 
             // ── process.stdout/stderr as real Writable streams, process.env as a
@@ -1970,6 +2172,9 @@ pub fn inject_require(
                 };
 
                 function createInterface(options) {
+                    // Node.js accepts createInterface(stream) or createInterface({input:stream,...})
+                    if (options && typeof options === 'object' && typeof options.on === 'function' && !options.input)
+                        options = { input: options };
                     return new Interface(options);
                 }
                 function cursorTo(stream, x, y, cb) { if (typeof y === 'function') cb = y; if (cb) cb(); return true; }
@@ -2231,7 +2436,24 @@ pub fn inject_require(
 
             // ── perf_hooks ───────────────────────────────────────────────────────
             (function() {
-                var perf = (typeof globalThis.performance !== 'undefined') ? globalThis.performance : { now: function() { return Date.now(); } };
+                var _nativePerf = (typeof globalThis.performance !== 'undefined') ? globalThis.performance : null;
+                // Wrap native performance in a plain object so we can add missing methods
+                var perf = {
+                    now: _nativePerf ? function() { return _nativePerf.now(); } : function() { return Date.now(); },
+                    timeOrigin: _nativePerf ? _nativePerf.timeOrigin : 0,
+                    mark: _nativePerf && _nativePerf.mark ? function() { return _nativePerf.mark.apply(_nativePerf, arguments); } : function() {},
+                    measure: _nativePerf && _nativePerf.measure ? function() { return _nativePerf.measure.apply(_nativePerf, arguments); } : function() {},
+                    clearMarks: _nativePerf && _nativePerf.clearMarks ? function() { return _nativePerf.clearMarks.apply(_nativePerf, arguments); } : function() {},
+                    clearMeasures: _nativePerf && _nativePerf.clearMeasures ? function() { return _nativePerf.clearMeasures.apply(_nativePerf, arguments); } : function() {},
+                    getEntries: _nativePerf && _nativePerf.getEntries ? function() { return _nativePerf.getEntries.apply(_nativePerf, arguments); } : function() { return []; },
+                    getEntriesByName: _nativePerf && _nativePerf.getEntriesByName ? function() { return _nativePerf.getEntriesByName.apply(_nativePerf, arguments); } : function() { return []; },
+                    getEntriesByType: _nativePerf && _nativePerf.getEntriesByType ? function() { return _nativePerf.getEntriesByType.apply(_nativePerf, arguments); } : function() { return []; },
+                    markResourceTiming: function() {},
+                    eventLoopUtilization: function() { return { idle: 0, active: 0, utilization: 0 }; },
+                    nodeTiming: {},
+                    toJSON: function() { return { now: this.now(), timeOrigin: this.timeOrigin }; }
+                };
+                globalThis.performance = perf;
                 var perfHooks = { performance: perf, PerformanceObserver: globalThis.PerformanceObserver || function() {}, constants: {} };
                 globalThis.__requireCache['perf_hooks'] = perfHooks;
                 globalThis.__requireCache['node:perf_hooks'] = perfHooks;
@@ -2312,6 +2534,7 @@ pub fn inject_require(
                     format: urlFormat,
                     resolve: urlResolve,
                 };
+                globalThis.__requireCache['node:url'] = globalThis.__requireCache['url'];
             })();
 
             // ── net / tls — raw TCP sockets, backed by the native __tcp*/__net* ────
@@ -2377,6 +2600,7 @@ pub fn inject_require(
                     if (typeof host === 'function') { cb = host; host = 'localhost'; }
                     host = host || 'localhost';
                 }
+                console.error('[3va-socket] Socket.connect', host, port, new Error().stack.split('\n').slice(1, 4).join(' | '));
                 if (typeof cb === 'function') self.once('connect', cb);
                 self.connecting = true;
                 var result = __tcpConnect(host, port);
@@ -2478,6 +2702,9 @@ pub fn inject_require(
             Server.prototype.address = function() {
                 return this.listening ? { address: '0.0.0.0', port: 0, family: 'IPv4' } : null;
             };
+            Server.prototype.unref = function() { return this; };
+            Server.prototype.ref = function() { return this; };
+            Server.prototype.getConnections = function(cb) { if (cb) cb(null, 0); };
 
             function netCreateServer(opts, connListener) { return new Server(opts, connListener); }
             function netConnect(port, host, cb) {
@@ -2541,16 +2768,24 @@ pub fn inject_require(
 
             // ── http module ──────────────────────────────────────────────────────────
             var httpAgent = function(options) {
+                EventEmitter.call(this);
                 this.options = options || {};
                 this.maxSockets = Infinity;
+                this.maxFreeSockets = 256;
+                this.scheduling = 'lifo';
                 this.sockets = {};
+                this.freeSockets = {};
                 this.requests = {};
+                this.keepAlive = !!(options && options.keepAlive);
+                this.keepAliveMsecs = (options && options.keepAliveMsecs) || 1000;
             };
+            httpAgent.prototype = Object.create(EventEmitter.prototype);
+            httpAgent.prototype.constructor = httpAgent;
             httpAgent.prototype.addRequest = function(req, options) {};
-            httpAgent.prototype.createConnection = function(options, cb) {};
+            httpAgent.prototype.createConnection = function(options, cb) { if (cb) cb(null, {}); return {}; };
             httpAgent.prototype.destroy = function() {};
-            httpAgent.prototype.free = function(socket) {};
-            httpAgent.prototype.getCurrentStatus = function() {};
+            httpAgent.prototype.free = function(socket, options) {};
+            httpAgent.prototype.getCurrentStatus = function() { return { activeSockets: 0, freeSocketCount: 0, requestCount: 0 }; };
             httpAgent.prototype.keepSocketAlive = function(socket) {};
             httpAgent.prototype.reuseSocket = function(socket, req) {};
             httpAgent.prototype.onFREE = function(socket) {};
@@ -2589,6 +2824,7 @@ pub fn inject_require(
                 // write to. Node API compat also allows `new ServerResponse(req)`
                 // standalone (e.g. for unit tests) — _connId stays undefined
                 // there, fine as long as .end() is never called on it.
+                this.req = req;
                 this._connId = req && req.socket && req.socket._connId;
                 this.statusCode = 200;
                 this.statusMessage = '';
@@ -2631,6 +2867,33 @@ pub fn inject_require(
                 var isBinary = this._chunks.some(function(c) {
                     return c instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(c));
                 });
+                // ponytail: fix Vite SSR transform mangling private field/method names.
+                // The parser used by Vite (oxc-parser via rollup/parseAst) represents
+                // the name part of a private identifier (#foo) as an Identifier node
+                // with the '#' as a preceding character. Vite's SSR walk then
+                // rewrites it as `#__vite_ssr_import_N__` (keeping the '#'), which
+                // produces `this.#__vite_ssr_import_N__.origName()` — V8 reads the
+                // '#' as a private field access (no such field is declared → SyntaxError)
+                // and the method-definition form `#__vite_ssr_import_N__.origName()`
+                // leaks `origName` as a phantom parameter. Strip the spurious
+                // `.origName()` suffix so the private identifier stays a single
+                // token and resolves to the class's own private method/field.
+                var __viteFix = function(buf) {
+                    try {
+                        if (typeof TextDecoder === 'undefined') return null;
+                        var __td = new TextDecoder('utf-8');
+                        var s = __td.decode(buf);
+                        var hashIdx = s.indexOf('#__vite_ssr_import_');
+                        var viteIdx = s.indexOf('__vite_ssr_import_');
+                        if (hashIdx === -1 && viteIdx === -1) return null;
+                        var fixed = s.replace(/#(__vite_ssr_import_\d+)__\.([A-Za-z_$][\w$]*)\(\s*\)/g, '#$1__()');
+                        if (fixed === s) return null;
+                        if (typeof TextEncoder !== 'undefined') {
+                            return new TextEncoder().encode(fixed);
+                        }
+                        return null;
+                    } catch (e) { return null; }
+                };
                 if (isBinary) {
                     var parts = this._chunks.map(function(c) {
                         if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.from(c) : new TextEncoder().encode(c);
@@ -2640,9 +2903,21 @@ pub fn inject_require(
                     var merged = new Uint8Array(total);
                     var off = 0;
                     parts.forEach(function(p) { merged.set(p, off); off += p.length; });
+                    var __fixed = __viteFix(merged);
+                    if (__fixed) merged = __fixed;
                     __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged);
                 } else {
-                    __httpRespond(this._connId, this.statusCode, this.statusMessage, headersJson, this._chunks.join(''));
+                    var body = this._chunks.join('');
+                    var __fixedS = __viteFix(body);
+                    if (__fixedS) {
+                        if (typeof Buffer !== 'undefined') {
+                            __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__fixedS, 'utf-8'));
+                        } else {
+                            __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__fixedS));
+                        }
+                    } else {
+                        __httpRespond(this._connId, this.statusCode, this.statusMessage, headersJson, body);
+                    }
                 }
                 setTimeout(function() { self.emit('finish'); self.emit('close'); if (typeof callback === 'function') callback(); }, 0);
                 return this;
@@ -2683,18 +2958,26 @@ pub fn inject_require(
                     return self;
                 }
                 self._id = result;
-                self._port = port;
+                self._port = __httpServerPort(result);
                 self._host = hostname;
                 self.listening = true;
                 self._pollTimer = setInterval(function() {
+                    try {
                     var raw;
                     while ((raw = __httpAcceptPoll(self._id)) !== null && raw !== undefined) {
                         var r;
                         try { r = JSON.parse(raw); } catch (e) { continue; }
-                        var req = new httpIncomingMessage({ remoteAddress: r.remoteAddress, _connId: r.conn_id });
+                        var _sock = new EventEmitter();
+                        _sock.remoteAddress = r.remoteAddress;
+                        _sock._connId = r.conn_id;
+                        var req = new httpIncomingMessage(_sock);
                         req.method = r.method;
                         req.url = r.url;
+                        var _lbHdrs = r.headers || {};
+                        console.error('[3va-lb] serverId=' + self._id + ' method=' + r.method + ' url=' + r.url + ' cfService=' + (_lbHdrs['mf-custom-fetch-service'] || 'none') + ' origUrl=' + (_lbHdrs['mf-original-url'] || 'none') + ' envName=' + (_lbHdrs['x-vite-environment'] || 'none') + ' body=' + (r.body || '').slice(0, 100));
                         req.headers = r.headers || {};
+                        var _rh = r.headers || {};
+                        req.rawHeaders = Object.keys(_rh).reduce(function(a, k) { a.push(k, _rh[k]); return a; }, []);
                         req._body = r.body || '';
                         var res = new httpServerResponse(req);
                         self.emit('request', req, res);
@@ -2706,6 +2989,7 @@ pub fn inject_require(
                             }, 0);
                         })(req);
                     }
+                    } catch(e) { console.error('[3va-poll-err] setInterval callback threw:', e && (e.stack || e.message || e)); }
                 }, 5);
                 setTimeout(function() { self.emit('listening'); }, 0);
                 return self;
@@ -2741,6 +3025,139 @@ pub fn inject_require(
             httpOutgoingMessage.prototype.destroy = function(err) {};
             httpOutgoingMessage.prototype.setTimeout = function(msecs, callback) { return this; };
 
+            // ClientRequest: a real HTTP client request that supports upgrade (WebSocket handshake).
+            function ClientRequest(options, callback) {
+                EventEmitter.call(this);
+                if (typeof options === 'string') {
+                    var u = new URL(options);
+                    options = { protocol: u.protocol, hostname: u.hostname, port: parseInt(u.port) || (u.protocol === 'https:' ? 443 : 80), path: u.pathname + u.search };
+                }
+                this._method = (options.method || 'GET').toUpperCase();
+                this._path = options.path || '/';
+                this._host = options.hostname || options.host || 'localhost';
+                this._port = parseInt(options.port) || 80;
+                this._headers = {};
+                if (options.headers) {
+                    var oh = options.headers;
+                    Object.keys(oh).forEach(function(k) { this._headers[k] = oh[k]; }, this);
+                }
+                this._socket = null;
+                this._ended = false;
+                this._pendingWrite = [];
+                if (typeof callback === 'function') this.once('response', callback);
+            }
+            util.inherits(ClientRequest, EventEmitter);
+            ClientRequest.prototype.setHeader = function(k, v) { this._headers[k] = v; return this; };
+            ClientRequest.prototype.getHeader = function(k) {
+                var lk = k.toLowerCase();
+                for (var h in this._headers) { if (h.toLowerCase() === lk) return this._headers[h]; }
+            };
+            ClientRequest.prototype.removeHeader = function(k) { delete this._headers[k]; return this; };
+            ClientRequest.prototype.setNoDelay = function() { return this; };
+            ClientRequest.prototype.setSocketKeepAlive = function() { return this; };
+            ClientRequest.prototype.setTimeout = function(ms, cb) { if (cb) this.once('timeout', cb); return this; };
+            ClientRequest.prototype.write = function(chunk, enc, cb) {
+                this._pendingWrite.push(chunk);
+                if (cb) cb();
+                return true;
+            };
+            ClientRequest.prototype.destroy = function(err) {
+                if (this._socket) this._socket.destroy();
+                return this;
+            };
+            ClientRequest.prototype.end = function(chunk, enc, cb) {
+                if (chunk !== undefined && chunk !== null) this._pendingWrite.push(chunk);
+                if (typeof enc === 'function') { cb = enc; }
+                if (this._ended) { if (cb) cb(); return this; }
+                this._ended = true;
+                var self = this;
+
+                var socket = netConnect(self._port, self._host);
+                self._socket = socket;
+
+                socket.once('error', function(err) { self.emit('error', err); });
+                socket.once('connect', function() {
+                    // Build and send the HTTP request headers (deduplicate case-insensitively)
+                    var hostHdr = self._host + (self._port !== 80 && self._port !== 443 ? ':' + self._port : '');
+                    var hdrsLower = { host: hostHdr, connection: 'close' };
+                    var hdrsCase = { host: 'Host', connection: 'Connection' };
+                    Object.keys(self._headers).forEach(function(k) {
+                        var kl = k.toLowerCase();
+                        hdrsLower[kl] = self._headers[k];
+                        hdrsCase[kl] = k;
+                    });
+                    var lines = [self._method + ' ' + self._path + ' HTTP/1.1'];
+                    Object.keys(hdrsLower).forEach(function(kl) { lines.push(hdrsCase[kl] + ': ' + hdrsLower[kl]); });
+                    lines.push('', '');
+                    console.error('[3va-creq] RAW REQUEST to', self._host + ':' + self._port + ':\n' + lines.join('\r\n').slice(0, 800));
+                    socket.write(lines.join('\r\n'));
+                    for (var i = 0; i < self._pendingWrite.length; i++) {
+                        socket.write(self._pendingWrite[i]);
+                    }
+                    self._pendingWrite = [];
+
+                    // Parse response headers
+                    var buf = Buffer.alloc(0);
+                    var parsedHeaders = false;
+                    socket.on('data', function onData(chunk) {
+                        if (parsedHeaders) return;
+                        buf = Buffer.concat([buf, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+                        var idx = -1;
+                        for (var i = 0; i < buf.length - 3; i++) {
+                            if (buf[i] === 13 && buf[i+1] === 10 && buf[i+2] === 13 && buf[i+3] === 10) { idx = i; break; }
+                        }
+                        if (idx === -1) return;
+                        parsedHeaders = true;
+                        socket.removeListener('data', onData);
+                        var tail = buf.slice(idx + 4);
+                        var headerStr = buf.slice(0, idx).toString('ascii');
+                        var lines2 = headerStr.split('\r\n');
+                        var sl = (lines2[0] || '').split(' ');
+                        var statusCode = parseInt(sl[1]) || 0;
+                        var respHeaders = {};
+                        for (var j = 1; j < lines2.length; j++) {
+                            var ci = lines2[j].indexOf(':');
+                            if (ci > 0) {
+                                var rk = lines2[j].slice(0, ci).trim().toLowerCase();
+                                var rv = lines2[j].slice(ci + 1).trim();
+                                respHeaders[rk] = rv;
+                            }
+                        }
+                        var fakeRes = { statusCode: statusCode, headers: respHeaders, httpVersion: '1.1', socket: socket, resume: function() {} };
+                        if (statusCode !== 101) console.error('[3va-creq-resp]', self._method, self._path, '→', statusCode, '| tail:', tail.length, 'bytes:', tail.slice(0, 300).toString('utf8'));
+                        if (statusCode === 101) {
+                            self.emit('upgrade', fakeRes, socket, tail);
+                        } else {
+                            var _fakeResListeners = {};
+                            fakeRes.on = function(ev, fn) { (_fakeResListeners[ev] = _fakeResListeners[ev] || []).push(fn); return fakeRes; };
+                            fakeRes.once = fakeRes.on;
+                            fakeRes.pipe = function() {};
+                            self.emit('response', fakeRes);
+                            // deliver body and end after listeners are attached
+                            setTimeout(function() {
+                                var dataFns = _fakeResListeners['data'] || [];
+                                if (tail.length) dataFns.forEach(function(fn) { fn(tail); });
+                                // consume remaining socket data
+                                var endFns = _fakeResListeners['end'] || [];
+                                socket.on('data', function(chunk) { dataFns.forEach(function(fn) { fn(chunk); }); });
+                                socket.once('end', function() { endFns.forEach(function(fn) { fn(); }); });
+                                socket.once('error', function() { endFns.forEach(function(fn) { fn(); }); });
+                            }, 0);
+                        }
+                    });
+                });
+
+                if (cb) cb();
+                return this;
+            };
+
+            function httpRequest(options, callback) { return new ClientRequest(options, callback); }
+            function httpGet(options, callback) {
+                var req = httpRequest(options, callback);
+                req.end();
+                return req;
+            }
+
             function createServer(opts, requestListener) {
                 return new httpServer(opts, requestListener);
             }
@@ -2753,9 +3170,9 @@ pub fn inject_require(
                 OutgoingMessage: httpOutgoingMessage,
                 IncomingMessage: httpIncomingMessage,
                 ServerResponse: httpServerResponse,
-                request: function(options, callback) { return new httpOutgoingMessage(); },
-                get: function(options, callback) { return new httpOutgoingMessage(); },
-                ClientRequest: httpOutgoingMessage,
+                request: httpRequest,
+                get: httpGet,
+                ClientRequest: ClientRequest,
                 maxHeaderSize: 16384,
                 STATUS_CODES: HTTP_STATUS_CODES
             };
@@ -2766,8 +3183,11 @@ pub fn inject_require(
             var httpsModule = {
                 createServer: function(opts, requestListener) { return createServer(opts, requestListener); },
                 globalAgent: new httpAgent(),
-                request: function(options, callback) { return new httpOutgoingMessage(); },
-                get: function(options, callback) { return new httpOutgoingMessage(); }
+                Agent: httpAgent,
+                Server: Server,
+                request: httpRequest,
+                get: httpGet,
+                ClientRequest: ClientRequest
             };
             globalThis.__requireCache['https'] = httpsModule;
             globalThis.__requireCache['node:https'] = httpsModule;
@@ -3078,13 +3498,16 @@ pub fn inject_require(
             var parseAstStub = {
                 parseAst: function(code, opts) {
                     var parser = getBabelParser();
-                    return parser.parse(code, {
+                    var result = parser.parse(code, {
                         plugins: ['estree'],
                         sourceType: 'module',
                         allowReturnOutsideFunction: !!(opts && opts.allowReturnOutsideFunction),
                         allowImportExportEverywhere: true,
                         errorRecovery: true,
                     });
+                    // @babel/parser returns { type:"File", program:{type:"Program",body:[...]} }
+                    // Vite's ssrTransform expects the Program node directly (ast.body iterable).
+                    return (result && result.program) ? result.program : result;
                 },
                 parseAstAsync: function(code, opts) {
                     try {
@@ -3171,9 +3594,20 @@ pub fn inject_require(
         // (perms().check(...) in the Rust bindings) need scoping — wrapping
         // every required module would be pure overhead for no benefit, since
         // plain JS/data modules never touch PermissionState.
+        // ssh2/imap/ftp/pop3/irc/webrtc are NOT included here even though
+        // they perform capability-gated native calls: each exposes only a
+        // PascalCase `Client` constructor (`new require('ssh2').Client(...)`),
+        // and the wrapper below deliberately skips PascalCase properties to
+        // avoid breaking `instanceof` — same documented gap as `net.Socket`.
+        // Scoping those would need the constructor itself to stamp the
+        // creator's scope onto the instance and have its methods re-apply
+        // it, not just this require()-boundary wrapper. `mqtt` is included
+        // because it additionally exposes a lowercase `connect` factory
+        // function (mirroring `net.connect`) whose permission check runs
+        // synchronously in the same call, which the wrapper does cover.
         var __SCOPE_GATED_MODULES = {
             fs: true, 'fs/promises': true, net: true, tls: true,
-            dgram: true, child_process: true,
+            dgram: true, child_process: true, mqtt: true,
         };
 
         // Shallow-wraps lowercase-named function properties (heuristic for
@@ -3224,7 +3658,7 @@ pub fn inject_require(
             if (scopeName === '.' || !Object.prototype.hasOwnProperty.call(__SCOPE_GATED_MODULES, bare)) {
                 return mod;
             }
-            var cacheKey = bare + ' ' + scopeName;
+            var cacheKey = bare + '\u0000' + scopeName;
             if (!Object.prototype.hasOwnProperty.call(__scopedModuleCache, cacheKey)) {
                 __scopedModuleCache[cacheKey] = __wrapForScope(mod, scopeName, 0);
             }
@@ -3232,6 +3666,12 @@ pub fn inject_require(
         }
 
         function requireFrom(specifier, dir) {
+            if (specifier && specifier.indexOf('node:') === 0 && specifier !== 'node:module') {
+                console.error('[3va-requireFrom] node: spec=' + specifier + ' inCache=' + Object.prototype.hasOwnProperty.call(globalThis.__requireCache, specifier));
+            }
+            if (specifier && (specifier.indexOf('devalue') !== -1 || specifier.indexOf('file://') === 0)) {
+                console.error('[3va-devalue] requireFrom spec=' + specifier + ' dir=' + dir);
+            }
             // Normalize file:// URLs: strip scheme, host, and query/fragment
             if (specifier && specifier.indexOf('file://') === 0) {
                 var stripped = specifier.slice('file://'.length);
@@ -3245,6 +3685,12 @@ pub fn inject_require(
                 specifier = stripped;
             }
             var bare = bareName(specifier);
+            if (specifier === 'rollup/parseAst' || specifier === 'rollup') {
+                console.error('[3va-require] require(' + specifier + ') inCache=' + Object.prototype.hasOwnProperty.call(globalThis.__requireCache, specifier));
+            }
+            if (specifier === 'node:console') {
+                console.error('[3va-require] require(node:console) inCache=' + Object.prototype.hasOwnProperty.call(globalThis.__requireCache, 'node:console') + ' val=' + typeof globalThis.__requireCache['node:console']);
+            }
             if (Object.prototype.hasOwnProperty.call(globalThis.__requireCache, specifier)) {
                 return __scopedModule(bare, globalThis.__requireCache[specifier], __pkgScopeFor(dir));
             }
@@ -3257,21 +3703,23 @@ pub fn inject_require(
 
             var resolved = __requireResolve(specifier, dir);
 
+            // node: builtins (or bare node names) return themselves as sentinel.
+            // Guard: absolute paths (starts with /) are never sentinels — they're
+            // real files that resolve_esm_from_dir returns unchanged, so
+            // resolved===specifier is a coincidence, not a sentinel signal.
+            var isAbsoluteOrRelative = specifier[0] === '/' || specifier[0] === '.';
+            if (resolved && (resolved.indexOf('node:') === 0 || (!isAbsoluteOrRelative && resolved === specifier))) {
+                var nbCached = globalThis.__requireCache[resolved]
+                    || globalThis.__requireCache['node:' + resolved]
+                    || globalThis.__requireCache[bare];
+                if (nbCached !== undefined) return __scopedModule(bare, nbCached, __pkgScopeFor(dir));
+                return {};
+            }
+
             if (Object.prototype.hasOwnProperty.call(globalThis.__loadedModules, resolved)) {
                 return globalThis.__loadedModules[resolved].exports;
             }
 
-            // require() of a .mjs file is always an error in Node — .mjs
-            // marks a file as ESM-only regardless of its actual content, so
-            // this must be an extension check, not the source_is_esm()
-            // content sniff used elsewhere (a .cjs file with import/export-
-            // looking text must NOT hit this, and does not: it's excluded
-            // by extension here too).
-            if (resolved.slice(-4) === '.mjs') {
-                var esmErr = new Error("Must use import to load ES Module: " + resolved);
-                esmErr.code = 'ERR_REQUIRE_ESM';
-                throw esmErr;
-            }
 
             if (resolved.slice(-5) === '.json') {
                 var jsonSrc = __readFile(resolved);
@@ -3319,6 +3767,9 @@ pub fn inject_require(
             });
             if (resolved.indexOf('module-loader/vite') !== -1 || resolved.indexOf('module-runner') !== -1) {
                 __fsWriteFileSync('/tmp/debug_' + resolved.replace(/[^a-zA-Z0-9]/g, '_') + '.js', source);
+            }
+            if (resolved.indexOf('/chunks/config.js') !== -1) {
+                __fsWriteFileSync('/tmp/debug_config_js.js', source.slice(0, 5000));
             }
             try {
                 // A required file's own `import.meta.url` must be ITS path,
