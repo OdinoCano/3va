@@ -53,6 +53,15 @@ fn do_generate_keypair_sync_inner(key_type: &str, options_json: &str) -> anyhow:
                 .get("modulusLength")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(2048) as usize;
+            // RSA keygen time grows steeply with modulus size — an
+            // attacker-controlled (or just careless) script requesting an
+            // absurd modulusLength would tie up a blocking-pool thread for
+            // an unbounded amount of time/memory. 512 matches the practical
+            // floor other runtimes accept; 16384 is far beyond any real
+            // use case but still generous.
+            if !(512..=16384).contains(&bits) {
+                anyhow::bail!("RSA modulusLength must be between 512 and 16384 bits, got {bits}");
+            }
             let mut rng = OsRng;
             let private_key = RsaPrivateKey::new(&mut rng, bits)
                 .map_err(|e| anyhow::anyhow!("RSA keygen failed: {e}"))?;
@@ -1366,7 +1375,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         },
 
         randomBytes: function(n, callback) {
-            var bytes = new Uint8Array(__cryptoRandomBytes(n));
+            var bytes = Buffer.from(new Uint8Array(__cryptoRandomBytes(n)));
             if (typeof callback === 'function') {
                 Promise.resolve().then(function() { callback(null, bytes); });
                 return;

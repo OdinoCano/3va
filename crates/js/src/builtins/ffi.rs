@@ -122,6 +122,21 @@ unsafe fn call_native(
         .map(|t| ffi_type_from_str(t))
         .collect::<anyhow::Result<_>>()?;
 
+    // `cif` is built for exactly `arg_types.len()` arguments — libffi will
+    // read that many argument slots when marshalling the call. `.zip()`
+    // below silently truncates to the shorter of the two iterators, so a
+    // caller passing fewer JS arguments than the declared signature (an easy
+    // mistake, not even malice) would hand libffi an `ffi_args` slice
+    // shorter than what `cif` expects: undefined behavior, not a clean
+    // panic. Reject the mismatch before it ever reaches libffi.
+    if arg_types.len() != js_args.len() {
+        anyhow::bail!(
+            "FFI call expects {} argument(s), got {}",
+            arg_types.len(),
+            js_args.len()
+        );
+    }
+
     let cif = Cif::new(arg_ffi, ret_ffi);
     let code = CodePtr(fn_ptr as *mut _);
 

@@ -222,6 +222,29 @@ async fn generate_keypair_rsa_async() {
 }
 
 #[tokio::test]
+async fn generate_keypair_rsa_rejects_oversized_modulus_length() {
+    // Regression test: modulusLength used to be passed straight to RSA
+    // keygen unbounded — a script requesting an absurd size could tie up a
+    // blocking-pool thread for an unbounded amount of time/memory.
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var c = require('crypto');
+            try {
+                c.generateKeyPairSync('rsa', { modulusLength: 999999999 });
+                'no error thrown';
+            } catch (e) {
+                'threw:' + (e.message.indexOf('modulusLength') !== -1);
+            }
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "threw:true");
+}
+
+#[tokio::test]
 async fn generate_keypair_ec_p256_sync() {
     let mut e = engine().await;
     let r = e

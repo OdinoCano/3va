@@ -251,12 +251,21 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
                                     (protocol === 'http:' && port === '80');
                 host = hostname + (port && !isDefaultPort ? ':' + port : '');
                 origin = protocol + '//' + hostname + (port && !isDefaultPort ? ':' + port : '');
-            } else if (href.indexOf('#') !== -1) {
-                var parts = href.split('#');
-                pathname = parts[0];
-                hash = '#' + parts[1];
             } else {
-                pathname = href;
+                // Handle opaque-path URLs: about:, data:, blob:, javascript:, etc.
+                var opaqueMatch = href.match(/^([a-zA-Z][a-zA-Z0-9+\-.]*):(.*)$/);
+                if (opaqueMatch) {
+                    protocol = opaqueMatch[1] + ':';
+                    pathname = opaqueMatch[2];
+                    origin = 'null'; // opaque origin per WHATWG spec
+                    href = href;
+                } else if (href.indexOf('#') !== -1) {
+                    var parts = href.split('#');
+                    pathname = parts[0];
+                    hash = '#' + parts[1];
+                } else {
+                    pathname = href;
+                }
             }
             return {
                 href: href,
@@ -630,6 +639,8 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
             if (!(this instanceof Request)) return new Request(input, init);
             if (typeof input === 'string') {
                 this.url = input;
+            } else if (input instanceof URL) {
+                this.url = input.href;
             } else if (input && input.url) {
                 this.url = input.url;
             }
@@ -786,6 +797,8 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
             this._chunks = [];
             this._pending = [];
             this.locked = false;
+            this._pulling = false;
+            this._pull = (init && typeof init.pull === 'function') ? init.pull : null;
             var self = this;
             this._controller = {
                 enqueue: function(chunk) {
@@ -802,13 +815,29 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
                     self._errored = e;
                     self._closed = true;
                     while (self._pending.length > 0) self._pending.shift().reject(e);
-                }
+                },
+                desiredSize: 1
             };
             if (init.start) {
-                init.start(this._controller);
+                Promise.resolve(init.start(this._controller)).then(function() {
+                    self._started = true;
+                    self._maybeCallPull();
+                });
+            } else {
                 this._started = true;
             }
         }
+        ReadableStream.prototype._maybeCallPull = function() {
+            if (!this._pull || this._pulling || this._closed || this._pending.length === 0) return;
+            this._pulling = true;
+            var self = this;
+            Promise.resolve(this._pull(this._controller)).then(function() {
+                self._pulling = false;
+                self._maybeCallPull();
+            }).catch(function(e) {
+                self._pulling = false;
+            });
+        };
         ReadableStream.prototype._flushPending = function() {
             while (this._pending.length > 0 && this._chunks.length > 0) {
                 this._pending.shift().resolve({ done: false, value: this._chunks.shift() });
@@ -831,6 +860,7 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
                             resolve({ done: true, value: undefined });
                         } else {
                             stream._pending.push({ resolve: resolve, reject: reject });
+                            stream._maybeCallPull();
                         }
                     });
                 },
@@ -1208,6 +1238,98 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
             __eventSourceClose(this._id);
         };
         globalThis.EventSource = EventSource;
+
+        // Event / EventTarget / CustomEvent / DOMException etc — Node.js 15+ globals.
+        if (typeof globalThis.Event === 'undefined') {
+            function Event(type, init) {
+                this.type = type || '';
+                this.bubbles = !!(init && init.bubbles);
+                this.cancelable = !!(init && init.cancelable);
+                this.defaultPrevented = false;
+                this.target = null;
+                this.currentTarget = null;
+                this.timeStamp = Date.now();
+            }
+            Event.prototype.preventDefault = function() { this.defaultPrevented = true; };
+            Event.prototype.stopPropagation = function() {};
+            Event.prototype.stopImmediatePropagation = function() {};
+            globalThis.Event = Event;
+        }
+        if (typeof globalThis.CustomEvent === 'undefined') {
+            function CustomEvent(type, init) {
+                Event.call(this, type, init);
+                this.detail = (init && init.detail !== undefined) ? init.detail : null;
+            }
+            CustomEvent.prototype = Object.create(Event.prototype);
+            CustomEvent.prototype.constructor = CustomEvent;
+            globalThis.CustomEvent = CustomEvent;
+        }
+        if (typeof globalThis.EventTarget === 'undefined') {
+            function EventTarget() { this._listeners = Object.create(null); }
+            EventTarget.prototype.addEventListener = function(type, fn) {
+                if (!this._listeners[type]) this._listeners[type] = [];
+                this._listeners[type].push(fn);
+            };
+            EventTarget.prototype.removeEventListener = function(type, fn) {
+                if (!this._listeners[type]) return;
+                this._listeners[type] = this._listeners[type].filter(function(f) { return f !== fn; });
+            };
+            EventTarget.prototype.dispatchEvent = function(evt) {
+                evt.target = this; evt.currentTarget = this;
+                var handlers = this._listeners[evt.type] || [];
+                for (var i = 0; i < handlers.length; i++) handlers[i].call(this, evt);
+                return !evt.defaultPrevented;
+            };
+            globalThis.EventTarget = EventTarget;
+        }
+        if (typeof globalThis.DOMException === 'undefined') {
+            function DOMException(message, name) {
+                this.message = message || '';
+                this.name = name || 'Error';
+                this.code = 0;
+            }
+            DOMException.prototype = Object.create(Error.prototype);
+            DOMException.prototype.constructor = DOMException;
+            DOMException.prototype.name = 'DOMException';
+            globalThis.DOMException = DOMException;
+        }
+        if (typeof globalThis.MessageEvent === 'undefined') {
+            function MessageEvent(type, init) {
+                Event.call(this, type, init);
+                this.data = (init && init.data !== undefined) ? init.data : null;
+                this.origin = (init && init.origin) || '';
+                this.lastEventId = (init && init.lastEventId) || '';
+                this.source = (init && init.source) || null;
+                this.ports = (init && init.ports) || [];
+            }
+            MessageEvent.prototype = Object.create(Event.prototype);
+            MessageEvent.prototype.constructor = MessageEvent;
+            globalThis.MessageEvent = MessageEvent;
+        }
+        if (typeof globalThis.CloseEvent === 'undefined') {
+            function CloseEvent(type, init) {
+                Event.call(this, type, init);
+                this.wasClean = !!(init && init.wasClean);
+                this.code = (init && init.code) || 0;
+                this.reason = (init && init.reason) || '';
+            }
+            CloseEvent.prototype = Object.create(Event.prototype);
+            CloseEvent.prototype.constructor = CloseEvent;
+            globalThis.CloseEvent = CloseEvent;
+        }
+        if (typeof globalThis.ErrorEvent === 'undefined') {
+            function ErrorEvent(type, init) {
+                Event.call(this, type, init);
+                this.message = (init && init.message) || '';
+                this.filename = (init && init.filename) || '';
+                this.lineno = (init && init.lineno) || 0;
+                this.colno = (init && init.colno) || 0;
+                this.error = (init && init.error) || null;
+            }
+            ErrorEvent.prototype = Object.create(Event.prototype);
+            ErrorEvent.prototype.constructor = ErrorEvent;
+            globalThis.ErrorEvent = ErrorEvent;
+        }
 
     })();
     "#;

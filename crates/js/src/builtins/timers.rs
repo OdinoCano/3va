@@ -225,18 +225,47 @@ pub fn inject_timers(
             }
         };
 
+        function __makeTimerHandle(id, ms, repeat) {
+            var handle = {
+                _id: id,
+                _ms: ms,
+                _repeat: repeat,
+                unref: function() { return handle; },
+                ref: function() { return handle; },
+                refresh: function() {
+                    // Re-arm: cancel then reschedule with same callback.
+                    var cb = globalThis.__timerCallbacks[handle._id];
+                    __nativeClearTimer(handle._id);
+                    globalThis.__timerNextId = (globalThis.__timerNextId || 0) + 1;
+                    handle._id = globalThis.__timerNextId;
+                    globalThis.__timerCallbacks[handle._id] = cb;
+                    if (repeat) __nativeSetInterval(handle._id, ms);
+                    else __nativeSetTimeout(handle._id, ms);
+                    return handle;
+                },
+                hasRef: function() { return true; }
+            };
+            return handle;
+        }
+        function __numericId(id) {
+            if (id == null) return null;
+            return (typeof id === 'object' && id !== null && id._id != null) ? id._id : id;
+        }
+
         globalThis.setTimeout = function(fn, ms) {
             globalThis.__timerNextId = (globalThis.__timerNextId || 0) + 1;
             var id = globalThis.__timerNextId;
+            var delay = Math.floor(+ms) || 0;
             globalThis.__timerCallbacks[id] = fn;
-            __nativeSetTimeout(id, Math.floor(+ms) || 0);
-            return id;
+            __nativeSetTimeout(id, delay);
+            return __makeTimerHandle(id, delay, false);
         };
 
         globalThis.clearTimeout = function(id) {
-            if (id == null) return;
-            delete globalThis.__timerCallbacks[id];
-            __nativeClearTimer(id);
+            var numId = __numericId(id);
+            if (numId == null) return;
+            delete globalThis.__timerCallbacks[numId];
+            __nativeClearTimer(numId);
         };
 
         globalThis.setInterval = function(fn, ms) {
@@ -249,13 +278,14 @@ pub fn inject_timers(
             };
             globalThis.__timerCallbacks[id] = wrapper;
             __nativeSetInterval(id, intervalMs);
-            return id;
+            return __makeTimerHandle(id, intervalMs, true);
         };
 
         globalThis.clearInterval = function(id) {
-            if (id == null) return;
-            delete globalThis.__timerCallbacks[id];
-            __nativeClearTimer(id);
+            var numId = __numericId(id);
+            if (numId == null) return;
+            delete globalThis.__timerCallbacks[numId];
+            __nativeClearTimer(numId);
         };
 
         if (typeof globalThis.setImmediate === 'undefined') {

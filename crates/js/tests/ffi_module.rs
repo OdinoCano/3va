@@ -249,6 +249,37 @@ async fn ffi_call_pow_two_f64_args() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+async fn ffi_call_rejects_argument_count_mismatch() {
+    // Regression test: calling with fewer JS arguments than the declared FFI
+    // signature used to silently truncate via `.zip()`, handing libffi an
+    // args slice shorter than the Cif it was built for — undefined behavior,
+    // not a clean error. Must now throw a catchable JS error instead.
+    let mut e = engine_with_ffi(LIBM).await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"(function() {{
+                 var {{ dlopen, FFIType }} = require('ffi');
+                 var lib = dlopen('{}', {{
+                   pow: {{ args: [FFIType.f64, FFIType.f64], returns: FFIType.f64 }}
+                 }});
+                 try {{
+                   lib.symbols.pow(2.0); // missing the second declared argument
+                   lib.close();
+                   return 'no error thrown';
+                 }} catch (e) {{
+                   lib.close();
+                   return 'threw:' + (e.message.indexOf('argument') !== -1);
+                 }}
+               }})()"#,
+            LIBM
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "threw:true");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
 async fn ffi_call_void_return() {
     // free(NULL) is a no-op — tests that void return works without crashing
     let mut e = engine_with_ffi(LIBC).await;

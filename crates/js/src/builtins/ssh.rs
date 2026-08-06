@@ -173,9 +173,19 @@ pub fn inject_ssh(
             // thread — permissions() itself would panic if called from
             // there (see PermissionState's doc comment above).
             let perms_for_thread = permissions();
+            // Same reasoning for the per-package permission scope
+            // (vvva_permissions::scope): it's a thread-local too, set by the
+            // require() wrapper on the JS engine's own thread. A freshly
+            // spawned std::thread::spawn thread never had it set, so
+            // perms_for_thread.check() below would silently evaluate against
+            // ROOT_SCOPE instead of whichever package actually called
+            // ssh.connect() — capture it here and re-apply it on the new
+            // thread before the check.
+            let scope_for_thread = vvva_permissions::current_scope();
             let op_id = next_op_id();
 
             std::thread::spawn(move || {
+                vvva_permissions::set_current_scope(&scope_for_thread);
                 // Kept alive for the connection's lifetime via SshConn — see
                 // its doc comment. Not dropped at the end of this thread.
                 let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());

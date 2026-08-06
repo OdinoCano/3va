@@ -51,9 +51,11 @@ impl ContentStore {
     /// Returns the canonical store path for a package.
     /// The directory exists iff the package is already cached.
     pub fn package_path(&self, registry: &str, name: &str, version: &str) -> PathBuf {
-        self.root
-            .join(safe_registry(registry))
-            .join(format!("{}@{}", safe_name(name), version))
+        self.root.join(safe_registry(registry)).join(format!(
+            "{}@{}",
+            safe_name(name),
+            safe_version(version)
+        ))
     }
 
     /// True if the package is fully cached (package.json present in the store).
@@ -92,7 +94,7 @@ impl ContentStore {
         let tmp = dest.with_file_name(format!(
             "{}@{}__tmp_{}",
             safe_name(name),
-            version,
+            safe_version(version),
             std::process::id()
         ));
         if tmp.exists() {
@@ -187,7 +189,7 @@ impl ContentStore {
         }
 
         // node_modules/.3va/@scope+pkg@version/node_modules/@scope/pkg/
-        let entry = format!("{}@{}", virtual_entry_name(name), version);
+        let entry = format!("{}@{}", virtual_entry_name(name), safe_version(version));
         let virtual_pkg_dir = node_modules
             .join(".3va")
             .join(&entry)
@@ -260,7 +262,7 @@ impl ContentStore {
             );
         }
 
-        let entry = format!("{}@{}", virtual_entry_name(name), version);
+        let entry = format!("{}@{}", virtual_entry_name(name), safe_version(version));
         let dest = config_deps_root.join(entry);
         if dest.join("package.json").exists() {
             return Ok(dest); // already linked — idempotent
@@ -428,6 +430,19 @@ impl PruneResult {
 
 pub(crate) fn safe_name(name: &str) -> String {
     name.replace('/', "+")
+}
+
+/// Sanitizes a version string before it's used as a path segment
+/// (`package_path`, virtual-store/hoisted-linker/config-dep entry names).
+/// `version` normally comes from `semver`-shaped registry data, but it's
+/// still attacker-controlled — a compromised/malicious registry returning
+/// `"version": "1.0.0/../../../etc/x"` in a packument must not be able to
+/// escape the store root. `/` and `\` are the only characters that matter
+/// for path-traversal (there's no other way to introduce a path separator
+/// or `..`/`.` component once those are gone), so replacing them is
+/// sufficient without also breaking legitimate semver/pre-release strings.
+pub(crate) fn safe_version(version: &str) -> String {
+    version.replace(['/', '\\'], "_")
 }
 
 pub(crate) fn safe_registry(registry: &str) -> String {

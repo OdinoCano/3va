@@ -434,18 +434,52 @@ pub fn inject_require(
                 // Bare node.js built-in names (without node: prefix) also
                 // return as sentinel so requireFrom can find them in cache.
                 const NODE_BUILTINS: &[&str] = &[
-                    "assert","async_hooks","buffer","child_process","cluster",
-                    "console","crypto","dgram","diagnostics_channel","dns","domain",
-                    "events","fs","http","http2","https","inspector","module","net",
-                    "os","path","perf_hooks","process","punycode","querystring",
-                    "readline","repl","stream","string_decoder","sys","timers",
-                    "tls","tty","url","util","v8","vm","wasi","worker_threads","zlib",
+                    "assert",
+                    "async_hooks",
+                    "buffer",
+                    "child_process",
+                    "cluster",
+                    "console",
+                    "crypto",
+                    "dgram",
+                    "diagnostics_channel",
+                    "dns",
+                    "domain",
+                    "events",
+                    "fs",
+                    "http",
+                    "http2",
+                    "https",
+                    "inspector",
+                    "module",
+                    "net",
+                    "os",
+                    "path",
+                    "perf_hooks",
+                    "process",
+                    "punycode",
+                    "querystring",
+                    "readline",
+                    "repl",
+                    "stream",
+                    "string_decoder",
+                    "sys",
+                    "timers",
+                    "tls",
+                    "tty",
+                    "url",
+                    "util",
+                    "v8",
+                    "vm",
+                    "wasi",
+                    "worker_threads",
+                    "zlib",
                 ];
-                let bare = specifier.strip_prefix("node:").unwrap_or(&specifier);
+                let bare = specifier.strip_prefix("node:").unwrap_or(specifier);
                 // Also match sub-path builtins like timers/promises, stream/consumers
                 let root = bare.split('/').next().unwrap_or(bare);
                 if NODE_BUILTINS.contains(&root) {
-                    let result = V8String::new(scope, &specifier).unwrap();
+                    let result = V8String::new(scope, specifier).unwrap();
                     rv.set(result.into());
                     return;
                 }

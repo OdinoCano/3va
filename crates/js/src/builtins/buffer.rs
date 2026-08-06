@@ -114,15 +114,15 @@ if (typeof globalThis.TextDecoder === 'undefined') {
     return s;
   }
 
-  function Buffer(arg, enc) {
-    if (!(this instanceof Buffer)) return new Buffer(arg, enc);
+  function Buffer(arg, enc, len) {
+    if (!(this instanceof Buffer)) return new Buffer(arg, enc, len);
     var bytes;
     if (typeof arg === 'number') {
       bytes = new Uint8Array(arg < 0 ? 0 : arg);
     } else if (arg instanceof Uint8Array) {
       bytes = new Uint8Array(arg);
-    } else if (arg instanceof ArrayBuffer) {
-      bytes = new Uint8Array(arg);
+    } else if (arg instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && arg instanceof SharedArrayBuffer)) {
+      bytes = typeof enc === 'number' ? new Uint8Array(arg, enc, len) : new Uint8Array(arg);
     } else if (Array.isArray(arg)) {
       bytes = new Uint8Array(arg);
     } else if (typeof arg === 'string') {
@@ -138,11 +138,14 @@ if (typeof globalThis.TextDecoder === 'undefined') {
 
   Object.setPrototypeOf(Buffer.prototype, Uint8Array.prototype);
   Buffer.prototype.constructor = Buffer;
+  Object.defineProperty(Buffer, Symbol.species, { get: function() { return Buffer; } });
 
   Buffer.from = function(data, enc, len) {
     if (typeof data === 'string') return new Buffer(_encodeString(data, enc || 'utf8'));
     if (data instanceof Uint8Array) return new Buffer(new Uint8Array(data));
-    if (data instanceof ArrayBuffer) return new Buffer(new Uint8Array(data));
+    if (data instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && data instanceof SharedArrayBuffer)) {
+      return typeof enc === 'number' ? new Buffer(data, enc, len) : new Buffer(new Uint8Array(data));
+    }
     if (Array.isArray(data)) return new Buffer(new Uint8Array(data));
     if (data && typeof data === 'object' && data.type === 'Buffer') return new Buffer(new Uint8Array(data.data));
     throw new TypeError('Buffer.from: unsupported argument type ' + typeof data);

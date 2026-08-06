@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(unix)]
+extern crate libc;
 use v8::{
     ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, Script,
     String as V8String,
@@ -12,6 +14,8 @@ struct StreamChild {
     stdin: Option<std::process::ChildStdin>,
     stdout_buf: Arc<Mutex<Vec<u8>>>,
     done: Arc<AtomicBool>,
+    control_buf: Arc<Mutex<Vec<u8>>>,
+    control_done: Arc<AtomicBool>,
     _child: std::process::Child,
 }
 
@@ -494,12 +498,53 @@ pub fn inject_child_process(
                 vec![]
             };
 
+            // Create a pipe for fd 3 (--control-fd=3 used by workerd).
+            // pipe_fds[0]=read end (parent keeps), pipe_fds[1]=write end (child gets as fd 3).
+            let mut pipe_fds = [-1i32; 2];
+            let pipe_ok = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
+            let read_fd = pipe_fds[0];
+            let write_fd = pipe_fds[1];
+
+            #[cfg(unix)]
+            let child_result = {
+                use std::os::unix::process::CommandExt;
+                unsafe {
+                    std::process::Command::new(&cmd)
+                        .args(&arg_vec)
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::inherit())
+                        .pre_exec(move || {
+                            if pipe_ok && write_fd >= 0 {
+                                // dup write end to fd 3, close originals
+                                libc::dup2(write_fd, 3);
+                                libc::close(write_fd);
+                                libc::close(read_fd);
+                                // Set close-on-exec for fd 3 false so child keeps it
+                                let flags = libc::fcntl(3, libc::F_GETFD);
+                                if flags >= 0 {
+                                    libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                                }
+                            }
+                            Ok(())
+                        })
+                        .spawn()
+                }
+            };
+            #[cfg(not(unix))]
             let child_result = std::process::Command::new(&cmd)
                 .args(&arg_vec)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::inherit())
                 .spawn();
+
+            // In the parent: close write end; spawn thread to read from read end.
+            if pipe_ok && write_fd >= 0 {
+                unsafe {
+                    libc::close(write_fd);
+                }
+            }
 
             match child_result {
                 Ok(mut child) => {
@@ -521,6 +566,35 @@ pub fn inject_child_process(
                         }
                         done2.store(true, Ordering::SeqCst);
                     });
+                    let ctrl_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+                    let ctrl_done = Arc::new(AtomicBool::new(false));
+                    if pipe_ok && read_fd >= 0 {
+                        let cbuf = ctrl_buf.clone();
+                        let cdone = ctrl_done.clone();
+                        std::thread::spawn(move || {
+                            use std::io::Read;
+                            use std::os::unix::io::FromRawFd;
+                            let mut f = unsafe { std::fs::File::from_raw_fd(read_fd) };
+                            let mut tmp = [0u8; 4096];
+                            loop {
+                                match f.read(&mut tmp) {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => {
+                                        eprintln!(
+                                            "[3va-fd3] read {} bytes: {:?}",
+                                            n,
+                                            std::str::from_utf8(&tmp[..n]).unwrap_or("<binary>")
+                                        );
+                                        cbuf.lock().unwrap().extend_from_slice(&tmp[..n]);
+                                    }
+                                }
+                            }
+                            eprintln!("[3va-fd3] EOF on control pipe");
+                            cdone.store(true, Ordering::SeqCst);
+                        });
+                    } else {
+                        ctrl_done.store(true, Ordering::SeqCst);
+                    }
                     let id = NEXT_CHILD_ID.fetch_add(1, Ordering::SeqCst);
                     child_table().lock().unwrap().insert(
                         id,
@@ -528,6 +602,8 @@ pub fn inject_child_process(
                             stdin: Some(stdin),
                             stdout_buf: buf,
                             done,
+                            control_buf: ctrl_buf,
+                            control_done: ctrl_done,
                             _child: child,
                         },
                     );
@@ -651,6 +727,51 @@ pub fn inject_child_process(
         spawn_kill_fn.into(),
     );
 
+    // ── __spawnPollControl(id) → Uint8Array | undefined (fd 3 / control pipe) ─
+    let spawn_poll_ctrl_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let table = child_table().lock().unwrap();
+            if let Some(child) = table.get(&id) {
+                let mut buf = child.control_buf.lock().unwrap();
+                if !buf.is_empty() {
+                    let data = buf.drain(..).collect::<Vec<u8>>();
+                    drop(buf);
+                    drop(table);
+                    let arr = crate::builtins::v8_compat::uint8array_from_bytes(scope, &data);
+                    rv.set(arr.into());
+                }
+            }
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__spawnPollControl").unwrap().into(),
+        spawn_poll_ctrl_fn.into(),
+    );
+
+    // ── __spawnIsControlDone(id) → bool ──────────────────────────────────────
+    let spawn_ctrl_done_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let table = child_table().lock().unwrap();
+            let done = table
+                .get(&id)
+                .map(|c| c.control_done.load(Ordering::SeqCst))
+                .unwrap_or(true);
+            rv.set(v8::Boolean::new(scope, done).into());
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__spawnIsControlDone").unwrap().into(),
+        spawn_ctrl_done_fn.into(),
+    );
+
     let js_code = r#"
         (function() {
             function parseOpts(cmd, opts, cb) {
@@ -725,67 +846,184 @@ pub fn inject_child_process(
                             return s;
                         }
                     }
-                    function drainAndFinish() {
-                        var data = __spawnPollOut(id);
-                        if (data) stdout._dataListeners.forEach(function(fn) { fn(bytesToChunk(data)); });
-                        if (__spawnIsDone(id)) {
-                            var tail = __spawnPollOut(id);
-                            if (tail) stdout._dataListeners.forEach(function(fn) { fn(bytesToChunk(tail)); });
-                            stdout._endListeners.forEach(function(fn) { fn(); });
-                            cp._closeListeners.forEach(function(fn) { fn(0, null); });
-                            __spawnKill(id);
-                            return true;
-                        }
-                        return false;
-                    }
                     function schedulePoll() {
-                        Promise.resolve().then(function() {
-                            if (drainAndFinish()) return;
-                            if (typeof setTimeout === 'function') setTimeout(schedulePoll, 0);
-                        });
+                        startStdoutPoll();
                     }
                     var stdin = {
+                        _listeners: {},
                         write: function(chunk, cb) {
                             __spawnWrite(id, toBytes(chunk));
                             if (cb) cb(null);
                             return true;
                         },
-                        on: function(ev, fn) { return this; },
+                        on: function(ev, fn) {
+                            if (!this._listeners[ev]) this._listeners[ev] = [];
+                            this._listeners[ev].push(fn);
+                            return this;
+                        },
+                        once: function(ev, fn) {
+                            var self = this;
+                            function w() {
+                                var ls = self._listeners[ev] || [];
+                                var idx = ls.indexOf(w);
+                                if (idx >= 0) ls.splice(idx, 1);
+                                fn.apply(null, arguments);
+                            }
+                            return this.on(ev, w);
+                        },
+                        emit: function(ev) {
+                            var args = Array.prototype.slice.call(arguments, 1);
+                            (this._listeners[ev] || []).slice().forEach(function(fn) { fn.apply(null, args); });
+                            return this;
+                        },
                         end: function(chunk) {
                             if (chunk !== undefined && chunk !== null) __spawnWrite(id, toBytes(chunk));
                             __spawnEnd(id);
+                            var self = this;
+                            Promise.resolve().then(function() { self.emit('finish'); });
                             schedulePoll();
+                            return this;
+                        },
+                        removeListener: function(ev, fn) {
+                            if (!this._listeners[ev]) return this;
+                            this._listeners[ev] = this._listeners[ev].filter(function(f) { return f !== fn; });
                             return this;
                         },
                         destroy: function() { __spawnKill(id); },
                         unref: function() {}
                     };
+                    var _stdoutPolling = false;
+                    function startStdoutPoll() {
+                        if (_stdoutPolling) return;
+                        _stdoutPolling = true;
+                        (function pollStdout() {
+                            Promise.resolve().then(function() {
+                                var data = __spawnPollOut(id);
+                                if (data && data.length) {
+                                    var chunk = bytesToChunk(data);
+                                    stdout._dataListeners.forEach(function(fn) { fn(chunk); });
+                                }
+                                if (__spawnIsDone(id)) {
+                                    var tail = __spawnPollOut(id);
+                                    if (tail && tail.length) {
+                                        var tc = bytesToChunk(tail);
+                                        stdout._dataListeners.forEach(function(fn) { fn(tc); });
+                                    }
+                                    stdout._endListeners.forEach(function(fn) { fn(); });
+                                    cp._closeListeners.forEach(function(fn) { fn(0, null); });
+                                    __spawnKill(id);
+                                    _stdoutPolling = false;
+                                } else {
+                                    setTimeout(pollStdout, 0);
+                                }
+                            });
+                        })();
+                    }
                     var stdout = {
                         _dataListeners: [],
                         _endListeners: [],
                         on: function(ev, fn) {
-                            if (ev === 'data') this._dataListeners.push(fn);
+                            if (ev === 'data') { this._dataListeners.push(fn); startStdoutPoll(); }
                             else if (ev === 'end') this._endListeners.push(fn);
                             return this;
                         },
+                        once: function(ev, fn) { return this.on(ev, fn); },
+                        pipe: function(dest) {
+                            this.on('data', function(chunk) {
+                                if (dest && typeof dest.write === 'function') dest.write(chunk);
+                            });
+                            this.on('end', function() {
+                                if (dest && typeof dest.end === 'function') dest.end();
+                            });
+                            return dest;
+                        },
+                        resume: function() { return this; },
                         destroy: function() {},
                         unref: function() {}
                     };
                     var stderr = {
                         _listeners: [],
                         on: function(ev, fn) { if (ev === 'data') this._listeners.push(fn); return this; },
+                        once: function(ev, fn) { return this.on(ev, fn); },
+                        pipe: function(dest) {
+                            this.on('data', function(chunk) {
+                                if (dest && typeof dest.write === 'function') dest.write(chunk);
+                            });
+                            return dest;
+                        },
+                        resume: function() { return this; },
                         destroy: function() {},
                         unref: function() {}
                     };
+                    // controlStream: readable backed by the fd-3 pipe workerd writes to.
+                    var controlStream = {
+                        _readableState: { flowing: false },
+                        _dataListeners: [],
+                        _endListeners: [],
+                        on: function(ev, fn) {
+                            if (ev === 'data') this._dataListeners.push(fn);
+                            else if (ev === 'end' || ev === 'close') this._endListeners.push(fn);
+                            return this;
+                        },
+                        once: function(ev, fn) { return this.on(ev, fn); },
+                        resume: function() { return this; },
+                        pause: function() { return this; },
+                        destroy: function() {},
+                        pipe: function(dest) { return dest; },
+                        removeListener: function() { return this; },
+                        removeAllListeners: function() { return this; }
+                    };
+                    (function pollControl() {
+                        Promise.resolve().then(function() {
+                            var data = __spawnPollControl(id);
+                            if (data && data.length) {
+                                var chunk = bytesToChunk(data);
+                                var str = typeof chunk === 'string' ? chunk : (chunk instanceof Uint8Array ? new TextDecoder().decode(chunk) : String(chunk));
+                                console.error('[3va-ctrl] fd3 data:', str.slice(0, 500));
+                                controlStream._dataListeners.forEach(function(fn) { fn(chunk); });
+                            }
+                            if (__spawnIsControlDone(id)) {
+                                console.error('[3va-ctrl] fd3 done');
+                                controlStream._endListeners.forEach(function(fn) { fn(); });
+                            } else {
+                                setTimeout(pollControl, 20);
+                            }
+                        });
+                    })();
+
                     var cp = {
                         stdin: stdin,
                         stdout: stdout,
                         stderr: stderr,
+                        stdio: [stdin, stdout, stderr, controlStream],
+                        pid: 0,
                         _closeListeners: [],
                         _errorListeners: [],
                         on: function(ev, fn) {
                             if (ev === 'close' || ev === 'exit') this._closeListeners.push(fn);
                             else if (ev === 'error') this._errorListeners.push(fn);
+                            return this;
+                        },
+                        once: function(ev, fn) {
+                            var self = this;
+                            function w() {
+                                if (ev === 'close' || ev === 'exit') {
+                                    var idx = self._closeListeners.indexOf(w);
+                                    if (idx >= 0) self._closeListeners.splice(idx, 1);
+                                } else if (ev === 'error') {
+                                    var idx2 = self._errorListeners.indexOf(w);
+                                    if (idx2 >= 0) self._errorListeners.splice(idx2, 1);
+                                }
+                                fn.apply(null, arguments);
+                            }
+                            return this.on(ev, w);
+                        },
+                        removeListener: function(ev, fn) {
+                            if (ev === 'close' || ev === 'exit') {
+                                this._closeListeners = this._closeListeners.filter(function(f) { return f !== fn; });
+                            } else if (ev === 'error') {
+                                this._errorListeners = this._errorListeners.filter(function(f) { return f !== fn; });
+                            }
                             return this;
                         },
                         kill: function() { __spawnKill(id); },
