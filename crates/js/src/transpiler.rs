@@ -2379,7 +2379,7 @@ fn try_transpile_inner(
     let codegen_out = Codegen::new()
         .with_options(CodegenOptions {
             comments: CommentOptions::disabled(),
-            source_map_path: file_path.map(|p| std::path::PathBuf::from(p)),
+            source_map_path: file_path.map(std::path::PathBuf::from),
             ..CodegenOptions::default()
         })
         .build(&program);
@@ -2890,7 +2890,7 @@ pub fn wrap_esm_with_tla(code: &str) -> String {
                 output.push_str(&idx.to_string());
                 output.push_str(" = await import(");
                 output.push_str(&spec);
-                output.push_str(")");
+                output.push(')');
                 continue;
             } else {
                 i = start;
@@ -2916,7 +2916,7 @@ pub fn wrap_esm_with_tla(code: &str) -> String {
         import_args,
         imports
             .iter()
-            .map(|(idx, spec)| format!("import('{}')", spec))
+            .map(|(_idx, spec)| format!("import('{}')", spec))
             .collect::<Vec<_>>()
             .join(", "),
         output
@@ -2958,7 +2958,7 @@ pub fn apply_source_map(file_path: &str, line: u32, column: u32) -> Option<(Stri
     // The "mappings" field is a VLQ-encoded string with segments separated by ';'
     // Each segment is: [generatedColumn, sourceFileIndex, sourceLine, sourceColumn, nameIndex]
     // We need to decode this to find the original position.
-    let mut gen_col: u32 = 0;
+    let mut gen_col: u32;
     let mut src_idx: u32 = 0;
     let mut src_line: u32 = 0;
     let mut src_col: u32 = 0;
@@ -2992,7 +2992,6 @@ pub fn apply_source_map(file_path: &str, line: u32, column: u32) -> Option<(Stri
 
             if line_idx + 1 == line as usize && gen_col >= column {
                 let sources = map.get("sources").and_then(|s| s.as_array());
-                let names = map.get("names").and_then(|n| n.as_array());
 
                 let src_file = sources
                     .and_then(|arr| arr.get(src_idx as usize))
@@ -3013,14 +3012,14 @@ fn decode_vlq(bytes: &[u8]) -> (i64, usize) {
     let mut shift: i32 = 0;
     let mut i = 0;
     for (idx, &b) in bytes.iter().enumerate() {
-        if b < 32 || b > 96 {
+        if !(32..=96).contains(&b) {
             i = idx;
             break;
         }
         let mut byte = (b - 63) as i64;
         let continuation = (byte & 32) != 0;
         byte &= 31;
-        result += (byte as i64) << shift;
+        result += byte << shift;
         shift += 5;
         if !continuation {
             i = idx + 1;
@@ -3042,7 +3041,7 @@ fn encode_vlq(mut value: i64) -> String {
     if value < 0 {
         value = ((-value) << 1) | 1;
     } else {
-        value = value << 1;
+        value <<= 1;
     }
     loop {
         let mut digit = (value & 31) as u8;
