@@ -33,7 +33,8 @@ static V8_INIT: std::sync::Once = std::sync::Once::new();
 // task queue (used by e.g. async WebAssembly compilation). Without this,
 // `WebAssembly.instantiate()`'s promise never settles: the microtask
 // checkpoint alone does not run tasks V8 posts to the platform.
-static V8_PLATFORM: std::sync::OnceLock<v8::SharedRef<v8::Platform>> = std::sync::OnceLock::new();
+pub static V8_PLATFORM: std::sync::OnceLock<v8::SharedRef<v8::Platform>> =
+    std::sync::OnceLock::new();
 
 /// Initializes the V8 platform, if it hasn't been already. Safe to call any
 /// number of times from any number of places in the process — e.g. once per
@@ -319,13 +320,14 @@ impl JsEngine {
         let source = std::fs::read_to_string(path)?;
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        // Entry-point files with real static import/export syntax must go
-        // through transpile_to_cjs (ESM→CJS conversion), not plain
-        // transpile()/transpile_js() — those only strip TS types/JSX and
-        // leave import/export untouched, which V8 rejects when the file is
-        // run as a classic script (not a compiled ES Module).
         let is_esm = ext == "mjs" || is_esm_source(&source);
-        let transpiled = if is_esm {
+        let has_tla = transpiler::has_top_level_await(&source);
+
+        let transpiled: String = if is_esm && has_tla {
+            // TLA only valid in ESM — wrap transpiled CJS in async IIFE
+            let base_code = transpiler::transpile_to_cjs(&source, matches!(ext, "tsx" | "jsx"));
+            transpiler::wrap_with_async_main(&base_code)
+        } else if is_esm {
             transpiler::transpile_to_cjs(&source, matches!(ext, "tsx" | "jsx"))
         } else {
             match ext {
@@ -375,17 +377,17 @@ impl JsEngine {
                 "globalThis.__filename = '{f}'; globalThis.__dirname = '{d}';\
              globalThis.__vvva_meta_url__ = '{u}';\
              globalThis.__vvva_meta_env__ = (typeof process !== 'undefined' ? \
-               Object.assign(Object.create(null), \
+                Object.assign(Object.create(null), \
                  {{ MODE: (process.env && process.env.NODE_ENV) || 'production', \
                     PROD: (process.env && process.env.NODE_ENV) !== 'development', \
                     DEV:  (process.env && process.env.NODE_ENV) === 'development', \
                     SSR:  true, \
                     BASE_URL: '/' }}, process.env) : \
-               {{ MODE: 'production', PROD: true, DEV: false, SSR: true, BASE_URL: '/' }});\
+                {{ MODE: 'production', PROD: true, DEV: false, SSR: true, BASE_URL: '/' }});\
              if (typeof globalThis.__vvva_meta_resolve__ === 'undefined') \
-               globalThis.__vvva_meta_resolve__ = function(s) {{ return require.resolve(s); }};\
+                globalThis.__vvva_meta_resolve__ = function(s) {{ return require.resolve(s); }};\
              if (typeof globalThis.__vvva_meta_glob__ === 'undefined') \
-               globalThis.__vvva_meta_glob__ = function() {{ return {{}}; }};\
+                globalThis.__vvva_meta_glob__ = function() {{ return {{}}; }};\
              globalThis.__vvva_import_meta__ = {{url: globalThis.__vvva_meta_url__, env: globalThis.__vvva_meta_env__, hot: undefined, glob: globalThis.__vvva_meta_glob__, resolve: globalThis.__vvva_meta_resolve__, require: globalThis.require, dirname: globalThis.__dirname, filename: globalThis.__filename, main: false}};\
              if (globalThis.process && Array.isArray(globalThis.process.argv) \
              && globalThis.process.argv.length < 2) \
@@ -403,18 +405,11 @@ impl JsEngine {
             let setup_src = v8::String::new(&scope, &setup).unwrap();
             let _ = v8::Script::compile(&scope, setup_src, None).and_then(|s| s.run(&scope));
 
-            // Unlike the setup script above (internal boilerplate, always
-            // valid), the file's own code must propagate compile/run
-            // failures — a `let _ = ...` here (as before) silently
-            // discarded syntax errors and exceptions thrown during
-            // evaluation (e.g. a require() permission denial), so
-            // eval_file() always returned Ok even when the script never
-            // actually ran.
             let code_src = v8::String::new(&scope, &code).unwrap();
             v8::Script::compile(&scope, code_src, None)
-                .ok_or_else(|| anyhow::anyhow!("compile error"))?
+                .ok_or_else(|| anyhow::anyhow!("compile error in {filename}"))?
                 .run(&scope)
-                .ok_or_else(|| anyhow::anyhow!("execution error"))?;
+                .ok_or_else(|| anyhow::anyhow!("execution error in {filename}"))?;
         }
 
         self.run_event_loop().await?;
@@ -436,6 +431,7 @@ impl JsEngine {
         };
         let mut iterations = 0usize;
         let has_pending_async = true;
+        let mut last_heartbeat = std::time::Instant::now();
 
         while (self.timer_manager.has_pending()
             || self.runtime_core.lock().unwrap().pending_task_count() > 0
@@ -453,8 +449,10 @@ impl JsEngine {
                 let mut scope = v8::ContextScope::new(&mut scope, context);
                 builtins::timers::TimerManager::fire_pending(&mut scope, tm)?;
             }
+            builtins::napi::drain_async_completions();
             pump_v8_platform_tasks(&self.isolate);
             self.isolate.perform_microtask_checkpoint();
+            rejection_tracker::report_pending();
 
             if self.last_low_memory_hint.elapsed() >= LOW_MEMORY_HINT_INTERVAL {
                 self.isolate.low_memory_notification();
@@ -475,6 +473,22 @@ impl JsEngine {
             }
 
             tokio::task::yield_now().await;
+
+            if last_heartbeat.elapsed() >= std::time::Duration::from_secs(10) {
+                last_heartbeat = std::time::Instant::now();
+                let js_timers = self.timer_manager.pending_count();
+                let js_next = self.timer_manager.next_expiry().map(|d| d.as_millis());
+                let rust_tasks = self.runtime_core.lock().unwrap().pending_task_count();
+                let rust_next = self
+                    .runtime_core
+                    .lock()
+                    .unwrap()
+                    .next_timer_duration()
+                    .map(|d| d.as_millis());
+                eprintln!(
+                    "[heartbeat] js_timers={js_timers} js_next={js_next:?}ms rust_tasks={rust_tasks} rust_next={rust_next:?}ms iter={iterations}"
+                );
+            }
 
             let next_js = self.timer_manager.next_expiry();
             let next_rust = self.runtime_core.lock().unwrap().next_timer_duration();

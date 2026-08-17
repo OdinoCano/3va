@@ -560,6 +560,8 @@ pub fn inject_process(
         "__processExit",
         |_scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
             let code = args.get(0).int32_value(_scope).unwrap_or(0);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let _ = std::io::Write::flush(&mut std::io::stderr());
             std::process::exit(code);
         },
     );
@@ -699,6 +701,8 @@ pub fn inject_process(
         "exit",
         |_scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
             let code = args.get(0).int32_value(_scope).unwrap_or(0);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let _ = std::io::Write::flush(&mut std::io::stderr());
             std::process::exit(code);
         },
     );
@@ -1114,9 +1118,25 @@ pub fn inject_process(
             process.connected = false;
             process.disconnect = function() {};
 
-            // process.binding — legacy native addon bridge, stub
+            // process.binding — legacy Node.js internal API
+            // Most packages that call this need 'fs' or 'uv' bindings for low-level ops.
+            // We return the require('fs') module for 'fs'/'uv'/'fs_event_wrap' since our
+            // fs module exposes the same API surface. Other bindings are empty objects.
             process.binding = function(name) {
-                throw new Error('process.binding(\'' + name + '\') is not supported in 3va');
+                if (name === 'fs' || name === 'uv' || name === 'fs_event_wrap' || name === 'fs_poll') {
+                    return require('fs');
+                }
+                if (name === 'constants') {
+                    return require('constants');
+                }
+                if (name === 'buffer') {
+                    return { Buffer: Buffer, kMaxLength: 2147483647, kStringMaxLength: 536870888 };
+                }
+                if (name === 'util') {
+                    return require('util');
+                }
+                // Return empty stub for unknown bindings instead of throwing
+                return {};
             };
 
             // process.report — diagnostic reports stub

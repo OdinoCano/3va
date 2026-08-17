@@ -1103,6 +1103,231 @@ pub fn inject_fs(
         },
     );
 
+    // ── __fsReadlinkSync(path) -> String ──────────────────────────────────────
+    set_fn(
+        scope,
+        globals,
+        "__fsReadlinkSync",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileRead(path.clone())) {
+                let err = perm_err(scope, "read", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            match std::fs::read_link(&path) {
+                Ok(target) => rv.set(
+                    v8::String::new(scope, &target.to_string_lossy())
+                        .unwrap()
+                        .into(),
+                ),
+                Err(e) => {
+                    let err = fs_err(scope, &e, &path_str);
+                    scope.throw_exception(err);
+                }
+            }
+        },
+    );
+
+    // ── __fsChownSync(path, uid, gid) ─────────────────────────────────────────
+    set_fn(
+        scope,
+        globals,
+        "__fsChownSync",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let uid = args.get(1).uint32_value(scope).unwrap_or(0);
+            let gid = args.get(2).uint32_value(scope).unwrap_or(0);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            #[cfg(unix)]
+            {
+                let uid = Some(uid);
+                let gid = Some(gid);
+                if let Err(e) = nix::unistd::chown(
+                    &path,
+                    uid.map(nix::unistd::Uid::from_raw),
+                    gid.map(nix::unistd::Gid::from_raw),
+                ) {
+                    let io_err = std::io::Error::from_raw_os_error(e as i32);
+                    let err = fs_err(scope, &io_err, &path_str);
+                    scope.throw_exception(err);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (uid, gid);
+            }
+        },
+    );
+
+    // ── __fsLchownSync(path, uid, gid) ────────────────────────────────────────
+    set_fn(
+        scope,
+        globals,
+        "__fsLchownSync",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let uid = args.get(1).uint32_value(scope).unwrap_or(0);
+            let gid = args.get(2).uint32_value(scope).unwrap_or(0);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            #[cfg(unix)]
+            {
+                if let Err(e) = nix::unistd::fchownat(
+                    None,
+                    &path,
+                    Some(nix::unistd::Uid::from_raw(uid)),
+                    Some(nix::unistd::Gid::from_raw(gid)),
+                    nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+                ) {
+                    let io_err = std::io::Error::from_raw_os_error(e as i32);
+                    let err = fs_err(scope, &io_err, &path_str);
+                    scope.throw_exception(err);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (uid, gid);
+            }
+        },
+    );
+
+    // ── __fsFchownSync(fd, uid, gid) ──────────────────────────────────────────
+    set_fn(
+        scope,
+        globals,
+        "__fsFchownSync",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let fd = args.get(0).int32_value(scope).unwrap_or(-1);
+            let uid = args.get(1).uint32_value(scope).unwrap_or(0);
+            let gid = args.get(2).uint32_value(scope).unwrap_or(0);
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                let mut table = fdt().lock().unwrap();
+                if let Some(file) = table.get_mut(fd) {
+                    if let Err(e) = nix::unistd::fchown(
+                        file.as_raw_fd(),
+                        Some(nix::unistd::Uid::from_raw(uid)),
+                        Some(nix::unistd::Gid::from_raw(gid)),
+                    ) {
+                        let io_err = std::io::Error::from_raw_os_error(e as i32);
+                        let err = fs_err(scope, &io_err, &format!("fd {}", fd));
+                        scope.throw_exception(err);
+                    }
+                } else {
+                    let err = js_err(scope, format!("EBADF: bad file descriptor: {}", fd));
+                    scope.throw_exception(err);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (fd, uid, gid);
+            }
+        },
+    );
+
+    // ── __fsUtimesSync(path, atime, mtime) ────────────────────────────────────
+    set_fn(
+        scope,
+        globals,
+        "__fsUtimesSync",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let atime = args.get(1).number_value(scope).unwrap_or(0.0);
+            let mtime = args.get(2).number_value(scope).unwrap_or(0.0);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            let atime_ft =
+                filetime::FileTime::from_unix_time(atime as i64, ((atime.fract()) * 1e9) as u32);
+            let mtime_ft =
+                filetime::FileTime::from_unix_time(mtime as i64, ((mtime.fract()) * 1e9) as u32);
+            if let Err(e) = filetime::set_file_times(&path, atime_ft, mtime_ft) {
+                let err = fs_err(scope, &e, &path_str);
+                scope.throw_exception(err);
+            }
+        },
+    );
+
+    // ── __fsLutimesSync(path, atime, mtime) ───────────────────────────────────
+    set_fn(
+        scope,
+        globals,
+        "__fsLutimesSync",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let path_str = args.get(0).to_rust_string_lossy(scope);
+            let atime = args.get(1).number_value(scope).unwrap_or(0.0);
+            let mtime = args.get(2).number_value(scope).unwrap_or(0.0);
+            let path = PathBuf::from(&path_str);
+            if !perms().check(&Capability::FileWrite(path.clone())) {
+                let err = perm_err(scope, "write", &path);
+                scope.throw_exception(err);
+                return;
+            }
+            let atime_ft =
+                filetime::FileTime::from_unix_time(atime as i64, ((atime.fract()) * 1e9) as u32);
+            let mtime_ft =
+                filetime::FileTime::from_unix_time(mtime as i64, ((mtime.fract()) * 1e9) as u32);
+            if let Err(e) = filetime::set_symlink_file_times(&path, atime_ft, mtime_ft) {
+                let err = fs_err(scope, &e, &path_str);
+                scope.throw_exception(err);
+            }
+        },
+    );
+
+    // ── __fsFutimesSync(fd, atime, mtime) ─────────────────────────────────────
+    set_fn(
+        scope,
+        globals,
+        "__fsFutimesSync",
+        move |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let fd = args.get(0).int32_value(scope).unwrap_or(-1);
+            let atime = args.get(1).number_value(scope).unwrap_or(0.0);
+            let mtime = args.get(2).number_value(scope).unwrap_or(0.0);
+            #[cfg(unix)]
+            {
+                let mut table = fdt().lock().unwrap();
+                if let Some(file) = table.get_mut(fd) {
+                    let atime_ft = filetime::FileTime::from_unix_time(
+                        atime as i64,
+                        ((atime.fract()) * 1e9) as u32,
+                    );
+                    let mtime_ft = filetime::FileTime::from_unix_time(
+                        mtime as i64,
+                        ((mtime.fract()) * 1e9) as u32,
+                    );
+                    if let Err(e) =
+                        filetime::set_file_handle_times(file, Some(atime_ft), Some(mtime_ft))
+                    {
+                        let err = fs_err(scope, &e, &format!("fd {}", fd));
+                        scope.throw_exception(err);
+                    }
+                } else {
+                    let err = js_err(scope, format!("EBADF: bad file descriptor: {}", fd));
+                    scope.throw_exception(err);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (fd, atime, mtime);
+            }
+        },
+    );
+
     // ── JS wrapper: globalThis.fs ─────────────────────────────────────────────
     let js_src = r#"
     (function() {
@@ -1144,15 +1369,188 @@ pub fn inject_fs(
                 var args = Array.prototype.slice.call(arguments);
                 var cb = typeof args[args.length - 1] === 'function' ? args.pop() : null;
                 if (args.length) args[0] = __fsPath(args[0]);
-                var p = new Promise(function(resolve, reject) {
+                if (cb) {
+                    // Invoke via setTimeout to avoid creating a rejected Promise
+                    // that triggers spurious PromiseRejectWithNoHandler before
+                    // any .catch() can be attached (V8 fires it immediately).
+                    setTimeout(function() {
+                        try { cb(null, syncFn.apply(null, args)); }
+                        catch(e) { cb(e); }
+                    }, 0);
+                    return;
+                }
+                return new Promise(function(resolve, reject) {
                     try { resolve(syncFn.apply(null, args)); }
                     catch(e) { reject(e); }
                 });
-                if (cb) {
-                    p.then(function(v) { cb(null, v); }).catch(function(e) { cb(e); });
-                    return;
+            };
+        }
+
+        // Node exposes fs.ReadStream / fs.WriteStream as constructors that
+        // createReadStream / createWriteStream delegate to. Packages like
+        // graceful-fs call fs.WriteStream.apply(this, args), so they must be
+        // callable on a foreign `this` and carry a Writable/Readable prototype.
+        function ReadStream(path, opts) {
+            if (!(this instanceof ReadStream)) return new ReadStream(path, opts);
+            var ropts = (typeof opts === 'object' && opts !== null) ? opts : {};
+            var encoding = ropts.encoding;
+            if (encoding === 'buffer' || encoding === null) encoding = undefined;
+            var Readable = require('stream').Readable;
+            Readable.call(this, {
+                highWaterMark: ropts.highWaterMark || 65536,
+                encoding: encoding,
+            });
+            this.path = path;
+            this.bytesRead = 0;
+            this.fd = undefined;
+            this._done = false;
+            // The permission-checked native open/read happens later, on a
+            // setTimeout/interval tick driving this stream — by then the
+            // require()-boundary scope wrapper has already reverted. Capture
+            // the caller's scope now and re-apply it around every deferred
+            // native call so the grant checked is still the stream creator's.
+            var __streamScope = (typeof globalThis.__currentCallerScope === 'string')
+                ? globalThis.__currentCallerScope : '.';
+            var self = this;
+            this._read = function(size) {
+                if (self._done) return;
+                var __prevScope = globalThis.__currentCallerScope;
+                globalThis.__currentCallerScope = __streamScope;
+                if (typeof __setCallerScope === 'function') __setCallerScope(__streamScope);
+                try {
+                if (self.fd === undefined) {
+                    try {
+                        self.fd = __fsFdOpen(self.path, 'r', null);
+                        self.emit('open', self.fd);
+                    } catch(e) {
+                        self.emit('error', e);
+                        self._done = true;
+                        return;
+                    }
                 }
-                return p;
+                try {
+                    var chunkSize = size || 65536;
+                    var pos = ropts.start !== undefined ? (ropts.start + self.bytesRead) : undefined;
+                    if (ropts.end !== undefined && self.bytesRead > (ropts.end - (ropts.start || 0))) {
+                        if (self.fd !== undefined) { try { __fsFdClose(self.fd); } catch(_) {} }
+                        self._done = true;
+                        self.push(null);
+                        return;
+                    }
+                    var maxRead = ropts.end !== undefined ? Math.min(chunkSize, (ropts.end - (ropts.start || 0) - self.bytesRead + 1)) : chunkSize;
+                    if (maxRead <= 0) {
+                        if (self.fd !== undefined) { try { __fsFdClose(self.fd); } catch(_) {} }
+                        self._done = true;
+                        self.push(null);
+                        return;
+                    }
+                    var bytes = __fsFdRead(self.fd, maxRead, pos != null ? pos : null);
+                    self.bytesRead += bytes.length;
+                    if (bytes.length === 0) {
+                        if (self.fd !== undefined) { try { __fsFdClose(self.fd); } catch(_) {} }
+                        self._done = true;
+                        self.push(null);
+                    } else {
+                        self.push(Buffer.from(bytes));
+                        if (self._readableState && self._readableState.flowing && !self._done) {
+                            setTimeout(function() { self._read(65536); }, 0);
+                        }
+                    }
+                } catch(e) {
+                    self._done = true;
+                    if (self.fd !== undefined) { try { __fsFdClose(self.fd); } catch(_) {} }
+                    self.emit('error', e);
+                }
+                } finally {
+                    globalThis.__currentCallerScope = __prevScope;
+                    if (typeof __setCallerScope === 'function') __setCallerScope(__prevScope);
+                }
+            };
+            var _onOrig = this.on.bind(this);
+            this.on = function(event, fn) {
+                _onOrig(event, fn);
+                if (event === 'data' && !this._readableState.flowing) {
+                    this._readableState.flowing = true;
+                    this._read(65536);
+                }
+                return this;
+            };
+            this.destroy = function() {
+                if (this.fd !== undefined) { try { __fsFdClose(this.fd); this.fd = undefined; } catch(_) {} }
+                this._done = true;
+                this.emit('close');
+                return this;
+            };
+        }
+
+        function WriteStream(path, opts) {
+            if (!(this instanceof WriteStream)) return new WriteStream(path, opts);
+            var wopts = (typeof opts === 'object' && opts !== null) ? opts : {};
+            var flags = wopts.flags || 'w';
+            var Writable = require('stream').Writable;
+            Writable.call(this, { highWaterMark: wopts.highWaterMark || 16384 });
+            this.path = path;
+            this.flags = flags;
+            this.mode = wopts.mode;
+            this.autoClose = (wopts.autoClose !== undefined) ? wopts.autoClose : true;
+            this.bytesWritten = 0;
+            this.fd = undefined;
+            var __streamScope = (typeof globalThis.__currentCallerScope === 'string')
+                ? globalThis.__currentCallerScope : '.';
+            var self = this;
+            this._write = function(chunk, encoding, callback) {
+                var __prevScope = globalThis.__currentCallerScope;
+                globalThis.__currentCallerScope = __streamScope;
+                if (typeof __setCallerScope === 'function') __setCallerScope(__streamScope);
+                try {
+                if (self.fd === undefined) {
+                    try {
+                        self.fd = __fsFdOpen(self.path, self.flags, null);
+                        self.emit('open', self.fd);
+                    } catch(e) {
+                        callback(e);
+                        return;
+                    }
+                }
+                try {
+                    var data;
+                    if (Buffer.isBuffer(chunk)) {
+                        data = Array.from(chunk);
+                    } else if (chunk instanceof Uint8Array) {
+                        data = Array.from(chunk);
+                    } else {
+                        data = Array.from(new TextEncoder().encode(String(chunk)));
+                    }
+                    __fsFdWrite(self.fd, data, null);
+                    self.bytesWritten += data.length;
+                    callback(null);
+                } catch(e) {
+                    callback(e);
+                }
+                } finally {
+                    globalThis.__currentCallerScope = __prevScope;
+                    if (typeof __setCallerScope === 'function') __setCallerScope(__prevScope);
+                }
+            };
+            this._final = function(callback) {
+                var __prevScope = globalThis.__currentCallerScope;
+                globalThis.__currentCallerScope = __streamScope;
+                if (typeof __setCallerScope === 'function') __setCallerScope(__streamScope);
+                try {
+                    if (this.fd !== undefined) {
+                        try { __fsFdClose(this.fd); this.fd = undefined; } catch(_) {}
+                    }
+                    callback();
+                } finally {
+                    globalThis.__currentCallerScope = __prevScope;
+                    if (typeof __setCallerScope === 'function') __setCallerScope(__prevScope);
+                }
+            };
+            this.destroy = function(err) {
+                if (this.fd !== undefined) { try { __fsFdClose(this.fd); this.fd = undefined; } catch(_) {} }
+                if (err) this.emit('error', err);
+                this.emit('close');
+                return this;
             };
         }
 
@@ -1234,32 +1632,31 @@ pub fn inject_fs(
             // ── async (callback + promise) ──────────────────────────────────────
             readFile: function(p, opts, cb) {
                 if (typeof opts === 'function') { cb = opts; opts = null; }
-                var self = this;
-                var p2 = new Promise(function(resolve, reject) {
-                    try { resolve(self.readFileSync(p, opts || null)); } catch(e) { reject(e); }
+                if (cb) {
+                    // Call callback directly via setTimeout to match Node.js async semantics.
+                    // Avoids creating a rejected Promise that triggers spurious unhandled-rejection events.
+                    setTimeout(function() {
+                        try { cb(null, fs.readFileSync(p, opts || null)); } catch(e) { cb(e); }
+                    }, 0);
+                    return;
+                }
+                return new Promise(function(resolve, reject) {
+                    try { resolve(fs.readFileSync(p, opts || null)); } catch(e) { reject(e); }
                 });
-                if (cb) { p2.then(function(v) { cb(null, v); }).catch(function(e) { cb(e); }); return; }
-                return p2;
             },
             writeFile: function(p, data, opts, cb) {
                 if (typeof opts === 'function') { cb = opts; opts = {}; }
-                var self = this;
-                var result = new Promise(function(resolve, reject) {
-                    try { self.writeFileSync(p, data, opts); resolve(); }
-                    catch(e) { reject(e); }
+                if (cb) { setTimeout(function() { try { fs.writeFileSync(p, data, opts); cb(null); } catch(e) { cb(e); } }, 0); return; }
+                return new Promise(function(resolve, reject) {
+                    try { fs.writeFileSync(p, data, opts); resolve(); } catch(e) { reject(e); }
                 });
-                if (cb) { result.then(function() { cb(null); }).catch(function(e) { cb(e); }); return; }
-                return result;
             },
             appendFile: function(p, data, opts, cb) {
                 if (typeof opts === 'function') { cb = opts; opts = {}; }
-                var self = this;
-                var result = new Promise(function(resolve, reject) {
-                    try { self.appendFileSync(p, data); resolve(); }
-                    catch(e) { reject(e); }
+                if (cb) { setTimeout(function() { try { fs.appendFileSync(p, data); cb(null); } catch(e) { cb(e); } }, 0); return; }
+                return new Promise(function(resolve, reject) {
+                    try { fs.appendFileSync(p, data); resolve(); } catch(e) { reject(e); }
                 });
-                if (cb) { result.then(function() { cb(null); }).catch(function(e) { cb(e); }); return; }
-                return result;
             },
             readdir:     wrapAsync(function(p, opts) {
                 var names = JSON.parse(__fsReaddirSync(p));
@@ -1275,29 +1672,45 @@ pub fn inject_fs(
                 if (typeof opts === 'function') { cb = opts; opts = null; }
                 p = __fsPath(p);
                 var recursive = opts && opts.recursive;
-                var promise = new Promise(function(resolve, reject) {
+                if (cb) {
+                    setTimeout(function() {
+                        try { __fsMkdirSync(p); cb(null); }
+                        catch(e) {
+                            if (recursive && e && e.message && (e.message.indexOf('exists') !== -1 || e.message.indexOf('EEXIST') !== -1)) cb(null);
+                            else cb(e);
+                        }
+                    }, 0);
+                    return;
+                }
+                return new Promise(function(resolve, reject) {
                     try { __fsMkdirSync(p); resolve(); }
                     catch(e) {
                         if (recursive && e && e.message && (e.message.indexOf('exists') !== -1 || e.message.indexOf('EEXIST') !== -1)) resolve();
                         else reject(e);
                     }
                 });
-                if (cb) { promise.then(function() { cb(null); }).catch(function(e) { cb(e); }); return; }
-                return promise;
             },
             rm: function(p, opts, cb) {
                 if (typeof opts === 'function') { cb = opts; opts = null; }
                 p = __fsPath(p);
                 var force = opts && opts.force;
-                var promise = new Promise(function(resolve, reject) {
+                if (cb) {
+                    setTimeout(function() {
+                        try { __fsRmSync(p); cb(null); }
+                        catch(e) {
+                            if (force && e && e.message && e.message.indexOf('ENOENT') !== -1) cb(null);
+                            else cb(e);
+                        }
+                    }, 0);
+                    return;
+                }
+                return new Promise(function(resolve, reject) {
                     try { __fsRmSync(p); resolve(); }
                     catch(e) {
                         if (force && e && e.message && e.message.indexOf('ENOENT') !== -1) resolve();
                         else reject(e);
                     }
                 });
-                if (cb) { promise.then(function() { cb(null); }).catch(function(e) { cb(e); }); return; }
-                return promise;
             },
             unlink:      wrapAsync(function(p) { return __fsUnlinkSync(p); }),
             rename:      wrapAsync(function(f, t) { return __fsRenameSync(f, t); }),
@@ -1437,15 +1850,61 @@ pub fn inject_fs(
             }),
             truncateSync: function(p, _len) {},
 
-            // ── lutimes / lchown (stubs — rarely needed at JS level) ─────────────
-            lutimes: function(p, at, mt, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
-            lutimesSync: function() {},
-            lchown: function(p, uid, gid, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
-            lchownSync: function() {},
-            chown: function(p, uid, gid, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
-            chownSync: function() {},
-            fchown: function(fd, uid, gid, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
-            fchownSync: function() {},
+            // ── lutimes / lchown / chown / utimes ─────────────────────────────
+            lutimes: function(p, at, mt, cb) {
+                try {
+                    var atSec = (at instanceof Date) ? at.getTime() / 1000 : Number(at);
+                    var mtSec = (mt instanceof Date) ? mt.getTime() / 1000 : Number(mt);
+                    __fsLutimesSync(p, atSec, mtSec);
+                    if (cb) setTimeout(function() { cb(null); }, 0);
+                } catch(e) { if (cb) cb(e); }
+            },
+            lutimesSync: function(p, at, mt) {
+                var atSec = (at instanceof Date) ? at.getTime() / 1000 : Number(at);
+                var mtSec = (mt instanceof Date) ? mt.getTime() / 1000 : Number(mt);
+                __fsLutimesSync(p, atSec, mtSec);
+            },
+            utimes: function(p, at, mt, cb) {
+                try {
+                    var atSec = (at instanceof Date) ? at.getTime() / 1000 : Number(at);
+                    var mtSec = (mt instanceof Date) ? mt.getTime() / 1000 : Number(mt);
+                    __fsUtimesSync(p, atSec, mtSec);
+                    if (cb) setTimeout(function() { cb(null); }, 0);
+                } catch(e) { if (cb) cb(e); }
+            },
+            utimesSync: function(p, at, mt) {
+                var atSec = (at instanceof Date) ? at.getTime() / 1000 : Number(at);
+                var mtSec = (mt instanceof Date) ? mt.getTime() / 1000 : Number(mt);
+                __fsUtimesSync(p, atSec, mtSec);
+            },
+            futimes: function(fd, at, mt, cb) {
+                try {
+                    var atSec = (at instanceof Date) ? at.getTime() / 1000 : Number(at);
+                    var mtSec = (mt instanceof Date) ? mt.getTime() / 1000 : Number(mt);
+                    __fsFutimesSync(fd, atSec, mtSec);
+                    if (cb) setTimeout(function() { cb(null); }, 0);
+                } catch(e) { if (cb) cb(e); }
+            },
+            futimesSync: function(fd, at, mt) {
+                var atSec = (at instanceof Date) ? at.getTime() / 1000 : Number(at);
+                var mtSec = (mt instanceof Date) ? mt.getTime() / 1000 : Number(mt);
+                __fsFutimesSync(fd, atSec, mtSec);
+            },
+            lchown: function(p, uid, gid, cb) {
+                try { __fsLchownSync(p, uid, gid); if (cb) setTimeout(function() { cb(null); }, 0); }
+                catch(e) { if (cb) cb(e); }
+            },
+            lchownSync: function(p, uid, gid) { __fsLchownSync(p, uid, gid); },
+            chown: function(p, uid, gid, cb) {
+                try { __fsChownSync(p, uid, gid); if (cb) setTimeout(function() { cb(null); }, 0); }
+                catch(e) { if (cb) cb(e); }
+            },
+            chownSync: function(p, uid, gid) { __fsChownSync(p, uid, gid); },
+            fchown: function(fd, uid, gid, cb) {
+                try { __fsFchownSync(fd, uid, gid); if (cb) setTimeout(function() { cb(null); }, 0); }
+                catch(e) { if (cb) cb(e); }
+            },
+            fchownSync: function(fd, uid, gid) { __fsFchownSync(fd, uid, gid); },
             fchmod: function(fd, mode, cb) { if (cb) setTimeout(function() { cb(null); }, 0); },
             fchmodSync: function() {},
             link: function(src, dest, cb) {
@@ -1456,11 +1915,17 @@ pub fn inject_fs(
             },
             linkSync: function(src, dest) { __fsCopyFileSync(src, dest); },
             readlink: function(p, opts, cb) {
-                if (typeof opts === 'function') { cb = opts; }
-                if (cb) setTimeout(function() { cb(new Error('EINVAL: readlink not fully supported')); }, 0);
-                else return Promise.reject(new Error('EINVAL: readlink not fully supported'));
+                if (typeof opts === 'function') { cb = opts; opts = {}; }
+                try {
+                    var result = __fsReadlinkSync(p);
+                    if (cb) setTimeout(function() { cb(null, result); }, 0);
+                    else return Promise.resolve(result);
+                } catch(e) {
+                    if (cb) cb(e);
+                    else return Promise.reject(e);
+                }
             },
-            readlinkSync: function(p) { throw new Error('EINVAL: readlink not fully supported'); },
+            readlinkSync: function(p) { return __fsReadlinkSync(p); },
 
             // ── opendir ─────────────────────────────────────────────────────────
             opendir: function(p, opts, cb) {
@@ -1507,175 +1972,12 @@ pub fn inject_fs(
 
             // ── createReadStream (proper Readable) ──────────────────────────────
             createReadStream: function(path, opts) {
-                var ropts = (typeof opts === 'object' && opts !== null) ? opts : {};
-                var encoding = ropts.encoding;
-                if (encoding === 'buffer' || encoding === null) encoding = undefined;
-                var Readable = require('stream').Readable;
-                var stream = new Readable({
-                    highWaterMark: ropts.highWaterMark || 65536,
-                    encoding: encoding,
-                });
-                stream.path = path;
-                stream.bytesRead = 0;
-                stream._fd = undefined;
-                stream._done = false;
-                // The permission-checked native open/read happens later, on a
-                // setTimeout/interval tick driving this stream — by then the
-                // require()-boundary scope wrapper (which only brackets the
-                // synchronous createReadStream() call itself) has already
-                // reverted to whatever scope was active before. Capture the
-                // caller's scope now and re-apply it around every deferred
-                // native call so a package that opens a stream is still the
-                // one whose grants get checked, not whoever happens to be
-                // running when the timer fires.
-                var __streamScope = (typeof globalThis.__currentCallerScope === 'string')
-                    ? globalThis.__currentCallerScope : '.';
-                stream._read = function(size) {
-                    var self = this;
-                    if (self._done) return;
-                    var __prevScope = globalThis.__currentCallerScope;
-                    globalThis.__currentCallerScope = __streamScope;
-                    if (typeof __setCallerScope === 'function') __setCallerScope(__streamScope);
-                    try {
-                    if (self._fd === undefined) {
-                        try {
-                            self._fd = __fsFdOpen(path, 'r', null);
-                            self.emit('open', self._fd);
-                        } catch(e) {
-                            self.emit('error', e);
-                            self._done = true;
-                            return;
-                        }
-                    }
-                    try {
-                        var chunkSize = size || 65536;
-                        var pos = ropts.start !== undefined ? (ropts.start + self.bytesRead) : undefined;
-                        if (ropts.end !== undefined && self.bytesRead > (ropts.end - (ropts.start || 0))) {
-                            if (self._fd !== undefined) { try { __fsFdClose(self._fd); } catch(_) {} }
-                            self._done = true;
-                            self.push(null);
-                            return;
-                        }
-                        var maxRead = ropts.end !== undefined ? Math.min(chunkSize, (ropts.end - (ropts.start || 0) - self.bytesRead + 1)) : chunkSize;
-                        if (maxRead <= 0) {
-                            if (self._fd !== undefined) { try { __fsFdClose(self._fd); } catch(_) {} }
-                            self._done = true;
-                            self.push(null);
-                            return;
-                        }
-                        var bytes = __fsFdRead(self._fd, maxRead, pos != null ? pos : null);
-                        self.bytesRead += bytes.length;
-                        if (bytes.length === 0) {
-                            if (self._fd !== undefined) { try { __fsFdClose(self._fd); } catch(_) {} }
-                            self._done = true;
-                            self.push(null);
-                        } else {
-                            self.push(Buffer.from(bytes));
-                            if (self._readableState && self._readableState.flowing && !self._done) {
-                                setTimeout(function() { self._read(65536); }, 0);
-                            }
-                        }
-                    } catch(e) {
-                        self._done = true;
-                        if (self._fd !== undefined) { try { __fsFdClose(self._fd); } catch(_) {} }
-                        self.emit('error', e);
-                    }
-                    } finally {
-                        globalThis.__currentCallerScope = __prevScope;
-                        if (typeof __setCallerScope === 'function') __setCallerScope(__prevScope);
-                    }
-                };
-                var _onOrig = stream.on.bind(stream);
-                stream.on = function(event, fn) {
-                    _onOrig(event, fn);
-                    if (event === 'data' && !this._readableState.flowing) {
-                        this._readableState.flowing = true;
-                        this._read(65536);
-                    }
-                    return this;
-                };
-                stream.destroy = function() {
-                    if (this._fd !== undefined) { try { __fsFdClose(this._fd); this._fd = undefined; } catch(_) {} }
-                    this._done = true;
-                    this.emit('close');
-                    return this;
-                };
-                return stream;
+                return new ReadStream(path, opts);
             },
 
             // ── createWriteStream (proper Writable) ──────────────────────────────
             createWriteStream: function(path, opts) {
-                var wopts = (typeof opts === 'object' && opts !== null) ? opts : {};
-                var flags = wopts.flags || 'w';
-                var Writable = require('stream').Writable;
-                var stream = new Writable({
-                    highWaterMark: wopts.highWaterMark || 16384,
-                });
-                stream.path = path;
-                stream.bytesWritten = 0;
-                stream._fd = undefined;
-                // See the matching comment in createReadStream: the deferred
-                // native write happens after the require()-boundary scope
-                // wrapper has already reverted, so re-apply the creator's
-                // scope around each deferred call.
-                var __streamScope = (typeof globalThis.__currentCallerScope === 'string')
-                    ? globalThis.__currentCallerScope : '.';
-                stream._write = function(chunk, encoding, callback) {
-                    var self = this;
-                    var __prevScope = globalThis.__currentCallerScope;
-                    globalThis.__currentCallerScope = __streamScope;
-                    if (typeof __setCallerScope === 'function') __setCallerScope(__streamScope);
-                    try {
-                    if (self._fd === undefined) {
-                        try {
-                            self._fd = __fsFdOpen(path, flags, null);
-                            self.emit('open', self._fd);
-                        } catch(e) {
-                            callback(e);
-                            return;
-                        }
-                    }
-                    try {
-                        var data;
-                        if (Buffer.isBuffer(chunk)) {
-                            data = Array.from(chunk);
-                        } else if (chunk instanceof Uint8Array) {
-                            data = Array.from(chunk);
-                        } else {
-                            data = Array.from(new TextEncoder().encode(String(chunk)));
-                        }
-                        __fsFdWrite(self._fd, data, null);
-                        self.bytesWritten += data.length;
-                        callback(null);
-                    } catch(e) {
-                        callback(e);
-                    }
-                    } finally {
-                        globalThis.__currentCallerScope = __prevScope;
-                        if (typeof __setCallerScope === 'function') __setCallerScope(__prevScope);
-                    }
-                };
-                stream._final = function(callback) {
-                    var __prevScope = globalThis.__currentCallerScope;
-                    globalThis.__currentCallerScope = __streamScope;
-                    if (typeof __setCallerScope === 'function') __setCallerScope(__streamScope);
-                    try {
-                        if (this._fd !== undefined) {
-                            try { __fsFdClose(this._fd); this._fd = undefined; } catch(_) {}
-                        }
-                        callback();
-                    } finally {
-                        globalThis.__currentCallerScope = __prevScope;
-                        if (typeof __setCallerScope === 'function') __setCallerScope(__prevScope);
-                    }
-                };
-                stream.destroy = function(err) {
-                    if (this._fd !== undefined) { try { __fsFdClose(this._fd); this._fd = undefined; } catch(_) {} }
-                    if (err) this.emit('error', err);
-                    this.emit('close');
-                    return this;
-                };
-                return stream;
+                return new WriteStream(path, opts);
             },
 
             // ── watch — backed by __fsWatchCreate / __fsWatchNext / __fsWatchClose ──
@@ -1769,8 +2071,33 @@ pub fn inject_fs(
             promises: {}
         };
 
+        // rmdir is a deprecated alias for rm (recursive dir removal)
+        fs.rmdir = function(path, opts, cb) {
+            if (typeof opts === 'function') { cb = opts; opts = {}; }
+            fs.rm(path, Object.assign({ recursive: true, force: true }, opts || {}), cb);
+        };
+        fs.rmdirSync = function(path, opts) {
+            fs.rmSync(path, Object.assign({ recursive: true, force: true }, opts || {}));
+        };
+        fs.ReadStream = ReadStream;
+        fs.WriteStream = WriteStream;
+
+        // ponytail: only start fsTrace interval if explicitly enabled — unconditional
+        // setInterval keeps the event loop alive forever even when idle.
+        if (process.env && process.env['3VA_FS_TRACE']) {
+            process.__fsTrace = [];
+            try {
+                setInterval(function() {
+                    if (process.__fsTrace && process.__fsTrace.length) {
+                        console.error('[fsTrace] ' + process.__fsTrace.slice(-8).join(' | '));
+                        process.__fsTrace.length = 0;
+                    }
+                }, 5000);
+            } catch(e) {}
+        }
+
         // Build fs.promises from fs async methods
-        ['readFile','writeFile','appendFile','readdir','mkdir','rm','unlink','rename',
+        ['readFile','writeFile','appendFile','readdir','mkdir','rm','rmdir','unlink','rename',
          'copyFile','chmod','symlink','stat','lstat','realpath','access'].forEach(function(fn) {
             fs.promises[fn] = function() {
                 var args = Array.prototype.slice.call(arguments);

@@ -768,6 +768,819 @@ pub fn inject_http_server(
     Ok(())
 }
 
+// ── HTTP/2 server bindings ─────────────────────────────────────────────────
+
+use std::collections::VecDeque;
+use std::ffi::c_void;
+
+struct H2ServerState {
+    listener: Option<Arc<TcpListener>>,
+    stream_queue: VecDeque<String>,
+    streams: HashMap<u32, H2StreamEntry>,
+    next_stream_id: u32,
+}
+
+struct H2StreamEntry {
+    send_response: Option<h2::server::SendResponse<bytes::Bytes>>,
+    send_stream: Option<h2::SendStream<bytes::Bytes>>,
+}
+
+type H2Servers = Arc<Mutex<HashMap<u32, Arc<Mutex<H2ServerState>>>>>;
+
+struct H2ClientState {
+    send_request: Option<h2::client::SendRequest<bytes::Bytes>>,
+    streams: HashMap<u32, H2ClientStreamEntry>,
+    next_stream_id: u32,
+    response_queue: VecDeque<String>,
+}
+
+struct H2ClientStreamEntry {
+    send_stream: Option<h2::SendStream<bytes::Bytes>>,
+}
+
+type H2Clients = Arc<Mutex<HashMap<u32, Arc<Mutex<H2ClientState>>>>>;
+
+pub fn inject_http2_server(
+    scope: &mut PinScope,
+    permissions: Arc<PermissionState>,
+) -> anyhow::Result<()> {
+    let h2_servers: H2Servers = Arc::new(Mutex::new(HashMap::new()));
+    let h2_clients: H2Clients = Arc::new(Mutex::new(HashMap::new()));
+    let h2_next_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+    let h2_next_client_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+
+    // __h2Listen(port, host) → serverId
+    {
+        let servers = h2_servers.clone();
+        let nid = h2_next_id.clone();
+        let ctx_ptr = Box::leak(Box::new((permissions.clone(), servers, nid)))
+            as *mut (Arc<PermissionState>, H2Servers, Arc<Mutex<u32>>)
+            as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let listen_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let (perms, servers, nid) = unsafe {
+                    &*(args.data().cast::<v8::External>().value()
+                        as *const (Arc<PermissionState>, H2Servers, Arc<Mutex<u32>>))
+                };
+                let port = args.get(0).uint32_value(scope).unwrap_or(0) as u16;
+                let host = args.get(1).to_rust_string_lossy(scope);
+                if !perms.check_bind(&host) {
+                    let err = js_code_err(scope, "EACCES",
+                        &format!("Network access denied. Run with --allow-net={}", host));
+                    rv.set(err);
+                    return;
+                }
+                match bind_listener(&format!("{}:{}", host, port)) {
+                    Ok(std_listener) => {
+                        if let Err(e) = std_listener.set_nonblocking(true) {
+                            rv.set(js_err(scope, &e.to_string()));
+                            return;
+                        }
+                        match TcpListener::from_std(std_listener) {
+                            Ok(listener) => {
+                                let listener = Arc::new(listener);
+                                let id = { let mut n = nid.lock().unwrap(); let id = *n; *n += 1; id };
+                                let state = Arc::new(Mutex::new(H2ServerState {
+                                    listener: Some(listener.clone()),
+                                    stream_queue: VecDeque::new(),
+                                    streams: HashMap::new(),
+                                    next_stream_id: 1,
+                                }));
+                                servers.lock().unwrap().insert(id, state.clone());
+
+                                let state2 = state.clone();
+                                tokio::spawn(async move {
+                                    loop {
+                                        let (tcp_stream, _) = match listener.accept().await {
+                                            Ok(v) => v,
+                                            Err(_) => break,
+                                        };
+                                        let state3 = state2.clone();
+                                        tokio::spawn(async move {
+                                            let h2_result = h2::server::handshake(tcp_stream).await;
+                                            if let Ok(mut conn) = h2_result {
+                                                loop {
+                                                    match conn.accept().await {
+                                                        Some(Ok((request, send_response))) => {
+                                                            let mut st = state3.lock().unwrap();
+                                                            let sid = st.next_stream_id;
+                                                            st.next_stream_id += 1;
+                                                            let headers: Vec<(String, String)> = request
+                                                                .headers()
+                                                                .iter()
+                                                                .map(|(k, v)| (
+                                                                    k.as_str().to_string(),
+                                                                    v.to_str().unwrap_or("").to_string(),
+                                                                ))
+                                                                .collect();
+                                                            let method = request.method().to_string();
+                                                            let path = request.uri().to_string();
+                                                            let hdr_json: String = {
+                                                                let mut parts: Vec<String> = Vec::new();
+                                                                for (k, v) in &headers {
+                                                                    parts.push(format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)));
+                                                                }
+                                                                format!("{{{}}}", parts.join(","))
+                                                            };
+                                                            let info = format!(
+                                                                r#"{{"streamId":{},"method":"{}","path":"{}","headers":{}}}"#,
+                                                                sid, json_escape(&method), json_escape(&path), hdr_json
+                                                            );
+                                                            st.streams.insert(sid, H2StreamEntry {
+                                                                send_response: Some(send_response),
+                                                                send_stream: None,
+                                                            });
+                                                            st.stream_queue.push_back(info);
+                                                            drop(st);
+                                                            drop(request);
+                                                        }
+                                                        Some(Err(_)) => break,
+                                                        None => break,
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                                rv.set(v8::Integer::new_from_unsigned(scope, id).into());
+                            }
+                            Err(e) => { rv.set(js_err(scope, &e.to_string())); }
+                        }
+                    }
+                    Err(e) => { rv.set(js_code_err(scope, "EADDRINUSE", &e.to_string())); }
+                }
+            },
+        ).data(external.into()).build(scope).unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2Listen").unwrap().into(),
+            listen_fn.into(),
+        );
+    }
+
+    // __h2AcceptPoll(serverId) → JSON or null
+    {
+        let servers = h2_servers.clone();
+        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let poll_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let servers =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Servers) };
+                let sid = args.get(0).uint32_value(scope).unwrap_or(0);
+                let popped = servers
+                    .lock()
+                    .unwrap()
+                    .get(&sid)
+                    .and_then(|s| s.lock().unwrap().stream_queue.pop_front());
+                match popped {
+                    Some(json) => rv.set(V8String::new(scope, &json).unwrap().into()),
+                    None => rv.set(v8::null(scope).into()),
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2AcceptPoll").unwrap().into(),
+            poll_fn.into(),
+        );
+    }
+
+    // __h2ServerPort(serverId) → port
+    {
+        let servers = h2_servers.clone();
+        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let port_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let servers =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Servers) };
+                let sid = args.get(0).uint32_value(scope).unwrap_or(0);
+                let port = servers
+                    .lock()
+                    .unwrap()
+                    .get(&sid)
+                    .and_then(|s| {
+                        s.lock()
+                            .unwrap()
+                            .listener
+                            .as_ref()
+                            .and_then(|l| l.local_addr().ok())
+                            .map(|a| a.port() as u32)
+                    })
+                    .unwrap_or(0);
+                rv.set(v8::Integer::new_from_unsigned(scope, port).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2ServerPort").unwrap().into(),
+            port_fn.into(),
+        );
+    }
+
+    // __h2ServerClose(serverId)
+    {
+        let servers = h2_servers.clone();
+        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let close_fn = v8::Function::builder(
+            |_scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let servers =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Servers) };
+                let sid = args.get(0).uint32_value(_scope).unwrap_or(0);
+                if let Some(state) = servers.lock().unwrap().remove(&sid) {
+                    state.lock().unwrap().listener.take();
+                }
+                rv.set(v8::undefined(_scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2ServerClose").unwrap().into(),
+            close_fn.into(),
+        );
+    }
+
+    // __h2StreamRespond(serverId, streamId, headers_json) → bool
+    {
+        let servers = h2_servers.clone();
+        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let respond_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let servers =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Servers) };
+                let sid = args.get(0).uint32_value(scope).unwrap_or(0);
+                let stream_id = args.get(1).uint32_value(scope).unwrap_or(0);
+                let headers_json = args.get(2).to_rust_string_lossy(scope);
+
+                let mut builder = http::response::Builder::new();
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&headers_json) {
+                    if let Some(obj) = parsed.as_object() {
+                        for (k, v) in obj {
+                            let vs = v.as_str().unwrap_or("");
+                            if k == ":status" {
+                                if let Ok(status) = vs.parse::<u16>() {
+                                    builder = builder.status(status);
+                                }
+                            } else {
+                                builder = builder.header(k.as_str(), vs);
+                            }
+                        }
+                    }
+                }
+                let response = builder
+                    .body(())
+                    .unwrap_or_else(|_| http::Response::builder().status(200).body(()).unwrap());
+
+                let servers_guard = servers.lock().unwrap();
+                if let Some(state) = servers_guard.get(&sid) {
+                    let mut st = state.lock().unwrap();
+                    if let Some(entry) = st.streams.get_mut(&stream_id) {
+                        if let Some(mut send_response) = entry.send_response.take() {
+                            match send_response.send_response(response, false) {
+                                Ok(send_stream) => {
+                                    entry.send_stream = Some(send_stream);
+                                    rv.set(v8::Boolean::new(scope, true).into());
+                                }
+                                Err(_) => {
+                                    rv.set(v8::Boolean::new(scope, false).into());
+                                }
+                            }
+                        } else {
+                            rv.set(v8::Boolean::new(scope, false).into());
+                        }
+                    } else {
+                        rv.set(v8::Boolean::new(scope, false).into());
+                    }
+                } else {
+                    rv.set(v8::Boolean::new(scope, false).into());
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2StreamRespond").unwrap().into(),
+            respond_fn.into(),
+        );
+    }
+
+    // __h2StreamWrite(serverId, streamId, data) → bool
+    {
+        let servers = h2_servers.clone();
+        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let write_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let servers =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Servers) };
+                let sid = args.get(0).uint32_value(scope).unwrap_or(0);
+                let stream_id = args.get(1).uint32_value(scope).unwrap_or(0);
+                let data_arg = args.get(2);
+                let data: Vec<u8> = if let Ok(s) = v8::Local::<v8::String>::try_from(data_arg) {
+                    s.to_rust_string_lossy(scope).into_bytes()
+                } else if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                    uint8array_to_vec(scope, arr)
+                } else {
+                    vec![]
+                };
+
+                let servers_guard = servers.lock().unwrap();
+                if let Some(state) = servers_guard.get(&sid) {
+                    let mut st = state.lock().unwrap();
+                    if let Some(entry) = st.streams.get_mut(&stream_id) {
+                        if let Some(ref mut send_stream) = entry.send_stream {
+                            match send_stream.send_data(bytes::Bytes::from(data), false) {
+                                Ok(_) => rv.set(v8::Boolean::new(scope, true).into()),
+                                Err(_) => rv.set(v8::Boolean::new(scope, false).into()),
+                            }
+                        } else {
+                            rv.set(v8::Boolean::new(scope, false).into());
+                        }
+                    } else {
+                        rv.set(v8::Boolean::new(scope, false).into());
+                    }
+                } else {
+                    rv.set(v8::Boolean::new(scope, false).into());
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2StreamWrite").unwrap().into(),
+            write_fn.into(),
+        );
+    }
+
+    // __h2StreamEnd(serverId, streamId, data?) → bool
+    {
+        let servers = h2_servers.clone();
+        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let end_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let servers =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Servers) };
+                let sid = args.get(0).uint32_value(scope).unwrap_or(0);
+                let stream_id = args.get(1).uint32_value(scope).unwrap_or(0);
+                let data_arg = args.get(2);
+                let data: Vec<u8> = if data_arg.is_undefined() || data_arg.is_null() {
+                    vec![]
+                } else if let Ok(s) = v8::Local::<v8::String>::try_from(data_arg) {
+                    s.to_rust_string_lossy(scope).into_bytes()
+                } else if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                    uint8array_to_vec(scope, arr)
+                } else {
+                    vec![]
+                };
+
+                let servers_guard = servers.lock().unwrap();
+                if let Some(state) = servers_guard.get(&sid) {
+                    let mut st = state.lock().unwrap();
+                    if let Some(entry) = st.streams.get_mut(&stream_id) {
+                        if let Some(ref mut send_stream) = entry.send_stream {
+                            match send_stream.send_data(bytes::Bytes::from(data), true) {
+                                Ok(_) => rv.set(v8::Boolean::new(scope, true).into()),
+                                Err(_) => rv.set(v8::Boolean::new(scope, false).into()),
+                            }
+                        } else {
+                            rv.set(v8::Boolean::new(scope, false).into());
+                        }
+                    } else {
+                        rv.set(v8::Boolean::new(scope, false).into());
+                    }
+                } else {
+                    rv.set(v8::Boolean::new(scope, false).into());
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2StreamEnd").unwrap().into(),
+            end_fn.into(),
+        );
+    }
+
+    // __h2Connect(authority) → clientId or -1
+    {
+        let clients = h2_clients.clone();
+        let nid = h2_next_client_id.clone();
+        let perms2 = permissions.clone();
+        let ctx_ptr = Box::leak(Box::new((perms2, clients, nid)))
+            as *mut (Arc<PermissionState>, H2Clients, Arc<Mutex<u32>>)
+            as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let connect_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let (perms, clients, nid) = unsafe {
+                    &*(args.data().cast::<v8::External>().value()
+                        as *const (Arc<PermissionState>, H2Clients, Arc<Mutex<u32>>))
+                };
+                let authority = args.get(0).to_rust_string_lossy(scope);
+                let host = authority
+                    .split(':')
+                    .next()
+                    .unwrap_or(&authority)
+                    .to_string();
+                if !perms.check(&vvva_permissions::Capability::Network(host.clone())) {
+                    let err = js_code_err(
+                        scope,
+                        "EACCES",
+                        &format!("Network access denied. Run with --allow-net={}", host),
+                    );
+                    rv.set(err);
+                    return;
+                }
+                let addr = if authority.contains(':') {
+                    authority.clone()
+                } else {
+                    format!("{}:80", authority)
+                };
+                let id = {
+                    let mut n = nid.lock().unwrap();
+                    let id = *n;
+                    *n += 1;
+                    id
+                };
+
+                // ponytail: synchronous handshake on separate thread to avoid blocking V8 on tokio
+                let clients2 = clients.clone();
+                let handshake_result = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| e.to_string())?;
+                    rt.block_on(async move {
+                        match tokio::net::TcpStream::connect(&addr).await {
+                            Ok(tcp) => match h2::client::handshake(tcp).await {
+                                Ok((send_request, conn)) => {
+                                    tokio::spawn(async move {
+                                        let _ = conn.await;
+                                    });
+                                    let state = Arc::new(Mutex::new(H2ClientState {
+                                        send_request: Some(send_request),
+                                        streams: HashMap::new(),
+                                        next_stream_id: 1,
+                                        response_queue: VecDeque::new(),
+                                    }));
+                                    clients2.lock().unwrap().insert(id, state);
+                                    Ok(id)
+                                }
+                                Err(e) => Err(e.to_string()),
+                            },
+                            Err(e) => Err(e.to_string()),
+                        }
+                    })
+                })
+                .join()
+                .unwrap_or(Err("thread panicked".to_string()));
+
+                match handshake_result {
+                    Ok(_) => rv.set(v8::Integer::new_from_unsigned(scope, id).into()),
+                    Err(_) => rv.set(v8::Integer::new(scope, -1).into()),
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2Connect").unwrap().into(),
+            connect_fn.into(),
+        );
+    }
+
+    // __h2ClientReady(clientId) → bool (check if handshake completed)
+    {
+        let clients = h2_clients.clone();
+        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let ready_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let clients =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Clients) };
+                let cid = args.get(0).uint32_value(scope).unwrap_or(0);
+                let ready = clients
+                    .lock()
+                    .unwrap()
+                    .get(&cid)
+                    .map(|s| s.lock().unwrap().send_request.is_some())
+                    .unwrap_or(false);
+                rv.set(v8::Boolean::new(scope, ready).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2ClientReady").unwrap().into(),
+            ready_fn.into(),
+        );
+    }
+
+    // __h2ClientRequest(clientId, headers_json) → streamId or -1
+    {
+        let clients = h2_clients.clone();
+        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let req_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let clients = unsafe {
+                    &*(args.data().cast::<v8::External>().value() as *const H2Clients)
+                };
+                let cid = args.get(0).uint32_value(scope).unwrap_or(0);
+                let headers_json = args.get(1).to_rust_string_lossy(scope);
+
+                let clients_guard = clients.lock().unwrap();
+                if let Some(state) = clients_guard.get(&cid) {
+                    let mut st = state.lock().unwrap();
+                    if let Some(ref mut send_request) = st.send_request {
+                        let mut builder = http::request::Builder::new();
+                        let mut end_stream = false;
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&headers_json) {
+                            if let Some(obj) = parsed.as_object() {
+                                for (k, v) in obj {
+                                    let vs = v.as_str().unwrap_or("");
+                                    match k.as_str() {
+                                        ":method" => { builder = builder.method(vs); }
+                                        ":path" => { builder = builder.uri(vs); }
+                                        ":authority" | ":scheme" => {
+                                            builder = builder.header(k.as_str(), vs);
+                                        }
+                                        _ => { builder = builder.header(k.as_str(), vs); }
+                                    }
+                                }
+                            }
+                        }
+                        let request = builder.body(()).unwrap_or_else(|_| {
+                            http::Request::builder().method("GET").uri("/").body(()).unwrap()
+                        });
+                        match send_request.send_request(request, end_stream) {
+                            Ok((response, send_stream)) => {
+                                let stream_id = st.next_stream_id;
+                                st.next_stream_id += 1;
+                                st.streams.insert(stream_id, H2ClientStreamEntry {
+                                    send_stream: Some(send_stream),
+                                });
+                                let resp_q = st.response_queue.clone();
+                                drop(st);
+                                drop(clients_guard);
+                                let clients3 = clients.clone();
+                                let cid2 = cid;
+                                let sid2 = stream_id;
+                                tokio::spawn(async move {
+                                    match response.await {
+                                        Ok(resp) => {
+                                            let status = resp.status().as_u16();
+                                            let hdrs: Vec<(String, String)> = resp.headers().iter()
+                                                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                                                .collect();
+                                            let hdr_json: String = {
+                                                let mut parts: Vec<String> = Vec::new();
+                                                for (k, v) in &hdrs {
+                                                    parts.push(format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)));
+                                                }
+                                                format!("{{{}}}", parts.join(","))
+                                            };
+                                            let info = format!(
+                                                r#"{{"type":"response","streamId":{},"status":{},"headers":{}}}"#,
+                                                sid2, status, hdr_json
+                                            );
+                                            if let Some(state) = clients3.lock().unwrap().get(&cid2) {
+                                                state.lock().unwrap().response_queue.push_back(info);
+                                            }
+                                            let mut body = resp.into_body();
+                                            use h2::RecvStream;
+                                            while let Some(chunk) = body.data().await {
+                                                match chunk {
+                                                    Ok(data) => {
+                                                        let info = format!(
+                                                            r#"{{"type":"data","streamId":{},"data":"{}"}}"#,
+                                                            sid2, json_escape(&String::from_utf8_lossy(&data))
+                                                        );
+                                                        if let Some(state) = clients3.lock().unwrap().get(&cid2) {
+                                                            state.lock().unwrap().response_queue.push_back(info);
+                                                        }
+                                                    }
+                                                    Err(_) => break,
+                                                }
+                                            }
+                                            let info = format!(
+                                                r#"{{"type":"end","streamId":{}}}"#,
+                                                sid2
+                                            );
+                                            if let Some(state) = clients3.lock().unwrap().get(&cid2) {
+                                                state.lock().unwrap().response_queue.push_back(info);
+                                            }
+                                        }
+                                        Err(_) => {}
+                                    }
+                                });
+                                rv.set(v8::Integer::new_from_unsigned(scope, stream_id).into());
+                            }
+                            Err(_) => {
+                                rv.set(v8::Integer::new(scope, -1).into());
+                            }
+                        }
+                    } else {
+                        rv.set(v8::Integer::new(scope, -1).into());
+                    }
+                } else {
+                    rv.set(v8::Integer::new(scope, -1).into());
+                }
+            },
+        ).data(external.into()).build(scope).unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2ClientRequest").unwrap().into(),
+            req_fn.into(),
+        );
+    }
+
+    // __h2ClientStreamWrite(clientId, streamId, data) → bool
+    {
+        let clients = h2_clients.clone();
+        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let write_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let clients =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Clients) };
+                let cid = args.get(0).uint32_value(scope).unwrap_or(0);
+                let stream_id = args.get(1).uint32_value(scope).unwrap_or(0);
+                let data_arg = args.get(2);
+                let data: Vec<u8> = if let Ok(s) = v8::Local::<v8::String>::try_from(data_arg) {
+                    s.to_rust_string_lossy(scope).into_bytes()
+                } else if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                    uint8array_to_vec(scope, arr)
+                } else {
+                    vec![]
+                };
+                let clients_guard = clients.lock().unwrap();
+                if let Some(state) = clients_guard.get(&cid) {
+                    let mut st = state.lock().unwrap();
+                    if let Some(entry) = st.streams.get_mut(&stream_id) {
+                        if let Some(ref mut ss) = entry.send_stream {
+                            match ss.send_data(bytes::Bytes::from(data), false) {
+                                Ok(_) => rv.set(v8::Boolean::new(scope, true).into()),
+                                Err(_) => rv.set(v8::Boolean::new(scope, false).into()),
+                            }
+                        } else {
+                            rv.set(v8::Boolean::new(scope, false).into());
+                        }
+                    } else {
+                        rv.set(v8::Boolean::new(scope, false).into());
+                    }
+                } else {
+                    rv.set(v8::Boolean::new(scope, false).into());
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2ClientStreamWrite")
+                .unwrap()
+                .into(),
+            write_fn.into(),
+        );
+    }
+
+    // __h2ClientStreamEnd(clientId, streamId, data?) → bool
+    {
+        let clients = h2_clients.clone();
+        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let end_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let clients =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Clients) };
+                let cid = args.get(0).uint32_value(scope).unwrap_or(0);
+                let stream_id = args.get(1).uint32_value(scope).unwrap_or(0);
+                let data_arg = args.get(2);
+                let data: Vec<u8> = if data_arg.is_undefined() || data_arg.is_null() {
+                    vec![]
+                } else if let Ok(s) = v8::Local::<v8::String>::try_from(data_arg) {
+                    s.to_rust_string_lossy(scope).into_bytes()
+                } else if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(data_arg) {
+                    uint8array_to_vec(scope, arr)
+                } else {
+                    vec![]
+                };
+                let clients_guard = clients.lock().unwrap();
+                if let Some(state) = clients_guard.get(&cid) {
+                    let mut st = state.lock().unwrap();
+                    if let Some(entry) = st.streams.get_mut(&stream_id) {
+                        if let Some(ref mut ss) = entry.send_stream {
+                            match ss.send_data(bytes::Bytes::from(data), true) {
+                                Ok(_) => rv.set(v8::Boolean::new(scope, true).into()),
+                                Err(_) => rv.set(v8::Boolean::new(scope, false).into()),
+                            }
+                        } else {
+                            rv.set(v8::Boolean::new(scope, false).into());
+                        }
+                    } else {
+                        rv.set(v8::Boolean::new(scope, false).into());
+                    }
+                } else {
+                    rv.set(v8::Boolean::new(scope, false).into());
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2ClientStreamEnd").unwrap().into(),
+            end_fn.into(),
+        );
+    }
+
+    // __h2ClientPoll(clientId) → JSON or null
+    {
+        let clients = h2_clients.clone();
+        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let poll_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let clients =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Clients) };
+                let cid = args.get(0).uint32_value(scope).unwrap_or(0);
+                let popped = clients
+                    .lock()
+                    .unwrap()
+                    .get(&cid)
+                    .and_then(|s| s.lock().unwrap().response_queue.pop_front());
+                match popped {
+                    Some(json) => rv.set(V8String::new(scope, &json).unwrap().into()),
+                    None => rv.set(v8::null(scope).into()),
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2ClientPoll").unwrap().into(),
+            poll_fn.into(),
+        );
+    }
+
+    // __h2ClientClose(clientId)
+    {
+        let clients = h2_clients.clone();
+        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let external = v8::External::new(scope, ctx_ptr);
+        let close_fn = v8::Function::builder(
+            |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let clients =
+                    unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Clients) };
+                let cid = args.get(0).uint32_value(scope).unwrap_or(0);
+                clients.lock().unwrap().remove(&cid);
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__h2ClientClose").unwrap().into(),
+            close_fn.into(),
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

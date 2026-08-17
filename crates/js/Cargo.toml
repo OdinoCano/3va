@@ -161,6 +161,8 @@ russh = { workspace = true }
 russh-sftp = { workspace = true }
 webrtc = { workspace = true }
 async-trait = "0.1"
+h2 = "0.4"
+bytes = "1"
 tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 http = "1"
@@ -168,6 +170,8 @@ http = "1"
 libc = "0.2"
 libloading = "0.8"
 libffi = "3.2"
+nix = { version = "0.29", features = ["fs", "user"] }
+filetime = "0.2"
 oxc_transformer = "0.132"
 oxc_codegen = "0.132"
 oxc_parser = "0.132"

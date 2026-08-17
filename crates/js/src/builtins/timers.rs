@@ -99,6 +99,11 @@ impl TimerManager {
         timers.values().any(|e| !e.cancelled)
     }
 
+    pub fn pending_count(&self) -> usize {
+        let timers = self.timers.lock().unwrap();
+        timers.values().filter(|e| !e.cancelled).count()
+    }
+
     pub fn next_expiry(&self) -> Option<Duration> {
         let now = Instant::now();
         let timers = self.timers.lock().unwrap();

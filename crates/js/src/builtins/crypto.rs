@@ -1078,6 +1078,93 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         crypto_pbkdf2_sync2.unwrap().into(),
     );
 
+    let crypto_ecdh_compute = v8::Function::new(
+        scope,
+        |_scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let curve = args.get(0).to_rust_string_lossy(_scope);
+            let priv_pem = args.get(1).to_rust_string_lossy(_scope);
+            let other_pub = js_value_to_bytes(_scope, args.get(2));
+
+            let curve_lower = curve.to_lowercase();
+            let is_p384 = curve_lower.contains("384") || curve_lower.contains("secp384");
+
+            let result = if is_p384 {
+                use p384::PublicKey;
+                use p384::pkcs8::DecodePrivateKey;
+
+                let sk = match p384::SecretKey::from_pkcs8_pem(&priv_pem) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        rv.set(
+                            v8::String::new(_scope, &format!("ECDH: invalid private key: {e}"))
+                                .unwrap()
+                                .into(),
+                        );
+                        return;
+                    }
+                };
+
+                let other_pk = match PublicKey::from_sec1_bytes(&other_pub) {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        rv.set(
+                            v8::String::new(_scope, &format!("ECDH: invalid public key: {e}"))
+                                .unwrap()
+                                .into(),
+                        );
+                        return;
+                    }
+                };
+
+                let shared =
+                    p384::ecdh::diffie_hellman(sk.to_nonzero_scalar(), other_pk.as_affine());
+                shared.raw_secret_bytes().to_vec()
+            } else {
+                use p256::PublicKey;
+                use p256::ecdh::diffie_hellman;
+                use p256::pkcs8::DecodePrivateKey;
+
+                let sk = match p256::SecretKey::from_pkcs8_pem(&priv_pem) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        rv.set(
+                            v8::String::new(_scope, &format!("ECDH: invalid private key: {e}"))
+                                .unwrap()
+                                .into(),
+                        );
+                        return;
+                    }
+                };
+
+                let other_pk = match PublicKey::from_sec1_bytes(&other_pub) {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        rv.set(
+                            v8::String::new(_scope, &format!("ECDH: invalid public key: {e}"))
+                                .unwrap()
+                                .into(),
+                        );
+                        return;
+                    }
+                };
+
+                let shared = diffie_hellman(sk.to_nonzero_scalar(), other_pk.as_affine());
+                shared.raw_secret_bytes().to_vec()
+            };
+
+            rv.set(uint8array_from_bytes(_scope, &result).into());
+        },
+    );
+    global.set(
+        scope,
+        v8::String::new(scope, "__cryptoEcdhCompute")
+            .unwrap()
+            .into(),
+        crypto_ecdh_compute.unwrap().into(),
+    );
+
     let js_code = r#"
 (function() {
     function toBytes(v) {
@@ -1483,17 +1570,40 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         createCipheriv: function(algorithm, key, iv, options) {
             var alg = algorithm.toLowerCase();
             var isGcm = alg.indexOf('gcm') !== -1;
+            var isCtr = alg.indexOf('ctr') !== -1;
             var keyBytes = toBytes(key);
             var ivBytes = iv ? toBytes(iv) : new Uint8Array(0);
             var chunks = [];
             var aad = new Uint8Array(0);
+            var autoPadding = true;
             var self = {
+                _tag: null,
                 setAAD: function(buf) { aad = toBytes(buf); return this; },
+                setAutoPadding: function(val) { autoPadding = val !== false; return this; },
                 update: function(data, inputEncoding, outputEncoding) {
-                    var bytes = toBytes(data);
-                    if (!isGcm) {
-                        chunks.push(bytes);
-                        return new Uint8Array(0);
+                    var bytes;
+                    if (typeof data === 'string') {
+                        if (inputEncoding === 'hex') {
+                            bytes = new Uint8Array((data.match(/.{2}/g) || []).map(function(h) { return parseInt(h, 16); }));
+                        } else if (inputEncoding === 'base64') {
+                            var bin = atob(data);
+                            bytes = new Uint8Array(bin.length);
+                            for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                        } else {
+                            bytes = new TextEncoder().encode(data);
+                        }
+                    } else {
+                        bytes = toBytes(data);
+                    }
+                    if (isCtr) {
+                        var result = __cryptoCipherOneShot(alg, Array.from(keyBytes), Array.from(ivBytes), Array.from(bytes), true);
+                        var out = new Uint8Array(result);
+                        if (outputEncoding === 'hex') {
+                            return Array.from(out).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+                        } else if (outputEncoding === 'base64') {
+                            return btoa(String.fromCharCode.apply(null, out));
+                        }
+                        return out;
                     }
                     chunks.push(bytes);
                     return new Uint8Array(0);
@@ -1502,14 +1612,26 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                     var all = [];
                     for (var i = 0; i < chunks.length; i++)
                         for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
+                    var result;
                     if (isGcm) {
-                        var result = __cryptoAesGcmEncrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), all, Array.from(aad));
+                        result = __cryptoAesGcmEncrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), all, Array.from(aad));
                         var ct = new Uint8Array(result.slice(0, result.length - 16));
                         self._tag = new Uint8Array(result.slice(result.length - 16));
+                        if (outputEncoding === 'hex') {
+                            return Array.from(ct).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+                        } else if (outputEncoding === 'base64') {
+                            return btoa(String.fromCharCode.apply(null, ct));
+                        }
                         return ct;
                     } else {
-                        var result2 = __cryptoCipherOneShot(alg, Array.from(keyBytes), Array.from(ivBytes), all, true);
-                        return new Uint8Array(result2);
+                        result = __cryptoCipherOneShot(alg, Array.from(keyBytes), Array.from(ivBytes), all, true);
+                        var out = new Uint8Array(result);
+                        if (outputEncoding === 'hex') {
+                            return Array.from(out).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+                        } else if (outputEncoding === 'base64') {
+                            return btoa(String.fromCharCode.apply(null, out));
+                        }
+                        return out;
                     }
                 },
                 getAuthTag: function() { return self._tag || new Uint8Array(16); }
@@ -1520,30 +1642,70 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         createDecipheriv: function(algorithm, key, iv, options) {
             var alg = algorithm.toLowerCase();
             var isGcm = alg.indexOf('gcm') !== -1;
+            var isCtr = alg.indexOf('ctr') !== -1;
             var keyBytes = toBytes(key);
             var ivBytes = iv ? toBytes(iv) : new Uint8Array(0);
             var chunks = [];
             var aad = new Uint8Array(0);
             var authTag = null;
+            var autoPadding = true;
             return {
                 setAAD: function(buf) { aad = toBytes(buf); return this; },
                 setAuthTag: function(tag) { authTag = toBytes(tag); return this; },
+                setAutoPadding: function(val) { autoPadding = val !== false; return this; },
                 update: function(data, inputEncoding, outputEncoding) {
-                    chunks.push(toBytes(data));
+                    var bytes;
+                    if (typeof data === 'string') {
+                        if (inputEncoding === 'hex') {
+                            bytes = new Uint8Array((data.match(/.{2}/g) || []).map(function(h) { return parseInt(h, 16); }));
+                        } else if (inputEncoding === 'base64') {
+                            var bin = atob(data);
+                            bytes = new Uint8Array(bin.length);
+                            for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                        } else {
+                            bytes = new TextEncoder().encode(data);
+                        }
+                    } else {
+                        bytes = toBytes(data);
+                    }
+                    if (isCtr) {
+                        var result = __cryptoCipherOneShot(alg, Array.from(keyBytes), Array.from(ivBytes), Array.from(bytes), false);
+                        var out = new Uint8Array(result);
+                        if (outputEncoding === 'hex') {
+                            return Array.from(out).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+                        } else if (outputEncoding === 'base64') {
+                            return btoa(String.fromCharCode.apply(null, out));
+                        }
+                        return out;
+                    }
+                    chunks.push(bytes);
                     return new Uint8Array(0);
                 },
                 final: function(outputEncoding) {
                     var all = [];
                     for (var i = 0; i < chunks.length; i++)
                         for (var j = 0; j < chunks[i].length; j++) all.push(chunks[i][j]);
+                    var result;
                     if (isGcm) {
                         var tag = authTag || new Uint8Array(16);
                         var ct_and_tag = all.concat(Array.from(tag));
-                        var result = __cryptoAesGcmDecrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), ct_and_tag, Array.from(aad));
-                        return new Uint8Array(result);
+                        result = __cryptoAesGcmDecrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), ct_and_tag, Array.from(aad));
+                        var out = new Uint8Array(result);
+                        if (outputEncoding === 'hex') {
+                            return Array.from(out).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+                        } else if (outputEncoding === 'base64') {
+                            return btoa(String.fromCharCode.apply(null, out));
+                        }
+                        return out;
                     } else {
-                        var result2 = __cryptoCipherOneShot(alg, Array.from(keyBytes), Array.from(ivBytes), all, false);
-                        return new Uint8Array(result2);
+                        result = __cryptoCipherOneShot(alg, Array.from(keyBytes), Array.from(ivBytes), all, false);
+                        var out = new Uint8Array(result);
+                        if (outputEncoding === 'hex') {
+                            return Array.from(out).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+                        } else if (outputEncoding === 'base64') {
+                            return btoa(String.fromCharCode.apply(null, out));
+                        }
+                        return out;
                     }
                 }
             };
@@ -1674,6 +1836,49 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             return _makeDH(_dhGroups[name].prime, 2);
         },
         getDiffieHellman: function(name) { return crypto.createDiffieHellmanGroup(name); },
+
+        createECDH: function(curveName) {
+            var curve = curveName || 'prime256v1';
+            var curveNorm = curve.toLowerCase().replace(/[-_]/g, '');
+            var keyPair = null;
+            var privateKey = null;
+            var publicKey = null;
+            return {
+                generateKeys: function(encoding) {
+                    var result = __cryptoGenerateKeyPairSync('ec', JSON.stringify({ namedCurve: curve }));
+                    keyPair = JSON.parse(result);
+                    var privPem = keyPair.privateKeyPem;
+                    var pubPem = keyPair.publicKeyPem;
+                    var b64Priv = privPem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
+                    var binPriv = atob(b64Priv);
+                    privateKey = new Uint8Array(binPriv.length);
+                    for (var i = 0; i < binPriv.length; i++) privateKey[i] = binPriv.charCodeAt(i);
+                    var b64Pub = pubPem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
+                    var binPub = atob(b64Pub);
+                    publicKey = new Uint8Array(binPub.length);
+                    for (var i = 0; i < binPub.length; i++) publicKey[i] = binPub.charCodeAt(i);
+                    return encodeBytes(Array.from(publicKey), encoding || 'buffer');
+                },
+                getPrivateKey: function(encoding) {
+                    if (!privateKey) throw new Error('ECDH: generateKeys must be called first');
+                    return encodeBytes(Array.from(privateKey), encoding || 'buffer');
+                },
+                getPublicKey: function(encoding, format) {
+                    if (!publicKey) throw new Error('ECDH: generateKeys must be called first');
+                    return encodeBytes(Array.from(publicKey), encoding || 'buffer');
+                },
+                computeSecret: function(otherPublicKey, inputEncoding, outputEncoding) {
+                    if (!privateKey) throw new Error('ECDH: generateKeys must be called first');
+                    var otherBytes = toBytes(otherPublicKey);
+                    var result = __cryptoEcdhCompute(curve, keyPair.privateKeyPem, Array.from(otherBytes));
+                    if (typeof result === 'string') throw new Error(result);
+                    return encodeBytes(Array.from(result), outputEncoding || 'buffer');
+                },
+                setPrivateKey: function(key, encoding) {
+                    privateKey = toBytes(key);
+                }
+            };
+        },
 
         setEngine: function() {},
         constants: {},

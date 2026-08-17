@@ -36,7 +36,7 @@ dist/npm/win32-x64/bin/
 *.key
 *.p12
 *.pfx
-.compatibility
+.compatibility/
 
 # Fuzzing artifacts
 fuzz/corpus/
