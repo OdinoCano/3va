@@ -774,7 +774,7 @@ pub fn inject_child_process(
 
     // ── Cluster IPC bindings ─────────────────────────────────────────────────
     use std::io::{BufRead, BufReader};
-    use std::process::{Child, ChildStdin, ChildStdout};
+    use std::process::{Child, ChildStdin};
 
     struct ClusterWorker {
         child: Child,
@@ -852,7 +852,7 @@ pub fn inject_child_process(
             let reader_thread = stdout.map(|stdout| {
                 std::thread::spawn(move || {
                     let reader = BufReader::new(stdout);
-                    for line in reader.lines().flatten() {
+                    for line in reader.lines().map_while(std::result::Result::ok) {
                         // Debug: worker logs share the stdout channel with IPC JSON;
                         // echo the human-readable lines to stderr so they stay visible.
                         let t = line.trim();
@@ -894,13 +894,11 @@ pub fn inject_child_process(
             let msg = args.get(1).to_rust_string_lossy(scope);
 
             let mut table = cluster_table().lock().unwrap();
-            if let Some(worker) = table.get_mut(&worker_id) {
-                if let Some(ref mut stdin) = worker.stdin {
-                    let result = writeln!(stdin, "{}", msg);
-                    let _ = stdin.flush();
-                    rv.set(v8::Boolean::new(scope, result.is_ok()).into());
-                    return;
-                }
+            if let Some(ref mut stdin) = table.get_mut(&worker_id).and_then(|w| w.stdin.as_mut()) {
+                let result = writeln!(stdin, "{}", msg);
+                let _ = stdin.flush();
+                rv.set(v8::Boolean::new(scope, result.is_ok()).into());
+                return;
             }
             rv.set(v8::Boolean::new(scope, false).into());
         },

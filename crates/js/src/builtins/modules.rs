@@ -1791,6 +1791,14 @@ pub fn inject_require(
                     if (!sandbox || !sandbox.__contextId__) return undefined;
                     var result = __vmRunInContextById(sandbox.__contextId__, this.code);
                     if (result && result.error) throw new Error(result.error);
+                    // sync sandbox changes back
+                    var globals = __vmGetContextGlobals(sandbox.__contextId__);
+                    if (globals) {
+                        try {
+                            var updated = JSON.parse(globals);
+                            Object.keys(updated).forEach(function(k) { sandbox[k] = updated[k]; });
+                        } catch(e) {}
+                    }
                     return result ? JSON.parse(result).value : undefined;
                 };
                 VmScript.prototype.runInNewContext = function(sandbox) { return this.runInContext(sandbox || {}); };
