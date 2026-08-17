@@ -244,9 +244,25 @@ unsafe fn get_local<'a>(
 ///   - Otherwise, create a fresh HandleScope+ContextScope on env's isolate.
 ///
 /// The first path avoids the "sibling HandleScope violates V8 nesting" panic.
+// ponytail: napi_scope! pastes $body into two branches whose `$cs` has a
+// different concrete type (a `&mut PinScope` reborrow vs. an owned
+// `ContextScope`), so clippy's per-call-site suggestions (drop this `&mut`,
+// this `mut` is unused, ...) are only valid for one branch and silently
+// wrong for the other — that's what turned a blanket `clippy --fix` into
+// dozens of E0308s. Suppressed here, scoped to just this macro's expansion,
+// instead of chasing ~300 call sites by hand for a lint that's a false
+// positive by construction.
 macro_rules! napi_scope {
     ($env:expr, $cs:ident, $body:block) => {{
         let in_cb = !NAPI_CB_SCOPE.with(|s| s.get().is_null());
+        #[allow(
+            unused_mut,
+            clippy::needless_borrow,
+            clippy::needless_return,
+            clippy::useless_conversion,
+            clippy::collapsible_if,
+            clippy::needless_bool
+        )]
         if in_cb {
             // Reuse the active callback scope; skip fresh HandleScope creation.
             let cb_ptr = NAPI_CB_SCOPE.with(|s| s.get());
@@ -2228,7 +2244,7 @@ unsafe extern "C" fn napi_call_threadsafe_function(
         ctx,
         d,
     });
-    let closure: Box<dyn FnOnce() + Send> = Box::new(move || unsafe {
+    let closure: Box<dyn FnOnce() + Send> = Box::new(move || {
         napi_scope!(tc.env, cs, {
             if let Some(call_js) = call_js {
                 if let Some(local) = get_local(&cs, tc.js_func) {
@@ -2299,7 +2315,7 @@ unsafe extern "C" fn napi_remove_env_cleanup_hook(
     let f = fun.unwrap();
     (*env)
         .cleanup_hooks
-        .retain(|(fn_, a)| !(*fn_ == f && *a == arg));
+        .retain(|(fn_, a)| !(std::ptr::fn_addr_eq(*fn_, f) && *a == arg));
     NAPI_OK
 }
 #[unsafe(no_mangle)]
@@ -2308,7 +2324,7 @@ unsafe extern "C" fn napi_get_module_file_name(
     r: *mut *const c_char,
 ) -> NapiStatus {
     if !r.is_null() {
-        *r = b"\0".as_ptr() as *const c_char;
+        *r = c"".as_ptr();
     }
     NAPI_OK
 }
@@ -2380,7 +2396,7 @@ unsafe extern "C" fn napi_open_handle_scope(
     _result: *mut *mut c_void,
 ) -> NapiStatus {
     if !_result.is_null() {
-        *_result = 1usize as *mut c_void;
+        *_result = std::ptr::dangling_mut::<c_void>();
     }
     NAPI_OK
 }
@@ -2399,7 +2415,7 @@ unsafe extern "C" fn napi_open_escapable_handle_scope(
     _result: *mut *mut c_void,
 ) -> NapiStatus {
     if !_result.is_null() {
-        *_result = 1usize as *mut c_void;
+        *_result = std::ptr::dangling_mut::<c_void>();
     }
     NAPI_OK
 }
@@ -2435,7 +2451,7 @@ unsafe extern "C" fn napi_open_callback_scope(
     result: *mut NapiCallbackScope,
 ) -> NapiStatus {
     if !result.is_null() {
-        *result = 1usize as *mut c_void;
+        *result = std::ptr::dangling_mut::<c_void>();
     }
     NAPI_OK
 }
@@ -2693,11 +2709,11 @@ fn napi_bridge_callback(
         NAPI_CB_SCOPE.with(|s| s.set(scope_ptr as *const ()));
 
         let ctx = v8::Local::new(scope, &env_ref.context);
-        let mut cs = v8::ContextScope::new(scope, ctx);
+        let cs = v8::ContextScope::new(scope, ctx);
 
         let mut argv_handles: Vec<NapiValue> = Vec::with_capacity(argc);
         for i in 0..argc {
-            let arg: v8::Local<v8::Value> = args.get(i as i32).into();
+            let arg: v8::Local<v8::Value> = args.get(i as i32);
             let global = v8::Global::new(&cs, arg);
             argv_handles.push(store_value(env_ref, global));
         }
@@ -2715,10 +2731,10 @@ fn napi_bridge_callback(
         });
         let ci_ptr = Box::into_raw(ci);
         let result = (bridge.cb)(bridge.env, ci_ptr);
-        if !result.is_null() {
-            if let Some(local) = get_local(&cs, result) {
-                rv.set(local);
-            }
+        if !result.is_null()
+            && let Some(local) = get_local(&cs, result)
+        {
+            rv.set(local);
         }
         let _ = Box::from_raw(ci_ptr);
 
@@ -2740,7 +2756,7 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
     let lib = unsafe { Library::new(path).map_err(|e| format!("Failed to load {}: {}", path, e))? };
     let lib = Arc::new(lib);
 
-    let isolate: &mut v8::Isolate = &mut **scope;
+    let isolate: &mut v8::Isolate = scope;
     // `Isolate` is `#[repr(transparent)]` over `NonNull<RealIsolate>`; the
     // reborrowed address is the scope's internal field, so read the real
     // isolate pointer it wraps instead of storing that (dangling) field addr.
@@ -2761,7 +2777,7 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
     let env_ptr = Box::into_raw(env);
 
     unsafe {
-        let mut cs = v8::ContextScope::new(scope, ctx);
+        let cs = v8::ContextScope::new(scope, ctx);
 
         let exports = v8::Object::new(&cs);
         let exports_val: v8::Local<v8::Value> = exports.into();
@@ -2779,12 +2795,12 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
                 if !ret.is_null() {
                     let g = &(*ret).global;
                     let local = v8::Local::new(&cs, g);
-                    let val: v8::Local<v8::Value> = local.into();
+                    let val: v8::Local<v8::Value> = local;
                     v8::Global::new(&cs, val)
                 } else {
                     let last = (*env_ptr).values.last().unwrap();
                     let local = v8::Local::new(&cs, &(**last).global);
-                    let val: v8::Local<v8::Value> = local.into();
+                    let val: v8::Local<v8::Value> = local;
                     v8::Global::new(&cs, val)
                 }
             }
@@ -2796,24 +2812,24 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
                         if !ret.is_null() {
                             let g = &(*ret).global;
                             let local = v8::Local::new(&cs, g);
-                            let val: v8::Local<v8::Value> = local.into();
+                            let val: v8::Local<v8::Value> = local;
                             v8::Global::new(&cs, val)
                         } else {
                             let last = (*env_ptr).values.last().unwrap();
                             let local = v8::Local::new(&cs, &(**last).global);
-                            let val: v8::Local<v8::Value> = local.into();
+                            let val: v8::Local<v8::Value> = local;
                             v8::Global::new(&cs, val)
                         }
                     } else {
                         let last = *(*env_ptr).values.last().unwrap();
                         let local = v8::Local::new(&cs, &(*last).global);
-                        let val: v8::Local<v8::Value> = local.into();
+                        let val: v8::Local<v8::Value> = local;
                         v8::Global::new(&cs, val)
                     }
                 } else {
                     let last = *(*env_ptr).values.last().unwrap();
                     let local = v8::Local::new(&cs, &(*last).global);
-                    let val: v8::Local<v8::Value> = local.into();
+                    let val: v8::Local<v8::Value> = local;
                     v8::Global::new(&cs, val)
                 }
             }
