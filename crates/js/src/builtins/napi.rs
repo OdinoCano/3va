@@ -116,6 +116,21 @@ struct ThreadsafeFunctionInner {
 static NAPI_ASYNC_COMPLETIONS: Mutex<VecDeque<Box<dyn FnOnce() + Send>>> =
     Mutex::new(VecDeque::new());
 
+/// Work spawned by `napi_queue_async_work` that hasn't been drained yet —
+/// either still running on its background thread, or sitting in
+/// `NAPI_ASYNC_COMPLETIONS` waiting for `drain_async_completions()`. Lets
+/// `run_event_loop` know whether it's safe to stop polling (see
+/// `has_pending_native_async()`), instead of assuming there's always more
+/// native async work coming.
+static NAPI_INFLIGHT_ASYNC: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether any `napi_queue_async_work` call is still in flight or has an
+/// undrained completion. `run_event_loop` uses this instead of a hardcoded
+/// "always pending" flag to decide when it's safe to stop polling.
+pub fn has_pending_native_async() -> bool {
+    NAPI_INFLIGHT_ASYNC.load(Ordering::SeqCst) > 0
+}
+
 /// Raw pointers captured by a completion closure. Raw pointers aren't `Send`
 /// by default; the worker thread owns the pointer until the closure runs on
 /// the main thread, which is safe here.
@@ -2141,7 +2156,6 @@ unsafe extern "C" fn napi_queue_async_work(_e: NapiEnvHandle, w: NapiAsyncWork) 
     if w.is_null() {
         return NAPI_INVALID_ARG;
     }
-    eprintln!("[napi queue_async_work]");
     let work = &*(w as *const AsyncWorkInner);
     let env = work.env;
     let exec = work.exec;
@@ -2149,20 +2163,29 @@ unsafe extern "C" fn napi_queue_async_work(_e: NapiEnvHandle, w: NapiAsyncWork) 
     let data = work.data;
     let cancelled = work.cancelled.clone();
     let ctx = Box::new(CompleteCtx { env, data });
+    NAPI_INFLIGHT_ASYNC.fetch_add(1, Ordering::SeqCst);
     std::thread::spawn(move || {
         if let Some(exec) = exec {
             unsafe { exec(ctx.env, ctx.data) };
         }
         if cancelled.load(Ordering::SeqCst) {
+            NAPI_INFLIGHT_ASYNC.fetch_sub(1, Ordering::SeqCst);
             return;
         }
         if let Some(complete) = complete {
+            // Decremented by drain_async_completions() once this closure
+            // actually runs on the main thread — not here — so the event
+            // loop can't see the count hit zero and stop polling before
+            // the completion has been delivered.
             NAPI_ASYNC_COMPLETIONS
                 .lock()
                 .unwrap()
                 .push_back(Box::new(move || unsafe {
                     complete(ctx.env, NAPI_OK, ctx.data);
+                    NAPI_INFLIGHT_ASYNC.fetch_sub(1, Ordering::SeqCst);
                 }));
+        } else {
+            NAPI_INFLIGHT_ASYNC.fetch_sub(1, Ordering::SeqCst);
         }
     });
     NAPI_OK

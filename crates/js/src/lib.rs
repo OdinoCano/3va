@@ -126,9 +126,18 @@ impl JsEngine {
         prof_interval_ms: Option<u32>,
         firewall: Option<Arc<Firewall>>,
     ) -> anyhow::Result<Self> {
+        let trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
+        let t0 = std::time::Instant::now();
         ensure_v8_initialized();
+        if trace {
+            eprintln!("[startup] ensure_v8_initialized: {:?}", t0.elapsed());
+        }
 
+        let t1 = std::time::Instant::now();
         let mut isolate = Isolate::new(Default::default());
+        if trace {
+            eprintln!("[startup] Isolate::new: {:?}", t1.elapsed());
+        }
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
 
         let timer_manager = TimerManager::new();
@@ -177,9 +186,18 @@ impl JsEngine {
         self.context = Some(v8::Global::new(&handle_scope, context));
         let mut scope = v8::ContextScope::new(&mut handle_scope, context);
 
+        let trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
+        let t = std::time::Instant::now();
         async_context::install(&mut scope, &permissions)?;
+        if trace {
+            eprintln!("[startup] async_context::install: {:?}", t.elapsed());
+        }
 
+        let t = std::time::Instant::now();
         builtins::inject_all(&mut scope, permissions, timer_manager, firewall, ws_pool)?;
+        if trace {
+            eprintln!("[startup] builtins::inject_all: {:?}", t.elapsed());
+        }
 
         if let Some(state) = inspector_state {
             INSPECTOR_STATE_CELL.set(state).ok();
@@ -430,14 +448,15 @@ impl JsEngine {
             100_000
         };
         let mut iterations = 0usize;
-        let has_pending_async = true;
         let mut last_heartbeat = std::time::Instant::now();
 
-        while (self.timer_manager.has_pending()
-            || self.runtime_core.lock().unwrap().pending_task_count() > 0
-            || has_pending_async)
-            && iterations < max_iterations
-        {
+        // A do-while, not a while: callers' eval()/eval_to_string() don't
+        // perform their own microtask checkpoint, so this loop's body needs
+        // to run at least once per call to flush microtasks queued by
+        // synchronous script (e.g. a promise rejected by an AbortController
+        // fired before this loop ever saw a pending timer). Looping further
+        // is still gated on real pending work, not a hardcoded flag.
+        loop {
             iterations += 1;
 
             let tm = self.timer_manager.clone();
@@ -503,8 +522,15 @@ impl JsEngine {
                 && wait > std::time::Duration::ZERO
             {
                 tokio::time::sleep(wait.min(std::time::Duration::from_millis(50))).await;
-            } else if wait.is_none() && !has_pending_async {
+            } else if wait.is_none() && !builtins::napi::has_pending_native_async() {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+
+            let still_pending = self.timer_manager.has_pending()
+                || self.runtime_core.lock().unwrap().pending_task_count() > 0
+                || builtins::napi::has_pending_native_async();
+            if !still_pending || iterations >= max_iterations {
+                break;
             }
         }
 

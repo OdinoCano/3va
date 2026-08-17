@@ -3916,6 +3916,8 @@ fn print_version_with_hash() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let __trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
+    let __t_main = std::time::Instant::now();
     let raw_args = rewrite_create_dash_alias(std::env::args().collect());
 
     if raw_args
@@ -3987,11 +3989,21 @@ async fn main() -> anyhow::Result<()> {
             heap_snapshot,
             script_args,
         } => {
+            if __trace {
+                eprintln!(
+                    "[startup] main() entry -> Commands::Run: {:?}",
+                    __t_main.elapsed()
+                );
+            }
+            let __t = std::time::Instant::now();
             maybe_auto_install(
                 file.parent().unwrap_or(std::path::Path::new(".")),
                 std::io::stderr().is_terminal() && !*no_prompt,
             )
             .await;
+            if __trace {
+                eprintln!("[startup] maybe_auto_install: {:?}", __t.elapsed());
+            }
 
             // Resolve port: CLI flag > config file > env (set PORT so scripts see it)
             let effective_port = port.or_else(|| {
@@ -4108,12 +4120,19 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             } else {
+                let __t = std::time::Instant::now();
                 let mut engine = vvva_js::JsEngine::new_with_firewall_and_inspector(
                     permissions.clone(),
                     firewall,
                     inspect_addr,
                 )
                 .await?;
+                if __trace {
+                    eprintln!(
+                        "[startup] JsEngine::new_with_firewall_and_inspector: {:?}",
+                        __t.elapsed()
+                    );
+                }
 
                 // Run the script; on Ctrl+C or SIGTERM drain open WebSocket connections
                 // with jitter before exiting so remote peers reconnect staggered.
@@ -4121,6 +4140,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut sigterm =
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
+                let __t = std::time::Instant::now();
                 #[cfg(unix)]
                 tokio::select! {
                     result = engine.eval_file_with_args(file, script_args) => { result?; }
@@ -4132,6 +4152,10 @@ async fn main() -> anyhow::Result<()> {
                 tokio::select! {
                     result = engine.eval_file_with_args(file, script_args) => { result?; }
                     _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
+                }
+                if __trace {
+                    eprintln!("[startup] eval_file_with_args: {:?}", __t.elapsed());
+                    eprintln!("[startup] total main() time: {:?}", __t_main.elapsed());
                 }
 
                 // Take heap snapshot if requested
