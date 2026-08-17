@@ -62,24 +62,28 @@ pub fn inject_source_maps(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
                 }
             };
 
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(map_json) {
-                if let Some(obj) = parsed.as_object() {
-                    if let Some(sources) = obj.get("sources").and_then(|s| s.as_array()) {
-                        if let Some(first_source_val) = sources.get(0) {
-                            if let Some(first_source) = first_source_val.as_str() {
-                                let result = serde_json::json!({
-                                    "source": first_source,
-                                    "line": line.saturating_sub(1),
-                                    "col": col
-                                });
-                                rv.set(V8String::new(scope, &result.to_string()).unwrap().into());
-                                return;
-                            }
-                        }
-                    }
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(map_json) else {
+                rv.set(v8::null(scope).into());
+                return;
+            };
+            let first_source = parsed
+                .as_object()
+                .and_then(|obj| obj.get("sources"))
+                .and_then(|s| s.as_array())
+                .and_then(|sources| sources.first())
+                .and_then(|v| v.as_str());
+
+            match first_source {
+                Some(first_source) => {
+                    let result = serde_json::json!({
+                        "source": first_source,
+                        "line": line.saturating_sub(1),
+                        "col": col
+                    });
+                    rv.set(V8String::new(scope, &result.to_string()).unwrap().into());
                 }
+                None => rv.set(v8::null(scope).into()),
             }
-            rv.set(v8::null(scope).into());
         },
     )
     .build(scope)
