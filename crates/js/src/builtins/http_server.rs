@@ -1028,17 +1028,18 @@ pub fn inject_http2_server(
                 let headers_json = args.get(2).to_rust_string_lossy(scope);
 
                 let mut builder = http::response::Builder::new();
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&headers_json) {
-                    if let Some(obj) = parsed.as_object() {
-                        for (k, v) in obj {
-                            let vs = v.as_str().unwrap_or("");
-                            if k == ":status" {
-                                if let Ok(status) = vs.parse::<u16>() {
-                                    builder = builder.status(status);
-                                }
-                            } else {
-                                builder = builder.header(k.as_str(), vs);
+                if let Some(obj) = serde_json::from_str::<serde_json::Value>(&headers_json)
+                    .ok()
+                    .and_then(|v| v.as_object().cloned())
+                {
+                    for (k, v) in &obj {
+                        let vs = v.as_str().unwrap_or("");
+                        if k == ":status" {
+                            if let Ok(status) = vs.parse::<u16>() {
+                                builder = builder.status(status);
                             }
+                        } else {
+                            builder = builder.header(k.as_str(), vs);
                         }
                     }
                 }
@@ -1320,19 +1321,20 @@ pub fn inject_http2_server(
                     let mut st = state.lock().unwrap();
                     if let Some(ref mut send_request) = st.send_request {
                         let mut builder = http::request::Builder::new();
-                        let mut end_stream = false;
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&headers_json) {
-                            if let Some(obj) = parsed.as_object() {
-                                for (k, v) in obj {
-                                    let vs = v.as_str().unwrap_or("");
-                                    match k.as_str() {
-                                        ":method" => { builder = builder.method(vs); }
-                                        ":path" => { builder = builder.uri(vs); }
-                                        ":authority" | ":scheme" => {
-                                            builder = builder.header(k.as_str(), vs);
-                                        }
-                                        _ => { builder = builder.header(k.as_str(), vs); }
+                        let end_stream = false;
+                        if let Some(obj) = serde_json::from_str::<serde_json::Value>(&headers_json)
+                            .ok()
+                            .and_then(|v| v.as_object().cloned())
+                        {
+                            for (k, v) in &obj {
+                                let vs = v.as_str().unwrap_or("");
+                                match k.as_str() {
+                                    ":method" => { builder = builder.method(vs); }
+                                    ":path" => { builder = builder.uri(vs); }
+                                    ":authority" | ":scheme" => {
+                                        builder = builder.header(k.as_str(), vs);
                                     }
+                                    _ => { builder = builder.header(k.as_str(), vs); }
                                 }
                             }
                         }
@@ -1346,15 +1348,13 @@ pub fn inject_http2_server(
                                 st.streams.insert(stream_id, H2ClientStreamEntry {
                                     send_stream: Some(send_stream),
                                 });
-                                let resp_q = st.response_queue.clone();
                                 drop(st);
                                 drop(clients_guard);
                                 let clients3 = clients.clone();
                                 let cid2 = cid;
                                 let sid2 = stream_id;
                                 tokio::spawn(async move {
-                                    match response.await {
-                                        Ok(resp) => {
+                                    if let Ok(resp) = response.await {
                                             let status = resp.status().as_u16();
                                             let hdrs: Vec<(String, String)> = resp.headers().iter()
                                                 .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
@@ -1374,7 +1374,6 @@ pub fn inject_http2_server(
                                                 state.lock().unwrap().response_queue.push_back(info);
                                             }
                                             let mut body = resp.into_body();
-                                            use h2::RecvStream;
                                             while let Some(chunk) = body.data().await {
                                                 match chunk {
                                                     Ok(data) => {
@@ -1396,8 +1395,6 @@ pub fn inject_http2_server(
                                             if let Some(state) = clients3.lock().unwrap().get(&cid2) {
                                                 state.lock().unwrap().response_queue.push_back(info);
                                             }
-                                        }
-                                        Err(_) => {}
                                     }
                                 });
                                 rv.set(v8::Integer::new_from_unsigned(scope, stream_id).into());
