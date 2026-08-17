@@ -61,6 +61,7 @@ russh = { version = "0.62", features = ["ring"] }
 russh-sftp = "2.3"
 webrtc = "0.20.0-rc.1"
 async-trait = "0.1"
+h2 = "0.4"
 
 
 [profile.release]

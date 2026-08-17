@@ -6,6 +6,15 @@ use oxc_span::SourceType;
 use oxc_transformer::{
     DecoratorOptions, EnvOptions, JsxOptions, JsxRuntime, Module, TransformOptions, Transformer,
 };
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+static SOURCE_MAPS: std::sync::OnceLock<Arc<Mutex<HashMap<String, String>>>> =
+    std::sync::OnceLock::new();
+
+fn source_maps() -> &'static Arc<Mutex<HashMap<String, String>>> {
+    SOURCE_MAPS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
 
 /// TypeScript/TSX/JSX → JavaScript transpiler backed by the Oxc toolchain.
 ///
@@ -150,7 +159,13 @@ fn strip_inline_flow_types(source: &str) -> String {
             if let Some(cp) = after_kw.find(':') {
                 let before_colon = &after_kw[..cp];
                 // Ensure colon is not after `=` (already past value) or `?` (ternary)
-                if !before_colon.contains('=') && !before_colon.contains(')') && cp > 0 {
+                // Also skip if before_colon contains `{` or `[` (destructuring pattern, not Flow type)
+                if !before_colon.contains('=')
+                    && !before_colon.contains(')')
+                    && !before_colon.contains('{')
+                    && !before_colon.contains('[')
+                    && cp > 0
+                {
                     // Find `=` after the colon, respecting brace depth
                     let after_colon = &after_kw[cp + 1..];
                     let mut depth = 0u32;
@@ -296,7 +311,10 @@ pub fn replace_import_meta(source: &str) -> String {
         ("import.meta.glob(", "__vvva_meta_glob__("),
         ("import.meta.hot", "undefined"),
         ("import.meta.vitest", "undefined"),
-        ("import.meta.env", "__vvva_meta_env__"),
+        (
+            "import.meta.env",
+            "(typeof __vvva_meta_env__ !== 'undefined' ? __vvva_meta_env__ : (typeof process !== 'undefined' ? process.env : {}))",
+        ),
         ("import.meta.url", "__vvva_meta_url__"),
         ("import.meta.require(", "require("),
         ("import.meta.dirname", "__dirname"),
@@ -340,7 +358,10 @@ pub fn replace_import_meta(source: &str) -> String {
     // Second pass: catch import.meta.* inside strings (e.g., strings later interpolated).
     const INSIDE_STRING_PATTERNS: &[(&str, &str)] = &[
         ("import.meta.url", "__vvva_meta_url__"),
-        ("import.meta.env", "__vvva_meta_env__"),
+        (
+            "import.meta.env",
+            "(typeof __vvva_meta_env__ !== 'undefined' ? __vvva_meta_env__ : (typeof process !== 'undefined' ? process.env : {}))",
+        ),
         ("import.meta.hot", "undefined"),
         ("import.meta.vitest", "undefined"),
     ];
@@ -759,6 +780,11 @@ fn replace_only_inside_strings(source: &str, from: &str, to: &str) -> String {
 ///
 /// Also rewrites `import.meta.*` to runtime stubs (see [`replace_import_meta`]).
 pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
+    transpile_to_cjs_with_path(source, jsx, None)
+}
+
+/// Like transpile_to_cjs but with an optional file path for source map generation.
+pub fn transpile_to_cjs_with_path(source: &str, jsx: bool, file_path: Option<&str>) -> String {
     let is_devalue = source.contains("./src/uneval.js") && source.contains("./src/parse.js");
     let is_cf_plugin = source.contains("assertWranglerVersion");
     if is_cf_plugin {
@@ -768,7 +794,7 @@ pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
     if is_cf_plugin {
         eprintln!("[TLA-CF] replace_import_meta done");
     }
-    let oxc_out = try_transpile_inner(&replaced, jsx, true);
+    let oxc_out = try_transpile_inner(&replaced, jsx, true, file_path);
     if is_cf_plugin {
         eprintln!("[TLA-CF] oxc done ok={}", oxc_out.is_ok());
     }
@@ -912,7 +938,7 @@ pub fn transpile_to_cjs(source: &str, jsx: bool) -> String {
     }
     let _debug_tg = source.contains("createContentTypesGenerator");
     if _debug_tg {
-        let oxc_out2 = try_transpile_inner(&replaced, jsx, true);
+        let oxc_out2 = try_transpile_inner(&replaced, jsx, true, None);
         let oxc_str = oxc_out2.as_deref().unwrap_or("OXC_FAILED");
         let _ = std::fs::write("/tmp/tg_oxc_out.js", oxc_str.as_bytes());
         eprintln!(
@@ -2198,7 +2224,7 @@ fn strip_bare_export_marker(code: &str) -> String {
 }
 
 fn transpile_inner(source: &str, jsx: bool, _flow: bool) -> String {
-    try_transpile_inner(source, jsx, false).unwrap_or_else(|_| source.to_string())
+    try_transpile_inner(source, jsx, false, None).unwrap_or_else(|_| source.to_string())
 }
 
 /// Cheap pre-scan for pathologically deep `` ` `` / `${` nesting.
@@ -2219,15 +2245,59 @@ fn nesting_too_deep(source: &str) -> bool {
     let mut depth: u32 = 0;
     let mut max_depth: u32 = 0;
     let bytes = source.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'`' | b'{' => {
-                depth += 1;
-                max_depth = max_depth.max(depth);
+    while i < len {
+        let b = bytes[i];
+        // Skip string literals
+        if b == b'"' || b == b'\'' {
+            let quote = b;
+            i += 1;
+            while i < len && bytes[i] != quote {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
             }
-            b'}' => depth = depth.saturating_sub(1),
-            _ => {}
+            i += 1;
+            continue;
+        }
+        // Skip template literals (simplified: just skip to closing backtick)
+        if b == b'`' {
+            depth += 1;
+            max_depth = max_depth.max(depth);
+            i += 1;
+            while i < len && bytes[i] != b'`' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            depth = depth.saturating_sub(1);
+            i += 1;
+            continue;
+        }
+        // Skip single-line comments
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Skip multi-line comments
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        if b == b'{' {
+            depth += 1;
+            max_depth = max_depth.max(depth);
+        } else if b == b'}' {
+            depth = depth.saturating_sub(1);
         }
         if max_depth > MAX_TRANSPILER_NESTING {
             return true;
@@ -2237,7 +2307,12 @@ fn nesting_too_deep(source: &str) -> bool {
     false
 }
 
-fn try_transpile_inner(source: &str, jsx: bool, to_cjs: bool) -> Result<String, ()> {
+fn try_transpile_inner(
+    source: &str,
+    jsx: bool,
+    to_cjs: bool,
+    file_path: Option<&str>,
+) -> Result<String, ()> {
     if nesting_too_deep(source) {
         return Err(());
     }
@@ -2301,13 +2376,85 @@ fn try_transpile_inner(source: &str, jsx: bool, to_cjs: bool) -> Result<String, 
         return Err(());
     }
 
-    Ok(Codegen::new()
+    let codegen_out = Codegen::new()
         .with_options(CodegenOptions {
             comments: CommentOptions::disabled(),
+            source_map_path: file_path.map(|p| std::path::PathBuf::from(p)),
             ..CodegenOptions::default()
         })
-        .build(&program)
-        .code)
+        .build(&program);
+    let code = codegen_out.code;
+
+    if let (Some(fp), Some(map)) = (file_path, codegen_out.map) {
+        let sources: Vec<String> = map.get_sources().map(|s| s.to_string()).collect();
+        let names: Vec<String> = map.get_names().map(|n| n.to_string()).collect();
+        let tokens = map.get_tokens();
+
+        let mut encoded_mappings = String::new();
+        let mut prev_dst_line: u32 = 0;
+        let mut prev_dst_col: u32 = 0;
+        let mut prev_src_idx: u32 = 0;
+        let mut prev_src_line: u32 = 0;
+        let mut prev_src_col: u32 = 0;
+
+        for token in tokens {
+            let dst_line = token.get_dst_line();
+            let dst_col = token.get_dst_col();
+
+            if dst_line != prev_dst_line {
+                if !encoded_mappings.is_empty() {
+                    encoded_mappings.push(';');
+                }
+                prev_dst_col = 0;
+                prev_src_idx = 0;
+                prev_src_line = 0;
+                prev_src_col = 0;
+            }
+
+            if dst_col >= prev_dst_col {
+                let delta_col = (dst_col - prev_dst_col) as i64;
+                encoded_mappings.push_str(&encode_vlq(delta_col));
+                prev_dst_col = dst_col;
+
+                if let Some(si) = token.get_source_id() {
+                    encoded_mappings.push(',');
+                    encoded_mappings.push_str(&encode_vlq((si - prev_src_idx) as i64));
+                    prev_src_idx = si;
+
+                    let sl = token.get_src_line();
+                    encoded_mappings.push_str(&encode_vlq((sl - prev_src_line) as i64));
+                    prev_src_line = sl;
+
+                    let sc = token.get_src_col();
+                    encoded_mappings.push_str(&encode_vlq((sc - prev_src_col) as i64));
+                    prev_src_col = sc;
+                }
+            }
+
+            prev_dst_line = dst_line;
+        }
+
+        let sm_json = serde_json::json!({
+            "version": 3,
+            "sources": sources,
+            "names": names,
+            "mappings": encoded_mappings
+        })
+        .to_string();
+        source_maps()
+            .lock()
+            .unwrap()
+            .insert(fp.to_string(), sm_json);
+    }
+
+    let verify_alloc = Allocator::default();
+    let verify_type = SourceType::mjs();
+    let verify = Parser::new(&verify_alloc, &code, verify_type).parse();
+    if !verify.errors.is_empty() {
+        return Err(());
+    }
+
+    Ok(code)
 }
 
 /// Heuristic: does this source look like it contains JSX elements?
@@ -2654,9 +2801,261 @@ pub fn strip_top_level_await(code: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+pub fn wrap_esm_with_tla(code: &str) -> String {
+    if !code.contains("import ") && !code.contains("export ") {
+        return format!("(async () => {{ {code} }})()");
+    }
+
+    let mut imports = Vec::new();
+    let mut import_idx = 0;
+    let mut output = String::new();
+    let mut in_string = false;
+    let mut string_char = ' ';
+    let mut i = 0;
+    let bytes = code.as_bytes();
+
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        if !in_string && (b == b'"' || b == b'\'' || b == b'`') {
+            in_string = true;
+            string_char = b as char;
+            output.push(b as char);
+            i += 1;
+            continue;
+        }
+
+        if in_string {
+            output.push(b as char);
+            if b == b'\\' && i + 1 < bytes.len() {
+                output.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if b == string_char as u8 {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == b'/' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    output.push(bytes[i] as char);
+                    i += 1;
+                }
+                continue;
+            }
+            if bytes[i + 1] == b'*' {
+                output.push('/');
+                output.push('*');
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    output.push(bytes[i] as char);
+                    i += 1;
+                }
+                if i + 1 < bytes.len() {
+                    output.push('*');
+                    output.push('/');
+                    i += 2;
+                }
+                continue;
+            }
+        }
+
+        if b == b'i' && i + 6 < bytes.len() && &bytes[i..i + 7] == b"import " {
+            let start = i;
+            i += 7;
+
+            let mut spec = String::new();
+            while i < bytes.len()
+                && bytes[i] != b';'
+                && bytes[i] != b'\n'
+                && bytes[i] != b' '
+                && bytes[i] != b'{'
+            {
+                spec.push(bytes[i] as char);
+                i += 1;
+            }
+
+            if (spec.starts_with('\'') && spec.ends_with('\''))
+                || (spec.starts_with('"') && spec.ends_with('"'))
+            {
+                let idx = import_idx;
+                import_idx += 1;
+                imports.push((idx, spec[1..spec.len() - 1].to_string()));
+
+                output.push_str("const __import_");
+                output.push_str(&idx.to_string());
+                output.push_str(" = await import(");
+                output.push_str(&spec);
+                output.push_str(")");
+                continue;
+            } else {
+                i = start;
+            }
+        }
+
+        output.push(b as char);
+        i += 1;
+    }
+
+    if imports.is_empty() {
+        return format!("(async () => {{ {code} }})()");
+    }
+
+    let import_args: String = imports
+        .iter()
+        .map(|(idx, _)| format!("__import_{}", idx))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "(async () => {{ const [{}] = await Promise.all([{}]); {} }})()",
+        import_args,
+        imports
+            .iter()
+            .map(|(idx, spec)| format!("import('{}')", spec))
+            .collect::<Vec<_>>()
+            .join(", "),
+        output
+    )
+}
+
+pub fn wrap_with_async_main(code: &str) -> String {
+    format!("(async () => {{ {code} }})()")
+}
+
 #[inline]
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+// ── Source map storage & retrieval ─────────────────────────────────────────
+
+/// Store a source map for a given file path.
+pub fn store_source_map(file_path: &str, map_json: &str) {
+    source_maps()
+        .lock()
+        .unwrap()
+        .insert(file_path.to_string(), map_json.to_string());
+}
+
+/// Get the stored source map for a file path, if any.
+pub fn get_source_map(file_path: &str) -> Option<String> {
+    source_maps().lock().unwrap().get(file_path).cloned()
+}
+
+/// Apply a source map to map a position back to the original source.
+/// Returns (source_file, line, column) or None if mapping fails.
+pub fn apply_source_map(file_path: &str, line: u32, column: u32) -> Option<(String, u32, u32)> {
+    let maps = source_maps().lock().unwrap();
+    let map_json = maps.get(file_path)?;
+    let map: serde_json::Value = serde_json::from_str(map_json).ok()?;
+    let mappings = map.get("mappings")?.as_str()?;
+
+    // The "mappings" field is a VLQ-encoded string with segments separated by ';'
+    // Each segment is: [generatedColumn, sourceFileIndex, sourceLine, sourceColumn, nameIndex]
+    // We need to decode this to find the original position.
+    let mut gen_col: u32 = 0;
+    let mut src_idx: u32 = 0;
+    let mut src_line: u32 = 0;
+    let mut src_col: u32 = 0;
+
+    for (line_idx, line_segments) in mappings.split(';').enumerate() {
+        gen_col = 0;
+        for segment in line_segments.split(',') {
+            if segment.is_empty() {
+                continue;
+            }
+            let (delta, consumed) = decode_vlq(segment.as_bytes());
+            gen_col = gen_col.wrapping_add(delta as u32);
+
+            if consumed > 1 {
+                let rest = &segment.as_bytes()[consumed..];
+                let (si, consumed2) = decode_vlq(rest);
+                src_idx = src_idx.wrapping_add(si as u32);
+
+                if consumed2 > 0 && consumed + consumed2 < segment.len() {
+                    let rest2 = &segment.as_bytes()[consumed + consumed2..];
+                    let (sl, consumed3) = decode_vlq(rest2);
+                    src_line = src_line.wrapping_add(sl as u32);
+
+                    if consumed3 > 0 && consumed + consumed2 + consumed3 < segment.len() {
+                        let rest3 = &segment.as_bytes()[consumed + consumed2 + consumed3..];
+                        let (sc, _) = decode_vlq(rest3);
+                        src_col = src_col.wrapping_add(sc as u32);
+                    }
+                }
+            }
+
+            if line_idx + 1 == line as usize && gen_col >= column {
+                let sources = map.get("sources").and_then(|s| s.as_array());
+                let names = map.get("names").and_then(|n| n.as_array());
+
+                let src_file = sources
+                    .and_then(|arr| arr.get(src_idx as usize))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| file_path.to_string());
+
+                return Some((src_file, src_line + 1, src_col + 1));
+            }
+        }
+    }
+
+    None
+}
+
+fn decode_vlq(bytes: &[u8]) -> (i64, usize) {
+    let mut result: i64 = 0;
+    let mut shift: i32 = 0;
+    let mut i = 0;
+    for (idx, &b) in bytes.iter().enumerate() {
+        if b < 32 || b > 96 {
+            i = idx;
+            break;
+        }
+        let mut byte = (b - 63) as i64;
+        let continuation = (byte & 32) != 0;
+        byte &= 31;
+        result += (byte as i64) << shift;
+        shift += 5;
+        if !continuation {
+            i = idx + 1;
+            break;
+        }
+        if idx >= bytes.len() {
+            i = idx;
+            break;
+        }
+    }
+    if result >= 0x80000000 {
+        result -= 0x100000000;
+    }
+    (result, i)
+}
+
+fn encode_vlq(mut value: i64) -> String {
+    let mut result = String::new();
+    if value < 0 {
+        value = ((-value) << 1) | 1;
+    } else {
+        value = value << 1;
+    }
+    loop {
+        let mut digit = (value & 31) as u8;
+        value >>= 5;
+        if value == 0 {
+            digit |= 64;
+            result.push((digit + 63) as char);
+            break;
+        }
+        digit |= 32;
+        result.push((digit + 63) as char);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -3287,6 +3686,16 @@ export { gen };
         assert!(
             out.contains("module.exports.gen = gen"),
             "must export gen, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_destructuring_rename_preserved() {
+        let input = "const { trace: traceQuery } = createTracedChannel('mongoose:query');";
+        let output = transpile_js(input);
+        assert!(
+            output.contains("trace: traceQuery") || output.contains("trace:traceQuery"),
+            "destructuring rename must be preserved, got: {output}"
         );
     }
 }

@@ -5,8 +5,9 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
     (function() {
         'use strict';
 
-        // ── self and navigator ──────────────────────────────────────────────────
-        globalThis.self = globalThis;
+        // ponytail: do NOT define self=globalThis — webpack uses `typeof self`
+        // to detect browser vs Node.js and calls self.writeFileSync when self is defined.
+        // Real Node.js has no global `self`. Keep navigator for web-compat.
         globalThis.navigator = {
             userAgent: '3va/2.4.0',
             onLine: true,
@@ -879,6 +880,11 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
             }
             return pump();
         };
+        ReadableStream.prototype.pipeThrough = function(transform, options) {
+            var readable = transform.readable, writable = transform.writable;
+            this.pipeTo(writable, options);
+            return readable;
+        };
         ReadableStream.prototype.cancel = function() { this._closed = true; return Promise.resolve(); };
         ReadableStream.prototype[Symbol.asyncIterator] = function() {
             var reader = this.getReader();
@@ -964,6 +970,37 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
         globalThis.ReadableStream = ReadableStream;
         globalThis.WritableStream = WritableStream;
         globalThis.TransformStream = TransformStream;
+
+        function TextEncoderStream() {
+            var enc = new TextEncoder();
+            var ts = new TransformStream({
+                transform: function(chunk, controller) {
+                    controller.enqueue(enc.encode(typeof chunk === 'string' ? chunk : String(chunk)));
+                }
+            });
+            this.readable = ts.readable;
+            this.writable = ts.writable;
+            this.encoding = 'utf-8';
+        }
+        function TextDecoderStream(encoding, options) {
+            var dec = new TextDecoder(encoding || 'utf-8', options);
+            var ts = new TransformStream({
+                transform: function(chunk, controller) {
+                    controller.enqueue(dec.decode(chunk, { stream: true }));
+                },
+                flush: function(controller) {
+                    var final = dec.decode();
+                    if (final) controller.enqueue(final);
+                }
+            });
+            this.readable = ts.readable;
+            this.writable = ts.writable;
+            this.encoding = dec.encoding;
+            this.fatal = !!(options && options.fatal);
+            this.ignoreBOM = !!(options && options.ignoreBOM);
+        }
+        globalThis.TextEncoderStream = TextEncoderStream;
+        globalThis.TextDecoderStream = TextDecoderStream;
 
         // ── structuredClone ───────────────────────────────────────────────────
         globalThis.structuredClone = function(value, options) {

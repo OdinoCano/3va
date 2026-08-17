@@ -772,6 +772,193 @@ pub fn inject_child_process(
         spawn_ctrl_done_fn.into(),
     );
 
+    // ── Cluster IPC bindings ─────────────────────────────────────────────────
+    use std::io::{BufRead, BufReader};
+    use std::process::{Child, ChildStdin, ChildStdout};
+
+    struct ClusterWorker {
+        child: Child,
+        stdin: Option<ChildStdin>,
+        stdout_lines: Arc<Mutex<Vec<String>>>,
+        _reader_thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    static CLUSTER_TABLE: OnceLock<Mutex<HashMap<u32, ClusterWorker>>> = OnceLock::new();
+
+    fn cluster_table() -> &'static Mutex<HashMap<u32, ClusterWorker>> {
+        CLUSTER_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    // __clusterFork(script_path, worker_id) → worker_id or -1 on error
+    let cluster_fork_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let perms = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const PermissionState)
+            };
+            if !perms.check(&Capability::SpawnProcess) {
+                eprintln!("[__clusterFork] SpawnProcess denied (perms={:?})", perms);
+                rv.set(v8::Integer::new(scope, -1).into());
+                return;
+            }
+
+            let script_path = args.get(0).to_rust_string_lossy(scope);
+            let worker_id = args.get(1).uint32_value(scope).unwrap_or(0);
+            let extra_env_json = args.get(2).to_rust_string_lossy(scope);
+            let extra_env: std::collections::HashMap<String, String> =
+                serde_json::from_str(&extra_env_json).unwrap_or_default();
+
+            let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("3va"));
+
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.args([
+                "run",
+                "--allow-read",
+                "--allow-write",
+                "--allow-net",
+                "--allow-env",
+                "--allow-child-process",
+                "--allow-ffi",
+                "--prof",
+                "--prof-out",
+                "/tmp/worker-profile.cpuprofile",
+                &script_path,
+            ])
+            .env("NODE_UNIQUE_ID", worker_id.to_string())
+            .env("NODE_WORKER_ID", worker_id.to_string())
+            .env("CLUSTER_WORKER", "1");
+            for (k, v) in &extra_env {
+                cmd.env(k, v);
+            }
+            let mut child = match cmd
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => {
+                    rv.set(v8::Integer::new(scope, -1).into());
+                    return;
+                }
+            };
+
+            let stdin = child.stdin.take();
+            let stdout = child.stdout.take();
+
+            let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let lines_clone = lines.clone();
+
+            let reader_thread = stdout.map(|stdout| {
+                std::thread::spawn(move || {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines().flatten() {
+                        // Debug: worker logs share the stdout channel with IPC JSON;
+                        // echo the human-readable lines to stderr so they stay visible.
+                        let t = line.trim();
+                        if t.starts_with('{') || t.starts_with('[') {
+                            lines_clone.lock().unwrap().push(line);
+                        } else if !t.is_empty() {
+                            eprintln!("[worker-log] {t}");
+                        }
+                    }
+                })
+            });
+
+            cluster_table().lock().unwrap().insert(
+                worker_id,
+                ClusterWorker {
+                    child,
+                    stdin,
+                    stdout_lines: lines,
+                    _reader_thread: reader_thread,
+                },
+            );
+
+            rv.set(v8::Integer::new_from_unsigned(scope, worker_id).into());
+        },
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__clusterFork").unwrap().into(),
+        cluster_fork_fn.into(),
+    );
+
+    // __clusterSend(worker_id, json_msg) → bool
+    let cluster_send_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let worker_id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let msg = args.get(1).to_rust_string_lossy(scope);
+
+            let mut table = cluster_table().lock().unwrap();
+            if let Some(worker) = table.get_mut(&worker_id) {
+                if let Some(ref mut stdin) = worker.stdin {
+                    let result = writeln!(stdin, "{}", msg);
+                    let _ = stdin.flush();
+                    rv.set(v8::Boolean::new(scope, result.is_ok()).into());
+                    return;
+                }
+            }
+            rv.set(v8::Boolean::new(scope, false).into());
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__clusterSend").unwrap().into(),
+        cluster_send_fn.into(),
+    );
+
+    // __clusterPoll(worker_id) → string or null
+    let cluster_poll_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let worker_id = args.get(0).uint32_value(scope).unwrap_or(0);
+
+            let table = cluster_table().lock().unwrap();
+            if let Some(worker) = table.get(&worker_id) {
+                let mut lines = worker.stdout_lines.lock().unwrap();
+                if !lines.is_empty() {
+                    let line = lines.remove(0);
+                    drop(lines);
+                    rv.set(V8String::new(scope, &line).unwrap().into());
+                    return;
+                }
+            }
+            rv.set(v8::null(scope).into());
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__clusterPoll").unwrap().into(),
+        cluster_poll_fn.into(),
+    );
+
+    // __clusterKill(worker_id, signal)
+    let cluster_kill_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let worker_id = args.get(0).uint32_value(scope).unwrap_or(0);
+
+            let mut table = cluster_table().lock().unwrap();
+            if let Some(mut worker) = table.remove(&worker_id) {
+                let _ = worker.child.kill();
+                let _ = worker.child.wait();
+            }
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__clusterKill").unwrap().into(),
+        cluster_kill_fn.into(),
+    );
+
     let js_code = r#"
         (function() {
             function parseOpts(cmd, opts, cb) {
@@ -1077,6 +1264,53 @@ pub fn inject_child_process(
                             fn.apply(null, args);
                         });
                     };
+                },
+
+                fork: function(modulePath, args, opts) {
+                    if (!Array.isArray(args)) { opts = args || {}; args = []; }
+                    opts = opts || {};
+                    var execArgv = opts.execArgv || [];
+                    var execPath = process.execPath || 'node';
+                    var fullArgs = execArgv.concat([modulePath]).concat(args);
+                    var is3va = execPath.indexOf('3va') !== -1;
+                    if (is3va) fullArgs = ['run', '--allow-read', '--allow-write', '--allow-net'].concat(fullArgs);
+
+                    // Use cluster IPC mechanism for fork
+                    var forkId = ++globalThis.__forkIdCounter || (globalThis.__forkIdCounter = 0);
+                    // Pass opts.env as JSON so the child inherits custom env vars
+                    var extraEnv = (opts.env && typeof opts.env === 'object') ? opts.env : {};
+                    var pid = __clusterFork(modulePath, forkId, JSON.stringify(extraEnv));
+                    if (pid === -1) return null;
+
+                    var EventEmitter = require('events');
+                    var cp = new EventEmitter();
+                    cp.pid = pid;
+                    cp.connected = true;
+                    cp.killed = false;
+                    cp.send = function(msg) {
+                        __clusterSend(forkId, JSON.stringify(msg));
+                    };
+                    cp.disconnect = function() {
+                        __clusterKill(forkId, 'SIGTERM');
+                        cp.connected = false;
+                        clearInterval(cp._pollInterval);
+                    };
+                    cp.kill = function(sig) {
+                        __clusterKill(forkId, sig || 'SIGTERM');
+                        cp.killed = true;
+                        clearInterval(cp._pollInterval);
+                    };
+
+                    cp._pollInterval = setInterval(function() {
+                        try {
+                            var msg = __clusterPoll(forkId);
+                            if (msg !== null) {
+                                cp.emit('message', JSON.parse(msg));
+                            }
+                        } catch(e) {}
+                    }, 10);
+
+                    return cp;
                 }
             };
 

@@ -717,7 +717,7 @@ async fn cluster_is_primary_true() {
 
 #[tokio::test]
 async fn cluster_fork_returns_worker_object() {
-    let mut e = engine().await;
+    let mut e = engine_with_spawn().await;
     let r = e
         .eval_to_string(
             r#"
@@ -1086,5 +1086,81 @@ async fn dns_lookup_service_returns_enotsup() {
     assert_eq!(
         r, "pending",
         "dns.lookupService must call back with ENOTSUP (async)"
+    );
+}
+
+// ── source maps ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn source_maps_store_and_retrieve() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var map = JSON.stringify({sources: ["app.js"], mappings: "AAAA"});
+            __storeSourceMap("app.js.map", map);
+            var retrieved = __getSourceMap("app.js.map");
+            retrieved !== null ? "ok" : "null"
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "ok", "source map must be stored and retrieved");
+}
+
+#[tokio::test]
+async fn source_maps_apply_returns_original_location() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var map = JSON.stringify({
+                sources: ["original.js"],
+                mappings: "AAAA"
+            });
+            __storeSourceMap("transformed.js.map", map);
+            var result = __applySourceMap("transformed.js.map", 10, 5);
+            String(result)
+            "#,
+        )
+        .await
+        .unwrap();
+    eprintln!("DEBUG result: {}", r);
+    assert!(
+        r.contains("original.js"),
+        "applySourceMap must return original source"
+    );
+}
+
+#[tokio::test]
+async fn source_maps_get_returns_null_for_unknown() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var result = __getSourceMap("nonexistent.js.map");
+            result === null ? "null" : "found"
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "null", "getSourceMap must return null for unknown path");
+}
+
+#[tokio::test]
+async fn source_maps_apply_returns_null_for_unknown() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var result = __applySourceMap("nonexistent.js.map", 10, 5);
+            result === null ? "null" : "found"
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        r, "null",
+        "applySourceMap must return null for unknown path"
     );
 }

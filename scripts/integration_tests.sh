@@ -754,6 +754,59 @@ kill $DEV_PID2 2>/dev/null
 rm -rf /tmp/3va-dev-public
 
 # ============================================
+# TESTS: child_process.fork() IPC
+# ============================================
+echo ""
+echo -e "${CYAN}--- child_process.fork() IPC ---${NC}"
+
+# Test 1: fork returns EventEmitter with on/emit/send
+cat > "$TEST_DIR/test_fork_ee.js" << 'EOF'
+var cp = require('child_process');
+var child = cp.fork('/dev/null');
+var ok = typeof child.on === 'function' && typeof child.emit === 'function' && typeof child.send === 'function';
+child.on('message', function() {});
+var hasListener = child.listenerCount('message') === 1;
+child.kill();
+if (ok && hasListener) { console.log('FORK_EE_PASS'); } else { console.log('FORK_EE_FAIL'); }
+process.exit(0);
+EOF
+FORK_EE_OUT=$("$BINARY" run --allow-read --allow-child-process "$TEST_DIR/test_fork_ee.js" 2>/dev/null)
+if echo "$FORK_EE_OUT" | grep -q "FORK_EE_PASS"; then
+    log_pass "child_process.fork(): retorna EventEmitter con on/emit/send"
+else
+    log_fail "child_process.fork(): NO retorna EventEmitter (got: $FORK_EE_OUT)"
+fi
+
+# Test 2: fork IPC message round-trip (child sends, parent receives via .on('message'))
+cat > "$TEST_DIR/fork_child.js" << 'EOF'
+process.send({ hello: 'world', from: 'child' });
+setTimeout(function() { process.exit(0); }, 200);
+EOF
+cat > "$TEST_DIR/test_fork_ipc.js" << 'EOF'
+var cp = require('child_process');
+var child = cp.fork(__dirname + '/fork_child.js');
+var received = false;
+child.on('message', function(msg) {
+    if (msg && msg.hello === 'world' && msg.from === 'child') {
+        received = true;
+        child.kill();
+        console.log('FORK_IPC_PASS');
+        process.exit(0);
+    }
+});
+setTimeout(function() {
+    if (!received) { console.log('FORK_IPC_FAIL_TIMEOUT'); }
+    process.exit(1);
+}, 3000);
+EOF
+FORK_IPC_OUT=$("$BINARY" run --allow-read --allow-child-process "$TEST_DIR/test_fork_ipc.js" 2>/dev/null)
+if echo "$FORK_IPC_OUT" | grep -q "FORK_IPC_PASS"; then
+    log_pass "child_process.fork(): IPC message child→parent via .on('message')"
+else
+    log_fail "child_process.fork(): IPC message NO recibido (got: $FORK_IPC_OUT)"
+fi
+
+# ============================================
 # RESUMEN FINAL
 # ============================================
 echo ""

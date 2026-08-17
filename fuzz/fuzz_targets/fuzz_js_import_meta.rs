@@ -14,7 +14,7 @@ const META_PATTERNS: &[(&str, &str)] = &[
     ("import.meta.glob(", "__vvva_meta_glob__("),
     ("import.meta.hot", "undefined"),
     ("import.meta.vitest", "undefined"),
-    ("import.meta.env", "__vvva_meta_env__"),
+    ("import.meta.env", "(typeof __vvva_meta_env__ !== 'undefined' ? __vvva_meta_env__ : (typeof process !== 'undefined' ? process.env : {}))"),
     ("import.meta.url", "__vvva_meta_url__"),
 ];
 

@@ -226,6 +226,32 @@ pub fn inject_require(
                 enumerable: false, configurable: true
             });
         }
+
+        Error.prepareStackTrace = function(err, stack) {
+            var lines = [err.toString()];
+            for (var i = 0; i < stack.length; i++) {
+                var frame = stack[i];
+                var fileName = frame.getFileName() || '';
+                var line = frame.getLineNumber();
+                var col = frame.getColumnNumber();
+                try {
+                    var mapJson = __getSourceMap(fileName);
+                    if (mapJson) {
+                        var result = __applySourceMap(fileName, line, col);
+                        if (result) {
+                            try {
+                                var mapped = JSON.parse(result);
+                                if (mapped.source) fileName = mapped.source;
+                                if (mapped.line) line = mapped.line;
+                                if (mapped.col) col = mapped.col;
+                            } catch(e) {}
+                        }
+                    }
+                } catch(e) {}
+                lines.push('    at ' + (frame.getFunctionName() || '<anonymous>') + ' (' + fileName + ':' + line + ':' + col + ')');
+            }
+            return lines.join('\n');
+        };
     "#;
     let source = V8String::new(scope, source_code).unwrap();
     let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
@@ -1220,15 +1246,245 @@ pub fn inject_require(
                 globalThis.__requireCache['node:diagnostics_channel'] = dc;
             })();
 
-            // ── http2 stub (used only when http2:true option is set) ────────────────
+            // ── http2 compat (real h2 backend) ──────────────────────────────
             (function() {
-                function notImpl(name) { return function() { throw new Error('http2.' + name + ' not implemented in 3va'); }; }
+                var constants = {
+                    NGHTTP2_SESSION_SERVER: 0, NGHTTP2_SESSION_CLIENT: 1,
+                    NGHTTP2_STREAM_STATE_IDLE: 1, NGHTTP2_STREAM_STATE_OPEN: 2,
+                    NGHTTP2_STREAM_STATE_RESERVED_LOCAL: 3, NGHTTP2_STREAM_STATE_RESERVED_REMOTE: 4,
+                    NGHTTP2_STREAM_STATE_HALF_CLOSED_LOCAL: 5, NGHTTP2_STREAM_STATE_HALF_CLOSED_REMOTE: 6,
+                    NGHTTP2_STREAM_STATE_CLOSED: 7,
+                    NGHTTP2_NO_ERROR: 0, NGHTTP2_PROTOCOL_ERROR: 1, NGHTTP2_INTERNAL_ERROR: 2,
+                    NGHTTP2_FLOW_CONTROL_ERROR: 3, NGHTTP2_SETTINGS_TIMEOUT: 4,
+                    NGHTTP2_STREAM_CLOSED: 5, NGHTTP2_FRAME_SIZE_ERROR: 6,
+                    NGHTTP2_REFUSED_STREAM: 7, NGHTTP2_CANCEL: 8,
+                    NGHTTP2_COMPRESSION_ERROR: 9, NGHTTP2_CONNECT_ERROR: 10,
+                    NGHTTP2_ENHANCE_YOUR_CALM: 11, NGHTTP2_INADEQUATE_SECURITY: 12,
+                    NGHTTP2_HTTP_1_1_REQUIRED: 13,
+                    HTTP2_HEADER_STATUS: ':status', HTTP2_HEADER_METHOD: ':method',
+                    HTTP2_HEADER_AUTHORITY: ':authority', HTTP2_HEADER_SCHEME: ':scheme',
+                    HTTP2_HEADER_PATH: ':path', HTTP2_HEADER_CONTENT_LENGTH: 'content-length',
+                    HTTP2_HEADER_CONTENT_TYPE: 'content-type', HTTP2_HEADER_ACCEPT: 'accept',
+                    HTTP2_HEADER_HOST: 'host', HTTP2_HEADER_CONNECTION: 'connection',
+                    HTTP2_HEADER_UPGRADE: 'upgrade', HTTP2_HEADER_SERVER: 'server',
+                    HTTP2_HEADER_DATE: 'date', HTTP2_HEADER_TRANSFER_ENCODING: 'transfer-encoding',
+                    HTTP2_METHOD_GET: 'GET', HTTP2_METHOD_POST: 'POST',
+                    HTTP2_METHOD_PUT: 'PUT', HTTP2_METHOD_DELETE: 'DELETE',
+                    HTTP2_METHOD_PATCH: 'PATCH', HTTP2_METHOD_HEAD: 'HEAD',
+                    HTTP2_METHOD_OPTIONS: 'OPTIONS'
+                };
+
+                function EventEmitter() {
+                    this._events = {};
+                    this._maxListeners = 10;
+                }
+                EventEmitter.prototype.on = function(e, fn) {
+                    if (!this._events[e]) this._events[e] = [];
+                    this._events[e].push(fn);
+                    return this;
+                };
+                EventEmitter.prototype.once = function(e, fn) {
+                    var self = this;
+                    function wrapped() { self.removeListener(e, wrapped); fn.apply(this, arguments); }
+                    wrapped._original = fn;
+                    return this.on(e, wrapped);
+                };
+                EventEmitter.prototype.emit = function(e) {
+                    var args = Array.prototype.slice.call(arguments, 1);
+                    var fns = this._events[e] || [];
+                    for (var i = 0; i < fns.length; i++) fns[i].apply(this, args);
+                    return fns.length > 0;
+                };
+                EventEmitter.prototype.removeListener = function(e, fn) {
+                    var fns = this._events[e]; if (!fns) return this;
+                    this._events[e] = fns.filter(function(f) { return f !== fn && f._original !== fn; });
+                    return this;
+                };
+                EventEmitter.prototype.setMaxListeners = function(n) { this._maxListeners = n; return this; };
+                EventEmitter.prototype.getMaxListeners = function() { return this._maxListeners; };
+                EventEmitter.prototype.listeners = function(e) { return this._events[e] || []; };
+                EventEmitter.prototype.listenerCount = function(e) { return (this._events[e] || []).length; };
+
+                function Http2Server(options, onRequest) {
+                    EventEmitter.call(this);
+                    this._options = options || {};
+                    this._serverId = null;
+                    this._pollTimer = null;
+                    this._listening = false;
+                    if (typeof onRequest === 'function') this.on('stream', onRequest);
+                }
+                Http2Server.prototype = Object.create(EventEmitter.prototype);
+                Http2Server.prototype.listen = function(port, host, cb) {
+                    var self = this;
+                    if (typeof port === 'function') { cb = port; port = 0; host = '0.0.0.0'; }
+                    if (typeof host === 'function') { cb = host; host = '0.0.0.0'; }
+                    port = port || 0;
+                    host = host || '0.0.0.0';
+                    var result = __h2Listen(port, host);
+                    if (result instanceof Error) {
+                        if (cb) setTimeout(function() { cb(result); }, 0);
+                        return this;
+                    }
+                    this._serverId = result;
+                    this._listening = true;
+                    this._pollTimer = setInterval(function() {
+                        var info = __h2AcceptPoll(self._serverId);
+                        if (info !== null) {
+                            try {
+                                var parsed = JSON.parse(info);
+                                parsed._serverId = self._serverId;
+                                var stream = new Http2ServerStream(parsed);
+                                self.emit('stream', stream, parsed.headers);
+                            } catch(e) {}
+                        }
+                    }, 5);
+                    this.emit('listening');
+                    if (cb) setTimeout(cb, 0);
+                    return this;
+                };
+                Http2Server.prototype.address = function() {
+                    if (this._serverId === null) return null;
+                    var port = __h2ServerPort(this._serverId);
+                    return { port: port, family: 'IPv4', address: '0.0.0.0' };
+                };
+                Http2Server.prototype.close = function(cb) {
+                    if (this._serverId !== null) {
+                        __h2ServerClose(this._serverId);
+                        this._serverId = null;
+                    }
+                    if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+                    this._listening = false;
+                    this.emit('close');
+                    if (cb) setTimeout(cb, 0);
+                    return this;
+                };
+                Http2Server.prototype.ref = function() { return this; };
+                Http2Server.prototype.unref = function() { return this; };
+
+                function Http2ServerStream(info) {
+                    EventEmitter.call(this);
+                    this._serverId = info._serverId;
+                    this._streamId = info.streamId;
+                    this.headers = info.headers || {};
+                    this.method = info.method;
+                    this.url = info.path;
+                    this._responded = false;
+                    this._ended = false;
+                }
+                Http2ServerStream.prototype = Object.create(EventEmitter.prototype);
+                Http2ServerStream.prototype.respond = function(headers) {
+                    if (this._responded) return;
+                    this._responded = true;
+                    this._headers = headers;
+                    __h2StreamRespond(this._serverId, this._streamId, JSON.stringify(headers));
+                };
+                Http2ServerStream.prototype.write = function(data) {
+                    if (!this._responded) this.respond({ ':status': 200 });
+                    __h2StreamWrite(this._serverId, this._streamId, data);
+                };
+                Http2ServerStream.prototype.end = function(data) {
+                    if (!this._responded) this.respond({ ':status': 200 });
+                    if (data !== undefined && data !== null) {
+                        __h2StreamEnd(this._serverId, this._streamId, data);
+                    } else {
+                        __h2StreamEnd(this._serverId, this._streamId);
+                    }
+                    this._ended = true;
+                    this.emit('end');
+                };
+                Http2ServerStream.prototype.close = function() {
+                    if (!this._ended) this.end();
+                };
+                Http2ServerStream.prototype.pushStream = function(headers, cb) {
+                    if (cb) cb(new Error('push streams not supported'));
+                };
+
+                function Http2ClientSession(clientId) {
+                    EventEmitter.call(this);
+                    this._clientId = clientId;
+                    this._pollTimer = null;
+                    this._closed = false;
+                    this._startPolling();
+                }
+                Http2ClientSession.prototype = Object.create(EventEmitter.prototype);
+                Http2ClientSession.prototype._startPolling = function() {
+                    var self = this;
+                    this._pollTimer = setInterval(function() {
+                        if (self._closed) { clearInterval(self._pollTimer); return; }
+                        var info = __h2ClientPoll(self._clientId);
+                        if (info !== null) {
+                            try {
+                                var parsed = JSON.parse(info);
+                                self.emit(parsed.type, parsed);
+                            } catch(e) {}
+                        }
+                    }, 5);
+                };
+                Http2ClientSession.prototype.request = function(headers) {
+                    var streamId = __h2ClientRequest(this._clientId, JSON.stringify(headers));
+                    if (streamId === -1) throw new Error('failed to create stream');
+                    return new Http2ClientStream(this._clientId, streamId);
+                };
+                Http2ClientSession.prototype.close = function(cb) {
+                    this._closed = true;
+                    if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+                    __h2ClientClose(this._clientId);
+                    this.emit('close');
+                    if (cb) setTimeout(cb, 0);
+                };
+                Http2ClientSession.prototype.destroy = function() { this.close(); };
+                Http2ClientSession.prototype.settings = function() {};
+                Http2ClientSession.prototype.ref = function() { return this; };
+                Http2ClientSession.prototype.unref = function() { return this; };
+                Http2ClientSession.prototype.ping = function(cb) { if (cb) cb(null, Buffer.alloc(8)); };
+
+                function Http2ClientStream(clientId, streamId) {
+                    EventEmitter.call(this);
+                    this._clientId = clientId;
+                    this._streamId = streamId;
+                    this._ended = false;
+                }
+                Http2ClientStream.prototype = Object.create(EventEmitter.prototype);
+                Http2ClientStream.prototype.write = function(data) {
+                    __h2ClientStreamWrite(this._clientId, this._streamId, data);
+                };
+                Http2ClientStream.prototype.end = function(data) {
+                    if (data !== undefined && data !== null) {
+                        __h2ClientStreamEnd(this._clientId, this._streamId, data);
+                    } else {
+                        __h2ClientStreamEnd(this._clientId, this._streamId);
+                    }
+                    this._ended = true;
+                };
+                Http2ClientStream.prototype.close = function() {
+                    if (!this._ended) this.end();
+                };
+                Http2ClientStream.prototype.respond = function() {};
+
                 var http2 = {
-                    createServer: notImpl('createServer'),
-                    createSecureServer: notImpl('createSecureServer'),
-                    connect: notImpl('connect'),
-                    constants: {},
+                    constants: constants,
                     sensitiveHeaders: Symbol('sensitiveHeaders'),
+                    createServer: function(options, onRequest) {
+                        if (typeof options === 'function') { onRequest = options; options = {}; }
+                        return new Http2Server(options || {}, onRequest);
+                    },
+                    createSecureServer: function(options, onRequest) {
+                        if (typeof options === 'function') { onRequest = options; options = {}; }
+                        return new Http2Server(options || {}, onRequest);
+                    },
+                    connect: function(url, options, listener) {
+                        if (typeof options === 'function') { listener = options; options = {}; }
+                        var parsed = typeof url === 'string' ? new URL(url) : url;
+                        var authority = parsed.host || (parsed.hostname + ':' + (parsed.port || 80));
+                        var clientId = __h2Connect(authority);
+                        var session = new Http2ClientSession(clientId);
+                        if (listener) setTimeout(function() { listener(session); }, 0);
+                        return session;
+                    },
+                    getDefaultSettings: function() { return { enablePush: true, enableConnectProtocol: false }; },
+                    getPackedSettings: function() { return Buffer.alloc(0); },
+                    getUnpackedSettings: function() { return {}; },
+                    performServerHandshake: function() { return false; }
                 };
                 globalThis.__requireCache['http2'] = http2;
                 globalThis.__requireCache['node:http2'] = http2;
@@ -1527,37 +1783,61 @@ pub fn inject_require(
                 globalThis.__requireCache['node:v8'] = v8mod;
 
                 // ponytail: sandboxes are plain objects run through `with`,
-                // not real isolated V8 contexts — enough for the common
-                // "eval config code against a data object" use case; a real
-                // per-Context sandbox needs a native v8::Context binding,
-                // add one if code needs true isolation (e.g. untrusted input).
-                var _vmContexts = new WeakSet();
-                function vmRunInSandbox(code, sandbox) {
-                    try {
-                        return (new Function('__vm_sandbox__', 'with(__vm_sandbox__){ return (' + code + ') }'))(sandbox);
-                    } catch (e) {
-                        if (e instanceof SyntaxError) {
-                            return (new Function('__vm_sandbox__', 'with(__vm_sandbox__){ ' + code + ' }'))(sandbox);
-                        }
-                        throw e;
-                    }
-                }
+                var _vmContexts = {};
+                var _vmContextId = 0;
+
                 function VmScript(code) { this.code = code; }
-                VmScript.prototype.runInContext = function(sandbox) { return vmRunInSandbox(this.code, sandbox || {}); };
-                VmScript.prototype.runInNewContext = function(sandbox) { return vmRunInSandbox(this.code, sandbox || {}); };
+                VmScript.prototype.runInContext = function(sandbox) {
+                    if (!sandbox || !sandbox.__contextId__) return undefined;
+                    var result = __vmRunInContextById(sandbox.__contextId__, this.code);
+                    if (result && result.error) throw new Error(result.error);
+                    return result ? JSON.parse(result).value : undefined;
+                };
+                VmScript.prototype.runInNewContext = function(sandbox) { return this.runInContext(sandbox || {}); };
                 VmScript.prototype.runInThisContext = function() { return (0, eval)(this.code); };
 
                 var vm = {
                     createContext: function(sandbox) {
                         sandbox = sandbox || {};
-                        _vmContexts.add(sandbox);
+                        var id = ++_vmContextId;
+                        sandbox.__isVmContext__ = true;
+                        sandbox.__contextId__ = id;
+                        var json = JSON.stringify(sandbox);
+                        __vmCreateContext(id, json);
+                        _vmContexts[id] = sandbox;
                         return sandbox;
                     },
                     isContext: function(obj) {
-                        return typeof obj === 'object' && obj !== null && _vmContexts.has(obj);
+                        return obj && obj.__isVmContext__ === true;
                     },
-                    runInNewContext: function(code, sandbox) { return vmRunInSandbox(code, sandbox || {}); },
-                    runInContext: function(code, sandbox) { return vmRunInSandbox(code, sandbox || {}); },
+                    runInNewContext: function(code, sandbox) {
+                        var ctx = vm.createContext(sandbox || {});
+                        var result = __vmRunInContextById(ctx.__contextId__, code);
+                        if (result && result.error) throw new Error(result.error);
+                        // sync sandbox changes back
+                        var globals = __vmGetContextGlobals(ctx.__contextId__);
+                        if (globals) {
+                            try {
+                                var updated = JSON.parse(globals);
+                                Object.keys(updated).forEach(function(k) { ctx[k] = updated[k]; });
+                            } catch(e) {}
+                        }
+                        return result ? JSON.parse(result).value : undefined;
+                    },
+                    runInContext: function(code, sandbox) {
+                        if (!sandbox || !sandbox.__contextId__) return undefined;
+                        var result = __vmRunInContextById(sandbox.__contextId__, code);
+                        if (result && result.error) throw new Error(result.error);
+                        // sync sandbox changes back
+                        var globals = __vmGetContextGlobals(sandbox.__contextId__);
+                        if (globals) {
+                            try {
+                                var updated = JSON.parse(globals);
+                                Object.keys(updated).forEach(function(k) { sandbox[k] = updated[k]; });
+                            } catch(e) {}
+                        }
+                        return result ? JSON.parse(result).value : undefined;
+                    },
                     runInThisContext: function(code) { return (0, eval)(code); },
                     Script: VmScript,
                 };
@@ -1570,33 +1850,97 @@ pub fn inject_require(
                 var _clusterNextId = 0;
                 function ClusterWorker() {
                     EventEmitter.call(this);
-                    this.id = ++_clusterNextId;
+                    this.id = 0;
                     this.process = { pid: 0 };
                     this.state = 'online';
                     this.exitedAfterDisconnect = false;
+                    this._pollInterval = null;
                 }
                 util.inherits(ClusterWorker, EventEmitter);
-                ClusterWorker.prototype.send = function() { return true; };
-                ClusterWorker.prototype.kill = function() { this.state = 'dead'; };
-                ClusterWorker.prototype.disconnect = function() { this.state = 'dead'; };
+                ClusterWorker.prototype.send = function(msg) {
+                    return __clusterSend(this.id, JSON.stringify(msg));
+                };
+                ClusterWorker.prototype.kill = function(sig) {
+                    this.state = 'dead';
+                    if (this._pollInterval) { clearInterval(this._pollInterval); this._pollInterval = null; }
+                    __clusterKill(this.id, sig || 'SIGTERM');
+                    this.emit('exit', 0, sig || 'SIGTERM');
+                    cluster.emit('exit', this, 0, sig || 'SIGTERM');
+                };
+                ClusterWorker.prototype.disconnect = function() { this.kill(); };
                 ClusterWorker.prototype.isDead = function() { return this.state === 'dead'; };
 
-                cluster.isPrimary = true;
-                cluster.isMaster = true;
-                cluster.isWorker = false;
+                cluster.isPrimary = !process.env.CLUSTER_WORKER;
+                cluster.isMaster = cluster.isPrimary;
+                cluster.isWorker = !!process.env.CLUSTER_WORKER;
                 cluster.workers = _clusterWorkers;
                 cluster.settings = {};
                 cluster.schedulingPolicy = 2;
                 cluster.SCHED_NONE = 1;
                 cluster.SCHED_RR = 2;
-                cluster.fork = function() {
+
+                if (cluster.isWorker) {
+                    cluster.worker = {
+                        id: parseInt(process.env.NODE_WORKER_ID || '0'),
+                        send: function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
+                    };
+                    process.send = function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); };
+                    process.connected = true;
+                    // Read IPC messages from stdin (parent writes JSON lines via __clusterSend)
+                    var _ipcBuf = '';
+                    setInterval(function() {
+                        try {
+                            var chunk = __stdinReadPoll();
+                            if (chunk && chunk.length > 0) {
+                                _ipcBuf += Buffer.from(chunk).toString('utf8');
+                                var lines = _ipcBuf.split('\n');
+                                _ipcBuf = lines.pop();
+                                for (var i = 0; i < lines.length; i++) {
+                                    var line = lines[i].trim();
+                                    if (!line) continue;
+                                    try {
+                                        var msg = JSON.parse(line);
+                                        process.emit('message', msg);
+                                    } catch(e) {}
+                                }
+                            }
+                        } catch(e) {}
+                    }, 10);
+                }
+
+                cluster.fork = function(env) {
+                    if (!cluster.isPrimary) return null;
                     var w = new ClusterWorker();
+                    w.id = ++_clusterNextId;
                     _clusterWorkers[w.id] = w;
+                    var scriptPath = process.argv[1] || cluster.settings.exec || '';
+                    var result = __clusterFork(scriptPath, w.id);
+                    if (result === -1) {
+                        delete _clusterWorkers[w.id];
+                        return null;
+                    }
+                    w.process.pid = result;
+                    var pollInterval = setInterval(function() {
+                        try {
+                            var msg = __clusterPoll(w.id);
+                            if (msg !== null) {
+                                var parsed = JSON.parse(msg);
+                                w.emit('message', parsed);
+                                cluster.emit('message', w, parsed);
+                            }
+                        } catch(e) {}
+                    }, 10);
+                    w._pollInterval = pollInterval;
+                    cluster.emit('fork', w);
                     return w;
                 };
                 cluster.setupPrimary = function(settings) { cluster.settings = settings || {}; };
                 cluster.setupMaster = cluster.setupPrimary;
-                cluster.disconnect = function(cb) { if (cb) cb(); };
+                cluster.disconnect = function(cb) {
+                    var ids = Object.keys(_clusterWorkers);
+                    ids.forEach(function(id) { _clusterWorkers[id].kill(); });
+                    if (cb) setTimeout(cb, 0);
+                };
                 globalThis.__requireCache['cluster'] = cluster;
                 globalThis.__requireCache['node:cluster'] = cluster;
             })();
@@ -1953,6 +2297,24 @@ pub fn inject_require(
             };
             globalThis.__requireCache['stream'] = Stream;
             globalThis.__requireCache['node:stream'] = Stream;
+
+            // fs.ReadStream / fs.WriteStream are defined in the fs module, which
+            // is injected before the stream module exists, so they can't inherit
+            // from Readable/Writable at definition time. Wire up their prototypes
+            // here (still before any app code runs) so packages like graceful-fs
+            // that do `new fs.WriteStream(...)` or `fs.WriteStream.apply(this,..)`
+            // get working Writable/Readable instances.
+            (function() {
+                var _fs = globalThis.__requireCache['fs'];
+                if (_fs && _fs.ReadStream) {
+                    _fs.ReadStream.prototype = Object.create(Readable.prototype);
+                    _fs.ReadStream.prototype.constructor = _fs.ReadStream;
+                }
+                if (_fs && _fs.WriteStream) {
+                    _fs.WriteStream.prototype = Object.create(Writable.prototype);
+                    _fs.WriteStream.prototype.constructor = _fs.WriteStream;
+                }
+            })();
 
             (function() {
                 var streamPromises = {
@@ -2400,53 +2762,74 @@ pub fn inject_require(
             })();
 
             // ── module (node:module) ─────────────────────────────────────────────
-            // Minimal stub: provides createRequire(filename) which returns the
-            // global require shim (already set up by the 3va CJS wrapper).
+            // Next.js monkey-patches module.prototype.require and module._resolveFilename,
+            // so module must be a constructor-like function with .prototype.require.
             (function() {
-                var modMod = {
-                    createRequire: function(filename) {
-                        // Build a require scoped to the directory of `filename`.
-                        // Strip file:// URL prefix if present.
-                        var fsPath = (typeof filename === 'string')
-                            ? filename.replace(/^file:\/\/\/?/, '/')
-                            : (globalThis.__dirname || '');
-                        var dir = fsPath.replace(/[/\\][^/\\]*$/, '') || globalThis.__dirname || '';
-                        var scopedRequire = function(id) {
-                            return globalThis.__vvva_require_from
-                                ? globalThis.__vvva_require_from(id, dir)
-                                : globalThis.require(id);
-                        };
-                        scopedRequire.resolve = function(id) {
-                            return __requireResolve(id, dir);
-                        };
-                        scopedRequire.cache = globalThis.__loadedModules || {};
-                        return scopedRequire;
-                    },
-                    builtinModules: [
-                        'assert','async_hooks','buffer','child_process','cluster',
-                        'console','crypto','dgram','diagnostics_channel','dns',
-                        'domain','events','fs','http','http2','https','inspector',
-                        'module','net','os','path','perf_hooks','process','punycode',
-                        'querystring','readline','repl','stream','string_decoder',
-                        'sys','timers','tls','tty','url','util','v8','vm','wasi',
-                        'worker_threads','zlib',
-                    ],
-                    isBuiltin: function(id) {
-                        var bare = id.startsWith('node:') ? id.slice(5) : id;
-                        return modMod.builtinModules.indexOf(bare) !== -1;
-                    },
-                    syncBuiltinESMExports: function() {},
-                    register: function() {},
-                    Module: { _resolveFilename: function(r) { return r; }, builtinModules: [] },
+                function Module(id, parent) {
+                    this.id = id || '';
+                    this.filename = id || '';
+                    this.parent = parent || null;
+                    this.children = [];
+                    this.exports = {};
+                    this.loaded = false;
+                }
+                Module.prototype.require = function(id) {
+                    var dir = (this.filename || '').replace(/[/\\][^/\\]*$/, '') || globalThis.__dirname || '';
+                    return globalThis.__vvva_require_from
+                        ? globalThis.__vvva_require_from(id, dir)
+                        : globalThis.require(id);
                 };
-                globalThis.__requireCache['module'] = modMod;
-                globalThis.__requireCache['node:module'] = modMod;
+                Module._resolveFilename = function(request, parent, isMain, options) {
+                    var dir = (parent && parent.filename) ? parent.filename.replace(/[/\\][^/\\]*$/, '') : (globalThis.__dirname || '');
+                    return __requireResolve(request, dir);
+                };
+                Module._cache = globalThis.__loadedModules || {};
+                Module._extensions = {};
+                Module._load = function(request, parent, isMain) {
+                    return Module.prototype.require.call(parent || { filename: '' }, request);
+                };
+                Module.createRequire = function(filename) {
+                    var fsPath = (typeof filename === 'string')
+                        ? filename.replace(/^file:\/\/\/?/, '/')
+                        : (globalThis.__dirname || '');
+                    var dir = fsPath.replace(/[/\\][^/\\]*$/, '') || globalThis.__dirname || '';
+                    var scopedRequire = function(id) {
+                        return globalThis.__vvva_require_from
+                            ? globalThis.__vvva_require_from(id, dir)
+                            : globalThis.require(id);
+                    };
+                    scopedRequire.resolve = function(id) {
+                        return __requireResolve(id, dir);
+                    };
+                    scopedRequire.resolve.paths = function() { return [dir]; };
+                    scopedRequire.cache = globalThis.__loadedModules || {};
+                    return scopedRequire;
+                };
+                Module.builtinModules = [
+                    'assert','async_hooks','buffer','child_process','cluster',
+                    'console','crypto','dgram','diagnostics_channel','dns',
+                    'domain','events','fs','http','http2','https','inspector',
+                    'module','net','os','path','perf_hooks','process','punycode',
+                    'querystring','readline','repl','stream','string_decoder',
+                    'sys','timers','tls','tty','url','util','v8','vm','wasi',
+                    'worker_threads','zlib',
+                ];
+                Module.isBuiltin = function(id) {
+                    var bare = id.startsWith('node:') ? id.slice(5) : id;
+                    return Module.builtinModules.indexOf(bare) !== -1;
+                };
+                Module.syncBuiltinESMExports = function() {};
+                Module.register = function() {};
+                Module.wrap = function(script) { return '(function (exports, require, module, __filename, __dirname) { ' + script + '\n});'; };
+                Module.wrapper = ['(function (exports, require, module, __filename, __dirname) { ', '\n});'];
+                globalThis.__requireCache['module'] = Module;
+                globalThis.__requireCache['node:module'] = Module;
             })();
 
-            // Node.js require('buffer') returns { Buffer, SlowBuffer, constants, ...staticMethods }
+            // Node.js require('buffer') returns { Buffer, SlowBuffer, Blob, File, constants, ...staticMethods }
             (function() {
                 var B = globalThis.Buffer;
-                var bufMod = { Buffer: B, SlowBuffer: B, constants: { MAX_LENGTH: 2147483647, MAX_STRING_LENGTH: 1073741823 } };
+                var bufMod = { Buffer: B, SlowBuffer: B, Blob: globalThis.Blob, File: globalThis.File, constants: { MAX_LENGTH: 2147483647, MAX_STRING_LENGTH: 1073741823 } };
                 ['from','alloc','allocUnsafe','allocUnsafeSlow','isBuffer','isEncoding','byteLength','concat','compare'].forEach(function(k) {
                     if (B[k]) bufMod[k] = B[k].bind(B);
                 });
@@ -2454,6 +2837,10 @@ pub fn inject_require(
                 globalThis.__requireCache['node:buffer'] = bufMod;
             })();
             globalThis.__requireCache['stream'] = globalThis.__requireCache['stream'] || Stream;
+
+            // ── constants (deprecated, used by webpack) ─────────────────────────
+            globalThis.__requireCache['constants'] = globalThis.__requireCache['constants'] || {};
+            globalThis.__requireCache['node:constants'] = globalThis.__requireCache['constants'];
 
             // ── querystring ──────────────────────────────────────────────────────
             (function() {
@@ -2543,15 +2930,20 @@ pub fn inject_require(
                 }
                 function urlParse(urlStr, parseQueryString, slashesDenoteHost) {
                     try {
-                        var u = new globalThis.URL(String(urlStr));
+                        var s = String(urlStr);
+                        // WHATWG URL requires an absolute base; legacy url.parse()
+                        // also accepts relative URLs like "/foo?bar=1". Fall back to
+                        // a dummy base and null out the host fields for relative input.
+                        var relative = !/^[a-zA-Z][a-zA-Z0-9+.\-]*:/.test(s);
+                        var u = new globalThis.URL(s, relative ? 'http://x/' : undefined);
                         var obj = {
-                            href: u.href,
-                            protocol: u.protocol,
-                            slashes: u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'ftp:',
+                            href: relative ? s : u.href,
+                            protocol: relative ? null : u.protocol,
+                            slashes: !relative && (u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'ftp:'),
                             auth: u.username ? (u.password ? u.username + ':' + u.password : u.username) : null,
-                            host: u.host,
-                            port: u.port || null,
-                            hostname: u.hostname,
+                            host: relative ? null : u.host,
+                            port: relative ? null : (u.port || null),
+                            hostname: relative ? null : u.hostname,
                             hash: u.hash || null,
                             search: u.search || null,
                             query: parseQueryString ? Object.fromEntries(u.searchParams) : (u.search ? u.search.slice(1) : null),
@@ -2652,7 +3044,6 @@ pub fn inject_require(
                     if (typeof host === 'function') { cb = host; host = 'localhost'; }
                     host = host || 'localhost';
                 }
-                console.error('[3va-socket] Socket.connect', host, port, new Error().stack.split('\n').slice(1, 4).join(' | '));
                 if (typeof cb === 'function') self.once('connect', cb);
                 self.connecting = true;
                 var result = __tcpConnect(host, port);
@@ -2815,7 +3206,33 @@ pub fn inject_require(
                 return s;
             }
 
-            globalThis.__requireCache['tls'] = { TLSSocket: TLSSocket, connect: tlsConnect };
+            globalThis.__requireCache['tls'] = {
+                TLSSocket: TLSSocket,
+                connect: tlsConnect,
+                createSecureContext: function(options) {
+                    options = options || {};
+                    return {
+                        context: {
+                            ca: options.ca || null,
+                            cert: options.cert || null,
+                            key: options.key || null,
+                            passphrase: options.passphrase || null,
+                            rejectUnauthorized: options.rejectUnauthorized !== false,
+                            servername: options.servername || null,
+                            minVersion: options.minVersion || 'TLSv1.2',
+                            maxVersion: options.maxVersion || 'TLSv1.3',
+                            ciphers: options.ciphers || null,
+                            honorCipherOrder: options.honorCipherOrder || false,
+                            secureOptions: options.secureOptions || 0,
+                        },
+                        getCiphers: function() { return []; },
+                    };
+                },
+                getCiphers: function() { return []; },
+                DEFAULT_ECDH_CURVE: 'auto',
+                DEFAULT_MAX_VERSION: 'TLSv1.3',
+                DEFAULT_MIN_VERSION: 'TLSv1.2',
+            };
             globalThis.__requireCache['node:tls'] = globalThis.__requireCache['tls'];
 
             // ── http module ──────────────────────────────────────────────────────────
@@ -2899,8 +3316,15 @@ pub fn inject_require(
                     for (var k in headers) if (Object.prototype.hasOwnProperty.call(headers, k)) this._headers[k] = headers[k];
                 }
                 this.headersSent = true;
+                this._header = true;
                 return this;
             };
+            // Node compat: compression middleware (next/dist/compiled/compression)
+            // calls `this._implicitHeader()` when writing a response without an
+            // explicit writeHead. Node's ServerResponse implementation is just
+            // `this.writeHead(this.statusCode)` — the actual bytes are only flushed
+            // at end(), so recording the head here is sufficient.
+            httpServerResponse.prototype._implicitHeader = function() { this.writeHead(this.statusCode); };
             httpServerResponse.prototype.write = function(chunk, encoding, callback) {
                 if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
                 if (chunk !== undefined) this._chunks.push(chunk);
@@ -3025,8 +3449,6 @@ pub fn inject_require(
                         var req = new httpIncomingMessage(_sock);
                         req.method = r.method;
                         req.url = r.url;
-                        var _lbHdrs = r.headers || {};
-                        console.error('[3va-lb] serverId=' + self._id + ' method=' + r.method + ' url=' + r.url + ' cfService=' + (_lbHdrs['mf-custom-fetch-service'] || 'none') + ' origUrl=' + (_lbHdrs['mf-original-url'] || 'none') + ' envName=' + (_lbHdrs['x-vite-environment'] || 'none') + ' body=' + (r.body || '').slice(0, 100));
                         req.headers = r.headers || {};
                         var _rh = r.headers || {};
                         req.rawHeaders = Object.keys(_rh).reduce(function(a, k) { a.push(k, _rh[k]); return a; }, []);
@@ -3141,7 +3563,6 @@ pub fn inject_require(
                     var lines = [self._method + ' ' + self._path + ' HTTP/1.1'];
                     Object.keys(hdrsLower).forEach(function(kl) { lines.push(hdrsCase[kl] + ': ' + hdrsLower[kl]); });
                     lines.push('', '');
-                    console.error('[3va-creq] RAW REQUEST to', self._host + ':' + self._port + ':\n' + lines.join('\r\n').slice(0, 800));
                     socket.write(lines.join('\r\n'));
                     for (var i = 0; i < self._pendingWrite.length; i++) {
                         socket.write(self._pendingWrite[i]);
@@ -3176,7 +3597,6 @@ pub fn inject_require(
                             }
                         }
                         var fakeRes = { statusCode: statusCode, headers: respHeaders, httpVersion: '1.1', socket: socket, resume: function() {} };
-                        if (statusCode !== 101) console.error('[3va-creq-resp]', self._method, self._path, '→', statusCode, '| tail:', tail.length, 'bytes:', tail.slice(0, 300).toString('utf8'));
                         if (statusCode === 101) {
                             self.emit('upgrade', fakeRes, socket, tail);
                         } else {
@@ -3214,6 +3634,15 @@ pub fn inject_require(
                 return new httpServer(opts, requestListener);
             }
 
+            var HTTP_METHODS = [
+                'ACL','BIND','CHECKOUT','CONNECT','COPY','DELETE',
+                'GET','HEAD','LINK','LOCK','M-SEARCH','MERGE',
+                'MKACTIVITY','MKCALENDAR','MKCOL','MOVE','NOTIFY',
+                'OPTIONS','PATCH','POST','PRI','PROPFIND','PROPPATCH',
+                'PURGE','PUT','REBIND','REPORT','SEARCH','SOURCE',
+                'SUBSCRIBE','TRACE','UNBIND','UNLINK','UNLOCK','UNSUBSCRIBE'
+            ];
+
             var httpModule = {
                 createServer: createServer,
                 globalAgent: httpGlobalAgent,
@@ -3226,7 +3655,8 @@ pub fn inject_require(
                 get: httpGet,
                 ClientRequest: ClientRequest,
                 maxHeaderSize: 16384,
-                STATUS_CODES: HTTP_STATUS_CODES
+                STATUS_CODES: HTTP_STATUS_CODES,
+                METHODS: HTTP_METHODS
             };
             globalThis.__requireCache['http'] = httpModule;
             globalThis.__requireCache['node:http'] = httpModule;
@@ -3571,6 +4001,209 @@ pub fn inject_require(
             };
             globalThis.__requireCache['rollup/parseAst'] = parseAstStub;
         })();
+
+        (function() {
+            function StringDecoder(encoding) {
+                this.encoding = (encoding || 'utf8').toLowerCase().replace(/[-_]/g, '');
+                if (this.encoding === 'utf8' || this.encoding === 'utf-8') this.encoding = 'utf8';
+                this._incomplete = null;
+            }
+            StringDecoder.prototype.write = function(buf) {
+                if (typeof buf === 'string') return buf;
+                if (!Buffer.isBuffer(buf)) buf = Buffer.from(buf);
+                if (buf.length === 0) return '';
+                if (this.encoding === 'utf8') {
+                    var i = buf.length;
+                    while (i > 0 && (buf[i - 1] & 0xC0) === 0x80) i--;
+                    if (i > 0 && (buf[i - 1] & 0x80) !== 0) {
+                        var bytesNeeded = 0;
+                        var b = buf[i - 1];
+                        if ((b & 0xE0) === 0xC0) bytesNeeded = 2;
+                        else if ((b & 0xF0) === 0xE0) bytesNeeded = 3;
+                        else if ((b & 0xF8) === 0xF0) bytesNeeded = 4;
+                        if (i + bytesNeeded - 1 > buf.length) {
+                            this._incomplete = buf.slice(i - 1);
+                            return buf.slice(0, i - 1).toString('utf8');
+                        }
+                    }
+                    if (this._incomplete) {
+                        var combined = Buffer.concat([this._incomplete, buf]);
+                        this._incomplete = null;
+                        return combined.toString('utf8');
+                    }
+                    return buf.toString('utf8');
+                }
+                return buf.toString(this.encoding);
+            };
+            StringDecoder.prototype.end = function(buf) {
+                var ret = '';
+                if (buf) ret = this.write(buf);
+                if (this._incomplete) {
+                    ret += this._incomplete.toString('utf8');
+                    this._incomplete = null;
+                }
+                return ret;
+            };
+            globalThis.__requireCache['string_decoder'] = { StringDecoder: StringDecoder };
+            globalThis.__requireCache['node:string_decoder'] = globalThis.__requireCache['string_decoder'];
+        })();
+
+        (function() {
+            if (globalThis.__requireCache['util']) {
+                globalThis.__requireCache['sys'] = globalThis.__requireCache['util'];
+                globalThis.__requireCache['node:sys'] = globalThis.__requireCache['util'];
+            }
+        })();
+
+        (function() {
+            var MAX_LENGTH = 40;
+            var PUNYCODE_BASE = 36;
+            var TMIN = 1;
+            var TMAX = 26;
+            var SKEW = 38;
+            var DAMP = 700;
+            var INITIAL_BIAS = 72;
+            var INITIAL_N = 128;
+            var DELIMITER = '-';
+            function adapt(delta, numPoints, firstTime) {
+                delta = firstTime ? Math.floor(delta / DAMP) : delta >> 1;
+                delta += Math.floor(delta / numPoints);
+                var k = 0;
+                while (delta > ((PUNYCODE_BASE - TMIN) * TMAX) >> 1) {
+                    delta = Math.floor(delta / (PUNYCODE_BASE - TMIN));
+                    k += PUNYCODE_BASE;
+                }
+                return k + Math.floor(((PUNYCODE_BASE - TMIN + 1) * delta) / (delta + SKEW));
+            }
+            function digitToBasic(digit) {
+                return digit < 26 ? digit + 97 : digit - 26 + 22;
+            }
+            function basicToDigit(codePoint) {
+                if (codePoint >= 48 && codePoint < 58) return codePoint - 22;
+                if (codePoint >= 65 && codePoint < 91) return codePoint - 65;
+                if (codePoint >= 97 && codePoint < 123) return codePoint - 97;
+                return PUNYCODE_BASE;
+            }
+            function encode(input) {
+                var output = [];
+                var inputArray = Array.from(input);
+                var inputLength = inputArray.length;
+                var n = INITIAL_N;
+                var delta = 0;
+                var bias = INITIAL_BIAS;
+                for (var i = 0; i < inputLength; i++) {
+                    if (inputArray[i].charCodeAt(0) < 128) output.push(inputArray[i]);
+                }
+                var basicLength = output.length;
+                var handledCPCount = basicLength;
+                if (basicLength > 0) output.push(DELIMITER);
+                while (handledCPCount < inputLength) {
+                    var m = Infinity;
+                    for (var i = 0; i < inputLength; i++) {
+                        var cp = inputArray[i].charCodeAt(0);
+                        if (cp >= n && cp < m) m = cp;
+                    }
+                    if (m - n > Math.floor((2147483647 - delta) / (handledCPCount + 1))) throw new RangeError('Overflow');
+                    delta += (m - n) * (handledCPCount + 1);
+                    n = m;
+                    for (var i = 0; i < inputLength; i++) {
+                        var cp = inputArray[i].charCodeAt(0);
+                        if (cp < n && ++delta > 2147483647) throw new RangeError('Overflow');
+                        if (cp === n) {
+                            var q = delta;
+                            for (var k = PUNYCODE_BASE; ; k += PUNYCODE_BASE) {
+                                var t = k <= bias ? TMIN : (k >= bias + TMAX ? TMAX : k - bias);
+                                if (q < t) break;
+                                output.push(String.fromCharCode(digitToBasic(t + (q - t) % (PUNYCODE_BASE - t))));
+                                q = Math.floor((q - t) / (PUNYCODE_BASE - t));
+                            }
+                            output.push(String.fromCharCode(digitToBasic(q)));
+                            bias = adapt(delta, handledCPCount + 1, handledCPCount === basicLength);
+                            delta = 0;
+                            handledCPCount++;
+                        }
+                    }
+                    delta++;
+                    n++;
+                }
+                return output.join('');
+            }
+            function decode(input) {
+                var output = [];
+                var inputLength = input.length;
+                var i = 0;
+                var n = INITIAL_N;
+                var bias = INITIAL_BIAS;
+                var basic = input.lastIndexOf(DELIMITER);
+                if (basic < 0) basic = 0;
+                for (var j = 0; j < basic; j++) output.push(input[j]);
+                var index = basic > 0 ? basic + 1 : 0;
+                while (index < inputLength) {
+                    var oldi = i;
+                    var w = 1;
+                    for (var k = PUNYCODE_BASE; ; k += PUNYCODE_BASE) {
+                        if (index >= inputLength) throw new RangeError('Invalid input');
+                        var digit = basicToDigit(input.charCodeAt(index++));
+                        if (digit >= PUNYCODE_BASE) throw new RangeError('Invalid input');
+                        if (digit > Math.floor((2147483647 - i) / w)) throw new RangeError('Overflow');
+                        i += digit * w;
+                        var t = k <= bias ? TMIN : (k >= bias + TMAX ? TMAX : k - bias);
+                        if (digit < t) break;
+                        if (w > Math.floor(2147483647 / (PUNYCODE_BASE - t))) throw new RangeError('Overflow');
+                        w *= PUNYCODE_BASE - t;
+                    }
+                    bias = adapt(i - oldi, output.length + 1, oldi === 0);
+                    if (Math.floor(i / (output.length + 1)) > 2147483647 - n) throw new RangeError('Overflow');
+                    n += Math.floor(i / (output.length + 1));
+                    i %= output.length + 1;
+                    output.splice(i, 0, String.fromCharCode(n));
+                    i++;
+                }
+                return output.join('');
+            }
+            function toASCII(domain) {
+                return domain.split('.').map(function(label) {
+                    if (/^[a-zA-Z0-9-]+$/.test(label)) return label;
+                    return 'xn--' + encode(label);
+                }).join('.');
+            }
+            function toUnicode(domain) {
+                return domain.split('.').map(function(label) {
+                    if (label.indexOf('xn--') === 0) return decode(label.slice(4));
+                    return label;
+                }).join('.');
+            }
+            globalThis.__requireCache['punycode'] = {
+                encode: encode, decode: decode, toASCII: toASCII, toUnicode: toUnicode,
+                ucs2: { decode: function(s) { return Array.from(s).map(function(c) { return c.charCodeAt(0); }); },
+                        encode: function(arr) { return arr.map(function(c) { return String.fromCharCode(c); }).join(''); } },
+                version: '2.3.1'
+            };
+            globalThis.__requireCache['node:punycode'] = globalThis.__requireCache['punycode'];
+        })();
+
+        (function() {
+            var EE = globalThis.__requireCache['events'] || globalThis.__requireCache['node:events'];
+            function Domain() {
+                if (!(this instanceof Domain)) return new Domain();
+                if (EE && typeof EE === 'function') EE.call(this);
+                else if (EE && EE.EventEmitter) EE.EventEmitter.call(this);
+                this.members = [];
+            }
+            if (EE && typeof EE === 'function') Domain.prototype = Object.create(EE.prototype);
+            else if (EE && EE.EventEmitter) Domain.prototype = Object.create(EE.EventEmitter.prototype);
+            Domain.prototype.run = function(fn) { try { return fn(); } catch(e) { this.emit('error', e); } };
+            Domain.prototype.bind = function(fn) { var self = this; return function() { try { return fn.apply(this, arguments); } catch(e) { self.emit('error', e); } }; };
+            Domain.prototype.intercept = function(fn) { var self = this; return function(err) { if (err) { self.emit('error', err); } else { try { return fn.apply(this, Array.prototype.slice.call(arguments, 1)); } catch(e) { self.emit('error', e); } } }; };
+            Domain.prototype.add = function(emitter) { if (this.members.indexOf(emitter) === -1) this.members.push(emitter); };
+            Domain.prototype.remove = function(emitter) { var i = this.members.indexOf(emitter); if (i !== -1) this.members.splice(i, 1); };
+            Domain.prototype.enter = function() { process.domain = this; };
+            Domain.prototype.exit = function() { process.domain = null; };
+            Domain.prototype.dispose = function() { this.members = []; process.domain = null; };
+            if (!process.domain) process.domain = null;
+            globalThis.__requireCache['domain'] = { create: function() { return new Domain(); }, Domain: Domain };
+            globalThis.__requireCache['node:domain'] = globalThis.__requireCache['domain'];
+        })();
         })();
     "#;
     let source = V8String::new(scope, js_code).unwrap();
@@ -3753,6 +4386,47 @@ pub fn inject_require(
                 return globalThis.__fallbackModules[specifier];
             }
 
+            var __NATIVE_REMAP = {
+                'node-argon2': 'argon2-wasm-pro',
+                'argon2': 'argon2-wasm-pro',
+                'canvas': 'canvas-wasm',
+                'sharp': 'jimp',
+                'sqlite3': '__3va_node_sqlite',
+                'better-sqlite3': '__3va_node_sqlite',
+                'fsevents': '__3va_stub_fsevents',
+                '@parcel/watcher': '__3va_stub_parcel_watcher',
+                'cpu-features': '__3va_stub_cpu_features'
+            };
+            var __STUB_CACHE = {
+                '__3va_stub_fsevents': { subscribe: function(){ return function(){}; }, unsubscribe: function(){} },
+                '__3va_stub_parcel_watcher': { subscribe: function(){ return { unsubscribe: function(){} }; }, unsubscribe: function(){} },
+                '__3va_stub_cpu_features': {}
+            };
+            if (specifier[0] !== '.' && specifier[0] !== '/' && Object.prototype.hasOwnProperty.call(__NATIVE_REMAP, specifier)) {
+                var remapped = __NATIVE_REMAP[specifier];
+                var scope = __pkgScopeFor(dir);
+                if (typeof process !== 'undefined' && process.emitWarning) {
+                    process.emitWarning("Remapped '" + specifier + "' → '" + (remapped === '__3va_node_sqlite' ? 'node:sqlite' : remapped) + "' (native addon not supported)");
+                }
+                if (remapped === '__3va_node_sqlite') {
+                    return __scopedModule(bare, requireFrom('node:sqlite', dir), scope);
+                }
+                if (Object.prototype.hasOwnProperty.call(__STUB_CACHE, remapped)) {
+                    return __scopedModule(bare, __STUB_CACHE[remapped], scope);
+                }
+                return __scopedModule(bare, requireFrom(remapped, dir), scope);
+            }
+
+            if (/\.node$/.test(specifier)) {
+                var resolved_node = __requireResolve(specifier, dir);
+                if (resolved_node && resolved_node.slice(-5) === '.node') {
+                    return __napiLoad(resolved_node);
+                }
+                var err = new Error('Cannot find native addon: ' + specifier);
+                err.code = 'ERR_DLOPEN_FAILED';
+                throw err;
+            }
+
             var resolved = __requireResolve(specifier, dir);
 
             // node: builtins (or bare node names) return themselves as sentinel.
@@ -3776,24 +4450,22 @@ pub fn inject_require(
             if (resolved.slice(-5) === '.json') {
                 var jsonSrc = __readFile(resolved);
                 var parsed = JSON.parse(jsonSrc);
-                globalThis.__loadedModules[resolved] = { exports: parsed };
+                globalThis.__loadedModules[resolved] = { id: resolved, filename: resolved, exports: parsed, children: [], parent: null, loaded: true };
                 return parsed;
             }
 
             if (resolved.slice(-5) === '.node') {
-                // ponytail: stub native addons as empty objects; callers fail at use-time, not load-time
-                var stub = {};
-                globalThis.__loadedModules[resolved] = { exports: stub };
-                return stub;
+                return __napiLoad(resolved);
             }
 
             var moduleDir = resolved.replace(/[\/\\][^\/\\]*$/, '') || '.';
-            var mod = { exports: {} };
+            var mod = { id: resolved, filename: resolved, path: moduleDir, exports: {}, children: [], parent: null, loaded: false };
             globalThis.__loadedModules[resolved] = mod;
 
             var localRequire = function(id) { return requireFrom(id, moduleDir); };
             localRequire.resolve = function(id) { return __requireResolve(id, moduleDir); };
             localRequire.cache = globalThis.__loadedModules;
+            localRequire.extensions = globalThis.require.extensions || {};
             // Backs this module's own transpiled dynamic `import(x)` calls —
             // must resolve relative to *this* module's directory via
             // localRequire, not the entry script's, same as require() above.
@@ -3836,6 +4508,7 @@ pub fn inject_require(
                 var __vvva_import_meta__ = {url: ownMetaUrl, env: globalThis.__vvva_meta_env__, hot: undefined, glob: globalThis.__vvva_meta_glob__, resolve: globalThis.__vvva_meta_resolve__, require: localRequire, dirname: moduleDir, filename: resolved, main: false};
                 var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', '__importAsync', '__vvva_import_meta__', source + '\n//# sourceURL=' + resolved);
                 fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl, localImportAsync, __vvva_import_meta__);
+                mod.loaded = true;
             } catch (e) {
                 delete globalThis.__loadedModules[resolved];
                 e.message = (e.message || String(e)) + ' (in ' + resolved + ')';
@@ -3862,6 +4535,11 @@ pub fn inject_require(
             return globalThis.__vvva_require_resolve_from(specifier, globalThis.__dirname || undefined);
         };
         globalThis.require.main = globalThis.require.main || undefined;
+        globalThis.require.extensions = globalThis.require.extensions || {
+            '.js': function(mod, filename) { mod.exports = requireFrom(filename, filename.replace(/[\/\\][^\/\\]*$/, '')); },
+            '.json': function(mod, filename) { mod.exports = JSON.parse(__readFile(filename)); },
+            '.node': function(mod, filename) { mod.exports = __napiLoad(filename); }
+        };
 
         // Entry-point script's own transpiled dynamic `import(x)` calls —
         // required modules get their own per-directory version instead (see
@@ -3869,6 +4547,30 @@ pub fn inject_require(
         globalThis.__importAsync = __makeImportAsync(function(specifier) {
             return requireFrom(specifier, globalThis.__dirname || undefined);
         });
+
+        // When this process is a forked child (child_process.fork or cluster.fork),
+        // set up process.send and stdin IPC polling immediately — not gated on
+        // require('cluster'), so child scripts that never require cluster still get IPC.
+        if (process.env && process.env.CLUSTER_WORKER === '1' && typeof process.send !== 'function') {
+            process.send = function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); };
+            process.connected = true;
+            var __forkIpcBuf = '';
+            var __forkIpcInterval = setInterval(function() {
+                try {
+                    var chunk = __stdinReadPoll();
+                    if (chunk && chunk.length > 0) {
+                        __forkIpcBuf += Buffer.from(chunk).toString('utf8');
+                        var lines = __forkIpcBuf.split('\n');
+                        __forkIpcBuf = lines.pop();
+                        for (var i = 0; i < lines.length; i++) {
+                            var line = lines[i].trim();
+                            if (!line) continue;
+                            try { process.emit('message', JSON.parse(line)); } catch(e) {}
+                        }
+                    }
+                } catch(e) {}
+            }, 10);
+        }
     })();
     "#;
     let require_source = V8String::new(scope, require_js).unwrap();
