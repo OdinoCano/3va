@@ -15,11 +15,15 @@ async fn engine() -> JsEngine {
 
 // ── self / navigator ─────────────────────────────────────────────────────────
 
+// `self` is deliberately left undefined, not aliased to `globalThis` — see
+// the ponytail comment in web_globals.rs: webpack uses `typeof self` to
+// distinguish browser from Node.js and calls browser-only APIs when it's
+// defined, and real Node.js has no global `self` either.
 #[tokio::test]
-async fn self_equals_globalthis() {
+async fn self_is_undefined() {
     let mut e = engine().await;
     let r = e
-        .eval_to_string("String(self === globalThis)")
+        .eval_to_string("String(typeof self === 'undefined')")
         .await
         .unwrap();
     assert_eq!(r, "true");
