@@ -611,7 +611,15 @@ async fn child_process_spawnsync_with_input() {
 async fn child_process_spawn_stdin_write_end() {
     let mut e = engine_with_spawn().await;
     // eval_to_string doesn't await Promises, so we store the result in a global
-    // and drive the event loop with idle() before reading it.
+    // and drive the event loop before reading it. `cp.spawn`'s stdout-poll
+    // loop reschedules itself via `setTimeout(pollStdout, 0)` (a real timer,
+    // not just a microtask) until the child process is done — idle() only
+    // pumps one microtask checkpoint, so it can't fire that timer at all.
+    // run_event_loop() does, looping until the poll chain naturally stops
+    // rescheduling (child exits, stdout drained) instead of racing a single
+    // tick against however fast `cat` happens to flush under this run's
+    // system load — this test used to be flaky specifically because of
+    // that race under CI's heavier parallel load.
     e.eval_to_string(
         r#"
         globalThis.__spawnStdinResult = '';
@@ -625,7 +633,7 @@ async fn child_process_spawn_stdin_write_end() {
     )
     .await
     .unwrap();
-    e.idle().await;
+    e.run_event_loop().await.unwrap();
     let r = e
         .eval_to_string("globalThis.__spawnStdinResult.trim()")
         .await
