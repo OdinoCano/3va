@@ -591,3 +591,39 @@ jobs:
           # wingetcreate submit works for both new packages and version updates.
           .\wingetcreate.exe submit "$env:DEST_DIR" `
             --token $env:WINGET_TOKEN
+
+  # ── Publish to the Snap Store ─────────────────────────────────────────────────
+  # dist/snap/snapcraft.yaml builds from the tagged git source (not this
+  # checkout's working tree) via `source-tag: "$SNAPCRAFT_PROJECT_VERSION"`,
+  # so this job doesn't need collect-hashes — it just needs the tag to exist,
+  # which it does by the time release.yml has published the GitHub Release
+  # this workflow triggers on.
+  publish-snap:
+    name: Publish to Snap Store
+    runs-on: ubuntu-latest
+    environment: snap
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build snap
+        id: build
+        uses: snapcore/action-build@v1
+        with:
+          path: dist/snap
+
+      - name: Upload snap (dry run)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-snap
+          path: ${{ steps.build.outputs.snap }}
+          retention-days: 7
+
+      - name: Publish to Snap Store
+        if: env.DRY_RUN != 'true'
+        uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: stable
