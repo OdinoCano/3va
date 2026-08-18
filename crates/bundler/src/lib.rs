@@ -362,7 +362,14 @@ fn bundle_graph(entry: &Path, minify: bool) -> anyhow::Result<String> {
 
         // Rewrite every `require("spec")` call to the target's resolved
         // absolute-path registry key, discovering new modules to queue.
+        // Node built-ins (`fs`, `node:path`, ...) are left untouched instead
+        // of resolved from `node_modules/` — there's no such directory entry
+        // for them, and the bundle's own `require()` falls through to the
+        // real global `require` for exactly this case (see below).
         let rewritten = rewrite_bundle_requires(&body, |spec| {
+            if vvva_js::esm::is_node_builtin(spec) {
+                return spec.to_string();
+            }
             let resolved = vvva_js::esm::resolve_esm(&base, spec)
                 .canonicalize()
                 .unwrap_or_else(|_| vvva_js::esm::resolve_esm(&base, spec));
@@ -387,11 +394,15 @@ fn bundle_graph(entry: &Path, minify: bool) -> anyhow::Result<String> {
         "(function() {{\n\
          var __modules = {{\n{modules_src}}};\n\
          var __cache = {{}};\n\
+         var __hostRequire = (typeof globalThis !== 'undefined' && globalThis.require) || undefined;\n\
          function require(id) {{\n\
          \x20 if (__cache[id]) return __cache[id].exports;\n\
+         \x20 if (!__modules[id]) {{\n\
+         \x20\x20 if (__hostRequire) return __hostRequire(id);\n\
+         \x20\x20 throw new Error(\"3va bundle: module not found: \" + id);\n\
+         \x20 }}\n\
          \x20 var module = {{ exports: {{}} }};\n\
          \x20 __cache[id] = module;\n\
-         \x20 if (!__modules[id]) throw new Error(\"3va bundle: module not found: \" + id);\n\
          \x20 __modules[id](module, module.exports, require);\n\
          \x20 return module.exports;\n\
          }}\n\
