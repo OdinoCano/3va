@@ -498,12 +498,19 @@ pub fn inject_child_process(
                 vec![]
             };
 
-            // Create a pipe for fd 3 (--control-fd=3 used by workerd).
-            // pipe_fds[0]=read end (parent keeps), pipe_fds[1]=write end (child gets as fd 3).
-            let mut pipe_fds = [-1i32; 2];
-            let pipe_ok = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
-            let read_fd = pipe_fds[0];
-            let write_fd = pipe_fds[1];
+            // Create a pipe for fd 3 (--control-fd=3 used by workerd). Unix-only:
+            // `libc::pipe`/`dup2`/fd passing to a child has no Windows equivalent
+            // here, so the control channel is simply unavailable there — the
+            // `pipe_ok` checks below already treat "no pipe" as the normal
+            // no-control-channel case.
+            #[cfg(unix)]
+            let (pipe_ok, read_fd, write_fd) = {
+                let mut pipe_fds = [-1i32; 2];
+                let ok = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
+                (ok, pipe_fds[0], pipe_fds[1])
+            };
+            #[cfg(not(unix))]
+            let (pipe_ok, read_fd, write_fd) = (false, -1i32, -1i32);
 
             #[cfg(unix)]
             let child_result = {
@@ -540,6 +547,7 @@ pub fn inject_child_process(
                 .spawn();
 
             // In the parent: close write end; spawn thread to read from read end.
+            #[cfg(unix)]
             if pipe_ok && write_fd >= 0 {
                 unsafe {
                     libc::close(write_fd);
@@ -568,6 +576,9 @@ pub fn inject_child_process(
                     });
                     let ctrl_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
                     let ctrl_done = Arc::new(AtomicBool::new(false));
+                    #[cfg(not(unix))]
+                    ctrl_done.store(true, Ordering::SeqCst);
+                    #[cfg(unix)]
                     if pipe_ok && read_fd >= 0 {
                         let cbuf = ctrl_buf.clone();
                         let cdone = ctrl_done.clone();
