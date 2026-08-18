@@ -2056,9 +2056,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
 })();
 "#;
 
-    let script = v8::Script::compile(scope, v8::String::new(scope, js_code).unwrap(), None)
-        .ok_or_else(|| anyhow::anyhow!("compile error"))?;
-    let _ = script.run(scope);
+    crate::builtins::code_cache::compile_and_run_cached(scope, "crypto", js_code)?;
 
     Ok(())
 }

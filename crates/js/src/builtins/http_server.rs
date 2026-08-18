@@ -15,6 +15,18 @@ use vvva_permissions::PermissionState;
 
 const HARD_MAX_BODY: usize = 100 * 1024 * 1024;
 
+/// Count of currently-open `http.createServer().listen()` / http2 listeners
+/// (HTTP/1 and HTTP/2 both bump this — there's no need to tell them apart,
+/// only whether *any* server is listening). Like libuv's active-handle
+/// count: an open listener has to keep `run_event_loop` alive while idle,
+/// since "waiting for the next connection" isn't a pending timer or task.
+static HTTP_ACTIVE_LISTENERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub fn has_active_listeners() -> bool {
+    HTTP_ACTIVE_LISTENERS.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
 /// Requests that finished parsing, waiting to be picked up by JS, keyed by
 /// server id. Populated by the background accept task spawned in
 /// `__httpListen`; drained by the non-blocking `__httpAcceptPoll`.
@@ -316,6 +328,8 @@ pub fn inject_http_server(
                                 };
                                 let listener = Arc::new(tokio_listener);
                                 ctx.servers.lock().unwrap().insert(id, listener.clone());
+                                HTTP_ACTIVE_LISTENERS
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                                 if id == 0
                                     && let Some(firewall) = ctx.fw.as_ref().as_ref()
@@ -719,7 +733,9 @@ pub fn inject_http_server(
                 };
                 let server_id_arg = args.get(0);
                 let server_id = server_id_arg.uint32_value(scope).unwrap_or(0);
-                servers.lock().unwrap().remove(&server_id);
+                if servers.lock().unwrap().remove(&server_id).is_some() {
+                    HTTP_ACTIVE_LISTENERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 rv.set(v8::undefined(scope).into());
             },
         )
@@ -850,6 +866,8 @@ pub fn inject_http2_server(
                                     next_stream_id: 1,
                                 }));
                                 servers.lock().unwrap().insert(id, state.clone());
+                                HTTP_ACTIVE_LISTENERS
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                                 let state2 = state.clone();
                                 tokio::spawn(async move {
@@ -1000,6 +1018,7 @@ pub fn inject_http2_server(
                 let sid = args.get(0).uint32_value(_scope).unwrap_or(0);
                 if let Some(state) = servers.lock().unwrap().remove(&sid) {
                     state.lock().unwrap().listener.take();
+                    HTTP_ACTIVE_LISTENERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 rv.set(v8::undefined(_scope).into());
             },

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use v8::{
-    ContextScope, Function, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, Script,
+    ContextScope, Function, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue,
     String as V8String,
 };
 use vvva_permissions::{Capability, PermissionState};
@@ -253,8 +253,7 @@ pub fn inject_require(
             return lines.join('\n');
         };
     "#;
-    let source = V8String::new(scope, source_code).unwrap();
-    let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
+    crate::builtins::code_cache::compile_and_run_cached(scope, "require-intro", source_code)?;
 
     let read_file_fn = Function::new(
         scope,
@@ -4214,8 +4213,7 @@ pub fn inject_require(
         })();
         })();
     "#;
-    let source = V8String::new(scope, js_code).unwrap();
-    let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
+    crate::builtins::code_cache::compile_and_run_cached(scope, "require-core", js_code)?;
 
     // ── require() — CommonJS module loader ────────────────────────────────────
     // Built-in modules (fs, process, util, events, ...) are looked up directly
@@ -4581,8 +4579,7 @@ pub fn inject_require(
         }
     })();
     "#;
-    let require_source = V8String::new(scope, require_js).unwrap();
-    let _ = Script::compile(scope, require_source, None).and_then(|s| s.run(scope));
+    crate::builtins::code_cache::compile_and_run_cached(scope, "require-tail", require_js)?;
 
     Ok(())
 }
