@@ -134,6 +134,19 @@ static TCP_LISTENERS: std::sync::OnceLock<Arc<Mutex<HashMap<u32, Arc<std::net::T
 fn listeners() -> &'static Arc<Mutex<HashMap<u32, Arc<std::net::TcpListener>>>> {
     TCP_LISTENERS.get().unwrap()
 }
+
+/// Mirrors `listeners()`'s open-listener count without needing to lock it —
+/// `run_event_loop` checks this every iteration, including the hot path
+/// while serving real traffic, so it has to be an atomic load, not a mutex
+/// lock. Like libuv's active-handle count: an open listener has to keep the
+/// loop alive even while idle, since "waiting for the next connection"
+/// isn't a pending timer or task.
+static TCP_ACTIVE_LISTENERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub fn has_active_listeners() -> bool {
+    TCP_ACTIVE_LISTENERS.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
 static TCP_NEXT_LISTENER_ID: std::sync::OnceLock<Arc<Mutex<u32>>> = std::sync::OnceLock::new();
 fn next_listener_id() -> &'static Arc<Mutex<u32>> {
     TCP_NEXT_LISTENER_ID.get().unwrap()
@@ -448,6 +461,7 @@ pub fn inject_tcp(
                             id
                         };
                         listeners().lock().unwrap().insert(id, Arc::new(std_l));
+                        TCP_ACTIVE_LISTENERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         rv.set(v8::Integer::new_from_unsigned(_scope, id).into());
                     }
                     Err(e) => {
@@ -537,7 +551,9 @@ pub fn inject_tcp(
                   mut rv: v8::ReturnValue| {
                 let server_id_arg = args.get(0);
                 let server_id = server_id_arg.uint32_value(_scope).unwrap_or(0);
-                listeners().lock().unwrap().remove(&server_id);
+                if listeners().lock().unwrap().remove(&server_id).is_some() {
+                    TCP_ACTIVE_LISTENERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 rv.set(v8::undefined(_scope).into());
             },
         )

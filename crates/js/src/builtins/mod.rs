@@ -1,5 +1,6 @@
 pub mod buffer;
 pub mod child_process;
+pub mod code_cache;
 pub mod console;
 pub mod crypto;
 pub mod dgram;
@@ -45,8 +46,20 @@ pub fn inject_all(
     firewall: Option<Arc<Firewall>>,
     ws_pool: websocket::WsPool,
 ) -> anyhow::Result<()> {
-    console::inject_console(scope)?;
-    timers::inject_timers(scope, timer_manager)?;
+    let __trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
+    macro_rules! t {
+        ($label:expr, $e:expr) => {{
+            let __t = std::time::Instant::now();
+            let __r = $e;
+            if __trace {
+                eprintln!("[inject] {}: {:?}", $label, __t.elapsed());
+            }
+            __r
+        }};
+    }
+
+    t!("console", console::inject_console(scope))?;
+    t!("timers", timers::inject_timers(scope, timer_manager))?;
 
     let atob_btoa = r#"
 (function() {
@@ -100,8 +113,11 @@ pub fn inject_all(
     .ok_or_else(|| anyhow::anyhow!("compile error"))?;
     let _ = script.run(scope);
 
-    buffer::inject_buffer(scope)?;
-    process::inject_process(scope, permissions.clone())?;
+    t!("buffer", buffer::inject_buffer(scope))?;
+    t!(
+        "process",
+        process::inject_process(scope, permissions.clone())
+    )?;
 
     let global_this_setup = "globalThis.global = globalThis; globalThis.GLOBAL = globalThis;";
     let script = v8::Script::compile(
@@ -112,34 +128,52 @@ pub fn inject_all(
     .ok_or_else(|| anyhow::anyhow!("compile error"))?;
     let _ = script.run(scope);
 
-    web_globals::inject_web_globals(scope)?;
-    fetch::inject_fetch(scope, permissions.clone())?;
-    fs::inject_fs(scope, permissions.clone())?;
-    tcp::inject_tcp(scope, permissions.clone())?;
-    grpc::inject_grpc(scope, permissions.clone())?;
-    http_server::inject_http_server(scope, permissions.clone(), firewall)?;
-    http_server::inject_http2_server(scope, permissions.clone())?;
-    os_info::inject_os_info(scope)?;
-    modules::inject_require(scope, permissions.clone())?;
-    websocket::inject_websocket(scope, permissions.clone(), ws_pool)?;
-    zlib::inject_zlib(scope)?;
-    child_process::inject_child_process(scope, permissions.clone())?;
-    crypto::inject_crypto(scope)?;
-    ffi::inject_ffi(scope, permissions.clone())?;
-    napi::inject_napi(scope, permissions.clone())?;
-    source_maps::inject_source_maps(scope)?;
-    vm::inject_vm(scope)?;
-    worker_threads::inject_worker_threads_native(scope, permissions.clone());
-    dgram::inject_dgram(scope, permissions.clone())?;
-    sqlite::inject_sqlite(scope)?;
-    event_source::inject_event_source(scope);
-    imap::inject_imap(scope, permissions.clone());
-    irc::inject_irc(scope, permissions.clone());
-    ftp::inject_ftp(scope, permissions.clone());
-    pop3::inject_pop3(scope, permissions.clone());
-    mqtt::inject_mqtt(scope, permissions.clone());
-    ssh::inject_ssh(scope, permissions.clone());
-    webrtc::inject_webrtc(scope, permissions.clone());
+    t!("web_globals", web_globals::inject_web_globals(scope))?;
+    t!("fetch", fetch::inject_fetch(scope, permissions.clone()))?;
+    t!("fs", fs::inject_fs(scope, permissions.clone()))?;
+    t!("tcp", tcp::inject_tcp(scope, permissions.clone()))?;
+    t!("grpc", grpc::inject_grpc(scope, permissions.clone()))?;
+    t!(
+        "http_server",
+        http_server::inject_http_server(scope, permissions.clone(), firewall)
+    )?;
+    t!(
+        "http2_server",
+        http_server::inject_http2_server(scope, permissions.clone())
+    )?;
+    t!("os_info", os_info::inject_os_info(scope))?;
+    t!(
+        "require",
+        modules::inject_require(scope, permissions.clone())
+    )?;
+    t!(
+        "websocket",
+        websocket::inject_websocket(scope, permissions.clone(), ws_pool)
+    )?;
+    t!("zlib", zlib::inject_zlib(scope))?;
+    t!(
+        "child_process",
+        child_process::inject_child_process(scope, permissions.clone())
+    )?;
+    t!("crypto", crypto::inject_crypto(scope))?;
+    t!("ffi", ffi::inject_ffi(scope, permissions.clone()))?;
+    t!("napi", napi::inject_napi(scope, permissions.clone()))?;
+    t!("source_maps", source_maps::inject_source_maps(scope))?;
+    t!("vm", vm::inject_vm(scope))?;
+    t!(
+        "worker_threads",
+        worker_threads::inject_worker_threads_native(scope, permissions.clone())
+    );
+    t!("dgram", dgram::inject_dgram(scope, permissions.clone()))?;
+    t!("sqlite", sqlite::inject_sqlite(scope))?;
+    t!("event_source", event_source::inject_event_source(scope));
+    t!("imap", imap::inject_imap(scope, permissions.clone()));
+    t!("irc", irc::inject_irc(scope, permissions.clone()));
+    t!("ftp", ftp::inject_ftp(scope, permissions.clone()));
+    t!("pop3", pop3::inject_pop3(scope, permissions.clone()));
+    t!("mqtt", mqtt::inject_mqtt(scope, permissions.clone()));
+    t!("ssh", ssh::inject_ssh(scope, permissions.clone()));
+    t!("webrtc", webrtc::inject_webrtc(scope, permissions.clone()));
 
     Ok(())
 }

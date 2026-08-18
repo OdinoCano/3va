@@ -442,7 +442,14 @@ impl JsEngine {
     }
 
     pub async fn run_event_loop(&mut self) -> anyhow::Result<()> {
-        let max_iterations = if self.server_mode {
+        // An open `http.createServer()`/`net.createServer()` listener needs
+        // to keep this loop alive indefinitely too, exactly like
+        // `server_mode` — "waiting for the next connection" is real pending
+        // work even though it never shows up as a timer or task.
+        let has_listener = || {
+            builtins::http_server::has_active_listeners() || builtins::tcp::has_active_listeners()
+        };
+        let max_iterations = if self.server_mode || has_listener() {
             usize::MAX
         } else {
             100_000
@@ -528,7 +535,8 @@ impl JsEngine {
 
             let still_pending = self.timer_manager.has_pending()
                 || self.runtime_core.lock().unwrap().pending_task_count() > 0
-                || builtins::napi::has_pending_native_async();
+                || builtins::napi::has_pending_native_async()
+                || has_listener();
             if !still_pending || iterations >= max_iterations {
                 break;
             }

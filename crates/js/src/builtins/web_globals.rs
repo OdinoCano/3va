@@ -1,4 +1,4 @@
-use v8::{ContextScope, HandleScope, Script};
+use v8::{ContextScope, HandleScope};
 
 pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> {
     let web_globals_code = r#"
@@ -1371,10 +1371,7 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
     })();
     "#;
 
-    let source = v8::String::new(scope, web_globals_code).unwrap();
-    let script =
-        Script::compile(scope, source, None).ok_or_else(|| anyhow::anyhow!("compile error"))?;
-    let _ = script.run(scope);
+    crate::builtins::code_cache::compile_and_run_cached(scope, "web-globals", web_globals_code)?;
 
     Ok(())
 }
