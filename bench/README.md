@@ -51,31 +51,45 @@ return `403`. Both numbers are real; they answer different questions.
 
 ## Reference run
 
-Measured 2026-07-15 on:
+The numbers backing the main README's comparison table now come from
+[`.github/workflows/benchmark.yml`](../.github/workflows/benchmark.yml)
+itself, not a hand-run on a maintainer's machine — see the "CI" section
+below for why. Latest published run:
+[actions/runs/32180248410](https://github.com/OdinoCano/3va/actions/runs/32180248410)
+(2026-08-18, commit `2917866`), on a GitHub-hosted `ubuntu-latest` runner
+(4 vCPU, 15 GiB RAM, Linux 6.17-azure):
 
-- AMD Ryzen 9 7950X (16 cores / 32 threads), 30 GiB RAM, Linux 6.17
-- 3va: this repo, release build (`cargo build --release`, fat LTO,
-  `rustc 1.97.0-nightly`)
-- Node.js 24.17.0
+- 3va: this repo, release build (`cargo build --release`)
+- Node.js 24.19.0
 - Bun 1.3.14
 
 | Runtime | Startup (mean) | HTTP throughput (c=1000) | Memory, idle → post-load | Install, warm |
 |---|---|---|---|---|
-| Node.js 24.17 | 14.8 ms | 69,274 req/s | 45.0 MB → 81.2 MB | — |
-| Bun 1.3.14 | 7.0 ms | 124,879 req/s | 34.4 MB → 44.6 MB | — |
-| **3va** | 30.1 ms | 12,999 req/s¹ | 31.9 MB → **92.7 MB**² | 12.0 ms |
+| Node.js 24.19 | 28.2 ms | 19,056 req/s | 48.0 MB → 77.2 MB | — |
+| Bun 1.3.14 | 15.4 ms | 54,112 req/s | 41.8 MB → 50.7 MB | — |
+| **3va** | 25.8 ms | 6,899 req/s¹ | 50.8 MB → 87.0 MB | 24.8 ms |
 
-¹ With `3va.config.json`'s opened-up firewall limits — see above.  
-² Was 255.1 MB before the fix described below — a real regression was found and fixed as part of producing this benchmark suite, not a permanent characteristic of the runtime.
+¹ With `3va.config.json`'s opened-up firewall limits — see above.
 
-Run-to-run variance on throughput was double-digit percent even on an
-otherwise idle machine (single-run figures above, not averaged across
-repeats) — treat the ranking as reliable and the exact req/s as a snapshot,
-not a guarantee.
+GitHub's shared runners are weaker and noisier than dedicated hardware —
+absolute numbers here run meaningfully lower than a quiet dedicated box for
+all three runtimes (CPU-bound work like HTTP throughput scales down with
+fewer/slower cores; startup latency picks up scheduler noise from
+neighboring jobs) — but the workflow re-measures all three runtimes
+together on every run, so the *ranking* and relative gaps are the
+trustworthy part. Treat single-run absolute figures as a snapshot; rerun
+the workflow (`workflow_dispatch`) for a fresh one, or diff against past
+runs in the Actions tab for a trend instead of one point in time.
 
 ### Memory under load: root cause and fix
 
-The first version of this reference run showed 3va's memory growing ~8.5×
+*Historical investigation, from a 2026-07-15 run on dedicated hardware
+(AMD Ryzen 9 7950X) predating the switch to CI-sourced reference numbers
+above — the specific MB figures below won't match the current CI table
+(different machine, different point in time), but the root cause and fix
+they describe are still exactly what's running today.*
+
+The first version of that run showed 3va's memory growing ~8.5×
 from idle to 1,000 concurrent connections (30 MB → 255 MB), against ~1.8×
 for Node and ~1.3× for Bun. That was investigated rather than left as a
 caveat:
@@ -128,8 +142,13 @@ lower.
 ## CI
 
 [`../.github/workflows/benchmark.yml`](../.github/workflows/benchmark.yml)
-runs this script on `workflow_dispatch` and on release tags, publishing the
-result table to the workflow's job summary. GitHub-hosted runners have
-noisier, weaker hardware than a dedicated machine, so treat CI's absolute
-numbers as regression signal against *previous CI runs*, not as the
-headline figures — the reference run above is what should back README claims.
+runs this script on `workflow_dispatch`, on release tags, and weekly,
+publishing the result table to the workflow's job summary. **As of 2.5.0,
+this is where the main README's comparison table numbers come from** —
+deliberately, not a reversal of the earlier "dedicated hardware only"
+policy by accident: a number anyone can regenerate by clicking "Run
+workflow" (or that reruns automatically on a schedule) is more credible
+than one only reproducible on a maintainer's specific machine, even though
+the dedicated-hardware run above has cleaner absolute figures. Re-run it
+yourself, compare against the [linked run](https://github.com/OdinoCano/3va/actions/runs/32180248410)
+above, or diff any two runs in the Actions tab for a regression check.
