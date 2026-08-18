@@ -35,7 +35,21 @@ apps:
 
 parts:
   3va:
-    plugin: dump
-    source: ../../target/release/
-    organize:
-      3va: bin/3va
+    # A `dump` part sourced from a relative host path (../../target/release/)
+    # looks tempting for a monorepo like this one, but snapcraft's real
+    # builds (LXD/Multipass/CI, i.e. anything but a bare `--destructive-mode`
+    # run from exactly this directory with a pre-built binary already
+    # sitting there) only mount this part's own source tree — a path
+    # escaping it via `..` doesn't exist inside the build instance at all.
+    # Building from the real git source, like any other snap, works
+    # everywhere the same way instead.
+    plugin: nil
+    source: https://github.com/OdinoCano/3va.git
+    source-tag: "$SNAPCRAFT_PROJECT_VERSION"
+    build-snaps:
+      - rustup
+    override-build: |
+      rustup default stable
+      cargo build --release -p vvva_cli
+      mkdir -p "$CRAFT_PART_INSTALL/bin"
+      cp target/release/3va "$CRAFT_PART_INSTALL/bin/3va"
