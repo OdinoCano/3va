@@ -2,6 +2,63 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::builtins::modules;
 
+/// Node.js built-in module names (bare, no `node:` prefix). Mirrors the
+/// list `modules.rs`'s native `require()` resolver and its JS-side
+/// `Module.builtinModules` both already carry — kept here too so callers
+/// that only need "is this specifier a builtin" (like the bundler, which
+/// must never try to resolve `require('fs')` from `node_modules/`) don't
+/// need to reach into `require()`'s resolution internals for it.
+const NODE_BUILTINS: &[&str] = &[
+    "assert",
+    "async_hooks",
+    "buffer",
+    "child_process",
+    "cluster",
+    "console",
+    "crypto",
+    "dgram",
+    "diagnostics_channel",
+    "dns",
+    "domain",
+    "events",
+    "fs",
+    "http",
+    "http2",
+    "https",
+    "inspector",
+    "module",
+    "net",
+    "os",
+    "path",
+    "perf_hooks",
+    "process",
+    "punycode",
+    "querystring",
+    "readline",
+    "repl",
+    "stream",
+    "string_decoder",
+    "sys",
+    "timers",
+    "tls",
+    "tty",
+    "url",
+    "util",
+    "v8",
+    "vm",
+    "wasi",
+    "worker_threads",
+    "zlib",
+];
+
+/// Whether `specifier` names a Node.js built-in module — `node:fs`, `fs`,
+/// or a built-in sub-path like `timers/promises`/`stream/consumers`.
+pub fn is_node_builtin(specifier: &str) -> bool {
+    let bare = specifier.strip_prefix("node:").unwrap_or(specifier);
+    let root = bare.split('/').next().unwrap_or(bare);
+    NODE_BUILTINS.contains(&root)
+}
+
 /// Collapse `.` and `..` components without hitting the filesystem (no symlink resolution).
 pub fn normalize_path(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
