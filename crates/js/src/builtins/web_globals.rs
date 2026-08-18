@@ -9,7 +9,7 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
         // to detect browser vs Node.js and calls self.writeFileSync when self is defined.
         // Real Node.js has no global `self`. Keep navigator for web-compat.
         globalThis.navigator = {
-            userAgent: '3va/2.4.0',
+            userAgent: '3va/2.5.0',
             onLine: true,
         };
 

@@ -7,6 +7,52 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+## [v2.5.0] — 2026-08-18
+
+### Added
+
+- **`vm` module** (`crates/js/src/builtins/vm.rs`): `vm.createContext`, `vm.runInNewContext`,
+  `vm.runInContext`, `vm.runInThisContext`, `vm.isContext`, and `vm.Script` with
+  `Script.prototype.runInContext` — backed by real V8 `Context`s (one per `createContext` call),
+  not a `with`-block sandbox. Sandbox mutations sync back to the JS-side object after each run.
+- **`source_maps` builtin**: native source map storage/lookup (`__storeSourceMap`,
+  `__getSourceMap`, `__applySourceMap`) backing stack-trace remapping.
+- **On-disk V8 code cache** (`crates/js/src/builtins/code_cache.rs`): the large static JS
+  bootstrap strings (require/vm/cluster polyfill, web globals, fs, crypto, process, buffer)
+  compile once and cache their V8 bytecode under `~/.cache/3va/codecache/`, keyed by a hash of the
+  source plus V8's own cached-data version tag. Cuts warm-cache engine init from ~7.7ms to ~5.2ms.
+- **`VVVA_STARTUP_TRACE=1`** env var: per-phase timing breakdown of engine startup
+  (`ensure_v8_initialized`, `Isolate::new`, each `inject_*` builtin) to stderr — a permanent,
+  opt-in diagnostic, not a one-off debug print.
+
+### Fixed
+
+- **`3va run` startup: 35ms → ~15ms**, now roughly on par with Node.js instead of 2.3× slower.
+  `run_event_loop`'s exit condition included a local declared `let has_pending_async = true;` that
+  was never updated, so it stayed permanently true — the loop spun all 100,000 iterations with no
+  sleep on *every* invocation, even `console.log("hi")`. Replaced with real pending-work signals
+  (timers, task queue, a new NAPI in-flight-async-work counter).
+- **`3va run server.js` could die under real HTTP load** — a regression exposed by the fix above:
+  nothing marked an open `http.createServer()`/`net.createServer()` listener as pending work, so a
+  quiet tick between requests could let the event loop exit (and the process follow) instead of
+  waiting for the next connection, the way a server is supposed to. Fixed with an active-listener
+  counter (`http_server.rs`, `tcp.rs`) feeding into the same loop-continuation check, using a plain
+  atomic rather than a lock since the check runs on every iteration, including under load.
+- **`3va bundle` crashed on any `require()` of a Node built-in** — `require('fs')`,
+  `require('path')`, and every other core module broke bundling with "No such file or directory"
+  under `node_modules/`, since the bundler's graph walker had no concept of built-ins and tried to
+  resolve them like any other package. Now recognized via `vvva_js::esm::is_node_builtin` and left
+  for the bundle's own `require()` to fall through to the real `globalThis.require` at runtime.
+- **Two RUSTSEC advisories** patched via lockfile-only bumps (no code changes): wasmtime
+  (RUSTSEC-2026-0222, 36.0.12 → 36.0.13) and h2 (RUSTSEC-2026-0258, 0.4.15 → 0.4.16). `cargo deny
+  check` — a documented CI merge gate — was failing on `main` before this.
+- All `cargo clippy -D warnings` findings in `napi.rs` (394 → 0), resolved by scoping a
+  `#[allow(...)]` to the shared `napi_scope!` macro's own expansion (its `$body` is pasted into two
+  branches with a different concrete scope type each, so clippy's per-call-site autofix suggestions
+  are only valid for one branch and silently wrong for the other) plus hand-fixes for the remaining
+  ~20 standalone findings across `vm.rs`, `source_maps.rs`, `http_server.rs`, `transpiler.rs`, and
+  `child_process.rs`.
+
 ## [v2.4.0] — 2026-07-16
 
 ### Added
