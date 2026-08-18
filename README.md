@@ -64,6 +64,15 @@ All performance rows are release builds (`cargo build --release`), all three run
 npm install -g @edge_166/3va
 ```
 
+### Cargo (all platforms)
+
+```bash
+cargo install vvva_cli
+```
+
+Installs a `3va` binary on `$PATH` — the crate is named `vvva_cli` (not `3va`)
+because crates.io rejects package names starting with a digit.
+
 ### Scoop (Windows)
 
 ```bash
