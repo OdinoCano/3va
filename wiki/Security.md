@@ -4,12 +4,12 @@
 
 **Do not open a public issue.**
 
-Email `edgarcano.166@gmail.com` with:
+Report via [GitHub Security Advisories](https://github.com/OdinoCano/3va/security/advisories/new) with:
 - A description of the vulnerability
 - Reproduction steps
 - Affected versions (if known)
 
-We will acknowledge receipt within 48 hours and aim to provide a fix or mitigation within 90 days depending on severity.
+Response times are a future goal, not a committed SLA at this time.
 
 ## Security model
 
@@ -48,4 +48,4 @@ Every commit and PR is scanned by:
 
 ## Responsible disclosure
 
-We follow coordinated disclosure. If you discover a vulnerability, please give us reasonable time to address it before public disclosure.
+We follow coordinated disclosure. If you discover a vulnerability, please give us reasonable time to address it before public disclosure. No fixed timeline has been committed to at this time.
