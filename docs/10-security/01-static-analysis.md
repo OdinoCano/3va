@@ -35,14 +35,17 @@ Scans installed code in `node_modules/` for known malicious patterns using both 
 
 ### Usage
 
-```bash
-# Runs automatically during install
-3va install axios --allow-net=registry.npmjs.org
+The malware scanner does **not** run automatically during `3va install` — it only runs when explicitly invoked via `3va audit` (Phase 1). A package with no lifecycle scripts (the only thing `install` blocks by default) is written to disk unscanned until you run `audit` yourself.
 
-# Explicit audit (malware is Phase 1)
+```bash
+3va install axios --allow-net=registry.npmjs.org  # not scanned by this step
+
+# Explicit audit (malware is Phase 1) — run this after installing
 3va audit
 3va audit --json
 ```
+
+Making this automatic (scan-on-install, not just on-demand) is tracked in `docs/12-roadmap/01-roadmap.md`.
 
 ## 1.3 Secrets Scanner
 
