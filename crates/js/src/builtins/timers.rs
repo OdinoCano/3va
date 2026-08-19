@@ -10,6 +10,14 @@ struct TimerEntry {
     repeating: bool,
     interval_ms: u64,
     cancelled: bool,
+    /// A "background" timer still fires normally but doesn't count toward
+    /// `has_pending()` — used by the CPU profiler's own sampling interval so
+    /// it can't keep `run_event_loop` alive on its own once the script's
+    /// real work (its own timers/tasks/async/listeners) is done. Without
+    /// this, a self-rescheduling interval like the profiler's has no way to
+    /// signal "I'm just housekeeping, not real pending work", and the loop
+    /// (and the whole process) never exits on its own.
+    background: bool,
 }
 
 pub struct TimerManager {
@@ -33,11 +41,22 @@ impl TimerManager {
                 repeating: false,
                 interval_ms: 0,
                 cancelled: false,
+                background: false,
             },
         );
     }
 
     pub fn set_interval(&self, id: TimerId, ms: u64) {
+        self.set_interval_inner(id, ms, false);
+    }
+
+    /// Same as `set_interval`, but the timer is exempt from `has_pending()`
+    /// — see `TimerEntry::background`.
+    pub fn set_interval_background(&self, id: TimerId, ms: u64) {
+        self.set_interval_inner(id, ms, true);
+    }
+
+    fn set_interval_inner(&self, id: TimerId, ms: u64, background: bool) {
         let fires_at = Instant::now() + Duration::from_millis(ms);
         let mut timers = self.timers.lock().unwrap();
         timers.insert(
@@ -47,6 +66,7 @@ impl TimerManager {
                 repeating: true,
                 interval_ms: ms,
                 cancelled: false,
+                background,
             },
         );
     }
@@ -96,7 +116,7 @@ impl TimerManager {
 
     pub fn has_pending(&self) -> bool {
         let timers = self.timers.lock().unwrap();
-        timers.values().any(|e| !e.cancelled)
+        timers.values().any(|e| !e.cancelled && !e.background)
     }
 
     pub fn pending_count(&self) -> usize {
@@ -183,6 +203,24 @@ pub fn inject_timers(
 
     let mgr_ptr = Arc::into_raw(manager.clone()) as *mut std::ffi::c_void;
     let external = v8::External::new(scope, mgr_ptr);
+    let native_set_interval_background = v8::Function::builder(
+        |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
+            let mgr = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                Arc::from_raw(ptr as *const TimerManager)
+            };
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as u64;
+            let ms = args.get(1).uint32_value(scope).unwrap_or(0) as u64;
+            mgr.set_interval_background(id, ms);
+            std::mem::forget(mgr);
+        },
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
+
+    let mgr_ptr = Arc::into_raw(manager.clone()) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, mgr_ptr);
     let native_clear_timer = v8::Function::builder(
         |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
             let mgr = unsafe {
@@ -211,6 +249,13 @@ pub fn inject_timers(
             .unwrap()
             .into(),
         native_set_interval.into(),
+    );
+    global.set(
+        scope,
+        v8::String::new(scope, "__nativeSetIntervalBackground")
+            .unwrap()
+            .into(),
+        native_set_interval_background.into(),
     );
     global.set(
         scope,
@@ -283,6 +328,24 @@ pub fn inject_timers(
             };
             globalThis.__timerCallbacks[id] = wrapper;
             __nativeSetInterval(id, intervalMs);
+            return __makeTimerHandle(id, intervalMs, true);
+        };
+
+        // Not a public global — internal use only (e.g. the CPU profiler's
+        // own sampling interval). Same shape as setInterval, but the timer
+        // doesn't count as "pending work" that keeps run_event_loop (and
+        // the process) alive; clearInterval/the returned handle work on it
+        // exactly the same as a normal interval.
+        globalThis.__setIntervalBackground = function(fn, ms) {
+            globalThis.__timerNextId = (globalThis.__timerNextId || 0) + 1;
+            var id = globalThis.__timerNextId;
+            var intervalMs = Math.floor(+ms) || 0;
+            var wrapper = function() {
+                fn();
+                globalThis.__timerCallbacks[id] = wrapper;
+            };
+            globalThis.__timerCallbacks[id] = wrapper;
+            __nativeSetIntervalBackground(id, intervalMs);
             return __makeTimerHandle(id, intervalMs, true);
         };
 
