@@ -389,8 +389,15 @@ pub fn analyze_cpuprofile(json: &str, top_n: usize) -> anyhow::Result<Vec<(Strin
 ///
 /// Samples are pushed directly to Rust via `__profilerPush(ts_ms, stack_str, label)`,
 /// which is registered as a native function before this script runs.
-/// `__profilerStop()` is called by the Rust side after `eval_file` completes to
-/// flush any in-flight interval and stop further sampling.
+///
+/// The sampling interval is registered via `__setIntervalBackground` (see
+/// `builtins/timers.rs`), not the public `setInterval` — a plain interval
+/// would keep `run_event_loop` (and the whole process) alive forever on its
+/// own, since it never has a reason to stop itself. A background interval
+/// still fires normally while the script has other real pending work, but
+/// stops counting toward "is anything pending" once that other work is
+/// done, so the event loop — and the CLI's `--prof` run — can actually
+/// exit instead of hanging indefinitely.
 pub fn profiler_js(interval_ms: u32) -> String {
     format!(
         r#"(function() {{
@@ -433,7 +440,7 @@ pub fn profiler_js(interval_ms: u32) -> String {
         }}
     }});
 
-    __profilerIntervalId = setInterval(__profileCapture, {interval});
+    __profilerIntervalId = __setIntervalBackground(__profileCapture, {interval});
     __profileCapture();
 }})();"#,
         interval = interval_ms
@@ -573,6 +580,6 @@ mod tests {
     #[test]
     fn profiler_js_contains_interval() {
         let js = profiler_js(15);
-        assert!(js.contains("setInterval(__profileCapture, 15)"));
+        assert!(js.contains("__setIntervalBackground(__profileCapture, 15)"));
     }
 }
