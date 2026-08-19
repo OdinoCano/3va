@@ -291,6 +291,7 @@ Built into the runtime. No pm2, no separate daemon process.
 ```bash
 3va start server.js --name api
 3va start server.js --name worker -- --port 4000   # pass args after --
+3va start server.js --name one-shot --no-autorestart  # never respawn on crash
 3va status                                          # all processes
 3va status api                                      # one process
 3va logs api --lines 200
@@ -299,7 +300,9 @@ Built into the runtime. No pm2, no separate daemon process.
 3va delete api                                      # stop + remove logs
 ```
 
-Process metadata and logs live in `~/.3va/processes/`. If a managed process dies unexpectedly, `3va status` reports it as `error`; restart it with `3va restart <name>`. Automatic restart on crash is on the [roadmap](#known-limitations--roadmap).
+Process metadata and logs live in `~/.3va/processes/`. When a managed process dies unexpectedly, the supervisor restarts it automatically with **exponential backoff** (500 ms → 1 s → 2 s → … → capped at 30 s), giving up after 15 consecutive crashes (tunable with `--max-restarts`). `3va stop` always stops the process for good — it never triggers a respawn. The `Restarts` column in `3va status` counts both automatic and manual restarts.
+
+To disable automatic restarts for a specific process, start it with `--no-autorestart`; it will then be reported as `error` until you `3va restart` it by hand. A restarted process keeps the exact same permissions it had at first start (same CLI flags, same `package.json` `3va` grants).
 
 ---
 
@@ -486,7 +489,6 @@ Disable ANSI color output.
 ## Known Limitations & Roadmap
 
 - **Android arm64**: not built from `main` since v2.2.0; workaround via the `android-pre-v8` branch (see [Platform Support](#platform-support)).
-- **Process manager**: no automatic restart on crash yet — `3va status` reports `error`, restart manually with `3va restart <name>`.
 - **HTTP layer**: RUDY (R-U-Dead-Yet) detection and adaptive rate limiting are not yet implemented; connection limiting today is a fixed default (100 req/s, 50 conns/IP).
 - **Bundler**: `--source-map` and `--split` are not implemented for the real multi-file bundling path (only for a legacy single-file path reachable via the library API, not the CLI). Tree shaking is not yet applied to the multi-file graph.
 - **Dev server HMR**: full-page reload only, not granular per-module hot replacement.
