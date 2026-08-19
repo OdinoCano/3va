@@ -22,6 +22,8 @@ jobs:
   benchmark:
     name: Run benchmarks
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # needed to push the README install-time sync commit
     steps:
       - uses: actions/checkout@v4
 
@@ -51,4 +53,19 @@ jobs:
             echo "Commit: \`${{ github.sha }}\`"
             echo
             bash bench/run.sh
-          } | tee "$GITHUB_STEP_SUMMARY"
+          } | tee "$GITHUB_STEP_SUMMARY" /tmp/bench-output.txt
+
+      - name: Sync README install-time cells
+        # Tag-triggered runs check out a detached tag ref, not a branch —
+        # nothing sane to push to. Only commit back on main (schedule /
+        # manual dispatch), same as any other push-to-main automation.
+        if: github.ref == 'refs/heads/main'
+        run: |
+          bash bench/sync-readme.sh /tmp/bench-output.txt
+          if ! git diff --quiet -- README.md; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            git commit -m "chore(bench): update install-time figures [skip ci]"
+            git push
+          fi

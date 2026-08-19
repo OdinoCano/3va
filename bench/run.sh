@@ -74,27 +74,39 @@ hf_row "3va" "$BIN_3VA run hello.js --allow-read=."
 echo
 
 # ── Install: warm, already satisfied ────────────────────────────────────────
-echo "## Install (warm — dependency already present)"
+# Same operation for every tool: `is-odd` is already in package.json and
+# already on disk, so this measures the "is anything to do?" resolution
+# check, not a network download. Each tool gets its own workdir so one
+# tool's lockfile/node_modules can't leak into another's timing.
+echo "## Install (warm — is-odd already present in node_modules)"
 echo
-WORKDIR="$RESULTS_DIR/install"
-mkdir -p "$WORKDIR"
-cat > "$WORKDIR/package.json" <<'EOF'
-{"name":"bench","version":"1.0.0","dependencies":{"is-odd":"^3.0.1"}}
-EOF
-( cd "$WORKDIR" && "$BIN_3VA" install --allow-net=registry.npmjs.org >/dev/null 2>&1 )
 echo "| Tool | Mean | Range |"
 echo "|---|---|---|"
-( cd "$WORKDIR" && hyperfine --warmup 3 --min-runs 15 --export-json "$RESULTS_DIR/install-3va.json" \
-    "$BIN_3VA install --allow-net=registry.npmjs.org" >&2 )
-python3 - "$RESULTS_DIR/install-3va.json" "3va install" <<'EOF'
+
+install_row() {
+  local label="$1" install_cmd="$2" warm_cmd="$3"
+  local dir="$RESULTS_DIR/install-$label"
+  mkdir -p "$dir"
+  echo '{"name":"bench","version":"1.0.0","dependencies":{"is-odd":"^3.0.1"}}' > "$dir/package.json"
+  ( cd "$dir" && eval "$install_cmd" >/dev/null 2>&1 )
+  ( cd "$dir" && hyperfine --warmup 3 --min-runs 15 --export-json "$RESULTS_DIR/install-$label.json" \
+      "$warm_cmd" >&2 )
+  python3 - "$RESULTS_DIR/install-$label.json" "$label" <<'EOF'
 import json, sys
 data = json.load(open(sys.argv[1]))["results"][0]
 print(f"| {sys.argv[2]} | {data['mean']*1000:.1f} ms | {data['min']*1000:.1f}–{data['max']*1000:.1f} ms |")
 EOF
+}
+
+install_row "3va" "$BIN_3VA install --allow-net=registry.npmjs.org" "$BIN_3VA install --allow-net=registry.npmjs.org"
+[ "$HAVE_NODE" = 1 ] && command -v npm >/dev/null 2>&1 && \
+  install_row "npm" "npm install --silent" "npm install --silent"
+[ "$HAVE_BUN" = 1 ] && install_row "bun" "bun install" "bun install"
 echo
-echo "_Only 3va is measured here — this is a different comparison than the_"
-echo "_npm/pnpm/Bun install-speed numbers in the main README, which aren't_"
-echo "_yet scripted. See bench/README.md._"
+echo "_Node has no bundled installer of its own (npm/yarn/pnpm are separate_"
+echo "_tools), so its row above is npm's. Any row missing from the table_"
+echo "_means that tool wasn't on \$PATH when this ran, not that it was_"
+echo "_skipped on purpose — see bench/README.md._"
 echo
 
 # ── HTTP throughput + memory ─────────────────────────────────────────────────
