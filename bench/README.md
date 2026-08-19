@@ -123,21 +123,26 @@ caveat:
    JSON strings, Promise/closure objects — and without that hint, V8's
    heap grows to its burst high-water mark and stays there.
 6. **Fix:** `run_event_loop` (`crates/js/src/lib.rs`) now calls
-   `isolate.low_memory_notification()` on a 5-second throttle
+   `isolate.low_memory_notification()` on a 1-second throttle
    (`LOW_MEMORY_HINT_INTERVAL`) — frequent enough to reclaim memory during
    sustained load, not so frequent that a full GC pause on every event-loop
    tick would hurt throughput. Verified: post-load RSS dropped from 255 MB
    to 93–180 MB across repeated runs (a 30–64% reduction depending on run),
    with throughput unchanged (16,100 req/s @ c=1000, 99.94% success,
    measured before and after) — the fix costs nothing observable and keeps
-   most of the win.
+   most of the win. (The interval was later tightened from 5 s to 1 s: the
+   5 s hint never fired during a fast HTTP burst once keep-alive removed the
+   per-request TCP handshake cost — the whole 100k-request load finished in
+   ~2 s — so the heap hit its burst high-water mark before the first hint.
+   At 1 s the hint fires at least once mid-burst, which held post-load RSS
+   near the pre-keep-alive figure instead of spiking to the burst watermark.
+   The exact post-load number is measured by CI.)
 
-The remaining ~3× idle-to-loaded growth (versus Node's ~1.8×) wasn't chased
+The remaining idle-to-loaded growth (versus Node's ~1.8×) wasn't chased
 further — mimalloc is still wired in as the global allocator (a reasonable
 default for a busy server generally, even though it didn't fix this
-specific bug), and a shorter hint interval or a request-count-based trigger
-instead of a time-based one are the next things to try if this needs to go
-lower.
+specific bug), and a request-count-based trigger instead of a time-based one
+is the next thing to try if this needs to go lower.
 
 ## CI
 

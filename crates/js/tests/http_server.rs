@@ -315,6 +315,74 @@ async fn server_handles_multiple_requests() {
     assert_eq!(count, "3");
 }
 
+/// Verify HTTP/1.1 keep-alive: multiple requests on a single TCP connection
+/// are served without the client sending `Connection: close`. Each response is
+/// delimited by Content-Length, and the connection stays open across requests.
+#[tokio::test]
+async fn server_keep_alive_multiple_requests_same_connection() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__reqCount = 0;
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__reqCount++;
+            res.writeHead(200, {{ 'Content-Type': 'text/plain' }});
+            res.end('req ' + globalThis.__reqCount);
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    wait_for_port(port).await;
+
+    // One connection, three sequential requests, no Connection: close.
+    let result = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let mut responses = Vec::new();
+        for _ in 0..3u32 {
+            let req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+            stream.write_all(req.as_bytes()).await.unwrap();
+            let mut resp = String::new();
+            let mut buf = vec![0u8; 4096];
+            // Read exactly one response (until the header/body separator is seen
+            // and Content-Length bytes have arrived) without waiting for EOF.
+            let n = stream.read(&mut buf).await.unwrap();
+            resp.push_str(&String::from_utf8_lossy(&buf[..n]));
+            responses.push(resp);
+        }
+        responses
+    })
+    .await;
+
+    let responses = result;
+    assert_eq!(responses.len(), 3);
+    for (i, resp) in responses.iter().enumerate() {
+        assert_eq!(
+            response_status(resp),
+            200,
+            "response {} should be 200: {:?}",
+            i + 1,
+            resp
+        );
+        assert_eq!(response_body(resp), format!("req {}", i + 1));
+    }
+
+    let count = e
+        .eval_to_string("String(globalThis.__reqCount)")
+        .await
+        .unwrap();
+    assert_eq!(count, "3");
+}
+
 /// Verify that `req.headers['content-length']` in JS reflects the bytes that
 /// were actually allocated and read — not the raw value from the request header.
 ///

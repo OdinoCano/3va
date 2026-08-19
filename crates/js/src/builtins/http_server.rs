@@ -2,11 +2,11 @@
 
 use crate::builtins::v8_compat::uint8array_to_vec;
 use std::collections::HashMap;
-use std::io::Write;
-use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 use v8::{FunctionCallbackArguments, PinScope, ReturnValue, Script, String as V8String};
 
@@ -48,7 +48,6 @@ struct HttpAcceptCtx {
 
 struct HttpRespondCtx {
     conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
-    fw: Arc<Option<Arc<Firewall>>>,
 }
 
 #[cfg(unix)]
@@ -77,7 +76,12 @@ fn bind_listener(addr: &str) -> std::io::Result<std::net::TcpListener> {
 }
 
 struct ConnEntry {
-    stream: StdTcpStream,
+    resp_tx: mpsc::Sender<PendingResponse>,
+}
+
+struct PendingResponse {
+    conn_id: u32,
+    bytes: Vec<u8>,
 }
 
 fn js_err<'s>(scope: &mut PinScope<'s, '_>, msg: &str) -> v8::Local<'s, v8::Value> {
@@ -137,20 +141,21 @@ struct ParsedRequest {
     path: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
-    std_stream: StdTcpStream,
+    http10: bool,
 }
 
-async fn parse_request(
-    stream: tokio::net::TcpStream,
+async fn parse_request<R>(
+    reader: &mut R,
     header_timeout: std::time::Duration,
     body_timeout: std::time::Duration,
     max_header_count: usize,
     max_header_bytes: usize,
     max_body_bytes: usize,
     min_body_rate_bps: u32,
-) -> std::result::Result<ParsedRequest, String> {
-    let mut reader = BufReader::new(stream);
-
+) -> std::result::Result<ParsedRequest, String>
+where
+    R: AsyncBufRead + Unpin,
+{
     let mut request_line = String::new();
     tokio::time::timeout(header_timeout, reader.read_line(&mut request_line))
         .await
@@ -161,6 +166,8 @@ async fn parse_request(
     let mut parts = request_line.splitn(3, ' ');
     let method = parts.next().unwrap_or("GET").to_string();
     let path = parts.next().unwrap_or("/").to_string();
+    let version = parts.next().unwrap_or("HTTP/1.1").to_string();
+    let http10 = version == "HTTP/1.0";
 
     let max_body = if max_body_bytes == 0 {
         HARD_MAX_BODY
@@ -243,13 +250,12 @@ async fn parse_request(
         }
     }
 
-    let std_stream = reader.into_inner().into_std().map_err(|e| e.to_string())?;
     Ok(ParsedRequest {
         method,
         path,
         headers,
         body,
-        std_stream,
+        http10,
     })
 }
 
@@ -263,6 +269,138 @@ fn reject_stream(stream: tokio::net::TcpStream, status: u16, msg: &'static str) 
         let mut s = stream;
         let _ = s.write_all(response.as_bytes()).await;
     });
+}
+
+/// Idle timeout while waiting for JS to enqueue a response via
+/// `__httpRespond`. Guards against a request handler that never responds:
+/// without it a stalled handler would pin the connection open forever,
+/// defeating the firewall's connection-exhaustion protection.
+const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Drives a single accepted connection: parses requests in a loop (HTTP/1.1
+/// keep-alive), drops each parsed request into `ready` for JS, waits for
+/// `__httpRespond` to push a response through the per-connection channel, and
+/// writes it. Exits when the client closes the connection, a parse timeout
+/// fires (Slowloris/RUDY), a response times out, or the stream errors — the
+/// `conns` entry and firewall connection accounting are cleaned up on exit.
+#[allow(clippy::too_many_arguments)]
+async fn handle_connection(
+    stream: tokio::net::TcpStream,
+    ip: IpAddr,
+    server_id: u32,
+    hdr_timeout: std::time::Duration,
+    body_timeout: std::time::Duration,
+    max_hdr_count: usize,
+    max_hdr_bytes: usize,
+    max_body: usize,
+    min_body_rate: u32,
+    conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
+    conn_nid: Arc<Mutex<u32>>,
+    fw: Arc<Option<Arc<Firewall>>>,
+    ready: ReadyQueue,
+) {
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    let conn_id = {
+        let mut n = conn_nid.lock().unwrap();
+        let cid = *n;
+        *n = n.wrapping_add(1);
+        cid
+    };
+
+    let (resp_tx, mut resp_rx) = mpsc::channel::<PendingResponse>(16);
+    conns.lock().unwrap().insert(conn_id, ConnEntry { resp_tx });
+
+    loop {
+        let parsed = match parse_request(
+            &mut reader,
+            hdr_timeout,
+            body_timeout,
+            max_hdr_count,
+            max_hdr_bytes,
+            max_body,
+            min_body_rate,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+
+        if let Some(firewall) = fw.as_ref().as_ref() {
+            match firewall.check_request(ip) {
+                FirewallDecision::Allow => {}
+                decision => {
+                    let resp = format!(
+                        "HTTP/1.1 {s} {m}\r\nContent-Length: {l}\r\nConnection: close\r\n\r\n{m}",
+                        s = decision.http_status(),
+                        m = decision.message(),
+                        l = decision.message().len(),
+                    );
+                    let _ = writer.write_all(resp.as_bytes()).await;
+                    break;
+                }
+            }
+        }
+
+        let hdr_pairs: Vec<String> = parsed
+            .headers
+            .iter()
+            .map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)))
+            .collect();
+        let body_str = String::from_utf8_lossy(&parsed.body);
+        let json = format!(
+            "{{\"method\":\"{m}\",\"url\":\"{u}\",\"headers\":{{{h}}},\"body\":\"{b}\",\
+             \"conn_id\":{c},\"remoteAddress\":\"{ip}\"}}",
+            m = json_escape(&parsed.method),
+            u = json_escape(&parsed.path),
+            h = hdr_pairs.join(","),
+            b = json_escape(&body_str),
+            c = conn_id,
+            ip = ip,
+        );
+
+        ready
+            .lock()
+            .unwrap()
+            .entry(server_id)
+            .or_default()
+            .push_back(json);
+
+        let conn_hdr = parsed
+            .headers
+            .iter()
+            .find(|(k, _)| k == "connection")
+            .map(|(_, v)| v.to_lowercase());
+        // HTTP/1.1 defaults to keep-alive unless the client says close; HTTP/1.0
+        // defaults to close unless the client explicitly asks to keep the
+        // connection alive.
+        let close_after = match conn_hdr.as_deref() {
+            Some(v) => v == "close",
+            None => parsed.http10,
+        };
+
+        let resp = match tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx.recv()).await {
+            Ok(Some(r)) if r.conn_id == conn_id => r,
+            _ => break,
+        };
+
+        if writer.write_all(&resp.bytes).await.is_err() {
+            break;
+        }
+        if writer.flush().await.is_err() {
+            break;
+        }
+        if close_after {
+            break;
+        }
+    }
+
+    conns.lock().unwrap().remove(&conn_id);
+    if let Some(firewall) = fw.as_ref().as_ref() {
+        firewall.on_disconnect(ip);
+    }
 }
 
 pub fn inject_http_server(
@@ -394,9 +532,7 @@ pub fn inject_http_server(
                                                 std::time::Duration::from_millis(
                                                     c.header_timeout_ms,
                                                 ),
-                                                std::time::Duration::from_millis(
-                                                    c.body_timeout_ms,
-                                                ),
+                                                std::time::Duration::from_millis(c.body_timeout_ms),
                                                 c.max_header_count as usize,
                                                 c.max_header_bytes as usize,
                                                 c.max_body_bytes as usize,
@@ -413,84 +549,28 @@ pub fn inject_http_server(
                                             )
                                         };
 
-                                        let parsed = parse_request(
-                                            stream,
-                                            hdr_timeout,
-                                            body_timeout,
-                                            max_hdr_count,
-                                            max_hdr_bytes,
-                                            max_body,
-                                            min_body_rate,
-                                        )
-                                        .await;
-
-                                        let parsed = match parsed {
-                                            Ok(p) => p,
-                                            Err(_) => {
-                                                if let Some(firewall) = fw.as_ref().as_ref() {
-                                                    firewall.on_disconnect(ip);
-                                                }
-                                                continue;
-                                            }
-                                        };
-
-                                        if let Some(firewall) = fw.as_ref().as_ref() {
-                                            match firewall.check_request(ip) {
-                                                FirewallDecision::Allow => {}
-                                                decision => {
-                                                    let resp = format!(
-                                                        "HTTP/1.1 {s} {m}\r\nContent-Length: {l}\r\nConnection: close\r\n\r\n{m}",
-                                                        s = decision.http_status(),
-                                                        m = decision.message(),
-                                                        l = decision.message().len(),
-                                                    );
-                                                    let _ = {
-                                                        let mut s = parsed.std_stream;
-                                                        s.write_all(resp.as_bytes())
-                                                    };
-                                                    firewall.on_disconnect(ip);
-                                                    continue;
-                                                }
-                                            }
-                                        }
-
-                                        let conn_id = {
-                                            let mut n = conn_nid.lock().unwrap();
-                                            let cid = *n;
-                                            *n = n.wrapping_add(1);
-                                            cid
-                                        };
-                                        conns.lock().unwrap().insert(
-                                            conn_id,
-                                            ConnEntry {
-                                                stream: parsed.std_stream,
-                                            },
-                                        );
-
-                                        let hdr_pairs: Vec<String> = parsed
-                                            .headers
-                                            .iter()
-                                            .map(|(k, v)| {
-                                                format!(
-                                                    "\"{}\":\"{}\"",
-                                                    json_escape(k),
-                                                    json_escape(v)
-                                                )
-                                            })
-                                            .collect();
-                                        let body_str = String::from_utf8_lossy(&parsed.body);
-                                        let json = format!(
-                                            "{{\"method\":\"{m}\",\"url\":\"{u}\",\"headers\":{{{h}}},\
-                                             \"body\":\"{b}\",\"conn_id\":{c},\"remoteAddress\":\"{ip}\"}}",
-                                            m = json_escape(&parsed.method),
-                                            u = json_escape(&parsed.path),
-                                            h = hdr_pairs.join(","),
-                                            b = json_escape(&body_str),
-                                            c = conn_id,
-                                            ip = ip,
-                                        );
-
-                                        ready.lock().unwrap().entry(id).or_default().push_back(json);
+                                        let conns2 = conns.clone();
+                                        let conn_nid2 = conn_nid.clone();
+                                        let fw2 = fw.clone();
+                                        let ready2 = ready.clone();
+                                        tokio::spawn(async move {
+                                            handle_connection(
+                                                stream,
+                                                ip,
+                                                id,
+                                                hdr_timeout,
+                                                body_timeout,
+                                                max_hdr_count,
+                                                max_hdr_bytes,
+                                                max_body,
+                                                min_body_rate,
+                                                conns2,
+                                                conn_nid2,
+                                                fw2,
+                                                ready2,
+                                            )
+                                            .await;
+                                        });
                                     }
                                 });
 
@@ -567,7 +647,6 @@ pub fn inject_http_server(
     {
         let ctx_ptr = Box::leak(Box::new(HttpRespondCtx {
             conns: conns.clone(),
-            fw: fw.clone(),
         })) as *mut HttpRespondCtx as *mut std::ffi::c_void;
         let external = v8::External::new(scope, ctx_ptr);
         let http_respond_fn = v8::Function::builder(
@@ -591,7 +670,6 @@ pub fn inject_http_server(
                 let extra = parse_extra_headers(&headers_json);
                 let mut resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
                 resp.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
-                resp.push_str("Connection: close\r\n");
                 for (k, v) in &extra {
                     let kl = k.to_lowercase();
                     if kl != "content-length" && kl != "connection" {
@@ -600,32 +678,25 @@ pub fn inject_http_server(
                 }
                 resp.push_str("\r\n");
 
-                let mut guard = ctx.conns.lock().unwrap();
-                match guard.get_mut(&conn_id) {
+                let mut bytes = resp.into_bytes();
+                bytes.extend_from_slice(body_bytes);
+
+                let guard = ctx.conns.lock().unwrap();
+                match guard.get(&conn_id) {
                     Some(conn) => {
-                        if let Err(_e) = conn.stream.write_all(resp.as_bytes()) {
-                            rv.set(v8::undefined(scope).into());
+                        let ok = conn.resp_tx.try_send(PendingResponse { conn_id, bytes });
+                        drop(guard);
+                        if ok.is_err() {
+                            let err = js_code_err(scope, "ENOENT", "connection closed");
+                            rv.set(err);
                             return;
                         }
-                        if let Err(_e) = conn.stream.write_all(body_bytes) {
-                            rv.set(v8::undefined(scope).into());
-                            return;
-                        }
-                        let _ = conn.stream.flush();
                     }
                     None => {
                         let err = js_code_err(scope, "ENOENT", "unknown conn_id");
                         rv.set(err);
                         return;
                     }
-                }
-                drop(guard);
-
-                if let Some(entry) = ctx.conns.lock().unwrap().remove(&conn_id)
-                    && let Some(firewall) = ctx.fw.as_ref().as_ref()
-                    && let Ok(peer) = entry.stream.peer_addr()
-                {
-                    firewall.on_disconnect(peer.ip());
                 }
                 rv.set(v8::undefined(scope).into());
             },
@@ -643,7 +714,6 @@ pub fn inject_http_server(
     {
         let ctx_ptr = Box::leak(Box::new(HttpRespondCtx {
             conns: conns.clone(),
-            fw: fw.clone(),
         })) as *mut HttpRespondCtx as *mut std::ffi::c_void;
         let external = v8::External::new(scope, ctx_ptr);
         let http_respond_bytes_fn = v8::Function::builder(
@@ -671,7 +741,6 @@ pub fn inject_http_server(
                 let extra = parse_extra_headers(&headers_json);
                 let mut resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
                 resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
-                resp.push_str("Connection: close\r\n");
                 for (k, v) in &extra {
                     let kl = k.to_lowercase();
                     if kl != "content-length" && kl != "connection" && kl != "transfer-encoding" {
@@ -680,32 +749,25 @@ pub fn inject_http_server(
                 }
                 resp.push_str("\r\n");
 
-                let mut guard = ctx.conns.lock().unwrap();
-                match guard.get_mut(&conn_id) {
+                let mut bytes = resp.into_bytes();
+                bytes.extend_from_slice(&body);
+
+                let guard = ctx.conns.lock().unwrap();
+                match guard.get(&conn_id) {
                     Some(conn) => {
-                        if let Err(_e) = conn.stream.write_all(resp.as_bytes()) {
-                            rv.set(v8::undefined(scope).into());
+                        let ok = conn.resp_tx.try_send(PendingResponse { conn_id, bytes });
+                        drop(guard);
+                        if ok.is_err() {
+                            let err = js_code_err(scope, "ENOENT", "connection closed");
+                            rv.set(err);
                             return;
                         }
-                        if let Err(_e) = conn.stream.write_all(&body) {
-                            rv.set(v8::undefined(scope).into());
-                            return;
-                        }
-                        let _ = conn.stream.flush();
                     }
                     None => {
                         let err = js_code_err(scope, "ENOENT", "unknown conn_id");
                         rv.set(err);
                         return;
                     }
-                }
-                drop(guard);
-
-                if let Some(entry) = ctx.conns.lock().unwrap().remove(&conn_id)
-                    && let Some(firewall) = ctx.fw.as_ref().as_ref()
-                    && let Ok(peer) = entry.stream.peer_addr()
-                {
-                    firewall.on_disconnect(peer.ip());
                 }
                 rv.set(v8::undefined(scope).into());
             },
@@ -1623,8 +1685,9 @@ mod tests {
             client.write_all(body).await.unwrap();
         });
         let (server_stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server_stream);
         let result = parse_request(
-            server_stream,
+            &mut reader,
             std::time::Duration::from_secs(5),
             std::time::Duration::from_secs(5),
             100,
@@ -1649,8 +1712,9 @@ mod tests {
             }
         });
         let (server_stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server_stream);
         let result = parse_request(
-            server_stream,
+            &mut reader,
             std::time::Duration::from_secs(5),
             std::time::Duration::from_secs(30),
             100,
@@ -1676,8 +1740,9 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         });
         let (server_stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server_stream);
         let result = parse_request(
-            server_stream,
+            &mut reader,
             std::time::Duration::from_secs(5),
             std::time::Duration::from_millis(200),
             100,
@@ -1704,8 +1769,9 @@ mod tests {
                 .unwrap();
         });
         let (server_stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server_stream);
         let result = parse_request(
-            server_stream,
+            &mut reader,
             std::time::Duration::from_secs(5),
             std::time::Duration::from_secs(5),
             100,
