@@ -12,6 +12,46 @@ fn default_max_restarts() -> u32 {
     15
 }
 
+fn default_autorestart() -> bool {
+    true
+}
+
+/// Base delay (milliseconds) for the first automatic restart after a crash.
+const BACKOFF_BASE_MS: u64 = 500;
+
+/// Upper bound (milliseconds) on the delay between consecutive restarts, so a
+/// process stuck in a crash loop never burns the supervisor's CPU or floods
+/// its log faster than this — 30 s is the "give it a while, maybe the
+/// dependency came back" ceiling.
+const BACKOFF_MAX_MS: u64 = 30_000;
+
+/// Exponential backoff delay before restart number `restarts` (1-based).
+///
+/// `delay(n) = min(BASE · 2^(n−1), MAX)` with BASE = 500 ms, MAX = 30 s, so the
+/// schedule is 500 ms → 1 s → 2 s → 4 s → 8 s → 16 s → 30 s → 30 s → … .
+///
+/// Design rationale (vs. the fixed/linear alternatives):
+/// - A single spurious crash (e.g. an OOM-killed worker) recovers in 500 ms,
+///   the same ballpark as pm2's default `restart_delay`.
+/// - A sustained crash loop reaches the 30 s ceiling after 7 consecutive
+///   crashes, bounding worst-case CPU/log burn — the explicit requirement
+///   here — which a fixed delay can't do without being slow for the common
+///   one-off case, and a linear ramp (the previous 300 ms·n schedule, capped
+///   at 3 s) grows too slowly to bound a long crash loop.
+/// - No jitter: one supervisor supervises one process (unlike a fleet-wide
+///   orchestration tier where synchronized restarts thunder-herd), and jitter
+///   would make the restart schedule nondeterministic and hard to test.
+pub fn backoff_delay(restarts: u32) -> std::time::Duration {
+    if restarts == 0 {
+        return std::time::Duration::from_millis(BACKOFF_BASE_MS);
+    }
+    // `min(16)` keeps the shift well inside the cap (500 ms · 2^16 is already
+    // hours — the 30 s ceiling is hit at 2^6) while avoiding u64 overflow.
+    let exp = (restarts - 1).min(16);
+    let delay = BACKOFF_BASE_MS.saturating_mul(1u64 << exp);
+    std::time::Duration::from_millis(delay.min(BACKOFF_MAX_MS))
+}
+
 /// Managed process metadata.
 ///
 /// `pid` is always the *supervisor* process — the long-lived process that
@@ -34,6 +74,12 @@ pub struct ProcessInfo {
     pub instances: u32,
     #[serde(default = "default_max_restarts")]
     pub max_restarts: u32,
+    /// Whether the supervisor should respawn the app when it dies
+    /// unexpectedly. `3va start --no-autorestart` sets this to false; a manual
+    /// `3va restart` re-applies it. Defaults to true for pre-existing
+    /// `~/.3va/processes/*.json` files (missing field).
+    #[serde(default = "default_autorestart")]
+    pub autorestart: bool,
     #[serde(default)]
     pub instance_pids: Vec<u32>,
 }
@@ -154,46 +200,70 @@ fn resolve_entry_and_run_dir(entry: &Path, cwd: &Path) -> (PathBuf, PathBuf) {
     (abs_entry, run_dir)
 }
 
+/// Everything the supervisor needs to spawn and keep an app cohort alive:
+/// the entry, its arguments, and the restart policy. Shared by the detached
+/// supervisor (`3va start` → `__supervise`), the foreground `3va start
+/// --attach` supervisor, and `3va restart`, so they can never drift apart on
+/// which policy is in effect.
+#[derive(Debug, Clone)]
+pub struct SupervisorConfig {
+    pub name: String,
+    pub entry: PathBuf,
+    pub args: Vec<String>,
+    pub port: Option<u16>,
+    pub instances: u32,
+    /// Give up restarting after this many consecutive crashes.
+    pub max_restarts: u32,
+    /// Whether an unexpected exit should be respawned (`--no-autorestart`
+    /// disables this). `3va stop` always wins regardless of this value.
+    pub autorestart: bool,
+    /// Starting value for the restart counter — 0 for a fresh `3va start`,
+    /// `info.restarts + 1` for `3va restart`, so the count survives
+    /// supervisor generations without racing the on-disk state.
+    pub start_restarts: u32,
+}
+
 /// Spawn the managed daemon in the background: launches `3va __supervise`
 /// (setsid-detached, like the old direct-`3va run` daemon) instead of the app
 /// itself, so a supervisor process — not just the app — outlives this CLI
 /// invocation and can restart the app on crash. `3va stop` still just sends
 /// SIGTERM to `info.pid`; the supervisor traps it, drains its children, and
 /// exits without respawning (see `run_supervisor`).
-pub fn start_managed(
-    name: &str,
-    entry: &Path,
-    cwd: &Path,
-    args: &[String],
-    port: Option<u16>,
-    instances: u32,
-    max_restarts: u32,
-) -> anyhow::Result<ProcessInfo> {
+///
+/// `cfg.autorestart == false` (from `--no-autorestart`) tells the supervisor
+/// to mark the process `error` and exit when the app dies unexpectedly,
+/// instead of respawning it.
+pub fn start_managed(cfg: &SupervisorConfig, cwd: &Path) -> anyhow::Result<ProcessInfo> {
     ensure_dir()?;
 
-    let log_file = log_path(name);
+    let log_file = log_path(&cfg.name);
     let log = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_file)?;
 
     let bin = std::env::current_exe()?;
-    let (abs_entry, run_dir) = resolve_entry_and_run_dir(entry, cwd);
+    let (abs_entry, run_dir) = resolve_entry_and_run_dir(&cfg.entry, cwd);
 
     let mut cmd = std::process::Command::new(&bin);
     cmd.arg("__supervise")
         .arg("--name")
-        .arg(name)
+        .arg(&cfg.name)
         .arg("--instances")
-        .arg(instances.to_string())
+        .arg(cfg.instances.to_string())
         .arg("--max-restarts")
-        .arg(max_restarts.to_string());
-    if let Some(p) = port {
+        .arg(cfg.max_restarts.to_string())
+        .arg("--start-restarts")
+        .arg(cfg.start_restarts.to_string());
+    if !cfg.autorestart {
+        cmd.arg("--no-autorestart");
+    }
+    if let Some(p) = cfg.port {
         cmd.arg("--port").arg(p.to_string());
     }
     cmd.arg(&abs_entry);
-    if !args.is_empty() {
-        cmd.arg("--").args(args);
+    if !cfg.args.is_empty() {
+        cmd.arg("--").args(&cfg.args);
     }
     cmd.current_dir(&run_dir)
         .stdout(log.try_clone()?)
@@ -215,7 +285,7 @@ pub fn start_managed(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to spawn process '{}': {}", name, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to spawn process '{}': {}", cfg.name, e))?;
 
     let pid = child.id();
 
@@ -226,18 +296,19 @@ pub fn start_managed(
     });
 
     let info = ProcessInfo {
-        name: name.to_string(),
-        entry: entry.to_path_buf(),
+        name: cfg.name.clone(),
+        entry: cfg.entry.clone(),
         pid,
         cwd: cwd.to_path_buf(),
         log_path: log_file,
         status: "running".to_string(),
         started_at: now(),
         restarts: 0,
-        args: args.to_vec(),
-        port,
-        instances,
-        max_restarts,
+        args: cfg.args.clone(),
+        port: cfg.port,
+        instances: cfg.instances,
+        max_restarts: cfg.max_restarts,
+        autorestart: cfg.autorestart,
         instance_pids: vec![],
     };
 
@@ -313,38 +384,39 @@ async fn wait_for_any_exit(children: &mut [tokio::process::Child]) {
 /// The supervisor loop: spawns `instances` app processes, waits for either a
 /// shutdown signal or any instance exiting unexpectedly, and in the latter
 /// case kills the remaining siblings and restarts the whole cohort together
-/// (with linear backoff), up to `max_restarts` times.
+/// with exponential backoff (`backoff_delay`), up to `max_restarts` times.
+///
+/// With `autorestart: false` (`3va start --no-autorestart`), an unexpected
+/// exit is *not* respawned: the supervisor marks the process `error` and exits
+/// (rather than lingering as a live-but-idle supervisor), so `3va status`
+/// reflects reality and the user can still `3va restart` it manually.
+///
+/// `start_restarts` seeds the restart counter (0 for `3va start`, the persisted
+/// count + 1 for `3va restart`) so it keeps accumulating across supervisor
+/// generations instead of resetting to zero — see `restart_process`.
 ///
 /// Runs either as the long-lived body of the detached `3va __supervise`
 /// process (background `3va start`) or in-process as `3va start --attach`,
 /// in which case it IS the foreground process a container should run as PID 1.
-pub async fn run_supervisor(
-    name: &str,
-    entry: &Path,
-    args: &[String],
-    port: Option<u16>,
-    instances: u32,
-    max_restarts: u32,
-    inherit_stdio: bool,
-) -> anyhow::Result<()> {
+pub async fn run_supervisor(cfg: &SupervisorConfig, inherit_stdio: bool) -> anyhow::Result<()> {
     ensure_dir()?;
-    let instances = instances.max(1);
+    let instances = cfg.instances.max(1);
     let cwd = std::env::current_dir()?;
-    let log_file_path = log_path(name);
+    let log_file_path = log_path(&cfg.name);
 
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    let mut restarts = 0u32;
+    let mut restarts = cfg.start_restarts;
 
     loop {
         let mut children = Vec::with_capacity(instances as usize);
         for _ in 0..instances {
             children.push(spawn_app_instance(
-                entry,
+                &cfg.entry,
                 &cwd,
-                args,
-                port,
+                &cfg.args,
+                cfg.port,
                 instances > 1,
                 inherit_stdio,
                 &log_file_path,
@@ -353,24 +425,26 @@ pub async fn run_supervisor(
         let pids: Vec<u32> = children.iter().filter_map(|c| c.id()).collect();
 
         {
-            let mut info = load_process(name).unwrap_or_else(|_| ProcessInfo {
-                name: name.to_string(),
-                entry: entry.to_path_buf(),
+            let mut info = load_process(&cfg.name).unwrap_or_else(|_| ProcessInfo {
+                name: cfg.name.clone(),
+                entry: cfg.entry.clone(),
                 pid: std::process::id(),
                 cwd: cwd.clone(),
                 log_path: log_file_path.clone(),
                 status: "running".to_string(),
                 started_at: now(),
                 restarts,
-                args: args.to_vec(),
-                port,
-                instances,
-                max_restarts,
+                args: cfg.args.clone(),
+                port: cfg.port,
+                instances: cfg.instances,
+                max_restarts: cfg.max_restarts,
+                autorestart: cfg.autorestart,
                 instance_pids: vec![],
             });
             info.pid = std::process::id();
             info.status = "running".to_string();
             info.restarts = restarts;
+            info.autorestart = cfg.autorestart;
             info.instance_pids = pids.clone();
             let _ = save_process(&info);
         }
@@ -399,7 +473,7 @@ pub async fn run_supervisor(
         }
 
         if shutdown {
-            if let Ok(mut info) = load_process(name) {
+            if let Ok(mut info) = load_process(&cfg.name) {
                 info.status = "stopped".to_string();
                 let _ = save_process(&info);
             }
@@ -408,29 +482,41 @@ pub async fn run_supervisor(
 
         // `3va stop`/`3va delete` may have raced the crash — don't respawn
         // something the user just asked to stop.
-        if let Ok(info) = load_process(name) {
+        if let Ok(info) = load_process(&cfg.name) {
             if info.status == "stopped" {
                 return Ok(());
             }
         }
 
+        // Autorestart disabled (`3va start --no-autorestart`): the app died
+        // and we are explicitly told not to bring it back. Mark it `error`
+        // (dead, intentionally not respawned) and exit the supervisor so
+        // `3va status` doesn't keep reporting a live supervisor for a process
+        // that will never be respawned. A manual `3va restart` still works.
+        if !cfg.autorestart {
+            if let Ok(mut info) = load_process(&cfg.name) {
+                info.status = "error".to_string();
+                let _ = save_process(&info);
+            }
+            return Ok(());
+        }
+
         restarts += 1;
-        if restarts > max_restarts {
-            if let Ok(mut info) = load_process(name) {
+        if restarts > cfg.max_restarts {
+            if let Ok(mut info) = load_process(&cfg.name) {
                 info.status = "crashed".to_string();
                 let _ = save_process(&info);
             }
             anyhow::bail!(
                 "'{}' exited {} times in a row — giving up (--max-restarts {})",
-                name,
+                cfg.name,
                 restarts,
-                max_restarts
+                cfg.max_restarts
             );
         }
-        tokio::time::sleep(std::time::Duration::from_millis(
-            300 * restarts.min(10) as u64,
-        ))
-        .await;
+        // Exponential backoff: 500 ms, 1 s, 2 s, … up to a 30 s ceiling. See
+        // `backoff_delay` for the rationale (bounds crash-loop CPU/log burn).
+        tokio::time::sleep(backoff_delay(restarts)).await;
     }
 }
 
@@ -508,22 +594,24 @@ pub fn restart_process(name: &str) -> anyhow::Result<ProcessInfo> {
     let info = load_process(name)?;
     let restarts = info.restarts + 1;
     let cwd = info.cwd.clone();
-    let entry = info.entry.clone();
-    let args = info.args.clone();
+    let cfg = SupervisorConfig {
+        name: name.to_string(),
+        entry: info.entry.clone(),
+        args: info.args.clone(),
+        port: info.port,
+        instances: info.instances,
+        max_restarts: info.max_restarts,
+        autorestart: info.autorestart,
+        start_restarts: restarts,
+    };
 
     // Stop (ignore error if already stopped)
     let _ = stop_process(name);
 
-    // Start again (resets restarts to 0), then restore count
-    let mut result = start_managed(
-        name,
-        &entry,
-        &cwd,
-        &args,
-        info.port,
-        info.instances,
-        info.max_restarts,
-    )?;
+    // Start again, passing the bumped counter straight to the new supervisor
+    // (instead of racing the on-disk state after spawn), so the count keeps
+    // accumulating across manual restarts instead of resetting to 0.
+    let mut result = start_managed(&cfg, &cwd)?;
     result.restarts = restarts;
     save_process(&result)?;
     Ok(result)
@@ -674,6 +762,7 @@ mod tests {
             port: None,
             instances: 1,
             max_restarts: 15,
+            autorestart: true,
             instance_pids: vec![],
         };
         save_process(&info).unwrap();
@@ -688,5 +777,59 @@ mod tests {
             "stop_process took {}ms for a dead PID — fixed sleep may have been reintroduced",
             elapsed.as_millis()
         );
+    }
+
+    // ── backoff_delay ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn backoff_delay_grows_exponentially_and_caps() {
+        assert_eq!(backoff_delay(0), std::time::Duration::from_millis(500));
+        assert_eq!(backoff_delay(1), std::time::Duration::from_millis(500));
+        assert_eq!(backoff_delay(2), std::time::Duration::from_millis(1_000));
+        assert_eq!(backoff_delay(3), std::time::Duration::from_millis(2_000));
+        assert_eq!(backoff_delay(4), std::time::Duration::from_millis(4_000));
+        assert_eq!(backoff_delay(5), std::time::Duration::from_millis(8_000));
+        assert_eq!(backoff_delay(6), std::time::Duration::from_millis(16_000));
+        // 2^6·500 ms = 32 s → clamped to the 30 s ceiling, and stays there.
+        assert_eq!(backoff_delay(7), std::time::Duration::from_millis(30_000));
+        assert_eq!(backoff_delay(8), std::time::Duration::from_millis(30_000));
+        assert_eq!(
+            backoff_delay(10_000),
+            std::time::Duration::from_millis(30_000)
+        );
+    }
+
+    #[test]
+    fn backoff_delay_never_overflows_on_huge_count() {
+        let d = backoff_delay(u32::MAX);
+        assert_eq!(d, std::time::Duration::from_millis(30_000));
+    }
+
+    // ── ProcessInfo serde backward compatibility ──────────────────────────────
+
+    /// `~/.3va/processes/*.json` files written by versions before the
+    /// `autorestart` field existed must still load, defaulting to `true` (the
+    /// pre-existing supervised behavior).
+    #[test]
+    fn process_info_deserializes_without_autorestart_field() {
+        let legacy = r#"{
+            "name": "legacy",
+            "entry": "/tmp/legacy.js",
+            "pid": 1234,
+            "cwd": "/tmp",
+            "log_path": "/tmp/legacy.log",
+            "status": "running",
+            "started_at": 0,
+            "restarts": 3,
+            "args": [],
+            "port": null,
+            "instances": 1,
+            "max_restarts": 15
+        }"#;
+        let info: ProcessInfo = serde_json::from_str(legacy).unwrap();
+        assert!(info.autorestart, "missing field must default to true");
+        assert_eq!(info.restarts, 3);
+        assert_eq!(info.instances, 1);
+        assert_eq!(info.max_restarts, 15);
     }
 }

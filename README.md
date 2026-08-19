@@ -291,6 +291,7 @@ Built into the runtime. No pm2, no separate daemon process.
 ```bash
 3va start server.js --name api
 3va start server.js --name worker -- --port 4000   # pass args after --
+3va start server.js --name one-shot --no-autorestart  # never respawn on crash
 3va status                                          # all processes
 3va status api                                      # one process
 3va logs api --lines 200
@@ -299,7 +300,9 @@ Built into the runtime. No pm2, no separate daemon process.
 3va delete api                                      # stop + remove logs
 ```
 
-Process metadata and logs live in `~/.3va/processes/`. If a managed process dies unexpectedly, `3va status` reports it as `error`; restart it with `3va restart <name>`. Automatic restart on crash is on the [roadmap](#known-limitations--roadmap).
+Process metadata and logs live in `~/.3va/processes/`. When a managed process dies unexpectedly, the supervisor restarts it automatically with **exponential backoff** (500 ms → 1 s → 2 s → … → capped at 30 s), giving up after 15 consecutive crashes (tunable with `--max-restarts`). `3va stop` always stops the process for good — it never triggers a respawn. The `Restarts` column in `3va status` counts both automatic and manual restarts.
+
+To disable automatic restarts for a specific process, start it with `--no-autorestart`; it will then be reported as `error` until you `3va restart` it by hand. A restarted process keeps the exact same permissions it had at first start (same CLI flags, same `package.json` `3va` grants).
 
 ---
 
@@ -307,7 +310,7 @@ Process metadata and logs live in `~/.3va/processes/`. If a managed process dies
 
 The headline throughput number is in the [Comparison](#comparison) table (CI-measured, release build, firewall limits raised for the test). The numbers below describe how 3va behaves **at its shipped default limits** (100 req/s, 50 connections per source IP), which is a deliberate design choice, not a performance regression — a single-machine load test against defaults will see most requests rejected with `403`, and that's intentional.
 
-At high concurrency, 3va's connection limiter deliberately sheds excess connections rather than queuing them indefinitely, trading raw throughput for protection against overload. Slowloris protection is built into the HTTP layer. RUDY (R-U-Dead-Yet) detection and adaptive rate limiting are on the [roadmap](#known-limitations--roadmap).
+At high concurrency, 3va's connection limiter deliberately sheds excess connections rather than queuing them indefinitely, trading raw throughput for protection against overload. Slowloris and RUDY (R-U-Dead-Yet) protection are both built into the HTTP layer (`header_timeout_ms` / `body_timeout_ms` + a minimum body byte-rate check — see [`docs/10-security/08-firewall.md`](docs/10-security/08-firewall.md)). Adaptive rate limiting (auto-tuning `rateLimitRps` from observed traffic, rather than the fixed default) is on the [roadmap](#known-limitations--roadmap).
 
 ---
 
@@ -486,8 +489,13 @@ Disable ANSI color output.
 ## Known Limitations & Roadmap
 
 - **Android arm64**: not built from `main` since v2.2.0; workaround via the `android-pre-v8` branch (see [Platform Support](#platform-support)).
-- **Process manager**: no automatic restart on crash yet — `3va status` reports `error`, restart manually with `3va restart <name>`.
-- **HTTP layer**: RUDY (R-U-Dead-Yet) detection and adaptive rate limiting are not yet implemented; connection limiting today is a fixed default (100 req/s, 50 conns/IP).
+- **HTTP layer**: adaptive rate limiting (auto-tuning from observed traffic) is not yet implemented; connection limiting today is a fixed default (100 req/s, 50 conns/IP). Slowloris and RUDY protection are implemented (see above). The request parser does not understand `Transfer-Encoding: chunked` — only `Content-Length` — which can desync request framing if 3va sits behind a proxy that forwards chunked bodies.
+- **HTTP response headers**: `res.setHeader()`/`res.writeHead()` do not strip `\r`/`\n` from application-supplied values — passing unsanitized user input into a header or status message allows response splitting / header injection. Sanitize any user-controlled value before passing it to these APIs.
+- **Decompression size limits**: `zlib` (`gunzip`/`inflate`/`brotliDecompress`) and package tarball extraction do not cap decompressed output size — a small malicious payload can inflate to exhaust memory. Zip-slip/symlink-escape protection on tarball extraction is implemented; the ratio/size cap is not.
+- **`fetch()` response size**: response bodies are read fully into memory with no size cap, regardless of `Content-Length`.
+- **MQTT / IMAP clients**: no connect or read/write timeout is set on the underlying socket, and the connect call runs synchronously inside the JS engine thread — a slow or unresponsive broker/server can stall the runtime. Wrap calls with an application-level timeout until this lands.
+- **Malware/secrets scanning is not automatic on `3va install`** — despite `docs/10-security/01-static-analysis.md` previously implying otherwise, the scanner only runs when you explicitly call `3va audit` / `3va audit --secrets`. Run it yourself after installing new dependencies.
+- **Supply-chain detection gaps**: no typosquatting detection (edit-distance against popular package names), no dependency-confusion protection (scoped vs. unscoped resolution preference), no npm provenance/Sigstore signature verification. Tarball integrity (SHA-256/512) and lifecycle-script blocking are implemented; these are not.
 - **Bundler**: `--source-map` and `--split` are not implemented for the real multi-file bundling path (only for a legacy single-file path reachable via the library API, not the CLI). Tree shaking is not yet applied to the multi-file graph.
 - **Dev server HMR**: full-page reload only, not granular per-module hot replacement.
 - **`package.json` permissions section**: `3va permissions suggest`/`learn` don't yet write directly into `package.json` — that's planned but manual editing is required today.
