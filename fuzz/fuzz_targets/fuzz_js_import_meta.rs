@@ -324,15 +324,17 @@ fuzz_target!(|data: &[u8]| {
     // looks_like_jsx: never panics, deterministic, idempotent.
     let _ = looks_like_jsx(s);
 
-    // Length must not grow unboundedly. The longest replacement token is
-    // "__vvva_meta_resolve__" (20 bytes) vs the longest from token
-    // "import.meta.resolve(" (20 bytes) — equal — and "import.meta.hot" (15)
-    // → "undefined" (9). So the output is always ≤ input length + N*delta,
-    // where delta is bounded by the difference between the to/from pairs.
-    // Worst case delta per replacement is +5 (for "import.meta.glob(" → ...).
-    // With at most len/16 occurrences, the bound is len + 5*(len/16) = 1.3125*len.
+    // Length must not grow unboundedly. The worst-case pair in META_PATTERNS
+    // is "import.meta.env" (16 bytes) → the runtime stub
+    // "(typeof __vvva_meta_env__ !== 'undefined' ? ... )" (116 bytes), a
+    // +100 delta — not "import.meta.glob(" (+2), which an earlier version of
+    // this comment used and which undercounted growth badly enough that a
+    // 22-byte input producing a 123-byte output tripped the old bound.
+    // Occurrences can't be packed closer than the 16-byte "from" pattern
+    // itself, so at most len/16 of them fit, capping growth at
+    // (len/16)*100 = 6.25*len. Use 8x + slack for headroom.
     assert!(
-        r1.len() <= s.len() + s.len() / 2 + 64,
+        r1.len() <= s.len() * 8 + 64,
         "replace_import_meta output length exploded: in_len={} out_len={}",
         s.len(),
         r1.len()
