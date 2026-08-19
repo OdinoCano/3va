@@ -135,4 +135,24 @@
 
 ---
 
+## 1.6 Security Hardening Backlog (found by internal audit, 2026-08-19)
+
+Gaps identified against 3va's own attack surface (its HTTP/WS/MQTT/IMAP builtins, PM, and crypto), verified against code — not yet fixed. See `README.md` § Known Limitations & Roadmap for the user-facing summary, and `docs/SECURITY.md` § Level 6 for the compression-bomb item.
+
+| Item | Area | Status |
+|------|------|--------|
+| CRLF sanitization in `res.setHeader()`/`res.writeHead()` | HTTP server | ❌ Not implemented |
+| `Transfer-Encoding: chunked` support in request parser | HTTP server | ❌ Not implemented |
+| Decompression ratio/size cap (`zlib` builtin + PM tarball extraction) | zlib, PM | ❌ Not implemented |
+| Response size cap on `fetch()` | fetch | ❌ Not implemented |
+| Connect/read timeouts on MQTT and IMAP client sockets | MQTT, IMAP | ❌ Not implemented |
+| Automatic malware/secrets scan during `3va install` (today: `3va audit` only, on demand) | PM | ❌ Not implemented |
+| Typosquatting detection (edit-distance vs. popular package names) | PM | ❌ Not implemented |
+| Dependency-confusion protection (scoped vs. unscoped resolution preference) | PM | ❌ Not implemented |
+| npm provenance / Sigstore signature verification | PM | ❌ Not implemented |
+| Adaptive rate limiting (auto-tune from observed traffic) | Firewall | ❌ Not implemented |
+| `X-Forwarded-For` support for `remoteAddress` behind a reverse proxy | Firewall | ❌ Not implemented (documented limitation, `docs/10-security/08-firewall.md` §8.9) |
+
+---
+
 *Roadmap subject to change based on feedback and project priorities.*

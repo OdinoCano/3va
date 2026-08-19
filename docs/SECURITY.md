@@ -205,10 +205,12 @@ cargo vet
 ```
 
 **Critical protections**:
-- Zip Slip: Validate paths in tarballs
-- Symlink escape: Do not follow symlinks without validation
-- Compression bombs: Detect ratios >1000:1
+- Zip Slip: Validate paths in tarballs — implemented (`crates/pm/src/lib.rs`, `extract_tarball`)
+- Symlink escape: Do not follow symlinks without validation — implemented (same function, symlink/hardlink entries are skipped)
 - Unicode normalization: Normalize paths
+
+**Not yet implemented** (tracked in `docs/12-roadmap/01-roadmap.md`):
+- Compression bombs: no decompression ratio/size cap on tarball extraction (`extract_tarball`) or on the `zlib` builtin (`gunzip`/`inflate`/`brotliDecompress`) — a small malicious payload can inflate to exhaust memory in either path today.
 
 ---
 
