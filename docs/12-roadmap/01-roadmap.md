@@ -27,7 +27,7 @@
 | Malware scanner | ✅ | Static analysis of `node_modules` |
 | Secrets scanner | ✅ | `SecretsScanner`; 21 patterns (AWS, GitHub, GitLab, Stripe, Slack, SendGrid, Twilio, private keys, JWT, npm tokens, passwords, API keys, DB connection strings) |
 | OSV audit | ✅ | 3 phases (malware + CVE + secrets); 24 h cache; `--deny`/`--json`/`--secrets`/`--update-cache` flags |
-| Bundler | ✅ | Tree shaking, code splitting (`--split`), minification (`--minify`), source maps (`--source-map`), watch mode with real notifier |
+| Bundler | 🟡 | Real multi-file graph bundling + `--minify` + watch mode with real notifier are done. `--source-map`, `--split`, and tree shaking exist only on a legacy single-file path reachable via the library API, not `3va bundle` — see [README § Known Limitations](../../README.md#known-limitations--roadmap) |
 | Test runner | ✅ | `describe`/`test`/`expect`; complete matchers; snapshots (`toMatchSnapshot` + `--update-snapshots`); `--watch`; `--coverage`; snapshot file I/O |
 | Sandbox REPL | ✅ | Multi-line; `.help`/`.clear`/`.allow-read=`/`.allow-write=`/`.allow-net=`/`.allow-env`/`.permissions`; `exit`/`quit` to leave; TTY detection |
 | Development server (`dev`) | ✅ | `--port`/`--host`/`--open`/`--public-dir`; HMR via SSE (`/__hmr`); HMR client injection; static files; SPA fallback; rebuild with 300 ms debounce |
