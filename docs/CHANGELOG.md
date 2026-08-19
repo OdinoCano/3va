@@ -7,6 +7,31 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+### Added
+
+- **Automatic restart on crash for supervised processes** (`3va start <script> --name X`).
+  When a managed process dies unexpectedly (any exit reason — `process.exit(1)`, an external
+  `kill -9`, a native panic/abort), the supervisor respawns it with **exponential backoff**
+  (`min(500 ms · 2^(n−1), 30 s)`: 500 ms → 1 s → 2 s → 4 s → … → 30 s ceiling) instead of just
+  reporting `error`. Gives up after 15 consecutive crashes by default, tunable with
+  `--max-restarts`. Design notes: exponential (vs. the previous fixed/linear ramp) was chosen so a
+  sustained crash loop reaches the 30 s ceiling after 7 crashes, bounding worst-case CPU/log burn
+  while keeping a single spurious crash snappy; no jitter, because one supervisor supervises one
+  process and jitter would make the schedule nondeterministic.
+- **`3va start --no-autorestart`**: disables respawn for a specific process. On an unexpected exit
+  the process is marked `error` (not restarted) until a manual `3va restart`.
+- **Restart counter accuracy fix**: `3va restart` (manual) no longer resets the `Restarts` count in
+  `3va status` to zero — the count now accumulates across supervisor generations (automatic +
+  manual restarts). The new supervisor receives the exact starting count explicitly, avoiding a
+  race with the on-disk state.
+- The managed `~/.3va/processes/*.json` files gain an `autorestart` field; files written by older
+  versions load fine (field defaults to `true`).
+
+### Fixed
+
+- `3va status` no longer reports a supervised process as a live `running` supervisor after the app
+  died with autorestart disabled — the supervisor exits and the process shows `error`.
+
 ## [v2.5.0] — 2026-08-18
 
 ### Added

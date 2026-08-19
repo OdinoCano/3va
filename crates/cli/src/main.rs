@@ -3369,7 +3369,8 @@ enum Commands {
 
     // ── Process Management ────────────────────────────────────────────────────
     /// Start a managed process in production (daemon), pm2-style: supervises
-    /// the app and restarts it on crash.
+    /// the app and restarts it on crash with exponential backoff (500 ms →
+    /// 30 s), giving up after `--max-restarts` consecutive crashes.
     Start {
         /// Name to identify the process (default: derived from entry filename)
         #[arg(long, short)]
@@ -3385,6 +3386,10 @@ enum Commands {
         /// Give up restarting after this many consecutive crashes.
         #[arg(long = "max-restarts", default_value = "15")]
         max_restarts: u32,
+        /// Do not restart the process when it crashes — `3va status` will
+        /// report it as `error` until you `3va restart` it manually.
+        #[arg(long = "no-autorestart")]
+        no_autorestart: bool,
         /// Stay in the foreground instead of daemonizing — this process IS
         /// the supervisor. Use this as a container's CMD/ENTRYPOINT: unlike
         /// the default (which forks a supervisor and exits), it never exits
@@ -3407,6 +3412,12 @@ enum Commands {
         instances: u32,
         #[arg(long = "max-restarts", default_value = "15")]
         max_restarts: u32,
+        #[arg(long = "no-autorestart")]
+        no_autorestart: bool,
+        /// Initial value for the persisted restart counter (used by
+        /// `3va restart` to keep counting across supervisor generations).
+        #[arg(long = "start-restarts", default_value = "0")]
+        start_restarts: u32,
         #[arg(long, short)]
         port: Option<u16>,
         entry: PathBuf,
@@ -4678,6 +4689,7 @@ async fn main() -> anyhow::Result<()> {
             port,
             instances,
             max_restarts,
+            no_autorestart,
             attach,
             entry,
             args,
@@ -4692,31 +4704,24 @@ async fn main() -> anyhow::Result<()> {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "app".to_string()),
             };
+            let cfg = proc::SupervisorConfig {
+                name: process_name.clone(),
+                entry: resolved_entry,
+                args: resolved_args,
+                port: *port,
+                instances: *instances,
+                max_restarts: *max_restarts,
+                autorestart: !*no_autorestart,
+                start_restarts: 0,
+            };
             if *attach {
                 println!(
                     "  Running '{}' in the foreground ({} instance(s)) — Ctrl+C or SIGTERM to stop.",
                     process_name, instances
                 );
-                proc::run_supervisor(
-                    &process_name,
-                    &resolved_entry,
-                    &resolved_args,
-                    *port,
-                    *instances,
-                    *max_restarts,
-                    true,
-                )
-                .await?;
+                proc::run_supervisor(&cfg, true).await?;
             } else {
-                let info = proc::start_managed(
-                    &process_name,
-                    &resolved_entry,
-                    &cwd,
-                    &resolved_args,
-                    *port,
-                    *instances,
-                    *max_restarts,
-                )?;
+                let info = proc::start_managed(&cfg, &cwd)?;
                 println!();
                 println!(
                     "  ✓ Started process '{}' (supervisor PID {}, {} instance(s))",
@@ -4730,12 +4735,23 @@ async fn main() -> anyhow::Result<()> {
             name,
             instances,
             max_restarts,
+            no_autorestart,
+            start_restarts,
             port,
             entry,
             args,
         } => {
-            proc::run_supervisor(name, entry, args, *port, *instances, *max_restarts, false)
-                .await?;
+            let cfg = proc::SupervisorConfig {
+                name: name.clone(),
+                entry: entry.clone(),
+                args: args.clone(),
+                port: *port,
+                instances: *instances,
+                max_restarts: *max_restarts,
+                autorestart: !*no_autorestart,
+                start_restarts: *start_restarts,
+            };
+            proc::run_supervisor(&cfg, false).await?;
         }
         Commands::Stop { name } => {
             proc::stop_process(name)?;
