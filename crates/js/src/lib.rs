@@ -84,7 +84,7 @@ pub struct JsEngine {
     last_low_memory_hint: std::time::Instant,
 }
 
-const LOW_MEMORY_HINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const LOW_MEMORY_HINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl JsEngine {
     pub async fn new(permissions: Arc<PermissionState>) -> anyhow::Result<Self> {
