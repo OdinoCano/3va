@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Fills the <!--BENCH:install-*--> markers in README.md's Comparison table
-# from bench/run.sh's "Install (warm...)" table. Run after bench/run.sh,
+# Fills the <!--BENCH:install-*-->, <!--BENCH:http-*--> and <!--BENCH:mem-*-->
+# markers in README.md's Comparison table from bench/run.sh's "Install (warm
+# ...)" and "HTTP throughput ... and memory" tables. Run after bench/run.sh,
 # piping its output in:
 #
 #   bash bench/run.sh | tee /tmp/bench.txt
@@ -21,26 +22,49 @@ bench = pathlib.Path(sys.argv[1]).read_text()
 readme = pathlib.Path("README.md")
 text = readme.read_text()
 
-section_match = re.search(r"## Install \(warm.*?\n\n(.*?)\n\n", bench, re.S)
-section = section_match.group(1) if section_match else ""
+def fill(marker_value_map, text):
+    for marker, value in marker_value_map.items():
+        text, n = re.subn(
+            rf"(<!--BENCH:{marker}-->).*?(<!--/BENCH:{marker}-->)",
+            lambda m: m.group(1) + value + m.group(2),
+            text,
+        )
+        if n == 0:
+            print(f"warning: marker BENCH:{marker} not found in README.md", file=sys.stderr)
+    return text
 
 values = {}
+section_match = re.search(r"## Install \(warm.*?\n\n(.*?)\n\n", bench, re.S)
+section = section_match.group(1) if section_match else ""
 for line in section.splitlines():
     m = re.match(r"\|\s*(\S+)\s*\|\s*([\d.]+ ms)\s*\|", line)
     if m:
         values[m.group(1)] = m.group(2)
+install_map = {f"install-{k}": v for k, v in values.items()}
+text = fill(install_map, text)
 
-mapping = {"npm": "install-npm", "bun": "install-bun", "3va": "install-3va"}
-for key, marker in mapping.items():
-    if key not in values:
-        continue
-    text, n = re.subn(
-        rf"(<!--BENCH:{marker}-->).*?(<!--/BENCH:{marker}-->)",
-        lambda m: m.group(1) + values[key] + m.group(2),
+http_values = {}
+section_match = re.search(
+    r"## HTTP throughput \(100k requests, 1,000 concurrent\) and memory\n\n(.*?)\n\n",
+    bench,
+    re.S,
+)
+section = section_match.group(1) if section_match else ""
+for line in section.splitlines():
+    m = re.match(
+        r"\|\s*(\S+)\s*\|\s*([\d,]+)\s*\|\s*[\d.]+%\s*\|\s*([\d.]+ MB)\s*\|\s*([\d.]+ MB)\s*\|",
+        line,
+    )
+    if m:
+        name, rps, idle, loaded = m.group(1), m.group(2), m.group(3), m.group(4)
+        idle_val = idle.replace(" MB", "")
+        http_values[name] = {"http": f"{rps} req/s", "mem": f"{idle_val} → {loaded}"}
+
+for kind, suffix in (("http", "http"), ("mem", "mem")):
+    text = fill(
+        {f"{suffix}-{name}": vals[kind] for name, vals in http_values.items()},
         text,
     )
-    if n == 0:
-        print(f"warning: marker BENCH:{marker} not found in README.md", file=sys.stderr)
 
 readme.write_text(text)
 EOF
