@@ -87,11 +87,11 @@ La v2.0.0 implementa el firewall completo como un crate separado. Sustituye el l
 
 ### Rate limiting adaptativo por IP
 
-El token bucket per-IP (`rate_limit_rps` / `rate_limit_burst`) throttlea a cada origen de forma independiente. Las IPs legítimas no se ven afectadas por el abuso de otras. Tras `auto_block_threshold` violaciones, la IP se añade al blocklist automáticamente.
+El token bucket per-IP (`rate_limit_rps` / `rate_limit_burst`) throttlea a cada origen de forma independiente. Las IPs legítimas no se ven afectadas por el abuso de otras. Tras `auto_block_threshold` violaciones, la IP se añade al blocklist automáticamente. El bloqueo es **adaptativo**: cada auto-bloqueo suma un *strike* y la duración escala como `block_duration_secs × factor^(strikes-1)` (por defecto 300 s → 600 s → 1200 s → … → 1 h tope) mientras la IP siga reincidiendo dentro de la ventana de `strike_decay_secs`; si se mantiene calmada, el historial se olvida y vuelve a la duración base. La adaptividad modifica la duración del bloqueo, no el bucket de tasa per-IP.
 
 ### Detección de RUDY
 
-El cuerpo de la petición ahora está protegido por `body_timeout_ms`. Un cliente que envía el cuerpo byte a byte no puede bloquear un slot de conexión indefinidamente — la lectura de `read_exact` se cancela con timeout.
+El cuerpo de la petición está protegido por dos capas. `body_timeout_ms` es el deadline total de lectura; `min_body_rate_bps` (por defecto 100 B/s) calcula la tasa media de recepción pasados 2 s de gracia y cierra la conexión si el cliente envía más lento — un atacante que manda el cuerpo a 1 byte/s es descartado a los ~2 s, sin esperar a que expire el deadline.
 
 ### Límites de cabeceras
 

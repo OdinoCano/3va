@@ -712,3 +712,172 @@ async fn firewall_slowloris_timeout_and_recovery() {
         .unwrap();
     assert_eq!(count, "1");
 }
+
+/// Verify that a RUDY attack — a POST whose body arrives at ~1 byte/second —
+/// is dropped by the minimum body-rate check and the server recovers to serve
+/// subsequent requests normally.
+///
+/// The body deadline is raised to 120 s so the total-deadline path CANNOT fire
+/// within this test: only `min_body_rate_bps` can reject the connection, which
+/// is the point being proven.
+#[tokio::test]
+async fn firewall_rudy_slow_body_rejected_and_recovers() {
+    let port = free_port();
+    let mut e = engine_with_firewall(FirewallConfig {
+        min_body_rate_bps: 50, // slower than 50 B/s is dropped
+        body_timeout_ms: 120_000,
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__okCount = 0;
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__okCount++;
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    wait_for_port(port).await;
+
+    // RUDY simulation: declare Content-Length: 200 but drip the body at ~1 B/s
+    // (one byte every 500 ms). A complete body would take 100 s; the rate check
+    // must drop the connection after ~2-3 s instead.
+    let bytes_sent = drive_until(&mut e, async move {
+        let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port)).await else {
+            return 0u32;
+        };
+        let req =
+            "POST /slow HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 200\r\nConnection: close\r\n\r\n"
+                .to_string();
+        let _ = stream.write_all(req.as_bytes()).await;
+
+        let mut sent = 0u32;
+        let mut buf = [0u8; 16];
+        for _ in 0..60 {
+            let _ = stream.write_all(b"x").await;
+            sent += 1;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            // If the server dropped us, the read returns EOF.
+            match tokio::time::timeout(Duration::from_millis(50), stream.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => return sent,
+                _ => {}
+            }
+        }
+        sent
+    })
+    .await;
+
+    // A full body is 200 bytes; a rate-check drop happens after ~5 bytes. If we
+    // got here with bytes_sent >= 30 the server waited 15+ s (still far below
+    // the 120 s deadline), so neither mechanism dropped it — fail.
+    assert!(
+        bytes_sent < 30,
+        "server must drop the slow body quickly (sent {bytes_sent}/200 bytes, \
+         deadline is 120 s so only the rate check can have rejected it)"
+    );
+
+    // The incomplete RUDY body must never have reached JS.
+    let count = e
+        .eval_to_string("String(globalThis.__okCount)")
+        .await
+        .unwrap();
+    assert_eq!(count, "0", "the RUDY request must not reach the handler");
+
+    // A normal request after the attack must succeed.
+    let resp = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(
+        response_status(&resp),
+        200,
+        "server must recover after RUDY drop"
+    );
+
+    let count = e
+        .eval_to_string("String(globalThis.__okCount)")
+        .await
+        .unwrap();
+    assert_eq!(count, "1");
+}
+
+/// Verify adaptive rate limiting end-to-end: a repeat offender's block
+/// duration escalates. First auto-block lasts `block_duration_secs`; after the
+/// block expires the IP re-offends and the second block lasts
+/// `block_duration_secs × blockEscalationFactor` (longer), then the IP is
+/// served again only once that escalated block has fully elapsed.
+#[tokio::test]
+async fn firewall_adaptive_escalation_repeat_offender() {
+    let port = free_port();
+    let mut e = engine_with_firewall(FirewallConfig {
+        rate_limit_rps: 100,
+        rate_limit_burst: 1,
+        auto_block_threshold: 1,
+        block_duration_secs: 1,
+        block_escalation_factor: 2,
+        max_block_duration_secs: 4,
+        strike_decay_secs: 3600, // keep the strike history across this test
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    wait_for_port(port).await;
+
+    // Round 1: first request allowed, second auto-blocks at the base 1 s.
+    let r1 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(response_status(&r1), 200, "req 1 must be allowed");
+    let r2 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(response_status(&r2), 403, "req 2 must auto-block the IP");
+    let r3 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(response_status(&r3), 403, "req 3 must stay blocked");
+
+    // Wait past the 1 s block.
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    // Round 2: allowed again, then re-offends → strike 2 → 2 s block.
+    let r4 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(
+        response_status(&r4),
+        200,
+        "req 4 must be allowed after the block"
+    );
+    let r5 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(response_status(&r5), 403, "req 5 must re-block the IP");
+
+    // 1.5 s into the 2 s block it must STILL be active — the escalated block is
+    // longer than the first one, which had already expired at 1.3 s.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let r6 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(
+        response_status(&r6),
+        403,
+        "req 6 at 1.5 s into a 2 s block must still be blocked (escalated duration)"
+    );
+
+    // After the full 2 s elapses the IP is served again.
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let r7 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(
+        response_status(&r7),
+        200,
+        "req 7 must be allowed after the escalated block"
+    );
+}

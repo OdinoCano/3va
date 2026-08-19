@@ -307,7 +307,7 @@ Process metadata and logs live in `~/.3va/processes/`. If a managed process dies
 
 The headline throughput number is in the [Comparison](#comparison) table (CI-measured, release build, firewall limits raised for the test). The numbers below describe how 3va behaves **at its shipped default limits** (100 req/s, 50 connections per source IP), which is a deliberate design choice, not a performance regression — a single-machine load test against defaults will see most requests rejected with `403`, and that's intentional.
 
-At high concurrency, 3va's connection limiter deliberately sheds excess connections rather than queuing them indefinitely, trading raw throughput for protection against overload. Slowloris protection is built into the HTTP layer. RUDY (R-U-Dead-Yet) detection and adaptive rate limiting are on the [roadmap](#known-limitations--roadmap).
+At high concurrency, 3va's connection limiter deliberately sheds excess connections rather than queuing them indefinitely, trading raw throughput for protection against overload. Slowloris and RUDY (R-U-Dead-Yet) protection are built into the HTTP layer (per-line header deadlines, a `bodyTimeoutMs` body deadline, and a `minBodyRateBps` minimum body receive rate). Rate limiting is adaptive: an IP that repeatedly trips the rate limit is auto-blocked, and each repeat offense within the strike window is blocked for longer (`blockDurationSecs × blockEscalationFactor^(strikes-1)`, capped at `maxBlockDurationSecs`) until the IP stays calm for `strikeDecaySecs`.
 
 ---
 
@@ -487,7 +487,7 @@ Disable ANSI color output.
 
 - **Android arm64**: not built from `main` since v2.2.0; workaround via the `android-pre-v8` branch (see [Platform Support](#platform-support)).
 - **Process manager**: no automatic restart on crash yet — `3va status` reports `error`, restart manually with `3va restart <name>`.
-- **HTTP layer**: RUDY (R-U-Dead-Yet) detection and adaptive rate limiting are not yet implemented; connection limiting today is a fixed default (100 req/s, 50 conns/IP).
+- **HTTP layer**: RUDY (R-U-Dead-Yet) detection is implemented (`minBodyRateBps` minimum body rate + `bodyTimeoutMs` body deadline) and rate limiting is adaptive — repeat offenders get escalating auto-block durations (`blockEscalationFactor` up to `maxBlockDurationSecs`, reset after `strikeDecaySecs` of calm). The shipped default is still a fixed base of 100 req/s and 50 connections per source IP; adaptivity adjusts the *block penalty* for repeat offenders, not the per-IP token-bucket rate. Connection tracking is per source IP only — behind a reverse proxy that collapses clients onto one IP, the proxy's IP is what gets limited (no `X-Forwarded-For` trust yet).
 - **Bundler**: `--source-map` and `--split` are not implemented for the real multi-file bundling path (only for a legacy single-file path reachable via the library API, not the CLI). Tree shaking is not yet applied to the multi-file graph.
 - **Dev server HMR**: full-page reload only, not granular per-module hot replacement.
 - **`package.json` permissions section**: `3va permissions suggest`/`learn` don't yet write directly into `package.json` — that's planned but manual editing is required today.
