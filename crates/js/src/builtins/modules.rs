@@ -37,20 +37,19 @@ fn getaddrinfo_ips(hostname: &str, family: i32) -> std::result::Result<Vec<(Stri
     }
     let mut out = Vec::new();
     let mut p = res;
-    while !p.is_null() {
-        unsafe {
-            let info = &*p;
+    while let Some(info) = unsafe { p.as_ref() } {
+        if !info.ai_addr.is_null() {
             if info.ai_family == libc::AF_INET {
-                let sa = &*(info.ai_addr as *const libc::sockaddr_in);
+                let sa = unsafe { &*(info.ai_addr as *const libc::sockaddr_in) };
                 let ip = std::net::Ipv4Addr::from(sa.sin_addr.s_addr.to_ne_bytes());
                 out.push((ip.to_string(), 4));
             } else if info.ai_family == libc::AF_INET6 {
-                let sa = &*(info.ai_addr as *const libc::sockaddr_in6);
+                let sa = unsafe { &*(info.ai_addr as *const libc::sockaddr_in6) };
                 let ip = std::net::Ipv6Addr::from(sa.sin6_addr.s6_addr);
                 out.push((ip.to_string(), 6));
             }
-            p = info.ai_next;
         }
+        p = info.ai_next;
     }
     unsafe { libc::freeaddrinfo(res) };
     if out.is_empty() {
@@ -260,6 +259,16 @@ fn dns_any_to_json(answers: &[hickory_resolver::proto::rr::Record]) -> serde_jso
                         "minttl": soa.minimum,
                         "ttl": ttl,
                     }),
+                    RData::CAA(caa) => {
+                        let mut obj = json!({
+                            "type": "CAA",
+                            "critical": if caa.issuer_critical { 128 } else { 0 },
+                            "ttl": ttl,
+                        });
+                        obj[caa.tag.as_str()] =
+                            json!(std::string::String::from_utf8_lossy(&caa.value).into_owned());
+                        obj
+                    }
                     _ => return None,
                 };
                 Some(data)
