@@ -1736,7 +1736,7 @@ fn find_esm_export_names(js: &str) -> Vec<String> {
             let trimmed = js[start..].trim_start_matches('*'); // `export function* gen()`
             let end = trimmed
                 .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
-                .map_or(trimmed.len(), |o| o);
+                .unwrap_or(trimmed.len());
             let name = &trimmed[..end];
             if !name.is_empty()
                 && is_valid_js_identifier(name)
