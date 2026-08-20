@@ -48,6 +48,15 @@ ctr = "0.9"
 # Termux, cross-compilation, and restricted environments).
 native-tls = { version = "0.2", features = ["vendored"] }
 openssl-sys = { version = "0.9", features = ["vendored"] }
+# Real in-handshake hybrid PQ key exchange (RFC 10024 X25519MLKEM768) needs a TLS
+# stack with hybrid group support — native-tls (OS-native TLS) exposes no such hook.
+# aws_lc_rs + prefer-post-quantum are both already transitive (via tonic/russh);
+# this promotes them to direct use for the PQ-TLS client path only. See
+# docs/10-security/06-pq-tls-hybrid-design.md.
+rustls = { version = "0.23", features = ["aws_lc_rs", "prefer-post-quantum"] }
+rustls-native-certs = "0.8"
+rustls-pki-types = "1"
+rustls-pemfile = "2"
 rsa = "0.9"
 p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
 p384 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
