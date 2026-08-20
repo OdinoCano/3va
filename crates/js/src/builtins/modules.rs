@@ -6,6 +6,59 @@ use v8::{
 };
 use vvva_permissions::{Capability, PermissionState};
 
+/// Family-aware getaddrinfo lookup. Node's `dns.lookup`/`resolve4`/`resolve6`
+/// pass the requested family as an address hint — this matters for `localhost`,
+/// which glibc only resolves to `::1` when asked for AF_INET6 (a plain
+/// AF_UNSPEC `ToSocketAddrs` yields just `127.0.0.1`).
+///
+/// Returns `(ip, family)` pairs in resolver order, or a Node errno code
+/// (`ENOTFOUND`, `ENODATA`, …) as the error.
+fn getaddrinfo_ips(hostname: &str, family: i32) -> std::result::Result<Vec<(String, u8)>, String> {
+    use std::ffi::CString;
+    let c_host = match CString::new(hostname) {
+        Ok(c) => c,
+        Err(_) => return Err("EINVAL".to_string()),
+    };
+    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+    hints.ai_family = family;
+    hints.ai_socktype = libc::SOCK_DGRAM;
+    let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+    let rc = unsafe { libc::getaddrinfo(c_host.as_ptr(), std::ptr::null(), &hints, &mut res) };
+    if rc != 0 {
+        let code = match rc {
+            libc::EAI_NONAME => "ENOTFOUND",
+            libc::EAI_AGAIN => "EAI_AGAIN",
+            libc::EAI_FAIL => "EAI_FAIL",
+            libc::EAI_MEMORY => "EAI_MEMORY",
+            libc::EAI_SYSTEM => "EAI_SYSTEM",
+            _ => return Err(format!("EAI_{}", rc)),
+        };
+        return Err(code.to_string());
+    }
+    let mut out = Vec::new();
+    let mut p = res;
+    while let Some(info) = unsafe { p.as_ref() } {
+        if !info.ai_addr.is_null() {
+            if info.ai_family == libc::AF_INET {
+                let sa = unsafe { &*(info.ai_addr as *const libc::sockaddr_in) };
+                let ip = std::net::Ipv4Addr::from(sa.sin_addr.s_addr.to_ne_bytes());
+                out.push((ip.to_string(), 4));
+            } else if info.ai_family == libc::AF_INET6 {
+                let sa = unsafe { &*(info.ai_addr as *const libc::sockaddr_in6) };
+                let ip = std::net::Ipv6Addr::from(sa.sin6_addr.s6_addr);
+                out.push((ip.to_string(), 6));
+            }
+        }
+        p = info.ai_next;
+    }
+    unsafe { libc::freeaddrinfo(res) };
+    if out.is_empty() {
+        Err("ENODATA".to_string())
+    } else {
+        Ok(out)
+    }
+}
+
 fn dns_resolver() -> std::result::Result<&'static hickory_resolver::TokioResolver, String> {
     static RESOLVER: OnceLock<std::result::Result<hickory_resolver::TokioResolver, String>> =
         OnceLock::new();
@@ -34,6 +87,7 @@ fn dns_lookup_to_json(
                     RData::MX(mx) => Some(json!({
                         "exchange": mx.exchange.to_string().trim_end_matches('.'),
                         "priority": mx.preference,
+                        "type": "MX",
                     })),
                     _ => None,
                 })
@@ -127,6 +181,100 @@ fn dns_lookup_to_json(
             .unwrap_or(serde_json::Value::Null),
         _ => serde_json::Value::Array(vec![]),
     }
+}
+
+/// Serialize a mixed `ANY` answer set the way `dns.resolveAny()` returns it:
+/// every record as an object with a `type` discriminator (Node also attaches a
+/// `ttl` to each).
+fn dns_any_to_json(answers: &[hickory_resolver::proto::rr::Record]) -> serde_json::Value {
+    use hickory_resolver::proto::rr::RData;
+    use serde_json::json;
+
+    serde_json::Value::Array(
+        answers
+            .iter()
+            .filter_map(|r| {
+                let ttl = r.ttl;
+                let data = match &r.data {
+                    RData::A(a) => json!({ "type": "A", "address": a.to_string(), "ttl": ttl }),
+                    RData::AAAA(a) => {
+                        json!({ "type": "AAAA", "address": a.to_string(), "ttl": ttl })
+                    }
+                    RData::MX(mx) => json!({
+                        "type": "MX",
+                        "exchange": mx.exchange.to_string().trim_end_matches('.'),
+                        "priority": mx.preference,
+                        "ttl": ttl,
+                    }),
+                    RData::TXT(txt) => json!({
+                        "type": "TXT",
+                        "entries": txt
+                            .txt_data
+                            .iter()
+                            .map(|c| std::string::String::from_utf8_lossy(c).into_owned())
+                            .collect::<Vec<_>>(),
+                        "ttl": ttl,
+                    }),
+                    RData::SRV(srv) => json!({
+                        "type": "SRV",
+                        "name": srv.target.to_string().trim_end_matches('.'),
+                        "port": srv.port,
+                        "priority": srv.priority,
+                        "weight": srv.weight,
+                        "ttl": ttl,
+                    }),
+                    RData::NS(ns) => json!({
+                        "type": "NS",
+                        "value": ns.0.to_string().trim_end_matches('.'),
+                        "ttl": ttl,
+                    }),
+                    RData::CNAME(c) => json!({
+                        "type": "CNAME",
+                        "value": c.0.to_string().trim_end_matches('.'),
+                        "ttl": ttl,
+                    }),
+                    RData::PTR(p) => json!({
+                        "type": "PTR",
+                        "value": p.0.to_string().trim_end_matches('.'),
+                        "ttl": ttl,
+                    }),
+                    RData::NAPTR(n) => json!({
+                        "type": "NAPTR",
+                        "flags": std::string::String::from_utf8_lossy(&n.flags),
+                        "service": std::string::String::from_utf8_lossy(&n.services),
+                        "regexp": std::string::String::from_utf8_lossy(&n.regexp),
+                        "replacement": n.replacement.to_string().trim_end_matches('.'),
+                        "order": n.order,
+                        "preference": n.preference,
+                        "ttl": ttl,
+                    }),
+                    RData::SOA(soa) => json!({
+                        "type": "SOA",
+                        "nsname": soa.mname.to_string().trim_end_matches('.'),
+                        "hostmaster": soa.rname.to_string().trim_end_matches('.'),
+                        "serial": soa.serial,
+                        "refresh": soa.refresh,
+                        "retry": soa.retry,
+                        "expire": soa.expire,
+                        "minttl": soa.minimum,
+                        "ttl": ttl,
+                    }),
+                    RData::CAA(caa) => {
+                        let mut obj = json!({
+                            "type": "CAA",
+                            "critical": if caa.issuer_critical { 128 } else { 0 },
+                            "ttl": ttl,
+                        });
+                        obj[caa.tag.as_str()] =
+                            json!(std::string::String::from_utf8_lossy(&caa.value).into_owned());
+                        obj
+                    }
+                    _ => return None,
+                };
+                Some(data)
+            })
+            .collect(),
+    )
 }
 
 // Thread-local, not a process-wide static — see the identical fix (and
@@ -581,32 +729,31 @@ pub fn inject_require(
               mut rv: ReturnValue| {
             let hostname_arg = args.get(0);
             let hostname = hostname_arg.to_rust_string_lossy(scope);
-
-            // Plain blocking std::net::ToSocketAddrs — no tokio involved, so
-            // no need for tokio::task::block_in_place (which requires a
-            // multi_thread runtime and panics outright on current_thread,
-            // e.g. plain `#[tokio::test]`; see fs_watch's __fsWatchNext fix
-            // for the same bug pattern).
-            let result = {
-                use std::net::ToSocketAddrs;
-                let addr_str = format!("{}:0", hostname);
-                match addr_str.to_socket_addrs() {
-                    Ok(addrs) => {
-                        let ips: Vec<String> = addrs.map(|a| a.ip().to_string()).collect();
-                        if ips.is_empty() {
-                            Err(format!("ENOTFOUND: {hostname}"))
-                        } else {
-                            Ok(ips)
-                        }
-                    }
-                    Err(e) => Err(e.to_string()),
-                }
+            let family_arg = args.get(1);
+            let family = family_arg.int32_value(scope).unwrap_or(0);
+            let family_hint = match family {
+                6 => libc::AF_INET6,
+                4 => libc::AF_INET,
+                _ => libc::AF_UNSPEC,
             };
 
+            // Plain blocking getaddrinfo — no tokio involved, so no need for
+            // tokio::task::block_in_place (which requires a multi_thread
+            // runtime and panics outright on current_thread, e.g. plain
+            // `#[tokio::test]`; see fs_watch's __fsWatchNext fix for the same
+            // bug pattern).
+            let result = getaddrinfo_ips(&hostname, family_hint);
+
             let json_result = match result {
-                Ok(ips) => serde_json::to_string(&ips).unwrap_or_else(|_| "[]".to_string()),
-                Err(e) => {
-                    let err_str = V8String::new(scope, &format!("Error: {}", e)).unwrap();
+                Ok(ips) => {
+                    let arr: Vec<serde_json::Value> = ips
+                        .iter()
+                        .map(|(ip, fam)| serde_json::json!({ "address": ip, "family": fam }))
+                        .collect();
+                    serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string())
+                }
+                Err(code) => {
+                    let err_str = V8String::new(scope, &code).unwrap();
                     rv.set(err_str.into());
                     return;
                 }
@@ -642,6 +789,7 @@ pub fn inject_require(
                 "NAPTR" => RecordType::NAPTR,
                 "SOA" => RecordType::SOA,
                 "PTR" => RecordType::PTR,
+                "ANY" => RecordType::ANY,
                 other => {
                     let err_str =
                         V8String::new(scope, &format!("unsupported record type: {}", other))
@@ -701,7 +849,11 @@ pub fn inject_require(
 
             match result {
                 Ok(lookup) => {
-                    let json = dns_lookup_to_json(&rrtype, lookup.answers());
+                    let json = if record_type == RecordType::ANY {
+                        dns_any_to_json(lookup.answers())
+                    } else {
+                        dns_lookup_to_json(&rrtype, lookup.answers())
+                    };
                     let json_str =
                         serde_json::to_string(&json).unwrap_or_else(|_| "null".to_string());
                     let result_str = V8String::new(scope, &json_str).unwrap();
@@ -719,6 +871,167 @@ pub fn inject_require(
         scope,
         V8String::new(scope, "__dnsQuery").unwrap().into(),
         dns_query_fn.unwrap().into(),
+    );
+
+    // ── dns.getServers(): nameservers from /etc/resolv.conf ──────────────────
+    let dns_get_servers_fn = Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              _args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let mut servers: Vec<String> = Vec::new();
+            if let Ok(contents) = std::fs::read_to_string("/etc/resolv.conf") {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if let Some(rest) = line.strip_prefix("nameserver") {
+                        let ip = rest.trim();
+                        if !ip.is_empty() && !ip.starts_with('#') {
+                            servers.push(ip.to_string());
+                        }
+                    }
+                }
+            }
+            let json = serde_json::to_string(&servers).unwrap_or_else(|_| "[]".to_string());
+            let result_str = V8String::new(scope, &json).unwrap();
+            rv.set(result_str.into());
+        },
+    );
+    global.set(
+        scope,
+        V8String::new(scope, "__dnsGetServers").unwrap().into(),
+        dns_get_servers_fn.unwrap().into(),
+    );
+
+    // ── dns.lookupService(addr, port): getnameinfo host/service ──────────────
+    let dns_lookup_service_fn = Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let addr_arg = args.get(0);
+            let addr = addr_arg.to_rust_string_lossy(scope);
+            let port_arg = args.get(1);
+            let port: u16 = port_arg.uint32_value(scope).unwrap_or(0) as u16;
+
+            let ip: std::net::IpAddr = match addr.parse() {
+                Ok(ip) => ip,
+                Err(_) => {
+                    let err_str = V8String::new(
+                        scope,
+                        &format!(r#"{{"code":"EINVAL","message":"getnameinfo EINVAL {addr}"}}"#),
+                    )
+                    .unwrap();
+                    rv.set(err_str.into());
+                    return;
+                }
+            };
+
+            let addr_for_thread = addr.clone();
+            let result: std::result::Result<(String, String), String> =
+                std::thread::spawn(move || {
+                    let ip = ip;
+                    let mut host = [0u8; 1025];
+                    let mut serv = [0u8; 64];
+                    let mut storage = std::mem::MaybeUninit::<libc::sockaddr_storage>::uninit();
+                    let (sa, salen): (*const libc::sockaddr, libc::socklen_t) = match ip {
+                        std::net::IpAddr::V4(v4) => {
+                            let sock = libc::sockaddr_in {
+                                sin_family: libc::AF_INET as libc::sa_family_t,
+                                sin_port: port.to_be(),
+                                sin_addr: libc::in_addr {
+                                    s_addr: u32::from(v4).to_be(),
+                                },
+                                sin_zero: [0; 8],
+                            };
+                            unsafe {
+                                std::ptr::write(
+                                    storage.as_mut_ptr() as *mut libc::sockaddr_in,
+                                    sock,
+                                )
+                            };
+                            (
+                                storage.as_ptr() as *const libc::sockaddr,
+                                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                            )
+                        }
+                        std::net::IpAddr::V6(v6) => {
+                            let sock = libc::sockaddr_in6 {
+                                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                                sin6_port: port.to_be(),
+                                sin6_flowinfo: 0,
+                                sin6_addr: libc::in6_addr {
+                                    s6_addr: v6.octets(),
+                                },
+                                sin6_scope_id: 0,
+                            };
+                            unsafe {
+                                std::ptr::write(
+                                    storage.as_mut_ptr() as *mut libc::sockaddr_in6,
+                                    sock,
+                                )
+                            };
+                            (
+                                storage.as_ptr() as *const libc::sockaddr,
+                                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                            )
+                        }
+                    };
+                    let rc = unsafe {
+                        libc::getnameinfo(
+                            sa,
+                            salen,
+                            host.as_mut_ptr() as *mut libc::c_char,
+                            host.len() as libc::socklen_t,
+                            serv.as_mut_ptr() as *mut libc::c_char,
+                            serv.len() as libc::socklen_t,
+                            0,
+                        )
+                    };
+                    if rc != 0 {
+                        return Err(match rc {
+                            libc::EAI_NONAME => "ENOTFOUND".to_string(),
+                            _ => format!("EAI_{}", rc),
+                        });
+                    }
+                    let host = host
+                        .split(|&b| b == 0)
+                        .next()
+                        .map(|b| std::string::String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_else(|| addr_for_thread);
+                    let service = serv
+                        .split(|&b| b == 0)
+                        .next()
+                        .map(|b| std::string::String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_default();
+                    Ok((host, service))
+                })
+                .join()
+                .unwrap_or_else(|_| Err("lookupService thread panicked".to_string()));
+
+            match result {
+                Ok((host, service)) => {
+                    let json = format!(r#"{{"hostname":"{}","service":"{}"}}"#, host, service);
+                    let result_str = V8String::new(scope, &json).unwrap();
+                    rv.set(result_str.into());
+                }
+                Err(code) => {
+                    let msg = if code == "ENOTFOUND" {
+                        format!("getnameinfo ENOTFOUND {addr}:{port}")
+                    } else {
+                        format!("getnameinfo {code} {addr}:{port}")
+                    };
+                    let err_str =
+                        V8String::new(scope, &format!(r#"{{"code":"{code}","message":"{msg}"}}"#))
+                            .unwrap();
+                    rv.set(err_str.into());
+                }
+            }
+        },
+    );
+    global.set(
+        scope,
+        V8String::new(scope, "__dnsLookupService").unwrap().into(),
+        dns_lookup_service_fn.unwrap().into(),
     );
 
     let js_code = r#"
@@ -1563,59 +1876,74 @@ pub fn inject_require(
             })();
 
             // ── dns / dns/promises ───────────────────────────────────────────────────
-            // Backed by real native lookups (__dnsLookup: std::net::ToSocketAddrs;
-            // __dnsQuery: hickory-resolver) — both already existed but were never
-            // assembled into a require()able module.
+            // Backed by real native lookups: __dnsLookup (getaddrinfo with a
+            // family hint), __dnsQuery (hickory-resolver) and __dnsGetServers
+            // (/etc/resolv.conf). Behaviour (record shapes, error codes/syscall
+            // names, family hints) is verified against Node.js v24 in
+            // scripts/compat-dgram-dns.sh.
             (function() {
+                var SYSCALLS = {
+                    A: 'queryA', AAAA: 'queryAaaa', MX: 'queryMx', TXT: 'queryTxt',
+                    SRV: 'querySrv', NS: 'queryNs', CNAME: 'queryCname',
+                    NAPTR: 'queryNaptr', SOA: 'querySoa', PTR: 'queryPtr', ANY: 'queryAny',
+                };
+
                 function mkErr(raw, hostname, syscall) {
                     var code = 'ENOTFOUND';
-                    var m = /^([A-Z]+)[: ]/.exec(raw);
+                    var m = /^([A-Z]+)[: ]/.exec(String(raw));
                     if (m) code = m[1];
-                    var err = new Error(raw);
+                    syscall = syscall || 'queryA';
+                    var err = new Error(syscall + ' ' + code + ' ' + hostname);
                     err.code = code;
                     err.hostname = hostname;
-                    err.syscall = syscall || 'queryA';
+                    err.syscall = syscall;
                     return err;
                 }
 
                 function lookup(hostname, options, callback) {
                     if (typeof options === 'function') { callback = options; options = {}; }
                     options = options || {};
+                    var family = (options.family === 4 || options.family === 6) ? options.family : 0;
                     setTimeout(function() {
-                        var raw = __dnsLookup(hostname);
+                        var raw = __dnsLookup(hostname, family);
                         var ips;
                         try { ips = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'getaddrinfo')); return; }
                         if (options.all) {
-                            callback(null, ips.map(function(ip) { return { address: ip, family: ip.indexOf(':') !== -1 ? 6 : 4 }; }));
+                            callback(null, ips.map(function(o) { return { address: o.address, family: o.family }; }));
                         } else {
-                            var ip = ips[0];
-                            callback(null, ip, ip.indexOf(':') !== -1 ? 6 : 4);
+                            if (!ips.length) { callback(mkErr('ENOTFOUND', hostname, 'getaddrinfo')); return; }
+                            callback(null, ips[0].address, ips[0].family);
                         }
                     }, 0);
                 }
 
-                function resolveFamily(hostname, family, callback) {
+                function resolveFamily(hostname, family, syscall, callback) {
                     setTimeout(function() {
-                        var raw = __dnsLookup(hostname);
+                        var raw = __dnsLookup(hostname, family);
                         var ips;
-                        try { ips = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'queryA')); return; }
-                        var filtered = ips.filter(function(ip) { return (ip.indexOf(':') !== -1) === (family === 6); });
-                        if (!filtered.length) { callback(mkErr('ENOTFOUND', hostname, 'queryA')); return; }
-                        callback(null, filtered);
+                        try { ips = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, syscall)); return; }
+                        if (!ips.length) {
+                            var err = new Error(syscall + ' ENODATA ' + hostname);
+                            err.code = 'ENODATA'; err.hostname = hostname; err.syscall = syscall;
+                            callback(err);
+                            return;
+                        }
+                        callback(null, ips.map(function(o) { return o.address; }));
                     }, 0);
                 }
 
                 function resolveQuery(rrtype) {
+                    var syscall = SYSCALLS[rrtype] || ('query' + rrtype);
                     return function(hostname, callback) {
                         setTimeout(function() {
                             var raw = __dnsQuery(hostname, rrtype);
                             var data;
-                            try { data = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'query' + rrtype)); return; }
+                            try { data = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, syscall)); return; }
                             if (data === null || (Array.isArray(data) && data.length === 0)) {
-                                var err = new Error('query' + rrtype + ' ENODATA ' + hostname);
+                                var err = new Error(syscall + ' ENODATA ' + hostname);
                                 err.code = 'ENODATA';
                                 err.hostname = hostname;
-                                err.syscall = 'query' + rrtype;
+                                err.syscall = syscall;
                                 callback(err);
                                 return;
                             }
@@ -1632,19 +1960,29 @@ pub fn inject_require(
                 var resolveNaptr = resolveQuery('NAPTR');
                 var resolveSoa = resolveQuery('SOA');
                 var resolvePtrQuery = resolveQuery('PTR');
+                var resolveAny = resolveQuery('ANY');
 
-                function resolve4(hostname, callback) { resolveFamily(hostname, 4, callback); }
-                function resolve6(hostname, callback) { resolveFamily(hostname, 6, callback); }
+                function resolve4(hostname, callback) { resolveFamily(hostname, 4, 'queryA', callback); }
+                function resolve6(hostname, callback) { resolveFamily(hostname, 6, 'queryAaaa', callback); }
+
+                var RESOLVE_MAP = {
+                    A: resolve4, AAAA: resolve6, MX: resolveMx, TXT: resolveTxt,
+                    SRV: resolveSrv, NS: resolveNs, CNAME: resolveCname,
+                    NAPTR: resolveNaptr, SOA: resolveSoa, PTR: resolvePtrQuery,
+                    ANY: resolveAny,
+                };
 
                 function resolve(hostname, rrtype, callback) {
                     if (typeof rrtype === 'function') { callback = rrtype; rrtype = 'A'; }
                     rrtype = rrtype || 'A';
-                    var map = {
-                        A: resolve4, AAAA: resolve6, MX: resolveMx, TXT: resolveTxt,
-                        SRV: resolveSrv, NS: resolveNs, CNAME: resolveCname,
-                        NAPTR: resolveNaptr, SOA: resolveSoa, PTR: resolvePtrQuery,
-                    };
-                    (map[rrtype] || resolve4)(hostname, callback);
+                    var fn = RESOLVE_MAP[rrtype];
+                    if (!fn) {
+                        throw Object.assign(new TypeError(
+                            'The argument \'rrtype\' is invalid. Received ' +
+                            (typeof rrtype === 'string' ? '\'' + rrtype + '\'' : JSON.stringify(rrtype))
+                        ), { code: 'ERR_INVALID_ARG_VALUE' });
+                    }
+                    fn(hostname, callback);
                 }
 
                 function reverse(ip, callback) {
@@ -1652,7 +1990,33 @@ pub fn inject_require(
                         var raw = __dnsQuery(ip, 'PTR');
                         var data;
                         try { data = JSON.parse(raw); } catch (e) { callback(mkErr(raw, ip, 'getHostByAddr')); return; }
+                        if (data === null || data.length === 0) {
+                            var err = new Error('getHostByAddr ENODATA ' + ip);
+                            err.code = 'ENODATA'; err.hostname = ip; err.syscall = 'getHostByAddr';
+                            callback(err);
+                            return;
+                        }
                         callback(null, data);
+                    }, 0);
+                }
+
+                function getServers() {
+                    try { return JSON.parse(__dnsGetServers()); } catch (e) { return []; }
+                }
+
+                function lookupService(address, port, callback) {
+                    setTimeout(function() {
+                        var raw = __dnsLookupService(address, port);
+                        var info;
+                        try { info = JSON.parse(raw); } catch (e) { callback(mkErr(raw, address, 'getnameinfo')); return; }
+                        if (info.code) {
+                            var err = new Error(info.message || ('getnameinfo ' + info.code + ' ' + address));
+                            err.code = info.code;
+                            err.syscall = 'getnameinfo';
+                            callback(err);
+                            return;
+                        }
+                        callback(null, info.hostname, info.service);
                     }, 0);
                 }
 
@@ -1674,6 +2038,8 @@ pub fn inject_require(
                     });
                 }
 
+                var defaultResultOrder = 'verbatim';
+
                 var dns = {
                     lookup: lookup,
                     resolve: resolve,
@@ -1687,21 +2053,42 @@ pub fn inject_require(
                     resolveNaptr: resolveNaptr,
                     resolveSoa: resolveSoa,
                     resolvePtr: resolvePtrQuery,
+                    resolveAny: resolveAny,
                     reverse: reverse,
-                    getServers: function() { return []; },
+                    getServers: getServers,
                     setServers: function() {},
-                    lookupService: function(address, port, callback) {
-                        setTimeout(function() {
-                            var err = new Error('getnameinfo ENOTSUP ' + address);
-                            err.code = 'ENOTSUP';
-                            err.errno = -86;
-                            callback(err);
-                        }, 0);
+                    lookupService: lookupService,
+                    setDefaultResultOrder: function(order) {
+                        if (order === 'verbatim' || order === 'ipv4first') defaultResultOrder = order;
                     },
-                    ADDRCONFIG: 0, ALL: 0, V4MAPPED: 0,
+                    getDefaultResultOrder: function() { return defaultResultOrder; },
+                    Resolver: function() {
+                        var r = {
+                            lookup: function(h, o, cb) { if (typeof o === 'function') { cb = o; o = {}; } lookup(h, o, cb); },
+                            resolve: function(h, t, cb) { if (typeof t === 'function') { cb = t; t = 'A'; } resolve(h, t, cb); },
+                            resolve4: resolve4,
+                            resolve6: resolve6,
+                            resolveMx: resolveMx,
+                            resolveTxt: resolveTxt,
+                            resolveSrv: resolveSrv,
+                            resolveNs: resolveNs,
+                            resolveCname: resolveCname,
+                            resolveNaptr: resolveNaptr,
+                            resolveSoa: resolveSoa,
+                            resolvePtr: resolvePtrQuery,
+                            resolveAny: resolveAny,
+                            reverse: reverse,
+                            getServers: getServers,
+                            setServers: function() {},
+                            cancel: function() {},
+                        };
+                        return r;
+                    },
+                    ADDRCONFIG: 0x0020, ALL: 0x0010, V4MAPPED: 0x0008,
                     NODATA: 'ENODATA', FORMERR: 'EFORMERR', SERVFAIL: 'ESERVFAIL',
                     NOTFOUND: 'ENOTFOUND', NOTIMP: 'ENOTIMP', REFUSED: 'EREFUSED',
                 };
+                dns.Resolver.Resolver = dns.Resolver;
                 dns.promises = {
                     lookup: lookupPromise,
                     resolve: function(hostname, rrtype) { return promisify1(resolve)(hostname, rrtype); },
@@ -1715,9 +2102,21 @@ pub fn inject_require(
                     resolveNaptr: promisify1(function(h, _b, cb) { resolveNaptr(h, cb); }),
                     resolveSoa: promisify1(function(h, _b, cb) { resolveSoa(h, cb); }),
                     resolvePtr: promisify1(function(h, _b, cb) { resolvePtrQuery(h, cb); }),
+                    resolveAny: promisify1(function(h, _b, cb) { resolveAny(h, cb); }),
                     reverse: promisify1(function(h, _b, cb) { reverse(h, cb); }),
-                    getServers: function() { return []; },
+                    getServers: getServers,
                     setServers: function() {},
+                    lookupService: function(address, port) {
+                        return new Promise(function(resolve, reject) {
+                            lookupService(address, port, function(err, hostname, service) {
+                                if (err) reject(err); else resolve({ hostname: hostname, service: service });
+                            });
+                        });
+                    },
+                    setDefaultResultOrder: function(order) {
+                        if (order === 'verbatim' || order === 'ipv4first') defaultResultOrder = order;
+                    },
+                    getDefaultResultOrder: function() { return defaultResultOrder; },
                 };
                 globalThis.__requireCache['dns'] = dns;
                 globalThis.__requireCache['node:dns'] = dns;
