@@ -33,6 +33,8 @@ step) are unimplemented stubs, and there is no classic `crypto.createECDH()`;
 | `util` | 95% | `util.types` con 30+ métodos; faltan `parseArgs`, `styleText` |
 | `zlib` | 98% | Async callbacks + sync + Transform streams reales; brotli real vía crate `brotli 7` |
 | `child_process` | 95% | `exec`/`spawn`/`execSync`/`spawnSync` reales; stdin piping vía `stdin.write()`/`stdin.end()` y `spawnSync({input})` |
+| `dgram` | 100%* | UDP real vía `socket2`: creación lazy de socket, `bind`/`send`/recv (`message` + `rinfo` con `size`/`family`), `connect`/`disconnect`/`remoteAddress`, socket options (`setTTL`, multicast TTL/loopback/interface/membership, `setBroadcast`, buffer sizes), `udp6`/IPv6, valores de retorno Node-compat y códigos de error Node (`EADDRINUSE`, `ENOTFOUND`/`getaddrinfo`, `ERR_SOCKET_ALREADY_BOUND`/`_DGRAM_NOT_RUNNING`/`_DGRAM_NOT_CONNECTED`, `EBADF`). *Solo comportamientos ejercitados por `scripts/compat-dgram-dns.sh` (5 casos, byte-identical vs Node v24.17.0). |
+| `dns` | 100%* | `lookup` (family 4/6/`all`), `resolve` + rrtype (`resolve4/6/Mx/Txt/Ns/Cname/Srv/Naptr/Soa/Ptr/Any`), nombres de syscall Node (`queryMx`, `querySrv`, …), `reverse`, `lookupService` (getnameinfo), `getServers`, `setDefaultResultOrder`/`getDefaultResultOrder`, constantes (`ADDRCONFIG`/`ALL`/`V4MAPPED`), clase `Resolver`, `dns.promises`; errores `ENOTFOUND`/`ENODATA` y throw síncrono `ERR_INVALID_ARG_VALUE` para rrtype inválido. *Solo comportamientos ejercitados por `scripts/compat-dgram-dns.sh` (6 casos, byte-identical vs Node v24.17.0). |
 
 ## 4.3 Compatibility Flags — NOT IMPLEMENTED
 
@@ -118,6 +120,13 @@ real and are how Expo/framework compatibility is actually verified today:
 # Expo / ESM→CJS integration tests (real, implemented)
 cargo test -p vvva_js --test pipeline
 cargo test -p vvva_js --test framework_compat
+
+# dgram + dns behavioral comparison vs real Node.js (real, implemented)
+# Each case in scripts/compat-cases/{dgram,dns}/ is run under both `node` and
+# 3va; the two stdout streams must be identical (cases normalize ephemeral
+# ports, DNS answer ordering and kernel-dependent values). The `100%*` rows in
+# §4.2 are exactly these case files — coverage is the cases, not the whole API.
+./scripts/compat-dgram-dns.sh
 ```
 
 ---
