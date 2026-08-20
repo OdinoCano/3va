@@ -9,6 +9,18 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **Adaptive rate limiting (HTTP firewall)**: each auto-block now adds a per-IP *strike* and the
+  block duration escalates as `blockDurationSecs × blockEscalationFactor^(strikes-1)`, capped at
+  `maxBlockDurationSecs` (defaults: 300 s base, ×2, 1 h cap). The strike history persists across
+  block expirations and is only cleared after `strikeDecaySecs` (default 1 h) of calm, so repeat
+  offenders are blocked progressively longer while a calm IP resets to the base duration. New
+  `FirewallConfig` fields: `block_escalation_factor`, `max_block_duration_secs`, `strike_decay_secs`
+  (wired through `3va.config.ts` as `blockEscalationFactor`/`maxBlockDurationSecs`/`strikeDecaySecs`).
+- **End-to-end attack-simulation tests** (`crates/js/tests/http_server.rs`): a RUDY test drives a
+  real TCP client sending a POST body at ~1 B/s against the real server (proving `minBodyRateBps`
+  drops it in ~2 s — the body deadline is set to 120 s so only the rate check can reject — and that
+  the body never reaches JS), and an adaptive test proves a repeat offender's second block is longer
+  than the first (1 s → 2 s) and that the IP is only served again after the escalated block elapses.
 - **Automatic restart on crash for supervised processes** (`3va start <script> --name X`).
   When a managed process dies unexpectedly (any exit reason — `process.exit(1)`, an external
   `kill -9`, a native panic/abort), the supervisor respawns it with **exponential backoff**
@@ -29,8 +41,19 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Fixed
 
+- **`reject_stream` sent RST instead of a clean FIN** for rejected connections whose client had
+  already sent unread request bytes (blocked-IP 403/503 path). The socket now drains briefly before
+  closing, so blocked clients actually receive their 403/503 response instead of a
+  "connection reset by peer". Exposed by the new adaptive end-to-end test.
 - `3va status` no longer reports a supervised process as a live `running` supervisor after the app
   died with autorestart disabled — the supervisor exits and the process shows `error`.
+
+### Changed
+
+- **README** no longer lists RUDY and adaptive rate limiting as roadmap items — both are
+  implemented (RUDY via `minBodyRateBps` + `bodyTimeoutMs` in the HTTP layer; adaptive escalation in
+  the firewall). The Known Limitations entry now documents what adaptivity does *not* do (per-IP
+  token buckets stay fixed; strike history resets after `strikeDecaySecs`; no `X-Forwarded-For` trust).
 
 ## [v2.5.0] — 2026-08-18
 

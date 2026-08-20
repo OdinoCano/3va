@@ -1736,7 +1736,7 @@ fn find_esm_export_names(js: &str) -> Vec<String> {
             let trimmed = js[start..].trim_start_matches('*'); // `export function* gen()`
             let end = trimmed
                 .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
-                .map_or(trimmed.len(), |o| o);
+                .unwrap_or(trimmed.len());
             let name = &trimmed[..end];
             if !name.is_empty()
                 && is_valid_js_identifier(name)
@@ -4075,6 +4075,9 @@ async fn main() -> anyhow::Result<()> {
                             rate_limit_burst: fc.rate_limit_burst,
                             auto_block_threshold: fc.auto_block_threshold,
                             block_duration_secs: fc.block_duration_secs,
+                            block_escalation_factor: fc.block_escalation_factor,
+                            max_block_duration_secs: fc.max_block_duration_secs,
+                            strike_decay_secs: fc.strike_decay_secs,
                             max_connections_per_ip: fc.max_connections_per_ip,
                             max_connections_total: fc.max_connections_total,
                             header_timeout_ms: fc.header_timeout_ms,

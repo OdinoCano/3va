@@ -7,9 +7,10 @@
 //! | Attack | Mechanism |
 //! |--------|-----------|
 //! | **Slowloris** | Per-line `header_timeout_ms` deadline — a connection that never finishes sending headers is dropped |
-//! | **RUDY** | `body_timeout_ms` deadline on `read_exact` — slow POST bodies are aborted |
+//! | **RUDY** | `body_timeout_ms` deadline on `read_exact` plus a `min_body_rate_bps` average-rate check — slow POST bodies are aborted |
 //! | **Header flood** | `max_header_count` + `max_header_bytes` limits |
 //! | **Rate-based DDoS** | Token-bucket per IP; IPs that exceed `auto_block_threshold` violations are blocked |
+//! | **Adaptive (repeat offenders)** | Each auto-block adds a strike; the block duration escalates as `block_duration_secs × factor^(strikes-1)` up to `max_block_duration_secs`, and the history clears after `strike_decay_secs` of calm |
 //! | **Connection exhaustion** | `max_connections_per_ip` and `max_connections_total` caps |
 //!
 //! ## Quick start
@@ -31,6 +32,9 @@
 //!     rateLimitBurst: 200,
 //!     autoBlockThreshold: 10,
 //!     blockDurationSecs: 300,
+//!     blockEscalationFactor: 2,
+//!     maxBlockDurationSecs: 3600,
+//!     strikeDecaySecs: 3600,
 //!     headerTimeoutMs: 10_000,
 //!     bodyTimeoutMs: 30_000,
 //!     minBodyRateBps: 100,
@@ -61,8 +65,19 @@ pub struct FirewallConfig {
     /// How many rate-limit violations before the IP is auto-blocked.
     pub auto_block_threshold: u32,
 
-    /// Duration to block an offending IP, in seconds.
+    /// Base duration to block an offending IP, in seconds.
     pub block_duration_secs: u64,
+
+    /// Multiplier applied to the block duration for each repeat offense
+    /// (adaptive escalation). 1 = fixed duration, no escalation.
+    pub block_escalation_factor: u32,
+
+    /// Upper bound on the escalated block duration, in seconds.
+    pub max_block_duration_secs: u64,
+
+    /// Seconds of calm (no auto-block) after which an IP's strike history
+    /// clears and its block duration resets to `block_duration_secs`.
+    pub strike_decay_secs: u64,
 
     /// Max simultaneous open connections from a single IP.
     pub max_connections_per_ip: u32,
@@ -100,6 +115,9 @@ impl Default for FirewallConfig {
             rate_limit_burst: 200,
             auto_block_threshold: 10,
             block_duration_secs: 300,
+            block_escalation_factor: 2,
+            max_block_duration_secs: 3600,
+            strike_decay_secs: 3600,
             max_connections_per_ip: 50,
             max_connections_total: 10_000,
             header_timeout_ms: 10_000,
@@ -168,6 +186,20 @@ struct BlockEntry {
     reason: BlockReason,
 }
 
+/// Per-IP strike history for adaptive blocking. A strike is added every time
+/// the IP is auto-blocked; the block duration for a strike count escalates as
+/// `block_duration_secs × factor^(count-1)`, capped at `max_block_duration_secs`.
+/// The record is dropped by `cleanup()` once `strike_decay_secs` have passed
+/// without another auto-block, so a calm IP resets to the base duration.
+struct StrikeRecord {
+    count: u32,
+    last: Instant,
+}
+
+/// Upper bound on an IP's strike count (bounds the escalation loop and the
+/// value stored per IP; the duration cap governs the actual block length).
+const MAX_STRIKES: u32 = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockReason {
     RateLimitViolation,
@@ -220,6 +252,8 @@ pub struct Firewall {
     pub config: FirewallConfig,
     buckets: Mutex<HashMap<IpAddr, TokenBucket>>,
     blocklist: Mutex<HashMap<IpAddr, BlockEntry>>,
+    /// Per-IP adaptive strike history (see `StrikeRecord`).
+    strikes: Mutex<HashMap<IpAddr, StrikeRecord>>,
     /// Per-IP open connection count.
     conn_per_ip: Mutex<HashMap<IpAddr, u32>>,
     /// Total open connection count.
@@ -232,6 +266,7 @@ impl Firewall {
             config,
             buckets: Mutex::new(HashMap::new()),
             blocklist: Mutex::new(HashMap::new()),
+            strikes: Mutex::new(HashMap::new()),
             conn_per_ip: Mutex::new(HashMap::new()),
             conn_total: Mutex::new(0),
         })
@@ -296,14 +331,15 @@ impl Firewall {
         let violations = bucket.violations;
         drop(buckets);
 
-        // Auto-block after threshold violations.
+        // Auto-block after threshold violations. The block duration escalates
+        // for repeat offenders (see `record_auto_block`).
         if violations >= self.config.auto_block_threshold {
-            let duration = Duration::from_secs(self.config.block_duration_secs);
-            self.block_ip(ip, duration, BlockReason::RateLimitViolation);
-            warn!(ip = %ip, violations, "Firewall: auto-blocked IP after rate limit violations");
+            let duration_secs = self.record_auto_block(ip);
+            let remaining_ms = duration_secs * 1000;
+            warn!(ip = %ip, violations, duration_secs, "Firewall: auto-blocked IP after rate limit violations");
             return FirewallDecision::Blocked {
                 reason: BlockReason::RateLimitViolation,
-                remaining_ms: self.config.block_duration_secs * 1000,
+                remaining_ms,
             };
         }
 
@@ -377,6 +413,15 @@ impl Firewall {
             let mut buckets = self.buckets.lock().unwrap();
             buckets.retain(|_, bucket| !bucket.is_idle(idle));
         }
+
+        {
+            // Drop strike history for IPs that have been calm long enough to
+            // reset — repeat offenders who keep re-offending within the decay
+            // window keep (and grow) their escalation.
+            let decay = Duration::from_secs(self.config.strike_decay_secs);
+            let mut strikes = self.strikes.lock().unwrap();
+            strikes.retain(|_, rec| rec.last.elapsed() <= decay);
+        }
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
@@ -394,6 +439,52 @@ impl Firewall {
             }
         }
         None
+    }
+
+    /// Register an auto-block for `ip`: bump its strike count and block it for
+    /// the (escalating) duration for that count. Returns the duration in seconds.
+    fn record_auto_block(&self, ip: IpAddr) -> u64 {
+        let mut strikes = self.strikes.lock().unwrap();
+        let rec = strikes.entry(ip).or_insert(StrikeRecord {
+            count: 0,
+            last: Instant::now(),
+        });
+        rec.count = rec.count.saturating_add(1).min(MAX_STRIKES);
+        rec.last = Instant::now();
+        let count = rec.count;
+        drop(strikes);
+
+        let duration_secs = self.block_duration_secs_for(count);
+        self.block_ip(
+            ip,
+            Duration::from_secs(duration_secs),
+            BlockReason::RateLimitViolation,
+        );
+        duration_secs
+    }
+
+    /// Escalating block duration for a strike count: `block_duration_secs ×
+    /// factor^(strikes-1)`, capped at `max_block_duration_secs` (never below the
+    /// base duration). `strikes == 1` (a first offense) yields the base duration.
+    fn block_duration_secs_for(&self, strikes: u32) -> u64 {
+        let base = self.config.block_duration_secs;
+        let factor = self.config.block_escalation_factor.max(1) as u64;
+        let cap = self.config.max_block_duration_secs.max(base);
+        let mut dur = base;
+        for _ in 1..strikes.min(MAX_STRIKES) {
+            dur = dur.saturating_mul(factor).min(cap);
+            if dur >= cap {
+                break;
+            }
+        }
+        dur
+    }
+
+    /// Current strike count for an IP (used by tests to observe the adaptive
+    /// escalation bookkeeping).
+    #[cfg(test)]
+    fn strikes_for(&self, ip: IpAddr) -> u32 {
+        self.strikes.lock().unwrap().get(&ip).map_or(0, |r| r.count)
     }
 }
 
@@ -662,5 +753,133 @@ mod tests {
         // Verify it clones correctly (used when passing config to Firewall::new).
         let cloned = cfg.clone();
         assert_eq!(cloned.min_body_rate_bps, 512);
+    }
+
+    // ── Adaptive escalation ──────────────────────────────────────────────────
+
+    #[test]
+    fn adaptive_block_duration_escalates_and_caps() {
+        let fw = Firewall::new(FirewallConfig {
+            block_duration_secs: 10,
+            block_escalation_factor: 2,
+            max_block_duration_secs: 80,
+            ..FirewallConfig::default()
+        });
+        // First offense → base duration; each repeat offense doubles until capped.
+        assert_eq!(fw.block_duration_secs_for(1), 10);
+        assert_eq!(fw.block_duration_secs_for(2), 20);
+        assert_eq!(fw.block_duration_secs_for(3), 40);
+        assert_eq!(fw.block_duration_secs_for(4), 80);
+        assert_eq!(
+            fw.block_duration_secs_for(16),
+            80,
+            "must not exceed the cap"
+        );
+    }
+
+    #[test]
+    fn adaptive_escalation_factor_one_disables_escalation() {
+        let fw = Firewall::new(FirewallConfig {
+            block_duration_secs: 30,
+            block_escalation_factor: 1,
+            max_block_duration_secs: 3600,
+            ..FirewallConfig::default()
+        });
+        for strikes in 1..=16 {
+            assert_eq!(fw.block_duration_secs_for(strikes), 30);
+        }
+    }
+
+    #[test]
+    fn adaptive_max_below_base_never_shortens_first_block() {
+        let fw = Firewall::new(FirewallConfig {
+            block_duration_secs: 60,
+            block_escalation_factor: 2,
+            max_block_duration_secs: 30, // misconfigured below the base
+            ..FirewallConfig::default()
+        });
+        assert_eq!(fw.block_duration_secs_for(1), 60);
+        assert_eq!(fw.block_duration_secs_for(10), 60, "cap is clamped to base");
+    }
+
+    #[test]
+    fn adaptive_auto_block_escalates_across_offenses() {
+        let fw = Firewall::new(FirewallConfig {
+            rate_limit_rps: 1,
+            rate_limit_burst: 1,
+            auto_block_threshold: 1,
+            block_duration_secs: 10,
+            block_escalation_factor: 3,
+            max_block_duration_secs: 90,
+            ..FirewallConfig::default()
+        });
+        let a = ip(70);
+        fw.check_request(a); // allowed (burst token)
+
+        // First offense → strike 1 → 10 s block.
+        match fw.check_request(a) {
+            FirewallDecision::Blocked { remaining_ms, .. } => {
+                assert_eq!(
+                    remaining_ms, 10_000,
+                    "first block must use the base duration"
+                );
+            }
+            other => panic!("expected Blocked, got {:?}", other),
+        }
+        assert_eq!(fw.strikes_for(a), 1);
+
+        // Let the block expire (simulated via unblock) and re-offend: the
+        // strike history persists, so the next block escalates to 30 s.
+        fw.unblock_ip(a);
+        match fw.check_request(a) {
+            FirewallDecision::Blocked { remaining_ms, .. } => {
+                assert_eq!(remaining_ms, 30_000, "repeat offense must escalate");
+            }
+            other => panic!("expected Blocked, got {:?}", other),
+        }
+        assert_eq!(fw.strikes_for(a), 2);
+    }
+
+    #[test]
+    fn adaptive_strikes_persist_within_decay_window() {
+        let fw = Firewall::new(FirewallConfig {
+            rate_limit_rps: 1,
+            rate_limit_burst: 1,
+            auto_block_threshold: 1,
+            block_duration_secs: 10,
+            strike_decay_secs: 3600,
+            ..FirewallConfig::default()
+        });
+        let a = ip(72);
+        fw.check_request(a);
+        fw.check_request(a); // auto-block → strike 1
+        assert_eq!(fw.strikes_for(a), 1);
+
+        // cleanup must NOT clear the strike while the decay window is open.
+        fw.cleanup();
+        assert_eq!(fw.strikes_for(a), 1);
+    }
+
+    #[test]
+    fn adaptive_strikes_clear_after_decay_window() {
+        let fw = Firewall::new(FirewallConfig {
+            rate_limit_rps: 1,
+            rate_limit_burst: 1,
+            auto_block_threshold: 1,
+            block_duration_secs: 10,
+            strike_decay_secs: 0, // expire immediately on the next cleanup
+            ..FirewallConfig::default()
+        });
+        let a = ip(73);
+        fw.check_request(a);
+        fw.check_request(a); // auto-block → strike 1
+        assert_eq!(fw.strikes_for(a), 1);
+
+        fw.cleanup();
+        assert_eq!(
+            fw.strikes_for(a),
+            0,
+            "calm IP must reset to the base duration"
+        );
     }
 }

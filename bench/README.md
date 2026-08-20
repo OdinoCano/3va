@@ -44,6 +44,16 @@ server's actual request-handling capacity instead of its DDoS protection
 kicking in on a benchmark that looks, from the server's point of view,
 indistinguishable from an attack.
 
+Raising the limits also keeps the throughput number free of the firewall's
+adaptive layer: since every request is allowed (the raised token bucket never
+empties), no violations accumulate, so no IP is ever auto-blocked and the
+escalating block durations (`blockEscalationFactor`/`maxBlockDurationSecs`)
+never engage. The documented numbers therefore measure the server's raw
+request-handling capacity, not a rate limiter that is deliberately refusing
+traffic. The exact benchmark numbers are unaffected by the adaptive behavior —
+it only changes how repeat offenders are *blocked*, and the benchmark produces
+no offenders.
+
 If you want the *default-config* number instead — i.e. "what does a
 believable attacker actually get through" — delete or rename
 `3va.config.json` before running the script and expect most requests to
