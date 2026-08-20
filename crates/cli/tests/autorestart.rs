@@ -351,9 +351,14 @@ fn no_autorestart_marks_error_and_does_not_restart() {
     });
     let st = h.status_json().unwrap();
     assert_eq!(st.restarts, 0, "--no-autorestart must never respawn");
-    assert!(
-        !pid_alive(st.pid),
-        "supervisor must exit after a no-autorestart crash so status reflects reality"
+    // The status file is written just before the supervisor process exits, so
+    // there's a brief window after `status` flips to `error` where the PID
+    // can still be alive (process teardown, not yet reaped) — poll instead of
+    // a single immediate check to avoid flaking on slower/noisier CI runners.
+    h.wait_for_or(
+        Duration::from_secs(5),
+        "supervisor to exit after a no-autorestart crash",
+        || !pid_alive(st.pid),
     );
 }
 
