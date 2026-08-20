@@ -7,13 +7,16 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use v8::{ContextScope, Function, HandleScope, PinScope, Script, String as V8String};
-use vvva_crypto;
 use vvva_permissions::{Capability, PermissionState};
 
 #[allow(clippy::large_enum_variant)]
 enum TcpConn {
     Plain(TcpStream),
     Tls(TlsStream<TcpStream>),
+    /// Real in-handshake hybrid PQ TLS (RFC 10024 X25519MLKEM768), see
+    /// `pq_tls_connect_blocking` below — distinct from `Tls` because rustls'
+    /// `ClientConnection` is a different concrete type than native-tls' stream.
+    PqTls(rustls::StreamOwned<rustls::ClientConnection, TcpStream>),
 }
 
 impl TcpConn {
@@ -21,12 +24,14 @@ impl TcpConn {
         match self {
             TcpConn::Plain(s) => s.read(buf),
             TcpConn::Tls(s) => s.read(buf),
+            TcpConn::PqTls(s) => s.read(buf),
         }
     }
     fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
         match self {
             TcpConn::Plain(s) => s.write_all(data),
             TcpConn::Tls(s) => s.write_all(data),
+            TcpConn::PqTls(s) => s.write_all(data),
         }
     }
     fn shutdown(&mut self) {
@@ -36,6 +41,11 @@ impl TcpConn {
             }
             TcpConn::Tls(s) => {
                 let _ = s.shutdown();
+            }
+            TcpConn::PqTls(s) => {
+                s.conn.send_close_notify();
+                let _ = s.conn.complete_io(&mut s.sock);
+                let _ = s.sock.shutdown(std::net::Shutdown::Both);
             }
         }
     }
@@ -61,46 +71,113 @@ fn js_code_err<'s>(
         .unwrap_or_else(|| v8::undefined(scope).into())
 }
 
+/// Client config for real in-handshake hybrid PQ-TLS: RFC 10024 X25519MLKEM768,
+/// via rustls' aws-lc-rs provider with the `prefer-post-quantum` group ordering
+/// (client offers the PQ hybrid group first; a server that doesn't support it
+/// still negotiates plain classical X25519 — no separate fallback code needed,
+/// that's the point of a *hybrid* group). See
+/// docs/10-security/06-pq-tls-hybrid-design.md for the full design rationale.
+fn pq_tls_client_config_native() -> std::result::Result<Arc<rustls::ClientConfig>, String> {
+    static CONFIG: std::sync::OnceLock<std::result::Result<Arc<rustls::ClientConfig>, String>> =
+        std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            let native = rustls_native_certs::load_native_certs();
+            for err in &native.errors {
+                eprintln!("[3va-tcp] pq-tls: native cert load warning: {err}");
+            }
+            for cert in native.certs {
+                roots
+                    .add(cert)
+                    .map_err(|e| format!("PQ TLS: bad root cert: {e}"))?;
+            }
+            pq_tls_client_config_from_roots(roots)
+        })
+        .clone()
+}
+
+/// Builds a fresh (uncached) config trusting only the given CA PEM — the
+/// `tls.pqConnect(host, port, { ca })` path, mirroring Node's `tls` `ca`
+/// option, used for self-signed/private-CA endpoints (including the
+/// integration test's local `openssl s_server`).
+fn pq_tls_client_config_with_ca(
+    ca_pem: &str,
+) -> std::result::Result<Arc<rustls::ClientConfig>, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    let mut reader = std::io::BufReader::new(ca_pem.as_bytes());
+    for cert in rustls_pemfile::certs(&mut reader) {
+        let cert = cert.map_err(|e| format!("PQ TLS: bad ca PEM: {e}"))?;
+        roots
+            .add(cert)
+            .map_err(|e| format!("PQ TLS: bad ca cert: {e}"))?;
+    }
+    pq_tls_client_config_from_roots(roots)
+}
+
+fn pq_tls_client_config_from_roots(
+    roots: rustls::RootCertStore,
+) -> std::result::Result<Arc<rustls::ClientConfig>, String> {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("PQ TLS: protocol versions: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
 fn pq_tls_connect_blocking(
     host: &str,
     port: u16,
-) -> std::result::Result<(TlsStream<TcpStream>, String), String> {
-    let connector = native_tls::TlsConnector::new().map_err(|e| format!("TLS init: {e}"))?;
+    ca_pem: Option<&str>,
+) -> std::result::Result<
+    (
+        rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
+        String,
+        bool,
+    ),
+    String,
+> {
+    let config = match ca_pem {
+        Some(pem) => pq_tls_client_config_with_ca(pem)?,
+        None => pq_tls_client_config_native()?,
+    };
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| format!("PQ TLS: invalid server name {host:?}: {e}"))?;
+    let conn = rustls::ClientConnection::new(config, server_name)
+        .map_err(|e| format!("PQ TLS init: {e}"))?;
+
     let tcp =
         TcpStream::connect(format!("{host}:{port}")).map_err(|e| format!("ECONNREFUSED: {e}"))?;
-    let mut tls = connector
-        .connect(host, tcp)
-        .map_err(|e| format!("TLS handshake failed: {e}"))?;
+    let mut stream = rustls::StreamOwned::new(conn, tcp);
 
-    let kp = vvva_crypto::kem::MlKemKeypair::generate();
-    let ek_bytes = kp.encapsulation_key_bytes();
-
-    let ek_len = (ek_bytes.len() as u32).to_be_bytes();
-    tls.write_all(&ek_len)
-        .and_then(|_| tls.write_all(&ek_bytes))
-        .map_err(|e| format!("PQ TLS send ek: {e}"))?;
-
-    let mut ct_len_buf = [0u8; 4];
-    tls.read_exact(&mut ct_len_buf)
-        .map_err(|e| format!("PQ TLS recv ct len: {e}"))?;
-    let ct_len = u32::from_be_bytes(ct_len_buf) as usize;
-    if ct_len != 1088 {
-        return Err(format!("PQ TLS: invalid ciphertext length {ct_len}"));
+    while stream.conn.is_handshaking() {
+        stream
+            .conn
+            .complete_io(&mut stream.sock)
+            .map_err(|e| format!("TLS handshake failed: {e}"))?;
     }
-    let mut ct_bytes = vec![0u8; ct_len];
-    tls.read_exact(&mut ct_bytes)
-        .map_err(|e| format!("PQ TLS recv ct: {e}"))?;
 
-    let ct = vvva_crypto::MlKemCiphertext::from_bytes(&ct_bytes)
-        .map_err(|e| format!("PQ TLS ct decode: {e}"))?;
-    let ss = vvva_crypto::decapsulate(&kp.dk, &ct);
-    let ss_hex = hex::encode(ss.0);
+    let group = stream
+        .conn
+        .negotiated_key_exchange_group()
+        .map(|g| g.name())
+        .and_then(|n| n.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let pq_negotiated = stream
+        .conn
+        .negotiated_key_exchange_group()
+        .map(|g| g.name() == rustls::NamedGroup::X25519MLKEM768)
+        .unwrap_or(false);
 
-    tls.get_ref()
+    stream
+        .sock
         .set_nonblocking(true)
         .map_err(|e| format!("set_nonblocking: {e}"))?;
 
-    Ok((tls, ss_hex))
+    Ok((stream, group, pq_negotiated))
 }
 
 // Thread-local, not a process-wide static — see the identical fix (and
@@ -575,6 +652,12 @@ pub fn inject_tcp(
                 let host = host_arg.to_rust_string_lossy(_scope);
                 let port_arg = args.get(1);
                 let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
+                let ca_arg = args.get(2);
+                let ca_pem = if ca_arg.is_string() {
+                    Some(ca_arg.to_rust_string_lossy(_scope))
+                } else {
+                    None
+                };
 
                 if !permissions().check(&Capability::Network(host.clone())) {
                     let err = js_code_err(
@@ -586,20 +669,25 @@ pub fn inject_tcp(
                     return;
                 }
 
-                let result = tokio::task::block_in_place(|| pq_tls_connect_blocking(&host, port));
+                let result = tokio::task::block_in_place(|| {
+                    pq_tls_connect_blocking(&host, port, ca_pem.as_deref())
+                });
 
                 match result {
-                    Ok((tls, ss_hex)) => {
-                        let conn_id = alloc_id(pool(), next_id(), TcpConn::Tls(tls));
-                        let json =
-                            serde_json::json!({ "connId": conn_id, "pqSharedSecret": ss_hex })
-                                .to_string();
+                    Ok((stream, group, pq_negotiated)) => {
+                        let conn_id = alloc_id(pool(), next_id(), TcpConn::PqTls(stream));
+                        let json = serde_json::json!({
+                            "connId": conn_id,
+                            "group": group,
+                            "pqNegotiated": pq_negotiated,
+                        })
+                        .to_string();
                         let result_str = V8String::new(_scope, &json).unwrap();
                         rv.set(result_str.into());
                     }
                     Err(e) => {
-                        let err_str = V8String::new(_scope, &e).unwrap();
-                        rv.set(err_str.into());
+                        let err = js_code_err(_scope, "ECONNRESET", e);
+                        rv.set(err);
                     }
                 }
             },

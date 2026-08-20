@@ -120,6 +120,10 @@ path = "tests/sqlite_module.rs"
 name = "imap_module"
 path = "tests/imap_module.rs"
 
+[[test]]
+name = "pq_tls"
+path = "tests/pq_tls.rs"
+
 [dependencies]
 v8.workspace = true
 anyhow.workspace = true
@@ -148,6 +152,10 @@ aes = { workspace = true }
 cbc = { workspace = true }
 ctr = { workspace = true }
 native-tls = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+rustls-pki-types = { workspace = true }
+rustls-pemfile = { workspace = true }
 rsa = { workspace = true }
 p256 = { workspace = true }
 p384 = { workspace = true }

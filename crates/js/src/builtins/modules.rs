@@ -3213,9 +3213,36 @@ pub fn inject_require(
                 return s;
             }
 
+            // Real in-handshake hybrid PQ-TLS (RFC 10024 X25519MLKEM768) — see
+            // docs/10-security/06-pq-tls-hybrid-design.md. Client-only; the
+            // negotiated group falls back to plain X25519 against a server that
+            // doesn't support the hybrid group, so this never fails a connection
+            // that plain tls.connect() would have succeeded at.
+            function tlsPqConnect(port, host, opts, cb) {
+                if (typeof host === 'object' && host !== null) { cb = opts; opts = host; host = (opts && opts.host) || 'localhost'; }
+                if (typeof opts === 'function') { cb = opts; opts = {}; }
+                host = host || (opts && opts.host) || 'localhost';
+                var s = new TLSSocket(null, opts || {});
+                var result = __pqTlsConnect(host, port, (opts && opts.ca) || null);
+                if (typeof result === 'string') {
+                    var parsed = JSON.parse(result);
+                    s._connId = parsed.connId;
+                    s.pqNegotiated = parsed.pqNegotiated;
+                    s.negotiatedGroup = parsed.group;
+                    s._startPoll();
+                    if (typeof cb === 'function') s.once('secureConnect', cb);
+                    setTimeout(function() { s.emit('secureConnect'); s.emit('connect'); }, 0);
+                } else {
+                    if (typeof cb === 'function') s.once('secureConnect', cb);
+                    setTimeout(function() { s.emit('error', _netErr(result)); }, 0);
+                }
+                return s;
+            }
+
             globalThis.__requireCache['tls'] = {
                 TLSSocket: TLSSocket,
                 connect: tlsConnect,
+                pqConnect: tlsPqConnect,
                 createSecureContext: function(options) {
                     options = options || {};
                     return {
