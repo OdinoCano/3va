@@ -6837,6 +6837,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+ "vvva_firewall",
 ]
 
 [[package]]

@@ -35,6 +35,17 @@ pub struct FirewallConfig {
     /// How long to keep an offending IP blocked, in seconds.
     #[serde(rename = "blockDurationSecs")]
     pub block_duration_secs: u64,
+    /// Multiplier applied to the block duration for each repeat offense
+    /// (adaptive escalation). 1 = fixed duration, no escalation.
+    #[serde(rename = "blockEscalationFactor")]
+    pub block_escalation_factor: u32,
+    /// Upper bound on the escalated block duration, in seconds.
+    #[serde(rename = "maxBlockDurationSecs")]
+    pub max_block_duration_secs: u64,
+    /// Seconds of calm (no auto-block) after which an IP's strike history
+    /// clears and its block duration resets to `blockDurationSecs`.
+    #[serde(rename = "strikeDecaySecs")]
+    pub strike_decay_secs: u64,
     /// Max simultaneous open connections from a single IP.
     #[serde(rename = "maxConnectionsPerIp")]
     pub max_connections_per_ip: u32,
@@ -70,6 +81,9 @@ impl Default for FirewallConfig {
             rate_limit_burst: 200,
             auto_block_threshold: 10,
             block_duration_secs: 300,
+            block_escalation_factor: 2,
+            max_block_duration_secs: 3600,
+            strike_decay_secs: 3600,
             max_connections_per_ip: 50,
             max_connections_total: 10_000,
             header_timeout_ms: 10_000,
@@ -325,5 +339,43 @@ mod tests {
         let ws = WorkspaceConfig::default();
         assert_eq!(ws.parallelism, 4);
         assert!(ws.hoisting);
+    }
+
+    #[test]
+    fn firewall_config_deserializes_camel_case_keys() {
+        let json = r#"{
+            "firewall": {
+                "blockEscalationFactor": 3,
+                "maxBlockDurationSecs": 7200,
+                "strikeDecaySecs": 1800
+            }
+        }"#;
+        let cfg: ProjectConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.firewall.block_escalation_factor, 3);
+        assert_eq!(cfg.firewall.max_block_duration_secs, 7200);
+        assert_eq!(cfg.firewall.strike_decay_secs, 1800);
+        // Non-specified fields keep their safe defaults.
+        assert_eq!(cfg.firewall.block_duration_secs, 300);
+        assert_eq!(cfg.firewall.rate_limit_rps, 100);
+        assert_eq!(cfg.firewall.min_body_rate_bps, 100);
+    }
+
+    #[test]
+    fn firewall_config_defaults_match_firewall_crate() {
+        // The config schema defaults must mirror crates/firewall's FirewallConfig
+        // defaults — both are the source of truth for `3va.config.ts`.
+        let fw_cfg = FirewallConfig::default();
+        let crate_cfg = vvva_firewall::FirewallConfig::default();
+        assert_eq!(fw_cfg.block_duration_secs, crate_cfg.block_duration_secs);
+        assert_eq!(
+            fw_cfg.block_escalation_factor,
+            crate_cfg.block_escalation_factor
+        );
+        assert_eq!(
+            fw_cfg.max_block_duration_secs,
+            crate_cfg.max_block_duration_secs
+        );
+        assert_eq!(fw_cfg.strike_decay_secs, crate_cfg.strike_decay_secs);
+        assert_eq!(fw_cfg.min_body_rate_bps, crate_cfg.min_body_rate_bps);
     }
 }
