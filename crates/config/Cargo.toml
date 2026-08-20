@@ -18,3 +18,4 @@ regex-lite = "0.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+vvva_firewall = { version = "2.5.0", path = "../firewall" }

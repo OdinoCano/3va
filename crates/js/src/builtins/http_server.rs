@@ -268,6 +268,22 @@ fn reject_stream(stream: tokio::net::TcpStream, status: u16, msg: &'static str) 
         use tokio::io::AsyncWriteExt;
         let mut s = stream;
         let _ = s.write_all(response.as_bytes()).await;
+        // A blocked client may already have sent request bytes the accept loop
+        // never read. Dropping the socket with that data still unread makes
+        // Linux send an RST instead of a clean FIN, so the client's read loop
+        // gets "connection reset by peer" and discards the 403/503 it was just
+        // sent. Drain briefly so the close is a graceful FIN.
+        let mut buf = [0u8; 512];
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+        })
+        .await;
     });
 }
 

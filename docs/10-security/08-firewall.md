@@ -44,11 +44,11 @@ El bucle de aceptación en `__httpAcceptAsync` es un `loop {}` de Rust. Las cone
 | Ataque | Descripción | Mecanismo de defensa |
 |--------|-------------|---------------------|
 | **Slowloris** | Abre conexiones enviando cabeceras muy lentamente, una línea por segundo, agotando los slots de conexión | `header_timeout_ms`: cada `read_line` tiene un deadline independiente |
-| **RUDY** (R-U-Dead-Yet) | Envía cuerpos POST extremadamente despacio para mantener conexiones abiertas | `body_timeout_ms`: `read_exact` del cuerpo tiene su propio deadline |
+| **RUDY** (R-U-Dead-Yet) | Envía cuerpos POST extremadamente despacio para mantener conexiones abiertas | `body_timeout_ms`: deadline total de lectura del cuerpo + `min_body_rate_bps`: tasa mínima media de recepción (un cuerpo que llega a <50 B/s se aborta a los ~2 s, sin esperar al deadline) |
 | **Header flood** | Envía cientos de cabeceras para agotar memoria y CPU | `max_header_count` + `max_header_bytes` |
 | **DDoS por tasa** | IP individual dispara miles de requests por segundo | Token bucket per-IP con `rate_limit_rps` / `rate_limit_burst` |
 | **Agotamiento de conexiones** | Abre miles de conexiones sin enviar datos | `max_connections_per_ip` + `max_connections_total` |
-| **IPs persistentes** | IP que ya ha sido identificada como maliciosa reintenta | Blocklist con TTL configurable (`block_duration_secs`) |
+| **IPs persistentes** | IP que ya ha sido identificada como maliciosa reintenta | Blocklist adaptativo: cada auto-bloqueo suma un *strike*; la duración escala como `block_duration_secs × factor^(strikes-1)` hasta `max_block_duration_secs` |
 
 ---
 
@@ -64,11 +64,15 @@ pub struct FirewallConfig {
     pub rate_limit_rps: u32,          // 100 req/s por IP
     pub rate_limit_burst: u32,        // burst de 200 req antes de throttle
     pub auto_block_threshold: u32,    // bloqueo auto tras 10 violaciones
-    pub block_duration_secs: u64,     // IPs bloqueadas 300 s (5 min)
+    pub block_duration_secs: u64,     // bloqueo base: 300 s (5 min)
+    pub block_escalation_factor: u32, // ×2 por reincidencia (adaptativo)
+    pub max_block_duration_secs: u64, // tope: 3600 s (1 h)
+    pub strike_decay_secs: u64,       // olvida el historial tras 3600 s de calma
     pub max_connections_per_ip: u32,  // 50 conexiones simultáneas por IP
     pub max_connections_total: u32,   // 10,000 conexiones totales
     pub header_timeout_ms: u64,       // 10 s para recibir cabeceras completas
     pub body_timeout_ms: u64,         // 30 s para recibir el cuerpo
+    pub min_body_rate_bps: u32,       // 100 B/s mínimos de cuerpo (RUDY)
     pub max_header_count: u32,        // máx 100 cabeceras por request
     pub max_header_bytes: u32,        // máx 16 KiB de cabeceras combinadas
     pub max_body_bytes: u32,          // 0 = usar límite interno de 100 MiB
@@ -93,6 +97,22 @@ consume() → ¿tokens >= 1?
 ```
 
 Los tokens se rellenan *lazily* al llamar `consume()` basándose en el tiempo transcurrido (`Instant::elapsed()`). No hay hilo de fondo para el bucket — se calcula en el momento del check.
+
+### Escalación adaptativa (strikes)
+
+`auto_block_threshold` + `block_duration_secs` forman la capa base: violaciones repetidas → bloqueo automático con duración fija. Sobre eso, el firewall es **adaptativo**: cada auto-bloqueo registra un *strike* por IP y la duración del bloqueo escala con la reincidencia.
+
+```
+auto-block nº `n` → duración = min(block_duration_secs × factor^(n-1), max_block_duration_secs)
+```
+
+- Con los valores por defecto (base 300 s, factor ×2, tope 3600 s): 1ª ofensa → 300 s, 2ª → 600 s, 3ª → 1200 s, 4ª → 2400 s, 5ª → 3600 s (tope).
+- El historial de strikes **no** se borra cuando expira el bloqueo: un reincidente que vuelve a atacar recibe el siguiente escalón. Solo se limpia cuando la IP lleva `strike_decay_secs` sin otro auto-bloqueo (por defecto 1 h de calma), momento en que la duración vuelve a `block_duration_secs`.
+- La escalación penaliza el *castigo* (duración del bloqueo), no el bucket de tasa per-IP: los `rate_limit_rps`/`rate_limit_burst` de cada IP permanecen fijos.
+
+### RUDY: `min_body_rate_bps`
+
+Además del deadline total (`body_timeout_ms`), el lector del cuerpo calcula la tasa media de recepción pasados 2 s de gracia: si `bytes_recibidos / tiempo < min_body_rate_bps`, la conexión se cierra inmediatamente. Esto neutraliza el RUDY real (1 byte/s) sin esperar a que expire el deadline de 30 s — el caso límite que el timeout por sí solo cubre mal.
 
 ### `FirewallDecision`
 
@@ -133,8 +153,17 @@ export default {
     // Número de violaciones antes de bloquear la IP automáticamente
     autoBlockThreshold: 10,
 
-    // Duración del bloqueo en segundos (300 = 5 minutos)
+    // Duración base del bloqueo en segundos (300 = 5 minutos)
     blockDurationSecs: 300,
+
+    // Multiplicador de la duración por reincidencia (2 = se duplica cada ofensa)
+    blockEscalationFactor: 2,
+
+    // Tope de la duración escalada (3600 = 1 hora)
+    maxBlockDurationSecs: 3600,
+
+    // Segundos de calma tras los que se olvida el historial de strikes
+    strikeDecaySecs: 3600,
 
     // Conexiones simultáneas máximas por IP
     maxConnectionsPerIp: 50,
@@ -149,6 +178,9 @@ export default {
     // Tiempo máximo para recibir el cuerpo completo tras las cabeceras (ms)
     // Protege contra RUDY
     bodyTimeoutMs: 30_000,
+
+    // Tasa mínima de recepción del cuerpo en B/s (RUDY). 0 = desactivada.
+    minBodyRateBps: 100,
 
     // Número máximo de cabeceras HTTP por petición
     maxHeaderCount: 100,
@@ -268,6 +300,12 @@ cargo test -p vvva_firewall
 | `block_remaining_ms_is_positive` | `remaining_ms` es > 0 inmediatamente tras el bloqueo |
 | `connection_count_stays_consistent_after_disconnect` | El contador no queda en negativo tras disconnects |
 | `disconnect_below_zero_does_not_panic` | `on_disconnect` sin `on_connect` no produce panic ni underflow |
+| `adaptive_block_duration_escalates_and_caps` | La duración escala 10→20→40→80 s y nunca supera el tope |
+| `adaptive_escalation_factor_one_disables_escalation` | `factor: 1` = duración fija |
+| `adaptive_max_below_base_never_shortens_first_block` | Un tope mal configurado < base no acorta el 1er bloqueo |
+| `adaptive_auto_block_escalates_across_offenses` | La 2ª ofensa devuelve `remaining_ms` ×3 y suma un strike |
+| `adaptive_strikes_persist_within_decay_window` | `cleanup()` no borra el historial dentro de la ventana |
+| `adaptive_strikes_clear_after_decay_window` | `cleanup()` resetea el historial tras `strike_decay_secs` |
 
 ### Integration tests (`vvva_js`)
 
@@ -282,15 +320,21 @@ cargo test -p vvva_js --test http_server
 | `firewall_auto_blocks_after_threshold` | La 5ª petición recibe HTTP 403 (IP auto-bloqueada) |
 | `firewall_rejects_header_flood_and_continues` | Header flood es descartado y el servidor sigue aceptando |
 | `firewall_slowloris_timeout_and_recovery` | Conexión lenta es cerrada por timeout; el servidor responde normalmente a la siguiente |
+| `firewall_rudy_slow_body_rejected_and_recovers` | Atacante real (cuerpo a ~1 B/s): la conexión se cierra en ~2 s por `min_body_rate_bps`, el body nunca llega a JS y el servidor se recupera |
+| `firewall_adaptive_escalation_repeat_offender` | Reincidente: 1ª bloqueo 1 s, tras reincidir el 2ª bloqueo dura 2 s (escalado) y solo se sirve de nuevo al expirar |
+
+> Los tests de ataque simulado (RUDY y escalación adaptativa) ejercitan el servidor HTTP real con un cliente TCP de verdad — no son unit tests de la función aislada. El RUDY usa un deadline de cuerpo de 120 s para demostrar que es la *tasa mínima* quien rechaza, no el timeout total.
 
 ---
 
 ## 8.9 Limitaciones Conocidas
 
 - **No soporta IPv6 NAT64** — una IP IPv6 puede representar múltiples clientes reales en redes con traducción de direcciones. El rate-limit se aplica por dirección IP tal como aparece en el socket.
-- **Sin persistencia** — el blocklist y los buckets viven en memoria. Un reinicio del proceso vacía todas las restricciones.
+- **Sin persistencia** — el blocklist, los buckets y los strikes viven en memoria. Un reinicio del proceso vacía todas las restricciones.
 - **Sin modo de solo-observación** — `enabled: false` desactiva todas las protecciones. No existe un modo "log-only" en v2.0.0.
 - **Sin integración con reverse proxy** — si 3va está detrás de nginx/Caddy, `remoteAddress` será la IP del proxy, no la del cliente final. Soporte para `X-Forwarded-For` es trabajo futuro.
+- **La adaptividad ajusta el castigo, no la tasa** — los `rate_limit_rps`/`rate_limit_burst` de cada IP son fijos. La escalación solo alarga los bloqueos de reincidentes; no aprende patrones de tráfico "normales" ni ajusta el bucket por IP.
+- **El historial de strikes se olvida tras `strike_decay_secs`** — un atacante que espera la ventana completa de calma (1 h por defecto) vuelve a empezar con la duración base. No hay memoria de ofensas antiguas más allá de esa ventana.
 
 ---
 
