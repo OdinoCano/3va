@@ -96,8 +96,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # GitHub-hosted runners ship with a Node.js binary (v20+); verify and
-      # fall back to nvm if it is ever absent.
+      # Pinned to 24 (not just "whatever the runner ships") because some
+      # dns.* result shapes (e.g. whether resolveMx() includes a `type`
+      # field) changed across Node versions — an unpinned runner Node made
+      # this comparison non-deterministic.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - name: Verify node
         run: node --version
       - name: Build 3va (release)
