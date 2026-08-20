@@ -88,7 +88,26 @@ jobs:
         run: cargo fuzz run fuzz_pm_resolver --target x86_64-unknown-linux-gnu -- -max_total_time=30
         working-directory: fuzz
 
-  # ── Gate 6: secret scanning ──────────────────────────────────────────────────
+  # ── Gate 7: dgram + dns behavioral compat vs real Node.js ───────────────
+  compat-dgram-dns:
+    name: dgram+dns compat vs Node
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # GitHub-hosted runners ship with a Node.js binary (v20+); verify and
+      # fall back to nvm if it is ever absent.
+      - name: Verify node
+        run: node --version
+      - name: Build 3va (release)
+        run: cargo build --release
+      - name: Run dgram+dns compat comparison
+        run: ./scripts/compat-dgram-dns.sh
+        env:
+          NO_BUILD: "1"
+
+  # ── Gate 8: secret scanning ──────────────────────────────────────────────────
   secrets:
     name: Secret Scanning (gitleaks)
     runs-on: ubuntu-latest
