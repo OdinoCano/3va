@@ -6,17 +6,95 @@ use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
 use std::io::{Read, Write};
 use v8::{ContextScope, Function, HandleScope, Script, String};
 
+/// Decompression-bomb guards for the zlib builtins.
+///
+/// Node itself does not bound decompressed output by default; this runtime
+/// does, because scripts routinely inflate untrusted payloads and a small
+/// gzip/brotli input can otherwise expand to gigabytes in memory.
+///
+/// These are the defaults used by the JS-visible bindings. Tests inject lower
+/// values through the `*_with_limits` functions instead of relying on huge
+/// payloads.
+const MAX_DECOMPRESSED_OUTPUT_BYTES: usize = 512 * 1024 * 1024;
+/// Incremental expansion-ratio tripwire: abort once produced/consumed exceeds
+/// this ratio while streaming. Deflate's practical ceiling is ~1032:1, so
+/// legitimate streams never trip it; bombs do, well before the size cap.
+const MAX_DECOMPRESSION_RATIO: u64 = 4096;
+/// Ratio accounting starts only after this much compressed input has been
+/// consumed, so tiny inputs near stream headers cannot false-positive.
+const RATIO_MIN_INPUT_BYTES: u64 = 256 * 1024;
+
+#[derive(Clone, Copy)]
+struct DecompressionLimits {
+    max_output_bytes: usize,
+    max_ratio: u64,
+    ratio_min_input_bytes: u64,
+}
+
+impl Default for DecompressionLimits {
+    fn default() -> Self {
+        Self {
+            max_output_bytes: MAX_DECOMPRESSED_OUTPUT_BYTES,
+            max_ratio: MAX_DECOMPRESSION_RATIO,
+            ratio_min_input_bytes: RATIO_MIN_INPUT_BYTES,
+        }
+    }
+}
+
+/// Wraps the compressed input and records how many bytes the decoder pulled.
+struct CountingReader<'a, R: Read> {
+    inner: R,
+    consumed: &'a std::cell::Cell<u64>,
+}
+
+impl<R: Read> Read for CountingReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.consumed.set(self.consumed.get() + n as u64);
+        Ok(n)
+    }
+}
+
+/// Streams `dec` to memory enforcing both guards after every chunk read:
+/// absolute output size and incremental expansion ratio. Aborts with a clear
+/// error as soon as either is exceeded instead of letting the buffer grow.
+fn read_bounded(
+    mut dec: impl Read,
+    consumed: &std::cell::Cell<u64>,
+    lim: DecompressionLimits,
+) -> anyhow::Result<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 65_536];
+    loop {
+        let n = dec.read(&mut buf)?;
+        if n == 0 {
+            return Ok(out);
+        }
+        out.extend_from_slice(&buf[..n]);
+        if out.len() > lim.max_output_bytes {
+            anyhow::bail!(
+                "decompression aborted: output exceeded {} bytes (possible decompression bomb)",
+                lim.max_output_bytes
+            );
+        }
+        let consumed_now = consumed.get();
+        if consumed_now >= lim.ratio_min_input_bytes
+            && out.len() as u64 > consumed_now.saturating_mul(lim.max_ratio)
+        {
+            anyhow::bail!(
+                "decompression aborted: expansion ratio exceeded {}:1 ({} output bytes from {} input bytes; possible decompression bomb)",
+                lim.max_ratio,
+                out.len(),
+                consumed_now
+            );
+        }
+    }
+}
+
 fn gzip_compress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     let mut enc = GzEncoder::new(Vec::new(), Compression::default());
     enc.write_all(&data)?;
     Ok(enc.finish()?)
-}
-
-fn gzip_decompress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    let mut dec = GzDecoder::new(&data[..]);
-    let mut out = Vec::new();
-    dec.read_to_end(&mut out)?;
-    Ok(out)
 }
 
 fn deflate_compress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
@@ -25,24 +103,10 @@ fn deflate_compress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     Ok(enc.finish()?)
 }
 
-fn deflate_decompress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    let mut dec = ZlibDecoder::new(&data[..]);
-    let mut out = Vec::new();
-    dec.read_to_end(&mut out)?;
-    Ok(out)
-}
-
 fn raw_deflate_compress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
     enc.write_all(&data)?;
     Ok(enc.finish()?)
-}
-
-fn raw_deflate_decompress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    let mut dec = DeflateDecoder::new(&data[..]);
-    let mut out = Vec::new();
-    dec.read_to_end(&mut out)?;
-    Ok(out)
 }
 
 fn brotli_compress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
@@ -51,10 +115,62 @@ fn brotli_compress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
+fn gunzip_with_limits(data: Vec<u8>, lim: DecompressionLimits) -> anyhow::Result<Vec<u8>> {
+    let consumed = std::cell::Cell::new(0u64);
+    let mut dec = GzDecoder::new(CountingReader {
+        inner: &data[..],
+        consumed: &consumed,
+    });
+    read_bounded(&mut dec, &consumed, lim)
+}
+
+fn inflate_with_limits(data: Vec<u8>, lim: DecompressionLimits) -> anyhow::Result<Vec<u8>> {
+    let consumed = std::cell::Cell::new(0u64);
+    let mut dec = ZlibDecoder::new(CountingReader {
+        inner: &data[..],
+        consumed: &consumed,
+    });
+    read_bounded(&mut dec, &consumed, lim)
+}
+
+fn raw_inflate_with_limits(data: Vec<u8>, lim: DecompressionLimits) -> anyhow::Result<Vec<u8>> {
+    let consumed = std::cell::Cell::new(0u64);
+    let mut dec = DeflateDecoder::new(CountingReader {
+        inner: &data[..],
+        consumed: &consumed,
+    });
+    read_bounded(&mut dec, &consumed, lim)
+}
+
+fn brotli_decompress_with_limits(
+    data: Vec<u8>,
+    lim: DecompressionLimits,
+) -> anyhow::Result<Vec<u8>> {
+    let consumed = std::cell::Cell::new(0u64);
+    let mut dec = brotli::Decompressor::new(
+        CountingReader {
+            inner: &data[..],
+            consumed: &consumed,
+        },
+        65_536,
+    );
+    read_bounded(&mut dec, &consumed, lim)
+}
+
+fn gzip_decompress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    gunzip_with_limits(data, DecompressionLimits::default())
+}
+
+fn deflate_decompress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    inflate_with_limits(data, DecompressionLimits::default())
+}
+
+fn raw_deflate_decompress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    raw_inflate_with_limits(data, DecompressionLimits::default())
+}
+
 fn brotli_decompress(data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    let mut out = Vec::new();
-    brotli::BrotliDecompress(&mut &data[..], &mut out)?;
-    Ok(out)
+    brotli_decompress_with_limits(data, DecompressionLimits::default())
 }
 
 fn run_compress_async<F>(data: Vec<u8>, f: F) -> std::result::Result<Vec<u8>, std::string::String>
@@ -695,4 +811,104 @@ pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> 
     let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zeros(n: usize) -> Vec<u8> {
+        vec![0u8; n]
+    }
+
+    #[test]
+    fn roundtrip_under_default_limits() {
+        let payload = b"hello 3va zlib bomb guard".repeat(100);
+        let gz = gzip_compress(payload.clone()).unwrap();
+        assert_eq!(gzip_decompress(gz).unwrap(), payload);
+
+        let br = brotli_compress(payload.clone()).unwrap();
+        assert_eq!(brotli_decompress(br).unwrap(), payload);
+    }
+
+    #[test]
+    fn gunzip_aborts_when_output_exceeds_injected_cap() {
+        // 8 MiB of zeros compress to a few KB — a classic small-bomb shape.
+        let data = gzip_compress(zeros(8 * 1024 * 1024)).unwrap();
+        let lim = DecompressionLimits {
+            max_output_bytes: 1024 * 1024,
+            ..DecompressionLimits::default()
+        };
+        let err = gunzip_with_limits(data, lim).unwrap_err();
+        assert!(
+            err.to_string().contains("output exceeded"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn gunzip_ratio_tripwire_fires_before_size_cap() {
+        // ~1024:1 real ratio; with the size cap far out of reach (64 MiB) only
+        // the incremental ratio guard can reject this stream.
+        let data = gzip_compress(zeros(8 * 1024 * 1024)).unwrap();
+        let lim = DecompressionLimits {
+            max_output_bytes: 64 * 1024 * 1024,
+            max_ratio: 128,
+            ratio_min_input_bytes: 1024,
+        };
+        let err = gunzip_with_limits(data, lim).unwrap_err();
+        assert!(
+            err.to_string().contains("expansion ratio"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ratio_guard_ignores_small_inputs_below_floor() {
+        // Small legit payload: even at high effective ratio, input stays below
+        // the floor so no false positive fires.
+        let payload = zeros(64 * 1024);
+        let data = gzip_compress(payload.clone()).unwrap();
+        let lim = DecompressionLimits {
+            max_output_bytes: 512 * 1024,
+            max_ratio: 2,
+            ratio_min_input_bytes: 256 * 1024,
+        };
+        assert_eq!(gunzip_with_limits(data, lim).unwrap(), payload);
+    }
+
+    #[test]
+    fn inflate_and_raw_inflate_are_bounded() {
+        let z = deflate_compress(zeros(4 * 1024 * 1024)).unwrap();
+        let raw = raw_deflate_compress(zeros(4 * 1024 * 1024)).unwrap();
+        for (err_data, f) in [
+            (
+                z,
+                (inflate_with_limits
+                    as fn(Vec<u8>, DecompressionLimits) -> anyhow::Result<Vec<u8>>),
+            ),
+            (raw, raw_inflate_with_limits),
+        ] {
+            let lim = DecompressionLimits {
+                max_output_bytes: 1024 * 1024,
+                ..DecompressionLimits::default()
+            };
+            let err = f(err_data, lim).unwrap_err();
+            assert!(err.to_string().contains("output exceeded"));
+        }
+    }
+
+    #[test]
+    fn brotli_decompress_is_bounded() {
+        let data = brotli_compress(zeros(8 * 1024 * 1024)).unwrap();
+        let lim = DecompressionLimits {
+            max_output_bytes: 1024 * 1024,
+            ..DecompressionLimits::default()
+        };
+        let err = brotli_decompress_with_limits(data, lim).unwrap_err();
+        assert!(
+            err.to_string().contains("output exceeded"),
+            "unexpected error: {err}"
+        );
+    }
 }
