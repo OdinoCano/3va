@@ -27,6 +27,14 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   `chunked_body_decoded`, `multi_chunk_body_with_large_chunk_decoded`,
   `content_length_plus_transfer_encoding_rejected_as_smuggling`, `malformed_chunk_size_rejected_with_400`
   (unit, `crates/js/src/builtins/http_server.rs`).
+- **`fetch()` response size cap**: response bodies are streamed through a counting reader that
+  aborts once buffered output passes `MAX_RESPONSE_BODY_BYTES` (512 MiB); a response declaring a
+  larger `Content-Length` is rejected before the body is read. Scripts can lower the cap per call
+  with `fetch(url, { maxResponseSize: n })` (undici's option name) but cannot raise the default.
+  Tests: `fetch_body_under_cap_succeeds`,
+  `fetch_rejects_oversized_stream_via_max_response_size_option`,
+  `fetch_rejects_early_on_oversized_content_length`
+  (`crates/js/tests/fetch_response_cap.rs`).
 - **Decompression-bomb caps**: the four `zlib` decompressors (`gunzip`/`inflate`/
   `inflateRaw`/`brotliDecompress`) stream through a counting reader that aborts once output
   exceeds `MAX_DECOMPRESSED_OUTPUT_BYTES` (512 MiB) or the incremental expansion ratio passes
