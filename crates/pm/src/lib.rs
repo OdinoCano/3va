@@ -1191,6 +1191,93 @@ pub(crate) fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()>
     extract_tarball_with_limits(data, dest, ExtractLimits::default())
 }
 
+/// Scan a freshly downloaded package tarball with the malware and secrets
+/// engines (the same ones `3va audit` uses) BEFORE it becomes active in the
+/// global store or node_modules. High-severity findings abort the install of
+/// that package; the report lines use the audit output format.
+///
+/// Skipped entirely when `_3VA_SKIP_SCAN=1` (the `--no-scan` CLI flag), and
+/// for tarballs served from caches/global store — those were scanned when
+/// first downloaded.
+fn scan_tarball_before_install(pkg_name: &str, ver: &str, bytes: &[u8]) -> Result<(), String> {
+    if std::env::var("_3VA_SKIP_SCAN").as_deref() == Ok("1") {
+        return Ok(());
+    }
+
+    // Extract into a throwaway dir (with the standard extraction caps) so the
+    // file-based scanners can run over real files.
+    let unique = format!(
+        "3va-scan-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let dest = std::env::temp_dir().join(unique);
+    let cleanup = |dir: &PathBuf| {
+        let _ = std::fs::remove_dir_all(dir);
+    };
+    if let Err(e) = extract_tarball(bytes, &dest) {
+        cleanup(&dest);
+        return Err(format!(
+            "security scan could not extract package (treated as unsafe): {}",
+            e
+        ));
+    }
+
+    let mut findings: Vec<String> = Vec::new();
+
+    let malware = MalwareScanner::new();
+    for result in malware.scan_directory(&dest) {
+        if !matches!(
+            result.overall_level,
+            ThreatLevel::High | ThreatLevel::Critical
+        ) {
+            continue;
+        }
+        for t in &result.threats {
+            let sev = format!("{:?}", t.severity).to_uppercase();
+            findings.push(format!(
+                "[{}] {}:{} — {} — {}",
+                sev,
+                result.file.display(),
+                t.line,
+                t.description,
+                t.pattern
+            ));
+        }
+    }
+
+    let secrets_scanner = SecretsScanner::new();
+    for f in secrets_scanner.scan_directory(&dest) {
+        if !matches!(f.severity, SecretSeverity::High | SecretSeverity::Critical) {
+            continue;
+        }
+        let sev = format!("{:?}", f.severity).to_uppercase();
+        findings.push(format!(
+            "[{}] {}:{} — {} — {}",
+            sev,
+            f.file.display(),
+            f.line,
+            f.secret_type,
+            f.snippet
+        ));
+    }
+
+    cleanup(&dest);
+
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "install aborted by security scan ({pkg_name}@{ver}) — {} CRITICAL/HIGH finding(s):\n  {}",
+            findings.len(),
+            findings.join("\n  ")
+        ))
+    }
+}
+
 fn extract_tarball_with_limits(
     data: &[u8],
     dest: &PathBuf,
@@ -1905,6 +1992,13 @@ async fn install_with_transitive(
                                 }
                                 _ => {}
                             }
+                        }
+                        // Security scan (malware + secrets) before the
+                        // package becomes active anywhere. Aborting here
+                        // keeps it out of the global store and node_modules.
+                        if let Err(report) = scan_tarball_before_install(&pkg_name, &ver, &bytes) {
+                            errors.push(format!("{}@{} — {}", pkg_name, ver, report));
+                            continue;
                         }
                         // Store globally
                         let _ = global_store.store_tarball(&bytes, &reg_name, &pkg_name, &ver);
@@ -3670,5 +3764,40 @@ mod tests {
         extract_tarball_with_limits(&tgz, &dest.path().to_path_buf(), lim).unwrap();
         let written = std::fs::read(dest.path().join("index.js")).unwrap();
         assert_eq!(written, payload);
+    }
+
+    #[test]
+    fn security_scan_passes_a_clean_package() {
+        let tgz = make_tgz(&[(
+            "package/index.js",
+            b"module.exports = function add(a, b) { return a + b; };".to_vec(),
+        )]);
+        scan_tarball_before_install("clean-pkg", "1.0.0", &tgz)
+            .expect("clean package must not be aborted");
+    }
+
+    #[test]
+    fn security_scan_aborts_package_with_embedded_aws_key() {
+        // Matches the aws_access_key pattern (Critical): AKIA + 16 chars.
+        let evil = b"const cfg = { accessKeyId: 'AKIAIOSFODNN7EXAMPLE' };".to_vec();
+        let tgz = make_tgz(&[("package/index.js", evil)]);
+        let err = scan_tarball_before_install("evil-pkg", "1.0.0", &tgz)
+            .expect_err("package with an embedded AWS key must abort");
+        assert!(
+            err.contains("CRITICAL/HIGH") && err.contains("evil-pkg@1.0.0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn security_scan_respects_skip_flag() {
+        // SAFETY: single-threaded test process for this env var (tests in this
+        // module do not touch it concurrently).
+        unsafe { std::env::set_var("_3VA_SKIP_SCAN", "1") };
+        let evil = b"const cfg = { accessKeyId: 'AKIAIOSFODNN7EXAMPLE' };".to_vec();
+        let tgz = make_tgz(&[("package/index.js", evil)]);
+        let r = scan_tarball_before_install("evil-pkg", "1.0.0", &tgz);
+        unsafe { std::env::remove_var("_3VA_SKIP_SCAN") };
+        r.expect("--no-scan (_3VA_SKIP_SCAN=1) must skip the scan entirely");
     }
 }
