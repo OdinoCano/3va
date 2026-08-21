@@ -9,6 +9,16 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **Typosquatting detection on install**: new `typosquat` module
+  (`crates/pm/src/typosquat.rs`) carries an embedded list of popular/most-impersonated npm
+  packages (`popular_packages.txt`, ~60 entries) and flags dependency names whose Levenshtein
+  distance to a list entry is 1–`TYPOSQUAT_MAX_DISTANCE` (2) but non-zero — e.g. `reqeust`
+  → warns "looks like 'request' (edit distance 2)". Exact matches and unrelated names never warn.
+  The check runs in the install resolution loop for every newly resolved package, and
+  `warn_for_manifest_deps` is available to audit flows. Tests: `levenshtein_basics`,
+  `popular_list_is_loaded_and_clean`, `exact_popular_names_never_warn`,
+  `classic_typos_are_flagged`, `unrelated_names_do_not_warn`,
+  `warn_for_manifest_deps_reports_count`.
 - **Automatic malware/secrets scan on `3va install`**: every freshly downloaded package tarball is
   now scanned with the same malware and secrets engines `3va audit` uses, after integrity
   verification and before the package is written to the store or linked into `node_modules/`;
