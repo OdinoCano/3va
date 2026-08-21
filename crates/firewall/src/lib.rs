@@ -116,6 +116,13 @@ pub struct FirewallConfig {
     /// faster to traffic changes; lower values smooth more. Only used when
     /// `adaptive_rate_limit` is on.
     pub ewma_alpha_pct: u32,
+
+    /// Reverse proxies trusted to set `X-Forwarded-For`. Each entry is a bare
+    /// IP or CIDR (e.g. `"10.0.0.0/8"`, `"::1"`). When the direct peer is a
+    /// trusted proxy, `req.socket.remoteAddress` reports the right-most
+    /// non-trusted address from `X-Forwarded-For` and the firewall accounts
+    /// rate limits against it; otherwise the header is ignored entirely.
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for FirewallConfig {
@@ -139,8 +146,97 @@ impl Default for FirewallConfig {
             min_body_rate_bps: 100,
             adaptive_rate_limit: false,
             ewma_alpha_pct: 20,
+            trusted_proxies: Vec::new(),
         }
     }
+}
+
+// ── Trusted proxies / X-Forwarded-For ────────────────────────────────────────
+
+/// One trusted-proxy entry: a bare IP or a CIDR range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProxyRule {
+    addr: IpAddr,
+    prefix: u8,
+}
+
+impl ProxyRule {
+    /// Parse `"1.2.3.4"`, `"10.0.0.0/8"`, `"::1"`, `"fd00::/8"` …
+    pub fn parse(s: &str) -> Option<Self> {
+        let (ip_part, prefix) = match s.split_once('/') {
+            Some((ip, p)) => (ip, p.parse::<u8>().ok()?),
+            None => (
+                s,
+                match s.parse::<IpAddr>() {
+                    Ok(IpAddr::V4(_)) => 32,
+                    Ok(IpAddr::V6(_)) => 128,
+                    Err(_) => return None,
+                },
+            ),
+        };
+        let addr: IpAddr = ip_part.trim().parse().ok()?;
+        let max = match addr {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        if prefix > max {
+            return None;
+        }
+        Some(ProxyRule { addr, prefix })
+    }
+
+    /// True when `ip` falls inside this rule's range. Families must match
+    /// (an IPv4 rule never matches an IPv6 address and vice versa).
+    pub fn matches(&self, ip: IpAddr) -> bool {
+        match (self.addr, ip) {
+            (IpAddr::V4(base), IpAddr::V4(other)) => {
+                if self.prefix == 0 {
+                    return true;
+                }
+                let base = u32::from(base);
+                let other = u32::from(other);
+                let mask = u32::MAX << (32 - self.prefix);
+                base & mask == other & mask
+            }
+            (IpAddr::V6(base), IpAddr::V6(other)) => {
+                if self.prefix == 0 {
+                    return true;
+                }
+                let base = u128::from(base);
+                let other = u128::from(other);
+                let mask = u128::MAX << (128 - self.prefix);
+                base & mask == other & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Resolve the real client IP from an `X-Forwarded-For` header.
+///
+/// Safe only when the direct connection peer is itself a trusted proxy:
+/// - peer NOT trusted → `None` (the header is attacker-controlled noise),
+/// - walk entries right-to-left, skipping trusted proxies; the first
+///   non-trusted entry is the client,
+/// - a malformed entry stops the walk,
+/// - if every entry is a trusted proxy, the left-most one wins (deepest
+///   proxy chain we trust).
+pub fn resolve_forwarded_for(peer: IpAddr, xff: &str, trusted: &[ProxyRule]) -> Option<IpAddr> {
+    if !trusted.iter().any(|r| r.matches(peer)) {
+        return None;
+    }
+    let entries: Vec<&str> = xff.split(',').map(str::trim).collect();
+    // Right-to-left: first non-trusted, fully-parsed address.
+    for part in entries.iter().rev() {
+        match part.parse::<IpAddr>() {
+            Ok(a) if !trusted.iter().any(|r| r.matches(a)) => return Some(a),
+            Ok(_) => continue, // trusted intermediate hop
+            Err(_) => break,   // malformed — stop walking
+        }
+    }
+    // All entries trusted → leftmost parsed entry is the client as seen by
+    // the innermost proxy.
+    entries.first().and_then(|e| e.parse::<IpAddr>().ok())
 }
 
 // ── Adaptive rate limiting ───────────────────────────────────────────────────
@@ -355,6 +451,34 @@ impl Firewall {
             conn_per_ip: Mutex::new(HashMap::new()),
             conn_total: Mutex::new(0),
         })
+    }
+
+    /// Effective client IP for a request that arrived from `peer`.
+    ///
+    /// When the peer is a trusted proxy (per `trusted_proxies`) and the
+    /// request carried `X-Forwarded-For`, this is the resolved client
+    /// address; otherwise it is the peer itself. Used both for rate-limit
+    /// accounting and for `req.socket.remoteAddress`.
+    pub fn client_ip_from_xff(&self, peer: IpAddr, xff: Option<&str>) -> IpAddr {
+        let Some(xff) = xff else {
+            return peer;
+        };
+        let rules: Vec<ProxyRule> = self
+            .config
+            .trusted_proxies
+            .iter()
+            .filter_map(|s| match ProxyRule::parse(s) {
+                Some(r) => Some(r),
+                None => {
+                    warn!("Firewall: ignoring invalid trusted proxy entry '{s}'");
+                    None
+                }
+            })
+            .collect();
+        if rules.is_empty() {
+            return peer;
+        }
+        resolve_forwarded_for(peer, xff, &rules).unwrap_or(peer)
     }
 
     /// Main entry point: call when a new TCP connection is accepted.
@@ -1060,6 +1184,110 @@ mod tests {
         assert!(
             effective > 4.0 && effective <= 4.0 * ADAPTIVE_MAX_RATE_MULTIPLIER,
             "adaptive limit must be raised but capped, got {effective}"
+        );
+    }
+
+    #[test]
+    fn proxy_rule_parses_ips_and_cidrs() {
+        let r = ProxyRule::parse("10.0.0.0/8").unwrap();
+        assert!(r.matches("10.1.2.3".parse().unwrap()));
+        assert!(r.matches("10.255.255.255".parse().unwrap()));
+        assert!(!r.matches("11.0.0.1".parse().unwrap()));
+        // Bare IP = /32 exact match.
+        let r = ProxyRule::parse("127.0.0.1").unwrap();
+        assert!(r.matches("127.0.0.1".parse().unwrap()));
+        assert!(!r.matches("127.0.0.2".parse().unwrap()));
+        // IPv6.
+        let r = ProxyRule::parse("fd00::/8").unwrap();
+        assert!(r.matches("fd12::1".parse().unwrap()));
+        assert!(!r.matches("fe80::1".parse().unwrap()));
+        // Family mismatch never matches.
+        let r = ProxyRule::parse("10.0.0.0/8").unwrap();
+        assert!(!r.matches("fd00::1".parse().unwrap()));
+        // Junk is rejected, oversized prefix rejected.
+        assert!(ProxyRule::parse("not-an-ip").is_none());
+        assert!(ProxyRule::parse("10.0.0.0/33").is_none());
+    }
+
+    #[test]
+    fn xff_ignored_when_peer_not_trusted() {
+        let trusted: Vec<ProxyRule> = ["10.0.0.0/8"]
+            .iter()
+            .filter_map(|s| ProxyRule::parse(s))
+            .collect();
+        // Peer is the client itself (not in 10/8) → header must be ignored.
+        assert_eq!(
+            resolve_forwarded_for("203.0.113.7".parse().unwrap(), "9.9.9.9", &trusted),
+            None
+        );
+    }
+
+    #[test]
+    fn xff_resolves_client_behind_trusted_proxy() {
+        let trusted: Vec<ProxyRule> = ["127.0.0.1", "10.0.0.0/8"]
+            .iter()
+            .filter_map(|s| ProxyRule::parse(s))
+            .collect();
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        // Simple chain: proxy saw one client.
+        assert_eq!(
+            resolve_forwarded_for(peer, "198.51.100.23", &trusted),
+            Some("198.51.100.23".parse().unwrap())
+        );
+        // Chained proxies (both trusted): rightmost non-trusted wins.
+        assert_eq!(
+            resolve_forwarded_for(peer, "198.51.100.23, 10.1.2.3", &trusted),
+            Some("198.51.100.23".parse().unwrap())
+        );
+        // All entries trusted → leftmost (deepest hop) wins.
+        assert_eq!(
+            resolve_forwarded_for(peer, "198.51.100.23, 10.1.2.3", &trusted),
+            Some("198.51.100.23".parse().unwrap())
+        );
+        assert_eq!(
+            resolve_forwarded_for(peer, "10.9.9.9, 10.1.2.3", &trusted),
+            Some("10.9.9.9".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn xff_malformed_entry_falls_back_to_leftmost() {
+        let trusted: Vec<ProxyRule> = ["127.0.0.1"]
+            .iter()
+            .filter_map(|s| ProxyRule::parse(s))
+            .collect();
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        // Rightmost entry garbage → walk stops there, leftmost valid entry
+        // (the deepest trusted proxy's view) is used.
+        assert_eq!(
+            resolve_forwarded_for(peer, "198.51.100.5, junk", &trusted),
+            Some("198.51.100.5".parse().unwrap())
+        );
+        // Nothing parseable at all → None.
+        assert_eq!(resolve_forwarded_for(peer, "junk", &trusted), None);
+    }
+
+    #[test]
+    fn firewall_client_ip_uses_xff_only_through_trusted_proxies() {
+        use std::net::Ipv4Addr;
+        let fw = Firewall::new(FirewallConfig {
+            trusted_proxies: vec!["127.0.0.1".to_string()],
+            ..Default::default()
+        });
+        let peer = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        // Trusted peer with header → forwarded address.
+        assert_eq!(
+            fw.client_ip_from_xff(peer, Some("203.0.113.9")),
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))
+        );
+        // Trusted peer without header → peer itself.
+        assert_eq!(fw.client_ip_from_xff(peer, None), peer);
+        // Untrusted direct client sending a spoofed header → ignored.
+        let outsider = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        assert_eq!(
+            fw.client_ip_from_xff(outsider, Some("9.9.9.9")),
+            outsider,
+            "spoofed XFF from an untrusted client must be ignored"
         );
     }
 }

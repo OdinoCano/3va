@@ -170,6 +170,9 @@ export default {
     // Capacidad de ráfaga antes de que se active el rate limiting
     rateLimitBurst: 200,
 
+    // Proxies de confianza para X-Forwarded-For (IPs o CIDRs; vacío = ignorar header)
+    trustedProxies: [],
+
     // Número de violaciones antes de bloquear la IP automáticamente
     autoBlockThreshold: 10,
 
@@ -271,6 +274,29 @@ http.createServer((req, res) => {
 
 Este campo se propaga independientemente del estado del firewall — se resuelve desde el peer address del socket TCP en el momento del `accept`.
 
+### Detrás de un reverse proxy (`trustedProxies` + `X-Forwarded-For`)
+
+Si 3va corre detrás de nginx/Caddy (o cualquier proxy de confianza), el peer address es la IP del proxy, no la del cliente. Con `trustedProxies` configurado, cuando la conexión llega **directamente** desde un proxy de confianza, `remoteAddress` reporta la IP real extraída de `X-Forwarded-For` y el rate-limiting contabiliza contra esa IP:
+
+```typescript
+export default {
+  firewall: {
+    // IPs o CIDRs autorizados a setear X-Forwarded-For
+    trustedProxies: ["127.0.0.1", "10.0.0.0/8"],
+  },
+};
+```
+
+Reglas de resolución (implementadas en `resolve_forwarded_for`, `crates/firewall/src/lib.rs`):
+
+- **Peer no confiable → header ignorado.** Un cliente que conecta directo y manda su propio `X-Forwarded-For` no puede falsificar `remoteAddress` (anti-spoofing). Solo se mira el header si el peer inmediato matchea `trustedProxies`.
+- Se recorre la lista **de derecha a izquierda**, saltando los hops que son proxies de confianza; la primera dirección no-confiable es el cliente.
+- Una entrada malformada corta el recorrido.
+- Si todas las entradas son proxies de confianza, gana la más a la izquierda (el hop más profundo de la cadena).
+- Sin header o sin resolución → se usa el peer address tal cual.
+
+Verificado por los tests `xff_ignored_when_peer_not_trusted`, `xff_resolves_client_behind_trusted_proxy`, `firewall_client_ip_uses_xff_only_through_trusted_proxies` (`crates/firewall`) y los e2e `trusted_proxy_forwards_client_ip_to_remote_address`, `untrusted_xff_header_is_ignored` (`crates/js/tests/http_server.rs`).
+
 ---
 
 ## 8.6 Tarea de Limpieza en Background
@@ -359,8 +385,8 @@ cargo test -p vvva_js --test http_server
 - **No soporta IPv6 NAT64** — una IP IPv6 puede representar múltiples clientes reales en redes con traducción de direcciones. El rate-limit se aplica por dirección IP tal como aparece en el socket.
 - **Sin persistencia** — el blocklist, los buckets y los strikes viven en memoria. Un reinicio del proceso vacía todas las restricciones.
 - **Sin modo de solo-observación** — `enabled: false` desactiva todas las protecciones. No existe un modo "log-only" en v2.0.0.
-- **Sin integración con reverse proxy** — si 3va está detrás de nginx/Caddy, `remoteAddress` será la IP del proxy, no la del cliente final. Soporte para `X-Forwarded-For` es trabajo futuro.
-- **La adaptividad ajusta el castigo, no la tasa** — los `rate_limit_rps`/`rate_limit_burst` de cada IP son fijos. La escalación solo alarga los bloqueos de reincidentes; no aprende patrones de tráfico "normales" ni ajusta el bucket por IP.
+- **Sin integración con reverse proxy** — resuelto: `trustedProxies` + `X-Forwarded-For` soportados, ver §8.5 "Detrás de un reverse proxy". Queda pendiente el protocolo `Forwarded` (RFC 7239) y proxies en múltiples hops no listados.
+- **La adaptividad ajusta el castigo, no la tasa** — los `rate_limit_rps`/`rate_limit_burst` de cada IP son fijos. La escalación (strikes) solo alarga los bloqueos de reincidentes; el modo `adaptiveRateLimit` sí ajusta el umbral de tasa por IP según su baseline EWMA (ver §"Rate limiting adaptativo"), pero no aprende patrones más complejos.
 - **El historial de strikes se olvida tras `strike_decay_secs`** — un atacante que espera la ventana completa de calma (1 h por defecto) vuelve a empezar con la duración base. No hay memoria de ofensas antiguas más allá de esa ventana.
 
 ---

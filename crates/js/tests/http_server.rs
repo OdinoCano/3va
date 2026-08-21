@@ -781,6 +781,114 @@ async fn request_exposes_remote_address() {
     assert_eq!(addr, "127.0.0.1");
 }
 
+/// Poll `globalThis.__remoteAddr`, driving the event loop while waiting,
+/// until the request handler has populated it.
+async fn wait_remote_addr(e: &mut JsEngine) -> String {
+    for _ in 0..250 {
+        let a = e.eval_to_string("globalThis.__remoteAddr").await.unwrap();
+        if !a.is_empty() {
+            return a;
+        }
+        drive_until(e, tokio::time::sleep(Duration::from_millis(20))).await;
+    }
+    panic!("remoteAddress was never set");
+}
+
+/// When the direct peer is a trusted proxy, `remoteAddress` reports the
+/// client IP from `X-Forwarded-For` and rate-limit accounting uses it.
+#[tokio::test]
+async fn trusted_proxy_forwards_client_ip_to_remote_address() {
+    let port = free_port();
+    // The test client connects from 127.0.0.1 — declare it a trusted proxy.
+    let mut e = engine_with_firewall(FirewallConfig {
+        trusted_proxies: vec!["127.0.0.1".to_string()],
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__remoteAddr = '';
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__remoteAddr = req.socket.remoteAddress;
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    wait_for_port(port).await;
+
+    // Proxy-style request carrying XFF.
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    let req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Forwarded-For: 203.0.113.9\r\nConnection: close\r\n\r\n";
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+
+    let addr = wait_remote_addr(&mut e).await;
+    assert_eq!(
+        addr, "203.0.113.9",
+        "trusted-proxy XFF must become remoteAddress"
+    );
+
+    // Same server, request WITHOUT XFF → falls back to the peer address.
+    drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    e.eval_to_string("globalThis.__remoteAddr = ''")
+        .await
+        .unwrap();
+    drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    let addr2 = wait_remote_addr(&mut e).await;
+    assert_eq!(addr2, "127.0.0.1");
+}
+
+/// A direct (untrusted) client cannot spoof `remoteAddress` by sending its
+/// own X-Forwarded-For header when no proxies are trusted.
+#[tokio::test]
+async fn untrusted_xff_header_is_ignored() {
+    let port = free_port();
+    let mut e = engine_with_firewall(FirewallConfig::default()).await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__remoteAddr = '';
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__remoteAddr = req.socket.remoteAddress;
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    wait_for_port(port).await;
+
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    let req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Forwarded-For: 6.6.6.6\r\nConnection: close\r\n\r\n";
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+
+    let addr = wait_remote_addr(&mut e).await;
+    assert_eq!(
+        addr, "127.0.0.1",
+        "spoofed XFF from an untrusted peer must not change remoteAddress"
+    );
+}
+
 /// Verify that once a client exhausts its token-bucket burst, subsequent requests
 /// receive HTTP 429 Too Many Requests without crashing the server.
 ///

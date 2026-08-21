@@ -9,6 +9,17 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **`X-Forwarded-For` support behind a trusted reverse proxy**: new `trustedProxies` firewall
+  config (list of IPs/CIDRs). When the direct peer is a trusted proxy, `req.socket.remoteAddress`
+  reports the client IP resolved from `X-Forwarded-For` (rightmost non-trusted hop wins; malformed
+  entries stop the walk) and rate-limit accounting uses that address. Requests from untrusted
+  peers ignore the header entirely, so direct clients cannot spoof their address. Previously the
+  proxy's IP was always reported and there was no proxy support at all. Tests:
+  `proxy_rule_parses_ips_and_cidrs`, `xff_ignored_when_peer_not_trusted`,
+  `xff_resolves_client_behind_trusted_proxy`, `firewall_client_ip_uses_xff_only_through_trusted_proxies`
+  (`crates/firewall`); e2e `trusted_proxy_forwards_client_ip_to_remote_address`,
+  `untrusted_xff_header_is_ignored` (`crates/js/tests/http_server.rs`); docs §8.5/§8.9 of
+  `docs/10-security/08-firewall.md`.
 - **Adaptive rate limiting in the firewall**: new `adaptive_rate_limit` mode (off by default)
   keeps a per-IP EWMA of observed legitimate traffic over 1-second windows and raises that IP's
   effective threshold to `max(rate_limit_rps, ceil(ewma × 1.5))`, capped at
