@@ -79,6 +79,43 @@ fn generate_client_id() -> String {
 
 const MQTT_DISCONNECT: u8 = 0xe0;
 
+/// Default TCP connect timeout for MQTT client sockets. Without it,
+/// `TcpStream::connect` against an unresponsive/blackholed host blocks the JS
+/// engine thread indefinitely — one slow broker stalls the whole runtime.
+const MQTT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Socket read/write timeout applied after connect. The stream is switched to
+/// non-blocking for the JS poll loop, so this mainly bounds the blocking TLS
+/// handshake window and any residual blocking I/O.
+const MQTT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn connect_tcp_with_timeout(
+    host: &str,
+    port: u16,
+    connect_timeout: std::time::Duration,
+    io_timeout: std::time::Duration,
+) -> io::Result<TcpStream> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = (host, port).to_socket_addrs()?.collect();
+    if addrs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "host resolved to no addresses",
+        ));
+    }
+    let mut last_err: Option<io::Error> = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, connect_timeout) {
+            Ok(stream) => {
+                let _ = stream.set_read_timeout(Some(io_timeout));
+                let _ = stream.set_write_timeout(Some(io_timeout));
+                return Ok(stream);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "connect timed out")))
+}
+
 fn encode_remaining_length(len: usize) -> Vec<u8> {
     let mut result = Vec::new();
     let mut x = len;
@@ -159,6 +196,23 @@ pub fn inject_mqtt(
             let host = args.get(1).to_rust_string_lossy(scope);
             let port = args.get(2).uint32_value(scope).unwrap_or(1883) as u16;
             let use_tls = args.get(3).boolean_value(scope);
+            // Optional per-client timeout override in milliseconds (JS passes
+            // `options.connectTimeout`); tests inject small values.
+            let user_timeout = {
+                let v = args.get(4);
+                if v.is_number() {
+                    let ms = v.number_value(scope).unwrap_or(f64::NAN);
+                    if ms.is_finite() && ms >= 1.0 {
+                        Some(std::time::Duration::from_millis(ms as u64))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            let connect_timeout = user_timeout.unwrap_or(MQTT_CONNECT_TIMEOUT);
+            let io_timeout = user_timeout.unwrap_or(MQTT_IO_TIMEOUT);
 
             let perms = perms().clone();
 
@@ -168,15 +222,17 @@ pub fn inject_mqtt(
                     &format!("Network access denied. Run with --allow-net={}", host),
                 )
                 .unwrap();
-                let err = v8::Exception::error(scope, msg);
-                rv.set(err);
+                scope.throw_exception(v8::Exception::error(scope, msg));
                 return;
             }
 
-            match TcpStream::connect(format!("{}:{}", host, port)) {
+            match connect_tcp_with_timeout(&host, port, connect_timeout, io_timeout) {
                 Ok(tcp) => {
                     let conn = if use_tls {
                         match native_tls::TlsConnector::new() {
+                            // Socket r/w timeouts are already set, so the
+                            // handshake below is bounded by `io_timeout`
+                            // instead of hanging forever on a silent peer.
                             Ok(connector) => {
                                 let fallback = tcp.try_clone().ok();
                                 match connector.connect(&host, tcp) {
@@ -214,9 +270,18 @@ pub fn inject_mqtt(
                     rv.set(v8::undefined(scope).into());
                 }
                 Err(e) => {
-                    let msg = v8::String::new(scope, &format!("Connection failed: {}", e)).unwrap();
-                    let err = v8::Exception::error(scope, msg);
-                    rv.set(err);
+                    let detail = if e.kind() == io::ErrorKind::TimedOut {
+                        format!("connect timed out after {} ms", connect_timeout.as_millis())
+                    } else {
+                        e.to_string()
+                    };
+                    let msg =
+                        v8::String::new(scope, &format!("Connection failed: {}", detail)).unwrap();
+                    // Throw (as the module contract states) instead of
+                    // returning the Error object — a returned error was never
+                    // surfaced to scripts, so failed connects looked like
+                    // success.
+                    scope.throw_exception(v8::Exception::error(scope, msg));
                 }
             }
         },
@@ -392,6 +457,7 @@ pub fn inject_mqtt(
             this.options = opts;
             this.clientId = opts.clientId || null;
             this.keepalive = opts.keepalive || 60;
+            this.connectTimeout = opts.connectTimeout || null;
             this.clean = opts.clean !== false;
             this.username = opts.username || null;
             this.password = opts.password || null;
@@ -415,7 +481,7 @@ pub fn inject_mqtt(
                 useTls = url.protocol === 'mqtts:' || url.protocol === 'mqtt+tls:';
             }
             this._id = __mqttCreate(this.clientId);
-            __mqttConnect(this._id, host, port, useTls);
+            __mqttConnect(this._id, host, port, useTls, this.connectTimeout);
             this._connected = true;
             this._startPoll();
             this._sendConnect();

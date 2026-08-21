@@ -27,6 +27,18 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   `chunked_body_decoded`, `multi_chunk_body_with_large_chunk_decoded`,
   `content_length_plus_transfer_encoding_rejected_as_smuggling`, `malformed_chunk_size_rejected_with_400`
   (unit, `crates/js/src/builtins/http_server.rs`).
+- **MQTT/IMAP client connect & read timeouts**: `mqtt` connects are bounded by
+  `MQTT_CONNECT_TIMEOUT` (10 s) and the blocking TLS handshake by socket r/w timeouts
+  (`MQTT_IO_TIMEOUT`, 30 s); a failed `mqtt.connect()` now throws (per the module's own contract)
+  instead of silently returning an `Error` object that scripts never saw. `imap` TCP connects are
+  bounded by `IMAP_CONNECT_TIMEOUT` (10 s) and every later blocking read — TLS handshake,
+  greeting/CAPABILITY exchange, command responses — by `IMAP_IO_TIMEOUT` (30 s), replacing a
+  non-blocking mode where reads failed instantly with EAGAIN and no deadline applied. Both clients
+  accept a per-client `connectTimeout` option (milliseconds). Tests:
+  `connect_tcp_bounded_times_out_against_blackholed_host`,
+  `establish_connection_read_times_out_against_silent_server`
+  (`crates/js/src/builtins/imap.rs`),
+  `mqtt_connect_times_out_against_blackholed_host` (`crates/js/tests/mqtt_module.rs`).
 - **`fetch()` response size cap**: response bodies are streamed through a counting reader that
   aborts once buffered output passes `MAX_RESPONSE_BODY_BYTES` (512 MiB); a response declaring a
   larger `Content-Length` is rejected before the body is read. Scripts can lower the cap per call
