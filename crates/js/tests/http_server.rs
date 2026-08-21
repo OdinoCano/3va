@@ -622,6 +622,133 @@ async fn smuggled_header_caught_by_native_writer() {
     assert_eq!(r, "ERR_INVALID_CHAR");
 }
 
+// ── Transfer-Encoding: chunked / request smuggling ────────────────────────────
+
+/// Send a fully raw request string (no automatic framing) and return the
+/// complete response.
+async fn raw_raw(port: u16, req: &str) -> String {
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap_or_else(|e| panic!("connect to port {}: {}", port, e));
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut resp = String::new();
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            resp.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        Ok::<_, String>(resp)
+    })
+    .await;
+    match result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            eprintln!("raw_raw error: {}", e);
+            String::new()
+        }
+        Err(_) => {
+            eprintln!("raw_raw timeout on port {}", port);
+            String::new()
+        }
+    }
+}
+
+/// A standard HTTP/1.1 chunked request body must be decoded exactly like the
+/// equivalent Content-Length-framed one.
+#[tokio::test]
+async fn chunked_body_decoded_same_as_content_length() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__lastBody = '';
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__lastBody = req._body;
+            res.end('len:' + req._body.length);
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    wait_for_port(port).await;
+
+    // Chunked: "hello" in two chunks + trailers discarded.
+    let chunked_req = "POST /upload HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\
+                       Connection: close\r\n\r\n3\r\nhel\r\n8\r\nlo world\r\n0\r\nX-Ignore: me\r\n\r\n";
+    let resp = drive_until(&mut e, raw_raw(port, chunked_req)).await;
+    assert_eq!(response_status(&resp), 200, "full response:\n{}", resp);
+    assert_eq!(response_body(&resp), "len:11");
+
+    // Same payload via Content-Length must behave identically.
+    let cl_resp = drive_until(&mut e, raw_http(port, "POST", "/upload", "hello world")).await;
+    assert_eq!(response_status(&cl_resp), 200);
+    assert_eq!(response_body(&cl_resp), "len:11");
+
+    let body = e.eval_to_string("globalThis.__lastBody").await.unwrap();
+    assert_eq!(body, "hello world");
+}
+
+/// The classic request-smuggling vector: a request carrying BOTH
+/// Content-Length and Transfer-Encoding must be rejected with 400.
+#[tokio::test]
+async fn content_length_plus_transfer_encoding_rejected_400() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__okCount = 0;
+        var _server = http.createServer(function(req, res) {{
+            globalThis.__okCount++;
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    wait_for_port(port).await;
+
+    let smuggle = "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 6\r\n\
+         Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\nGET /\r\n";
+    let resp = drive_until(&mut e, raw_raw(port, smuggle)).await;
+    assert_eq!(
+        response_status(&resp),
+        400,
+        "CL+TE smuggling attempt must get 400\nfull response:\n{}",
+        resp
+    );
+
+    // The poisoned request must never have reached JS…
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let count = e
+        .eval_to_string("String(globalThis.__okCount)")
+        .await
+        .unwrap();
+    assert_eq!(count, "0");
+
+    // …and the server must keep serving clean requests.
+    let ok = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert_eq!(response_status(&ok), 200);
+}
+
 // ── Firewall tests ─────────────────────────────────────────────────────────────
 
 /// Verify that every accepted request contains the `remoteAddress` of the client

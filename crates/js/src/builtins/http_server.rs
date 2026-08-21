@@ -197,6 +197,138 @@ struct ParsedRequest {
     http10: bool,
 }
 
+/// Why request parsing gave up. `Respond` is a client-side protocol violation
+/// that warrants a status line before closing (e.g. CL+TE smuggling, bad chunk
+/// framing); `Silent` covers timeouts/EOF/IO where the existing behaviour —
+/// dropping the connection without a response — is kept.
+#[derive(Debug)]
+enum ParseError {
+    Respond(u16, &'static str),
+    // Message kept for tests/diagnostics; production drops the connection
+    // without logging, hence dead_code.
+    #[allow(dead_code)]
+    Silent(String),
+}
+
+impl From<String> for ParseError {
+    fn from(msg: String) -> Self {
+        ParseError::Silent(msg)
+    }
+}
+
+/// Decode a `Transfer-Encoding: chunked` body: hex size [+ ;extensions] CRLF,
+/// data CRLF, repeated until a 0-size chunk, then the trailer section (read
+/// and discarded, bounded by `max_header_bytes`). Applies the same body
+/// deadline and RUDY minimum-rate checks as the Content-Length path.
+async fn read_chunked_body<R>(
+    reader: &mut R,
+    body_timeout: std::time::Duration,
+    max_body: usize,
+    min_body_rate_bps: u32,
+    max_header_bytes: usize,
+) -> Result<Vec<u8>, ParseError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut body: Vec<u8> = Vec::new();
+    let deadline = Instant::now() + body_timeout;
+    let body_start = Instant::now();
+
+    loop {
+        let mut size_line = String::new();
+        tokio::time::timeout(body_timeout, reader.read_line(&mut size_line))
+            .await
+            .map_err(|_| ParseError::Silent("timeout: chunk size line stalled".into()))?
+            .map_err(|e| ParseError::Silent(e.to_string()))?;
+        if size_line.is_empty() {
+            return Err(ParseError::Silent(
+                "connection closed mid-chunked-body".into(),
+            ));
+        }
+        let size_str = size_line.trim_end_matches(['\r', '\n']);
+        // Chunk extensions (RFC 9112 §7.1.1) are ignored.
+        let size_str = size_str.split(';').next().unwrap_or("").trim();
+        let chunk_len = usize::from_str_radix(size_str, 16)
+            .map_err(|_| ParseError::Respond(400, "Bad Request"))?;
+        if chunk_len > max_body || body.len().saturating_add(chunk_len) > max_body {
+            return Err(ParseError::Respond(413, "Payload Too Large"));
+        }
+
+        if chunk_len == 0 {
+            // Trailer section: read until blank line, discard, bounded.
+            let mut trailer_bytes = 0usize;
+            loop {
+                let mut trailer_line = String::new();
+                tokio::time::timeout(body_timeout, reader.read_line(&mut trailer_line))
+                    .await
+                    .map_err(|_| ParseError::Silent("timeout: trailers stalled".into()))?
+                    .map_err(|e| ParseError::Silent(e.to_string()))?;
+                if trailer_line.is_empty() {
+                    return Ok(body);
+                }
+                trailer_bytes += trailer_line.len();
+                if trailer_bytes > max_header_bytes {
+                    return Err(ParseError::Silent(format!(
+                        "trailer flood: exceeded {max_header_bytes} bytes"
+                    )));
+                }
+                if trailer_line.trim_end_matches(['\r', '\n']).is_empty() {
+                    return Ok(body);
+                }
+            }
+        }
+
+        // Read exactly chunk_len bytes of chunk data.
+        let mut remaining = chunk_len;
+        let mut buf = vec![0u8; chunk_len.min(16 * 1024)];
+        while remaining > 0 {
+            if Instant::now() >= deadline {
+                return Err(ParseError::Silent(
+                    "timeout: body deadline exceeded (RUDY?)".into(),
+                ));
+            }
+            let to_read = remaining.min(buf.len());
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                reader.read(&mut buf[..to_read]),
+            )
+            .await
+            .map_err(|_| ParseError::Silent("timeout: body stalled (RUDY?)".into()))?
+            .map_err(|e| ParseError::Silent(e.to_string()))?;
+            if n == 0 {
+                return Err(ParseError::Silent(
+                    "connection closed before body complete".into(),
+                ));
+            }
+            body.extend_from_slice(&buf[..n]);
+            remaining -= n;
+
+            if min_body_rate_bps > 0 {
+                let elapsed = body_start.elapsed().as_secs_f64();
+                if elapsed > 2.0 {
+                    let rate = body.len() as f64 / elapsed;
+                    if rate < min_body_rate_bps as f64 {
+                        return Err(ParseError::Silent(format!(
+                            "body rate too low ({rate:.0} B/s < {min_body_rate_bps} B/s min): RUDY?"
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Chunk data must be followed by CRLF; consume it via one line read so
+        // buffering stays consistent with the next size line.
+        let mut crlf = String::new();
+        tokio::time::timeout(body_timeout, reader.read_line(&mut crlf))
+            .await
+            .map_err(|_| ParseError::Silent("timeout: chunk terminator stalled".into()))?
+            .map_err(|e| ParseError::Silent(e.to_string()))?;
+        if !crlf.trim_end_matches(['\r', '\n']).is_empty() {
+            return Err(ParseError::Respond(400, "Bad Request"));
+        }
+    }
+}
+
 async fn parse_request<R>(
     reader: &mut R,
     header_timeout: std::time::Duration,
@@ -205,15 +337,17 @@ async fn parse_request<R>(
     max_header_bytes: usize,
     max_body_bytes: usize,
     min_body_rate_bps: u32,
-) -> std::result::Result<ParsedRequest, String>
+) -> Result<ParsedRequest, ParseError>
 where
     R: AsyncBufRead + Unpin,
 {
     let mut request_line = String::new();
     tokio::time::timeout(header_timeout, reader.read_line(&mut request_line))
         .await
-        .map_err(|_| "timeout: request line not received in time (Slowloris?)")?
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| {
+            ParseError::Silent("timeout: request line not received in time (Slowloris?)".into())
+        })?
+        .map_err(|e| ParseError::Silent(e.to_string()))?;
 
     let request_line = request_line.trim_end_matches(['\r', '\n']);
     let mut parts = request_line.splitn(3, ' ');
@@ -229,18 +363,25 @@ where
     };
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut content_length: usize = 0;
+    let mut has_content_length = false;
+    let mut transfer_encoding: Option<String> = None;
     let mut total_header_bytes: usize = 0;
 
     loop {
         let mut line = String::new();
         tokio::time::timeout(header_timeout, reader.read_line(&mut line))
             .await
-            .map_err(|_| "timeout: headers not received in time (Slowloris?)")?
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| {
+                ParseError::Silent("timeout: headers not received in time (Slowloris?)".into())
+            })?
+            .map_err(|e| ParseError::Silent(e.to_string()))?;
 
         total_header_bytes += line.len();
         if total_header_bytes > max_header_bytes {
-            return Err(format!("header flood: exceeded {} bytes", max_header_bytes));
+            return Err(ParseError::Silent(format!(
+                "header flood: exceeded {} bytes",
+                max_header_bytes
+            )));
         }
 
         let trimmed = line.trim_end_matches(['\r', '\n']);
@@ -249,42 +390,73 @@ where
         }
 
         if headers.len() >= max_header_count {
-            return Err(format!(
+            return Err(ParseError::Silent(format!(
                 "header flood: more than {} headers",
                 max_header_count
-            ));
+            )));
         }
 
         if let Some(colon) = trimmed.find(':') {
             let name = trimmed[..colon].trim().to_lowercase();
             let value = trimmed[colon + 1..].trim().to_string();
-            if name == "content-length" {
-                content_length = value.parse::<usize>().unwrap_or(0).min(max_body);
-                headers.push((name, content_length.to_string()));
-            } else {
-                headers.push((name, value));
+            match name.as_str() {
+                "content-length" => {
+                    content_length = value.parse::<usize>().unwrap_or(0).min(max_body);
+                    has_content_length = true;
+                    headers.push((name, content_length.to_string()));
+                }
+                "transfer-encoding" => {
+                    transfer_encoding = Some(value.to_lowercase());
+                    headers.push((name, value));
+                }
+                _ => headers.push((name, value)),
             }
         }
     }
 
-    let mut body = vec![0u8; content_length];
-    if content_length > 0 {
+    // Request smuggling vector: both framing headers present. RFC 9112 says
+    // reject; matching llhttp's HPE_UNEXPECTED_CONTENT_LENGTH behaviour.
+    if has_content_length && transfer_encoding.is_some() {
+        return Err(ParseError::Respond(400, "Bad Request"));
+    }
+
+    let body = if let Some(te) = transfer_encoding {
+        // Only "chunked" (as the final coding) can be decoded here; anything
+        // else gets 501 Not Implemented per RFC 9112 §6.1.
+        let final_coding = te.rsplit(',').next().unwrap_or("").trim();
+        if final_coding != "chunked" {
+            return Err(ParseError::Respond(501, "Not Implemented"));
+        }
+        read_chunked_body(
+            reader,
+            body_timeout,
+            max_body,
+            min_body_rate_bps,
+            max_header_bytes,
+        )
+        .await?
+    } else if has_content_length && content_length > 0 {
+        let mut body = vec![0u8; content_length];
         let deadline = Instant::now() + body_timeout;
         let mut received: usize = 0;
         let body_start = Instant::now();
 
         while received < content_length {
             if Instant::now() >= deadline {
-                return Err("timeout: body deadline exceeded (RUDY?)".into());
+                return Err(ParseError::Silent(
+                    "timeout: body deadline exceeded (RUDY?)".into(),
+                ));
             }
             let remaining_deadline = deadline.saturating_duration_since(Instant::now());
             let chunk_timeout = remaining_deadline.min(std::time::Duration::from_secs(1));
             let n = tokio::time::timeout(chunk_timeout, reader.read(&mut body[received..]))
                 .await
-                .map_err(|_| "timeout: body stalled (RUDY?)")?
-                .map_err(|e| e.to_string())?;
+                .map_err(|_| ParseError::Silent("timeout: body stalled (RUDY?)".into()))?
+                .map_err(|e| ParseError::Silent(e.to_string()))?;
             if n == 0 {
-                return Err("connection closed before body complete".into());
+                return Err(ParseError::Silent(
+                    "connection closed before body complete".into(),
+                ));
             }
             received += n;
 
@@ -293,15 +465,18 @@ where
                 if elapsed > 2.0 {
                     let rate = received as f64 / elapsed;
                     if rate < min_body_rate_bps as f64 {
-                        return Err(format!(
+                        return Err(ParseError::Silent(format!(
                             "body rate too low ({:.0} B/s < {} B/s min): RUDY?",
                             rate, min_body_rate_bps
-                        ));
+                        )));
                     }
                 }
             }
         }
-    }
+        body
+    } else {
+        Vec::new()
+    };
 
     Ok(ParsedRequest {
         method,
@@ -394,7 +569,16 @@ async fn handle_connection(
         .await
         {
             Ok(p) => p,
-            Err(_) => break,
+            Err(ParseError::Respond(status, msg)) => {
+                let resp = format!(
+                    "HTTP/1.1 {status} {msg}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{msg}",
+                    len = msg.len()
+                );
+                let _ = writer.write_all(resp.as_bytes()).await;
+                let _ = writer.flush().await;
+                break;
+            }
+            Err(ParseError::Silent(_)) => break,
         };
 
         if let Some(firewall) = fw.as_ref().as_ref() {
@@ -1812,8 +1996,10 @@ mod tests {
             50,
         )
         .await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err();
+        assert!(matches!(result, Err(ParseError::Silent(_))));
+        let ParseError::Silent(msg) = result.unwrap_err() else {
+            unreachable!()
+        };
         assert!(
             msg.contains("rate too low") || msg.contains("stalled") || msg.contains("RUDY"),
             "unexpected error: {msg}"
@@ -1840,8 +2026,10 @@ mod tests {
             0,
         )
         .await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err();
+        assert!(matches!(result, Err(ParseError::Silent(_))));
+        let ParseError::Silent(msg) = result.unwrap_err() else {
+            unreachable!()
+        };
         assert!(
             msg.contains("timeout") || msg.contains("stalled") || msg.contains("deadline"),
             "unexpected error: {msg}"
@@ -1873,5 +2061,150 @@ mod tests {
         let parsed = result.unwrap();
         assert_eq!(parsed.method, "GET");
         assert!(parsed.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn chunked_body_decoded() {
+        let (listener, mut client) = loopback_pair().await;
+        tokio::spawn(async move {
+            client
+                .write_all(
+                    b"POST /chunked HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n\
+                      5\r\nhello\r\n6\r\n world\r\n0\r\nX-Trailer: v\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server_stream);
+        let parsed = parse_request(
+            &mut reader,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            100,
+            16_384,
+            0,
+            0,
+        )
+        .await
+        .expect("chunked request must parse");
+        assert_eq!(parsed.body, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn multi_chunk_body_with_large_chunk_decoded() {
+        let (listener, mut client) = loopback_pair().await;
+        let big_chunk = vec![b'a'; 40_000]; // larger than one 16 KiB read buffer
+        let mut expected = big_chunk.clone();
+        tokio::spawn(async move {
+            let head =
+                b"POST /m HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: CHUNKED\r\n\r\n".to_vec();
+            client.write_all(&head).await.unwrap();
+            client
+                .write_all(format!("{:x}\r\n", big_chunk.len()).as_bytes())
+                .await
+                .unwrap();
+            client.write_all(&big_chunk).await.unwrap();
+            client.write_all(b"\r\n1A\r\n").await.unwrap();
+            client.write_all(&[b'b'; 26]).await.unwrap();
+            client.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server_stream);
+        let parsed = parse_request(
+            &mut reader,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            100,
+            16_384,
+            0,
+            0,
+        )
+        .await
+        .expect("multi-chunk request must parse");
+        expected.extend_from_slice(&[b'b'; 26]);
+        assert_eq!(parsed.body.len(), expected.len());
+        assert_eq!(parsed.body, expected);
+    }
+
+    #[tokio::test]
+    async fn content_length_plus_transfer_encoding_rejected_as_smuggling() {
+        let (listener, mut client) = loopback_pair().await;
+        tokio::spawn(async move {
+            client
+                .write_all(
+                    b"POST /smuggle HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\
+                      Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server_stream);
+        let result = parse_request(
+            &mut reader,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            100,
+            16_384,
+            0,
+            0,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ParseError::Respond(400, "Bad Request"))),
+            "CL+TE must be rejected with 400, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_chunk_size_rejected_with_400() {
+        let (listener, mut client) = loopback_pair().await;
+        tokio::spawn(async move {
+            client
+                .write_all(
+                    b"POST /bad HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n\
+                      zz\r\nhello\r\n0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server_stream);
+        let result = parse_request(
+            &mut reader,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            100,
+            16_384,
+            0,
+            0,
+        )
+        .await;
+        assert!(matches!(result, Err(ParseError::Respond(400, _))));
+    }
+
+    #[tokio::test]
+    async fn unsupported_transfer_coding_rejected_with_501() {
+        let (listener, mut client) = loopback_pair().await;
+        tokio::spawn(async move {
+            client
+                .write_all(b"POST /gzip HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\n...")
+                .await
+                .unwrap();
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server_stream);
+        let result = parse_request(
+            &mut reader,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            100,
+            16_384,
+            0,
+            0,
+        )
+        .await;
+        assert!(matches!(result, Err(ParseError::Respond(501, _))));
     }
 }
