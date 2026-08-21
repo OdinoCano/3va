@@ -2,6 +2,8 @@ use sha2::Digest;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::ExtractLimits;
+
 pub struct PackageFetcher {
     registry: String,
     _cache_dir: PathBuf,
@@ -39,12 +41,22 @@ impl PackageFetcher {
     }
 
     pub fn extract(&self, tarball: &[u8], dest: &PathBuf) -> anyhow::Result<()> {
+        self.extract_with_limits(tarball, dest, ExtractLimits::default())
+    }
+
+    pub(crate) fn extract_with_limits(
+        &self,
+        tarball: &[u8],
+        dest: &PathBuf,
+        lim: ExtractLimits,
+    ) -> anyhow::Result<()> {
         let decoder = flate2::read::GzDecoder::new(tarball);
         let mut archive = tar::Archive::new(decoder);
 
         std::fs::create_dir_all(dest)?;
         // Canonical dest is used to verify no entry escapes the package directory.
         let dest_canonical = std::fs::canonicalize(dest).unwrap_or_else(|_| dest.clone());
+        let mut total_declared: u64 = 0;
 
         for entry in archive.entries()? {
             let mut entry = entry?;
@@ -116,6 +128,29 @@ impl PackageFetcher {
                     continue;
                 }
                 _ => {}
+            }
+
+            // Enforce extraction caps BEFORE writing file content. Tar readers
+            // consume exactly `header().size()` bytes per entry, so the
+            // declared size is what unpack() will write. Unlike per-entry
+            // extraction hiccups, a cap violation aborts the whole extract:
+            // it indicates a malicious/broken tarball, not a flaky entry.
+            let declared = entry.header().size()?;
+            if declared > lim.max_file_bytes {
+                anyhow::bail!(
+                    "package extraction aborted: entry '{}' declares {} bytes, exceeding the per-file cap of {} bytes (possible decompression bomb)",
+                    cleaned.display(),
+                    declared,
+                    lim.max_file_bytes
+                );
+            }
+            total_declared = total_declared.saturating_add(declared);
+            if total_declared > lim.max_total_bytes {
+                anyhow::bail!(
+                    "package extraction aborted: cumulative payload reached {} bytes, exceeding the total cap of {} bytes (possible decompression bomb)",
+                    total_declared,
+                    lim.max_total_bytes
+                );
             }
 
             // Extract the regular file. Skip on error so one bad entry doesn't abort
@@ -284,5 +319,80 @@ mod tests {
         cache.max_size = 0; // Would prune everything if there were entries
         cache.prune().unwrap();
         assert_eq!(cache.metadata.len(), 0);
+    }
+
+    // ── extraction cap tests ──────────────────────────────────────────────
+
+    fn make_tgz(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+        for (name, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, &data[..]).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn test_fetcher() -> PackageFetcher {
+        PackageFetcher::new(
+            "http://registry.invalid",
+            PathBuf::from("/tmp/3va-fetcher-test"),
+        )
+    }
+
+    fn tiny_caps(file: u64, total: u64) -> ExtractLimits {
+        ExtractLimits {
+            max_file_bytes: file,
+            max_total_bytes: total,
+        }
+    }
+
+    #[test]
+    fn extract_aborts_when_entry_exceeds_per_file_cap() {
+        let tgz = make_tgz(&[("package/big.bin", vec![0u8; 4096])]);
+        let dest = tempfile::tempdir().unwrap();
+        let err = test_fetcher()
+            .extract_with_limits(&tgz, &dest.path().to_path_buf(), tiny_caps(1024, u64::MAX))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("per-file cap"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_aborts_when_cumulative_payload_exceeds_total_cap() {
+        // Each file fits the per-file cap, but their sum busts the total cap.
+        let tgz = make_tgz(&[
+            ("package/a.bin", vec![0u8; 2048]),
+            ("package/b.bin", vec![0u8; 2048]),
+        ]);
+        let dest = tempfile::tempdir().unwrap();
+        let err = test_fetcher()
+            .extract_with_limits(&tgz, &dest.path().to_path_buf(), tiny_caps(2048, 4095))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("total cap"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_succeeds_under_generous_caps() {
+        let payload = b"hello extraction".to_vec();
+        let tgz = make_tgz(&[("package/index.js", payload.clone())]);
+        let dest = tempfile::tempdir().unwrap();
+        test_fetcher()
+            .extract_with_limits(
+                &tgz,
+                &dest.path().to_path_buf(),
+                tiny_caps(u64::MAX, u64::MAX),
+            )
+            .unwrap();
+        let written = std::fs::read(dest.path().join("index.js")).unwrap();
+        assert_eq!(written, payload);
     }
 }

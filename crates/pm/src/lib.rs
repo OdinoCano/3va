@@ -1102,6 +1102,35 @@ const RETRY_BASE_MS: u64 = 400;
 /// against a compromised/malicious registry trying to exhaust memory.
 const MAX_TARBALL_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 
+// ── Extraction caps (decompression-bomb guard) ────────────────────────────────
+//
+// The compressed download is capped at MAX_TARBALL_BYTES, but gzip expands
+// ~1000:1 on highly repetitive data, so a sub-1-GiB .tgz could still unpack to
+// terabytes. These caps bound what extraction may write to disk and are
+// enforced per entry *before* any bytes hit the filesystem, using the size
+// declared in the tar header (tar readers consume exactly that many bytes per
+// entry, so the declared size is what gets written).
+
+/// Largest single file any package tarball may declare.
+const MAX_EXTRACTED_FILE_BYTES: u64 = 512 * 1024 * 1024;
+/// Largest combined payload a single tarball may declare.
+const MAX_EXTRACTED_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(crate) struct ExtractLimits {
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+}
+
+impl Default for ExtractLimits {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: MAX_EXTRACTED_FILE_BYTES,
+            max_total_bytes: MAX_EXTRACTED_TOTAL_BYTES,
+        }
+    }
+}
+
 async fn download_tarball(url: &str) -> anyhow::Result<Vec<u8>> {
     validate_tarball_url(url)?;
     let client = reqwest::Client::builder()
@@ -1159,6 +1188,14 @@ async fn download_tarball(url: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 pub(crate) fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()> {
+    extract_tarball_with_limits(data, dest, ExtractLimits::default())
+}
+
+fn extract_tarball_with_limits(
+    data: &[u8],
+    dest: &PathBuf,
+    lim: ExtractLimits,
+) -> anyhow::Result<()> {
     let decoder = flate2::read::GzDecoder::new(data);
     let mut archive = tar::Archive::new(decoder);
 
@@ -1171,6 +1208,7 @@ pub(crate) fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()>
     // or symlink entries (classic "zip slip"); `tar::Entry::unpack` alone
     // does not reject those.
     let dest_canonical = std::fs::canonicalize(dest).unwrap_or_else(|_| dest.clone());
+    let mut total_declared: u64 = 0;
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -1229,6 +1267,30 @@ pub(crate) fn extract_tarball(data: &[u8], dest: &PathBuf) -> anyhow::Result<()>
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        // Enforce extraction caps BEFORE writing any file content. Tar readers
+        // consume exactly `header().size()` bytes per entry, so the declared
+        // size is what unpack() will write — checking it up front keeps a bomb
+        // tarball from filling the disk. Symlinks never reach this point (they
+        // are skipped above).
+        let declared = entry.header().size()?;
+        if declared > lim.max_file_bytes {
+            anyhow::bail!(
+                "package extraction aborted: entry '{}' declares {} bytes, exceeding the per-file cap of {} bytes (possible decompression bomb)",
+                cleaned.display(),
+                declared,
+                lim.max_file_bytes
+            );
+        }
+        total_declared = total_declared.saturating_add(declared);
+        if total_declared > lim.max_total_bytes {
+            anyhow::bail!(
+                "package extraction aborted: cumulative payload reached {} bytes, exceeding the total cap of {} bytes (possible decompression bomb)",
+                total_declared,
+                lim.max_total_bytes
+            );
+        }
+
         entry.unpack(&out)?;
     }
     Ok(())
@@ -3543,5 +3605,70 @@ mod overrides_tests {
             apply_override(&overrides, "left-pad", None),
             Some("1.3.0".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tgz(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+        for (name, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, &data[..]).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn extract_tarball_rejects_entry_over_per_file_cap() {
+        let tgz = make_tgz(&[("package/big.bin", vec![0u8; 4096])]);
+        let dest = tempfile::tempdir().unwrap();
+        let lim = ExtractLimits {
+            max_file_bytes: 1024,
+            max_total_bytes: u64::MAX,
+        };
+        let err = extract_tarball_with_limits(&tgz, &dest.path().to_path_buf(), lim).unwrap_err();
+        assert!(
+            err.to_string().contains("per-file cap"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_tarball_rejects_cumulative_payload_over_total_cap() {
+        let tgz = make_tgz(&[
+            ("package/a.bin", vec![0u8; 2048]),
+            ("package/b.bin", vec![0u8; 2048]),
+        ]);
+        let dest = tempfile::tempdir().unwrap();
+        let lim = ExtractLimits {
+            max_file_bytes: 2048,
+            max_total_bytes: 4095,
+        };
+        let err = extract_tarball_with_limits(&tgz, &dest.path().to_path_buf(), lim).unwrap_err();
+        assert!(
+            err.to_string().contains("total cap"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_tarball_writes_files_under_default_style_caps() {
+        let payload = b"console.log('ok')".to_vec();
+        let tgz = make_tgz(&[("package/index.js", payload.clone())]);
+        let dest = tempfile::tempdir().unwrap();
+        let lim = ExtractLimits {
+            max_file_bytes: MAX_EXTRACTED_FILE_BYTES,
+            max_total_bytes: MAX_EXTRACTED_TOTAL_BYTES,
+        };
+        extract_tarball_with_limits(&tgz, &dest.path().to_path_buf(), lim).unwrap();
+        let written = std::fs::read(dest.path().join("index.js")).unwrap();
+        assert_eq!(written, payload);
     }
 }
