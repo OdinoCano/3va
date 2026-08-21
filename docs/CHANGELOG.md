@@ -9,6 +9,18 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **npm provenance / Sigstore attestation verification on install**: new `provenance` module
+  (`crates/pm/src/provenance.rs`) downloads a package's attestations from the registry provenance
+  endpoint and verifies each Sigstore bundle: the DSSE envelope signature is checked (ECDSA
+  P-256/P-384 over the PAE encoding, using the certificate embedded in the bundle) and the
+  in-toto statement must name exactly the requested `pkg:npm/{name}@{version}` as subject. An
+  invalid or tampered attestation aborts that package's install; a missing attestation is "no
+  provenance" unless `--require-provenance` is passed. Scope: Fulcio chain-to-root validation and
+  Rekor inclusion proofs are not yet performed (transparency-log entry presence is required).
+  Verified against a real npm bundle fixture (`sigstore@3.0.0`). Tests:
+  `pae_matches_spec_vector`, `real_npm_provenance_fixture_verifies`, `tampered_signature_fails_hard`,
+  `wrong_subject_fails_even_with_valid_signature`, `extracts_ec_key_from_fixture_certificate`,
+  `install_aborts_on_invalid_provenance`.
 - **Dependency-confusion protection**: scopes pinned in `.npmrc` via `@scope:registry=...` now
   resolve only against that private registry during install — the resolver never consults the
   public registry for those names, and a failed private-registry lookup aborts the install with

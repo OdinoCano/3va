@@ -6978,6 +6978,7 @@ version = "2.5.0"
 dependencies = [
  "anyhow",
  "base64",
+ "ecdsa 0.16.9",
  "flate2",
  "hex",
  "oxc_allocator",
@@ -6985,6 +6986,8 @@ dependencies = [
  "oxc_ast_visit",
  "oxc_parser",
  "oxc_span",
+ "p256 0.13.2",
+ "p384 0.13.1",
  "regex",
  "reqwest",
  "serde",

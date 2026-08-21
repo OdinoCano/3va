@@ -8,6 +8,7 @@ pub mod manifest;
 pub mod npmrc;
 pub mod package_lock;
 pub mod pnpm_lock;
+pub mod provenance;
 pub mod resolver;
 pub mod secrets;
 pub mod semver;
@@ -2048,6 +2049,55 @@ async fn install_with_transitive(
                             errors.push(format!("{}@{} — {}", pkg_name, ver, report));
                             continue;
                         }
+                        // Provenance verification (npm attestations /
+                        // Sigstore bundles). Missing attestation = "no
+                        // provenance" (fatal only with --require-provenance);
+                        // an invalid attestation is always fatal.
+                        {
+                            let pkg_base = npmrc::pinned_scope_registry(&npmrc_cfg, &pkg_name)
+                                .unwrap_or_else(|| base_url.clone());
+                            let require_provenance =
+                                std::env::var("_3VA_REQUIRE_PROVENANCE").as_deref() == Ok("1");
+                            match provenance::fetch_attestations(
+                                &meta_client,
+                                &pkg_base,
+                                &pkg_name,
+                                &ver,
+                            )
+                            .await
+                            {
+                                Ok(Some(att)) => {
+                                    if let Err(why) =
+                                        provenance::verify_attestations(&att, &pkg_name, &ver)
+                                    {
+                                        errors.push(format!(
+                                            "{pkg_name}@{ver} — invalid provenance: {why}"
+                                        ));
+                                        continue;
+                                    } else {
+                                        println!("  ✓ provenance verified for {pkg_name}@{ver}");
+                                    }
+                                }
+                                Ok(None) => {
+                                    if require_provenance {
+                                        errors.push(format!(
+                                            "{pkg_name}@{ver} — provenance required but the \
+                                             registry publishes none"
+                                        ));
+                                        continue;
+                                    }
+                                }
+                                Err(e) => {
+                                    if require_provenance {
+                                        errors.push(format!(
+                                            "{pkg_name}@{ver} — provenance required but \
+                                             unavailable: {e}"
+                                        ));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         // Store globally
                         let _ = global_store.store_tarball(&bytes, &reg_name, &pkg_name, &ver);
                         if zero_install_on && let Some(int_hash) = &integrity {
@@ -2200,7 +2250,15 @@ async fn install_with_transitive(
             for e in &errors {
                 eprintln!("  ✗ {}", e);
             }
-            anyhow::bail!("{} package(s) failed to install", errors.len());
+            anyhow::bail!(
+                "{} package(s) failed to install:\n{}",
+                errors.len(),
+                errors
+                    .iter()
+                    .map(|e| format!("  - {e}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
         }
 
         println!();
@@ -3905,6 +3963,9 @@ mod tests {
                     b"module.exports = 'from-private-registry';".to_vec(),
                 )]);
                 (200, tgz)
+            } else if path.contains("/-/npm/v1/attestations/") {
+                // Registry without provenance support → soft "no provenance".
+                (404, b"{}".to_vec())
             } else {
                 // Version metadata endpoint ({base}/@miorg/pkg/1.0.0)
                 let meta = serde_json::json!({
@@ -3986,5 +4047,56 @@ mod tests {
             "expected guard error, got: {err}"
         );
         assert!(!root.path().join("node_modules/@dead").exists());
+    }
+
+    const PROVENANCE_FIXTURE_BYTES: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/npm_provenance_sigstore_3.0.0.json"
+    ));
+
+    #[tokio::test]
+    async fn install_aborts_on_invalid_provenance() {
+        // Registry serves metadata + tarball + a provenance attestation whose
+        // subject names a DIFFERENT package → hard error, nothing installed.
+        let reg = MockRegistry::start(std::sync::Arc::new(|path, base| {
+            if path.ends_with(".tgz") {
+                let tgz = make_tgz(&[("package/index.js", b"module.exports = 1;".to_vec())]);
+                (200, tgz)
+            } else if path.contains("/-/npm/v1/attestations/") {
+                // Real bundle for sigstore@3.0.0 — subject mismatch vs @evil/pkg.
+                (200, PROVENANCE_FIXTURE_BYTES.as_bytes().to_vec())
+            } else {
+                let meta = serde_json::json!({
+                    "name": "@evil/pkg",
+                    "version": "1.0.0",
+                    "dist": { "tarball": format!("{base}/@evil/pkg/-/pkg-1.0.0.tgz") }
+                });
+                (200, serde_json::to_vec(&meta).unwrap())
+            }
+        }));
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".npmrc"),
+            format!("@evil:registry={}", reg.url),
+        )
+        .unwrap();
+        let allow = ["127.0.0.1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let err = install_with_transitive(
+            "@evil/pkg@1.0.0",
+            false,
+            Some(allow.as_slice()),
+            root.path(),
+            false,
+        )
+        .await
+        .expect_err("invalid provenance must abort the install");
+        assert!(
+            err.to_string().contains("invalid provenance"),
+            "unexpected error: {err}"
+        );
+        assert!(!root.path().join("node_modules/@evil").exists());
     }
 }
