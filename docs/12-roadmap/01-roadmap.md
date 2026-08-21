@@ -139,6 +139,8 @@
 
 Gaps identified against 3va's own attack surface (its HTTP/WS/MQTT/IMAP builtins, PM, and crypto), verified against code — status tracked per row below. See `README.md` § Known Limitations & Roadmap for the user-facing summary, and `docs/SECURITY.md` § Level 6 for the compression-bomb item.
 
+Expanded 2026-08-20: cross-checked against a full runtime-security responsibility checklist (memory, concurrency, network, FS, processes, sandboxing, crypto, zero-day hardening, supply chain, resource exhaustion, code integrity, error handling). Items below the first batch are new findings from that cross-check.
+
 | Item | Area | Status |
 |------|------|--------|
 | CRLF sanitization in `res.setHeader()`/`res.writeHead()` | HTTP server | ✅ Implemented (`ERR_INVALID_HTTP_TOKEN`/`ERR_INVALID_CHAR`, enforced in JS layer and native writer; tests in `crates/js/tests/http_server.rs`) |
@@ -152,6 +154,16 @@ Gaps identified against 3va's own attack surface (its HTTP/WS/MQTT/IMAP builtins
 | npm provenance / Sigstore signature verification | PM | ✅ Implemented (`provenance.rs`: fetches `/-/npm/v1/attestations/{pkg}@{version}`, verifies DSSE PAE ECDSA signature against the bundle X.509 certificate's P-256/P-384 key, checks in-toto subject = `pkg:npm/{name}@{version}`; invalid attestation aborts install, missing attestation is soft unless `--require-provenance`; tests `real_npm_provenance_fixture_verifies`, `tampered_signature_fails_hard`, `install_aborts_on_invalid_provenance`. Not yet verified: Fulcio chain-to-root and Rekor inclusion proofs — presence-only check today) |
 | Adaptive rate limiting (auto-tune from observed traffic) | Firewall | ✅ Implemented (`adaptive_rate_limit` + `ewma_alpha_pct` knobs; per-IP EWMA over 1 s windows raises the effective threshold to `max(static, ceil(ewma×1.5))`, capped at `static × 4`; formula in `docs/10-security/08-firewall.md` §Rate limiting adaptativo; tests `ewma_update_tracks_samples_with_configurable_smoothing`, `effective_rps_rises_with_baseline_and_stays_capped`, `growing_legitimate_traffic_raises_limit_without_violations`) |
 | `X-Forwarded-For` support for `remoteAddress` behind a reverse proxy | Firewall | ✅ Implemented (`trustedProxies` config (IPs/CIDRs) + `resolve_forwarded_for` in `crates/firewall/src/lib.rs`; rightmost-untrusted walk, header ignored from untrusted peers; feeds both rate-limit accounting and `req.socket.remoteAddress`; tests `xff_resolves_client_behind_trusted_proxy`, `firewall_client_ip_uses_xff_only_through_trusted_proxies`, e2e `trusted_proxy_forwards_client_ip_to_remote_address`, `untrusted_xff_header_is_ignored`; docs §8.5/§8.9 of `docs/10-security/08-firewall.md`) |
+| V8 heap limit not configured (no `near_heap_limit_callback`; `process.memoryUsage` reports zeros) — a runaway script can exhaust host memory | JS engine | ❌ Not implemented (`crates/js/src/builtins/modules.rs`) |
+| WebSocket flood limits: max frame size, frames/sec, concurrent WS connections | WebSocket | ❌ Not implemented (`crates/js/src/builtins/websocket.rs`) |
+| DNS rebinding protection (pin resolved IP after permission check; re-validate on redirect) | Network / fetch | ❌ Not implemented |
+| Compile-time hardening flags: explicit PIE/relocation-model, stack-protector, CFI (`.cargo/config.toml` only sets `-rdynamic`) | Build | ❌ Not implemented |
+| `mlock`-style protection for key material in memory (today only partial `zeroize` in `lamport.rs`) | Crypto | ❌ Not implemented |
+| Documented nonce-generation policy for AEAD modes (uniqueness guarantees to prevent nonce reuse) | Crypto | ❌ Not documented |
+| Per-process cap on user-spawned threads/workers; deadlock-detection tooling (tokio-console or similar) | Concurrency | ❌ Not implemented |
+| Optional `eval` restriction mode (CSP-like) and JIT-spray mitigations beyond V8 defaults | Code integrity | ❌ Not implemented |
+| Generic-error production mode (redact internal paths/details from untrusted callers); exception-rate limit | Error handling | ❌ Not implemented |
+| Spectre/Meltdown side-channel hardening (memory barriers, disable SMT guidance) — mostly OS/hardware scope; document the decision explicitly | Side channels | ⚪ Out of scope pending decision |
 
 ---
 
