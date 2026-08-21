@@ -110,6 +110,26 @@ auto-block nº `n` → duración = min(block_duration_secs × factor^(n-1), max_
 - El historial de strikes **no** se borra cuando expira el bloqueo: un reincidente que vuelve a atacar recibe el siguiente escalón. Solo se limpia cuando la IP lleva `strike_decay_secs` sin otro auto-bloqueo (por defecto 1 h de calma), momento en que la duración vuelve a `block_duration_secs`.
 - La escalación penaliza el *castigo* (duración del bloqueo), no el bucket de tasa per-IP: los `rate_limit_rps`/`rate_limit_burst` de cada IP permanecen fijos.
 
+### Rate limiting adaptativo (baseline EWMA)
+
+La escalación anterior penaliza reincidencia; este modo adaptativo resuelve el problema inverso: **picos legítimos**. Con umbrales fijos, una IP cuyo tráfico legítimo crece gradualmente (un cliente pesado, un proxy corporativo) cruza `rate_limit_rps` y empieza a acumular violaciones aunque no haya nada malicioso. Con `adaptive_rate_limit: true`, cada request observado alimenta un baseline por IP y el umbral efectivo sube con él.
+
+```
+Ventana de observación: 1 s (ADAPTIVE_WINDOW_SECS)
+Baseline:  ewma = α × count_ventana + (1 − α) × ewma_anterior
+           α = ewma_alpha_pct / 100          (default 20 → α = 0.20)
+Umbral:    rps_efectivo = max(rate_limit_rps, ceil(ewma × ADAPTIVE_HEADROOM))
+           con tope rps_efectivo ≤ rate_limit_rps × ADAPTIVE_MAX_RATE_MULTIPLIER
+           (ADAPTIVE_HEADROOM = 1.5, ADAPTIVE_MAX_RATE_MULTIPLIER = 4.0 — constantes en crates/firewall/src/lib.rs)
+```
+
+- El bucket consume contra `rps_efectivo` (la tasa de refill del token bucket se ajusta en cada check), así que la IP con baseline alto obtiene más tokens/segundo sin tocar su burst.
+- Si la IP vuelve a tráfico bajo, el EWMA decae hacia abajo en las ventanas siguientes y el umbral converge de vuelta a `rate_limit_rps`.
+- Un atacante que arranca desde cero sigue limitado por el umbral estático: sin historial observado, `ewma = 0` → umbral = estático.
+- Knobs de configuración (`FirewallConfig`): `adaptive_rate_limit: bool` (default `false`) y `ewma_alpha_pct: u32` 0–100 (default `20`; mayor = se adapta más rápido, menor = suaviza más).
+
+Verificado por los tests `ewma_update_tracks_samples_with_configurable_smoothing`, `effective_rps_rises_with_baseline_and_stays_capped` y `growing_legitimate_traffic_raises_limit_without_violations` en `crates/firewall/src/lib.rs`.
+
 ### RUDY: `min_body_rate_bps`
 
 Además del deadline total (`body_timeout_ms`), el lector del cuerpo calcula la tasa media de recepción pasados 2 s de gracia: si `bytes_recibidos / tiempo < min_body_rate_bps`, la conexión se cierra inmediatamente. Esto neutraliza el RUDY real (1 byte/s) sin esperar a que expire el deadline de 30 s — el caso límite que el timeout por sí solo cubre mal.
@@ -181,6 +201,13 @@ export default {
 
     // Tasa mínima de recepción del cuerpo en B/s (RUDY). 0 = desactivada.
     minBodyRateBps: 100,
+
+    // Rate limiting adaptativo: sube el umbral por IP según su tráfico
+    // legítimo observado (EWMA); ver §"Rate limiting adaptativo"
+    adaptiveRateLimit: false,
+
+    // Factor de suavizado del EWMA en % (0–100; mayor = adapta más rápido)
+    ewmaAlphaPct: 20,
 
     // Número máximo de cabeceras HTTP por petición
     maxHeaderCount: 100,

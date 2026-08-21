@@ -105,6 +105,17 @@ pub struct FirewallConfig {
     /// Minimum body receive rate in bytes per second. Connections dripping
     /// body data slower than this are dropped (RUDY mitigation). 0 = disabled.
     pub min_body_rate_bps: u32,
+
+    /// Adaptive rate limiting: when enabled, an IP whose observed legitimate
+    /// traffic baseline (EWMA over 1-second windows) exceeds the static
+    /// `rate_limit_rps` gets a proportionally raised threshold instead of
+    /// being rate-limited, so gradual traffic growth isn't punished.
+    pub adaptive_rate_limit: bool,
+
+    /// EWMA smoothing factor as a percentage (0–100). Higher values adapt
+    /// faster to traffic changes; lower values smooth more. Only used when
+    /// `adaptive_rate_limit` is on.
+    pub ewma_alpha_pct: u32,
 }
 
 impl Default for FirewallConfig {
@@ -126,8 +137,50 @@ impl Default for FirewallConfig {
             max_header_bytes: 16_384,
             max_body_bytes: 0,
             min_body_rate_bps: 100,
+            adaptive_rate_limit: false,
+            ewma_alpha_pct: 20,
         }
     }
+}
+
+// ── Adaptive rate limiting ───────────────────────────────────────────────────
+
+/// Window (in seconds) over which per-IP request counts are folded into the
+/// EWMA baseline.
+pub const ADAPTIVE_WINDOW_SECS: u64 = 1;
+
+/// Headroom multiplier applied to the EWMA baseline: an IP is allowed up to
+/// `baseline × 1.5` req/s before the static limit bites, so normal jitter
+/// around its own baseline doesn't produce violations.
+pub const ADAPTIVE_HEADROOM: f64 = 1.5;
+
+/// Hard cap on the adaptive threshold, as a multiple of `rate_limit_rps`.
+/// Abuse stays bounded no matter how high a compromised IP pumps its own
+/// baseline.
+pub const ADAPTIVE_MAX_RATE_MULTIPLIER: f64 = 4.0;
+
+/// Exponentially weighted moving average of window samples:
+/// `ewma = α × sample + (1 − α) × prev`, with α = `alpha_pct`/100.
+pub fn ewma_update(prev: f64, sample: f64, alpha_pct: u32) -> f64 {
+    let alpha = f64::from(alpha_pct.min(100)) / 100.0;
+    alpha * sample + (1.0 - alpha) * prev
+}
+
+/// Effective per-IP rate limit (req/s): static by default; with
+/// `adaptive` on, `max(static, ceil(ewma × ADAPTIVE_HEADROOM))` capped at
+/// `static × ADAPTIVE_MAX_RATE_MULTIPLIER`.
+pub(crate) fn compute_effective_rps(
+    static_rps: u32,
+    ewma_per_window: Option<f64>,
+    adaptive: bool,
+) -> f64 {
+    let base = f64::from(static_rps);
+    if !adaptive {
+        return base;
+    }
+    let baseline = ewma_per_window.unwrap_or(0.0);
+    let adapted = (baseline * ADAPTIVE_HEADROOM).ceil();
+    adapted.max(base).min(base * ADAPTIVE_MAX_RATE_MULTIPLIER)
 }
 
 // ── Token Bucket ──────────────────────────────────────────────────────────────
@@ -139,6 +192,13 @@ struct TokenBucket {
     last_refill: Instant,
     /// Consecutive violations (rate-limit exceeded).
     violations: u32,
+    /// EWMA of observed requests per `ADAPTIVE_WINDOW_SECS` window
+    /// (adaptive rate limiting baseline). None until the first window closes.
+    ewma_per_window: Option<f64>,
+    /// Requests observed in the currently open window.
+    window_count: u32,
+    /// When the current observation window opened.
+    window_start: Option<Instant>,
 }
 
 impl TokenBucket {
@@ -150,7 +210,32 @@ impl TokenBucket {
             rate: rate_rps as f64,
             last_refill: Instant::now(),
             violations: 0,
+            ewma_per_window: None,
+            window_count: 0,
+            window_start: None,
         }
+    }
+
+    /// Record one observed request at time `now`, rolling the EWMA whenever
+    /// the current window closes. Splitting the instant out as a parameter
+    /// keeps this deterministically testable.
+    fn note_request_at(&mut self, now: Instant, alpha_pct: u32) {
+        match self.window_start {
+            None => self.window_start = Some(now),
+            Some(start)
+                if now.duration_since(start) >= Duration::from_secs(ADAPTIVE_WINDOW_SECS) =>
+            {
+                let sample = f64::from(self.window_count);
+                self.ewma_per_window = Some(match self.ewma_per_window {
+                    None => sample,
+                    Some(prev) => ewma_update(prev, sample, alpha_pct),
+                });
+                self.window_count = 0;
+                self.window_start = Some(now);
+            }
+            Some(_) => {}
+        }
+        self.window_count += 1;
     }
 
     /// Try to consume one token. Returns `true` if allowed.
@@ -307,6 +392,16 @@ impl Firewall {
         FirewallDecision::Allow
     }
 
+    /// Effective per-IP rate limit for a bucket, applying the adaptive
+    /// baseline when enabled.
+    fn effective_bucket_rate(&self, bucket: &TokenBucket) -> f64 {
+        compute_effective_rps(
+            self.config.rate_limit_rps,
+            bucket.ewma_per_window,
+            self.config.adaptive_rate_limit,
+        )
+    }
+
     /// Call after parsing each HTTP request (once per request on a connection).
     pub fn check_request(&self, ip: IpAddr) -> FirewallDecision {
         if !self.config.enabled {
@@ -323,6 +418,13 @@ impl Firewall {
         let bucket = buckets.entry(ip).or_insert_with(|| {
             TokenBucket::new(self.config.rate_limit_rps, self.config.rate_limit_burst)
         });
+
+        // Adaptive bookkeeping: fold this observed request into the EWMA
+        // baseline and raise the bucket's refill rate if the IP's legitimate
+        // traffic has outgrown the static limit.
+        let alpha = self.config.ewma_alpha_pct;
+        bucket.note_request_at(Instant::now(), alpha);
+        bucket.rate = self.effective_bucket_rate(bucket);
 
         if bucket.consume() {
             return FirewallDecision::Allow;
@@ -880,6 +982,84 @@ mod tests {
             fw.strikes_for(a),
             0,
             "calm IP must reset to the base duration"
+        );
+    }
+
+    #[test]
+    fn ewma_update_tracks_samples_with_configurable_smoothing() {
+        // α=100% → pure passthrough of the newest sample.
+        assert_eq!(ewma_update(1.0, 5.0, 100), 5.0);
+        // α=0% → frozen at the previous value.
+        assert_eq!(ewma_update(1.0, 5.0, 0), 1.0);
+        // α=50% → halfway.
+        assert!((ewma_update(2.0, 4.0, 50) - 3.0).abs() < 1e-9);
+        // Repeated samples converge toward the sample value.
+        let mut e = 1.0;
+        for _ in 0..20 {
+            e = ewma_update(e, 8.0, 30);
+        }
+        assert!((e - 8.0).abs() < 0.01, "must converge to sample, got {e}");
+    }
+
+    #[test]
+    fn effective_rps_rises_with_baseline_and_stays_capped() {
+        // Adaptive off → always static, regardless of baseline.
+        assert_eq!(compute_effective_rps(10, Some(50.0), false), 10.0);
+        // Adaptive on, no data yet → static.
+        assert_eq!(compute_effective_rps(10, None, true), 10.0);
+        // Baseline below static → static (never lowers).
+        assert_eq!(compute_effective_rps(10, Some(3.0), true), 10.0);
+        // Baseline above static → raised with headroom: ceil(12 × 1.5) = 18.
+        assert_eq!(compute_effective_rps(10, Some(12.0), true), 18.0);
+        // Hard cap: never more than static × ADAPTIVE_MAX_RATE_MULTIPLIER.
+        assert_eq!(compute_effective_rps(10, Some(1000.0), true), 40.0);
+    }
+
+    #[test]
+    fn growing_legitimate_traffic_raises_limit_without_violations() {
+        use std::net::Ipv4Addr;
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let cfg = FirewallConfig {
+            rate_limit_rps: 4,
+            rate_limit_burst: 500,
+            adaptive_rate_limit: true,
+            ewma_alpha_pct: 60,
+            auto_block_threshold: u32::MAX,
+            ..Default::default()
+        };
+        let fw = Firewall::new(cfg);
+
+        let mut buckets = fw.buckets.lock().unwrap();
+        let bucket = buckets
+            .entry(ip)
+            .or_insert_with(|| TokenBucket::new(4, 500));
+        // Simulate five closed observation windows of steadily growing
+        // legitimate traffic: 7, 9, 12, 16, 21 requests per window. Each
+        // note_request_at lands in the next second so windows roll.
+        let counts = [7u32, 9, 12, 16, 21];
+        let t0 = Instant::now();
+        bucket.note_request_at(t0, 60);
+        for (w, n) in counts.iter().enumerate() {
+            for i in 0..*n {
+                bucket.note_request_at(
+                    t0 + Duration::from_millis((w as u64) * 1000 + 1 + i as u64),
+                    60,
+                );
+            }
+        }
+        assert_eq!(
+            bucket.violations, 0,
+            "no violations may accrue while adapting"
+        );
+        let ewma = bucket.ewma_per_window.expect("windows must have rolled");
+        assert!(
+            ewma > 4.0,
+            "baseline must exceed the static rps, got {ewma}"
+        );
+        let effective = fw.effective_bucket_rate(bucket);
+        assert!(
+            effective > 4.0 && effective <= 4.0 * ADAPTIVE_MAX_RATE_MULTIPLIER,
+            "adaptive limit must be raised but capped, got {effective}"
         );
     }
 }
