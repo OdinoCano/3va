@@ -208,9 +208,7 @@ cargo vet
 - Zip Slip: Validate paths in tarballs — implemented (`crates/pm/src/lib.rs`, `extract_tarball`)
 - Symlink escape: Do not follow symlinks without validation — implemented (same function, symlink/hardlink entries are skipped)
 - Unicode normalization: Normalize paths
-
-**Not yet implemented** (tracked in `docs/12-roadmap/01-roadmap.md`):
-- Compression bombs: no decompression ratio/size cap on tarball extraction (`extract_tarball`) or on the `zlib` builtin (`gunzip`/`inflate`/`brotliDecompress`) — a small malicious payload can inflate to exhaust memory in either path today.
+- Compression bombs: the `zlib` decompressors abort once output passes `MAX_DECOMPRESSED_OUTPUT_BYTES` (512 MiB) or expansion exceeds `MAX_DECOMPRESSION_RATIO` (4096:1, armed after `RATIO_MIN_INPUT_BYTES` = 256 KiB of input); tarball extraction enforces `MAX_EXTRACTED_FILE_BYTES` (512 MiB) per entry and `MAX_EXTRACTED_TOTAL_BYTES` (2 GiB) cumulative against header-declared sizes before writing (`crates/js/src/builtins/zlib.rs`, `crates/pm/src/lib.rs` `extract_tarball_with_limits`, `crates/pm/src/fetcher.rs`). Verified by `builtins::zlib::tests::*`, `tests::extract_tarball_*`, and `fetcher::tests::extract_*` unit tests.
 
 ---
 
