@@ -391,3 +391,52 @@ async fn mqtt_qos_options() {
         .unwrap();
     assert_eq!(r, "ok");
 }
+
+// ── connect timeout ──────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mqtt_connect_times_out_against_blackholed_host() {
+    // TEST-NET-1 (RFC 5737) is guaranteed non-routable — SYN packets are
+    // silently dropped, so a plain TcpStream::connect would hang (and stall
+    // the whole JS engine thread with it) until the OS gives up. The injected
+    // 500 ms `connectTimeout` must abort far earlier.
+    let mut e = engine_with_net("192.0.2.1").await;
+    e.eval(
+        r#"
+        var mqtt = require('mqtt');
+        globalThis.__mqttErr = null;
+        globalThis.__elapsed = 0;
+        var t0 = Date.now();
+        try {
+            new mqtt.Client({ host: '192.0.2.1', port: 81, connectTimeout: 500 }).connect();
+        } catch (err) {
+            globalThis.__mqttErr = String((err && err.message) ? err.message : err);
+        }
+        globalThis.__elapsed = Date.now() - t0;
+        "#
+        .to_string()
+        .as_str(),
+    )
+    .await
+    .unwrap();
+
+    let err = e
+        .eval_to_string("String(globalThis.__mqttErr)")
+        .await
+        .unwrap();
+    let elapsed: u64 = e
+        .eval_to_string("Number(globalThis.__elapsed)")
+        .await
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    assert!(
+        err.contains("timed out"),
+        "expected a timeout error, got: {err}"
+    );
+    assert!(
+        (400..=10_000).contains(&elapsed),
+        "connect returned after {elapsed} ms, outside the expected window"
+    );
+}

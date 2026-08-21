@@ -14,6 +14,145 @@ use vvva_permissions::{Capability, PermissionState};
 
 const CRLF: &[u8] = b"\r\n";
 
+/// Default TCP connect timeout for IMAP client sockets. Without it, a
+/// TCP connect against an unresponsive/blackholed host blocks the connect
+/// worker thread indefinitely, leaking a thread + socket per attempt.
+const IMAP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Socket read/write timeout applied after connect. Bounds the blocking TLS
+/// handshake and every later blocking read (greeting/CAPABILITY exchange,
+/// command responses) so a server that accepts but never answers cannot pin
+/// the worker thread forever.
+const IMAP_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// TCP connect bounded by `connect_timeout`.
+///
+/// Two layers keep a blackholed host from pinning the worker thread:
+/// 1. OS-level: every candidate address gets `TcpStream::connect_timeout`,
+///    so the blocking task always terminates near the deadline (and runtime
+///    teardown below never waits on a stuck connect).
+/// 2. Tokio timer: the whole resolve+connect runs under
+///    `tokio::time::timeout`, cancelling even if name resolution itself
+///    hangs.
+fn connect_tcp_bounded(
+    host: &str,
+    port: u16,
+    connect_timeout: std::time::Duration,
+) -> Result<TcpStream, String> {
+    let target_host = host.to_string();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .map_err(|e| format!("Connection failed: {}", e))?;
+    let result = rt.block_on(async move {
+        match tokio::time::timeout(
+            connect_timeout,
+            tokio::task::spawn_blocking(move || {
+                use std::net::ToSocketAddrs;
+                let addrs: Vec<_> = (target_host.as_str(), port).to_socket_addrs()?.collect();
+                let mut last_err: Option<std::io::Error> = None;
+                for addr in addrs {
+                    match TcpStream::connect_timeout(&addr, connect_timeout) {
+                        Ok(s) => return Ok(s),
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                Err(last_err.unwrap_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "no addresses")
+                }))
+            }),
+        )
+        .await
+        {
+            Ok(Ok(Ok(s))) => Ok(s),
+            Ok(Ok(Err(e))) => Err(e.to_string()),
+            Ok(Err(e)) => Err(format!("Connection failed: {}", e)),
+            Err(_) => Err(format!(
+                "Connection failed: connect timed out after {} ms",
+                connect_timeout.as_millis()
+            )),
+        }
+    });
+    // Bounded teardown: if the blocking task somehow lingers past its own
+    // deadlines, don't wait on it indefinitely.
+    rt.shutdown_timeout(std::time::Duration::from_millis(100));
+    result
+}
+
+/// Full connect sequence with bounded I/O: TCP connect (see
+/// [`connect_tcp_bounded`]), socket read/write timeouts applied before any
+/// further blocking call, optional TLS handshake, then the greeting /
+/// CAPABILITY exchange. Returns once the connection is in `NotAuthenticated`
+/// state. Every blocking step fails with a timeout error instead of hanging
+/// when the server accepts but never answers.
+fn establish_connection(
+    host: &str,
+    port: u16,
+    use_tls: bool,
+    connect_timeout: std::time::Duration,
+    io_timeout: std::time::Duration,
+) -> Result<ImapConnection, String> {
+    // Bound the TCP connect: without the timeout, a blackholed host pins this
+    // worker thread forever.
+    let stream = connect_tcp_bounded(host, port, connect_timeout)?;
+
+    // Bound every later blocking I/O (TLS handshake, greeting / CAPABILITY
+    // reads, command responses). Blocking + timeout replaces the previous
+    // non-blocking mode, where reads failed instantly with WouldBlock and no
+    // timeout applied.
+    stream
+        .set_read_timeout(Some(io_timeout))
+        .map_err(|e| format!("Set read timeout failed: {}", e))?;
+    stream
+        .set_write_timeout(Some(io_timeout))
+        .map_err(|e| format!("Set write timeout failed: {}", e))?;
+
+    let conn = if use_tls {
+        let connector =
+            native_tls::TlsConnector::new().map_err(|e| format!("TLS init failed: {}", e))?;
+        let tls_stream = connector
+            .connect(host, stream)
+            .map_err(|e| format!("TLS handshake failed: {}", e))?;
+        ImapConn::Tls(tls_stream)
+    } else {
+        ImapConn::Plain(stream)
+    };
+
+    let mut imap_conn = ImapConnection::new(conn);
+    let tag = imap_conn.next_tag();
+    imap_conn
+        .conn
+        .write_all(format!("{} CAPABILITY\r\n", tag).as_bytes())
+        .map_err(|e| format!("Write failed: {}", e))?;
+
+    loop {
+        let buf = imap_conn.read_line().map_err(|e| {
+            // Linux reports SO_RCVTIMEO expiry as EAGAIN/WouldBlock, so map
+            // both kinds to an explicit timeout error.
+            if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut {
+                format!(
+                    "Read failed: timed out after {} ms waiting for server response",
+                    io_timeout.as_millis()
+                )
+            } else {
+                format!("Read failed: {}", e)
+            }
+        })?;
+        if buf.starts_with(tag.as_bytes()) {
+            break;
+        }
+        if buf.starts_with(b"* CAPABILITY ") {
+            let caps = String::from_utf8_lossy(&buf[14..])
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+            imap_conn.capabilities = caps;
+        }
+    }
+
+    imap_conn.state = ImapState::NotAuthenticated;
+    Ok(imap_conn)
+}
+
 enum ImapConn {
     Plain(TcpStream),
     Tls(TlsStream<TcpStream>),
@@ -278,6 +417,22 @@ pub fn inject_imap(
             let host = args.get(1).to_rust_string_lossy(_scope);
             let port = args.get(2).uint32_value(_scope).unwrap_or(143) as u16;
             let use_tls = args.get(3).boolean_value(_scope);
+            // Optional per-client timeout override in milliseconds (JS passes
+            // `options.connectTimeout`); tests inject small values.
+            let user_timeout = {
+                let v = args.get(4);
+                if v.is_number() {
+                    let ms = v.number_value(_scope).unwrap_or(f64::NAN);
+                    if ms.is_finite() && ms >= 1.0 {
+                        Some(std::time::Duration::from_millis(ms as u64))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            let connect_timeout = user_timeout.unwrap_or(IMAP_CONNECT_TIMEOUT);
 
             let perms = perms().clone();
             let inner = inner().clone();
@@ -291,7 +446,7 @@ pub fn inject_imap(
 
             std::thread::spawn(move || {
                 vvva_permissions::set_current_scope(&scope_for_thread);
-                let rt = tokio::runtime::Runtime::new().unwrap();
+                let io_timeout = user_timeout.unwrap_or(IMAP_IO_TIMEOUT);
                 let result: Result<(), String> = (|| {
                     if !perms.check(&Capability::Network(host.clone())) {
                         return Err(format!(
@@ -300,55 +455,8 @@ pub fn inject_imap(
                         ));
                     }
 
-                    let connect_host = host.clone();
-                    let stream = rt.block_on(async {
-                        tokio::task::spawn_blocking(move || {
-                            TcpStream::connect(format!("{}:{}", connect_host, port))
-                        })
-                        .await
-                        .map_err(|e| format!("Connection failed: {}", e))?
-                        .map_err(|e: std::io::Error| e.to_string())
-                    })?;
-
-                    stream
-                        .set_nonblocking(true)
-                        .map_err(|e| format!("Set nonblocking failed: {}", e))?;
-
-                    let conn = if use_tls {
-                        let connector = native_tls::TlsConnector::new()
-                            .map_err(|e| format!("TLS init failed: {}", e))?;
-                        let tls_stream = connector
-                            .connect(&host, stream)
-                            .map_err(|e| format!("TLS handshake failed: {}", e))?;
-                        ImapConn::Tls(tls_stream)
-                    } else {
-                        ImapConn::Plain(stream)
-                    };
-
-                    let mut imap_conn = ImapConnection::new(conn);
-                    let tag = imap_conn.next_tag();
-                    imap_conn
-                        .conn
-                        .write_all(format!("{} CAPABILITY\r\n", tag).as_bytes())
-                        .map_err(|e| format!("Write failed: {}", e))?;
-
-                    loop {
-                        let buf = imap_conn
-                            .read_line()
-                            .map_err(|e| format!("Read failed: {}", e))?;
-                        if buf.starts_with(tag.as_bytes()) {
-                            break;
-                        }
-                        if buf.starts_with(b"* CAPABILITY ") {
-                            let caps = String::from_utf8_lossy(&buf[14..])
-                                .split_whitespace()
-                                .map(|s| s.to_string())
-                                .collect();
-                            imap_conn.capabilities = caps;
-                        }
-                    }
-
-                    imap_conn.state = ImapState::NotAuthenticated;
+                    let imap_conn =
+                        establish_connection(&host, port, use_tls, connect_timeout, io_timeout)?;
                     inner.connections.lock().unwrap().insert(imap_id, imap_conn);
                     Ok(())
                 })();
@@ -1719,6 +1827,7 @@ pub fn inject_imap(
           username: options.username,
           password: options.password,
           tlsOptions: options.tlsOptions || {},
+          connectTimeout: options.connectTimeout || null,
           readyFired: false,
         };
       }
@@ -1730,7 +1839,7 @@ pub fn inject_imap(
         if (self.connected) return;
         try {
           self.id = __imapCreate(JSON.stringify({ host: self.host, port: self.port }));
-          __imapConnect(self.id, self.host, self.port, self.tls ? 1 : 0);
+          __imapConnect(self.id, self.host, self.port, self.tls ? 1 : 0, self.connectTimeout);
           await new Promise(function(res) { setTimeout(res, 50); });
           if (self.username && self.password) {
             await this.login(self.username, self.password);
@@ -1950,6 +2059,63 @@ pub fn inject_imap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_tcp_bounded_times_out_against_blackholed_host() {
+        // TEST-NET-1 (RFC 5737) is guaranteed non-routable; SYN packets are
+        // silently dropped, so a plain TcpStream::connect would hang until the
+        // OS gives up (~2 min). The bounded wrapper must cancel far earlier.
+        let start = std::time::Instant::now();
+        let err = connect_tcp_bounded("192.0.2.1", 81, std::time::Duration::from_millis(300))
+            .unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert!(err.contains("timed out"), "unexpected error: {err}");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(250)
+                && elapsed < std::time::Duration::from_secs(5),
+            "timeout fired at {elapsed:?}, outside the expected window"
+        );
+    }
+
+    #[test]
+    fn establish_connection_read_times_out_against_silent_server() {
+        // A listener that accepts and then never speaks: TCP completes (the
+        // kernel does the handshake), but no greeting ever arrives — so the
+        // CAPABILITY read must fail via the socket read timeout, not hang.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                // Hold it open without ever responding; dropped when the
+                // thread ends, long after the deadline.
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                drop(stream);
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let err = match establish_connection(
+            "127.0.0.1",
+            port,
+            false,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(300),
+        ) {
+            Ok(_) => panic!("expected the silent server to time out"),
+            Err(e) => e,
+        };
+        let elapsed = start.elapsed();
+
+        assert!(
+            err.contains("Read failed") && err.contains("timed out"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "read failed at {elapsed:?}, outside the expected window"
+        );
+    }
 
     #[test]
     fn parse_mailbox_list_handles_normal_response() {
