@@ -3183,6 +3183,11 @@ enum Commands {
         /// packages (for CI flows that run `3va audit` separately).
         #[arg(long = "no-scan")]
         no_scan: bool,
+
+        /// Require valid npm provenance (Sigstore attestation) for every
+        /// newly downloaded package; abort otherwise.
+        #[arg(long = "require-provenance")]
+        require_provenance: bool,
     },
     /// Remove an installed package
     #[command(aliases = ["rm", "uninstall"])]
@@ -4225,6 +4230,7 @@ async fn main() -> anyhow::Result<()> {
             node_linker,
             config,
             no_scan,
+            require_provenance,
         } => {
             if node_linker == "hoisted" {
                 // SAFETY: single-threaded at this point in `main`, before any
@@ -4239,6 +4245,10 @@ async fn main() -> anyhow::Result<()> {
                 // SAFETY: single-threaded at this point in `main`, before any
                 // install task is spawned — no concurrent env access yet.
                 unsafe { std::env::set_var("_3VA_SKIP_SCAN", "1") };
+            }
+            if *require_provenance {
+                // SAFETY: same as above — before install tasks exist.
+                unsafe { std::env::set_var("_3VA_REQUIRE_PROVENANCE", "1") };
             }
             if *config {
                 let cwd = std::env::current_dir()?;

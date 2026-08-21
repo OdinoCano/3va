@@ -20,6 +20,12 @@ vvva_permissions = { version = "2.5.0", path = "../permissions" }
 reqwest = { version = "0.12", features = ["json", "gzip"] }
 sha2.workspace = true
 base64.workspace = true
+# Sigstore provenance verification (item: npm provenance) — ECDSA P-256/P-384
+# over DSSE PAE. p256/p384 already in the workspace tree; ecdsa is their shared
+# signing/verifying trait crate (same version p256 0.13 uses).
+p256.workspace = true
+p384.workspace = true
+ecdsa = "0.16"
 hex = "0.4"
 regex = "1.12"
 flate2 = "1.0"
