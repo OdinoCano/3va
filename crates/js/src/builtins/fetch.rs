@@ -1,8 +1,17 @@
 use base64::Engine as _;
-use std::io::Read as _;
+use std::io::Read;
 use std::sync::Arc;
 use v8::{Function, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, Script};
 use vvva_permissions::{Capability, PermissionState};
+
+/// Hard ceiling on how many response-body bytes a single `fetch()` may buffer.
+///
+/// The body is read fully into memory before it reaches JS, so without a cap
+/// one malicious/compromised server could exhaust the runtime's memory with a
+/// single oversized (or unbounded, chunked) response. Mirrors undici's
+/// `maxResponseSize` dispatcher option; scripts can lower (not raise) it per
+/// call via `fetch(url, { maxResponseSize })`.
+const MAX_RESPONSE_BODY_BYTES: u64 = 512 * 1024 * 1024;
 
 fn host_from_url(url: &str) -> Option<String> {
     let after_scheme = url.find("://")?;
@@ -16,7 +25,28 @@ fn host_from_url(url: &str) -> Option<String> {
     }
 }
 
-fn response_to_json(r: ureq::Response) -> serde_json::Value {
+/// Streams `reader` into memory enforcing `cap` after every chunk read, so an
+/// oversized or unbounded response is aborted mid-transfer instead of being
+/// buffered to completion.
+fn read_body_bounded(mut reader: impl Read, cap: u64) -> anyhow::Result<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 65_536];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            return Ok(out);
+        }
+        out.extend_from_slice(&buf[..n]);
+        if out.len() as u64 > cap {
+            anyhow::bail!(
+                "fetch failed: response body exceeded the maximum response size of {} bytes",
+                cap
+            );
+        }
+    }
+}
+
+fn response_to_json(r: ureq::Response, cap: u64) -> anyhow::Result<serde_json::Value> {
     let status = r.status();
     let status_text = r.status_text().to_string();
     let ok = (200u16..300).contains(&status);
@@ -26,8 +56,20 @@ fn response_to_json(r: ureq::Response) -> serde_json::Value {
             resp_hdrs.insert(name, serde_json::Value::String(val.to_string()));
         }
     }
-    let mut body_bytes: Vec<u8> = Vec::new();
-    r.into_reader().read_to_end(&mut body_bytes).unwrap_or(0);
+    // Fast path: trust Content-Length only to reject early — the streaming
+    // reader below still counts actual bytes, so a lying header cannot bypass
+    // the cap.
+    if let Some(cl) = r.header("content-length")
+        && let Ok(n) = cl.trim().parse::<u64>()
+        && n > cap
+    {
+        anyhow::bail!(
+            "fetch failed: response Content-Length ({}) exceeds the maximum response size of {} bytes",
+            n,
+            cap
+        );
+    }
+    let body_bytes = read_body_bounded(r.into_reader(), cap)?;
     let (body_val, binary) = match String::from_utf8(body_bytes.clone()) {
         Ok(s) => (serde_json::Value::String(s), false),
         Err(_) => (
@@ -37,10 +79,10 @@ fn response_to_json(r: ureq::Response) -> serde_json::Value {
             true,
         ),
     };
-    serde_json::json!({
+    Ok(serde_json::json!({
         "ok": ok, "status": status, "statusText": status_text,
         "headers": resp_hdrs, "body": body_val, "binary": binary,
-    })
+    }))
 }
 
 fn do_request(
@@ -48,9 +90,11 @@ fn do_request(
     method: String,
     hdrs_json: String,
     body: Option<String>,
+    max_response_size: Option<u64>,
 ) -> anyhow::Result<String> {
     let extra_val: serde_json::Value =
         serde_json::from_str(&hdrs_json).unwrap_or(serde_json::Value::Object(Default::default()));
+    let cap = max_response_size.unwrap_or(MAX_RESPONSE_BODY_BYTES);
 
     let agent = ureq::AgentBuilder::new().redirects(0).build();
     let mut req = agent.request(&method, &url);
@@ -73,8 +117,8 @@ fn do_request(
     };
 
     let json = match resp_result {
-        Ok(r) => response_to_json(r),
-        Err(ureq::Error::Status(_, r)) => response_to_json(r),
+        Ok(r) => response_to_json(r, cap)?,
+        Err(ureq::Error::Status(_, r)) => response_to_json(r, cap)?,
         Err(e) => return Err(anyhow::anyhow!("fetch failed: {}", e)),
     };
 
@@ -106,6 +150,22 @@ pub fn inject_fetch(
             } else {
                 Some(args.get(3).to_rust_string_lossy(scope))
             };
+            // Optional per-call cap (undici names this `maxResponseSize`).
+            // Only lowering the default is honored: a script cannot raise the
+            // runtime-wide ceiling through this option.
+            let max_response_size = {
+                let v = args.get(4);
+                if v.is_number() {
+                    let n = v.number_value(scope).unwrap_or(f64::NAN);
+                    if n.is_finite() && n >= 0.0 {
+                        Some(n as u64)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
 
             let host = match host_from_url(&url) {
                 Some(h) => h,
@@ -123,8 +183,9 @@ pub fn inject_fetch(
                 return;
             }
 
-            let result =
-                tokio::task::block_in_place(|| do_request(url, method, hdrs_json, body_opt));
+            let result = tokio::task::block_in_place(|| {
+                do_request(url, method, hdrs_json, body_opt, max_response_size)
+            });
 
             match result {
                 Ok(json) => {
@@ -174,9 +235,14 @@ pub fn inject_fetch(
         }
 
         var fetchUrl = String(input);
+        var maxResponseSize;
+        if (options.maxResponseSize != null) {
+            var mrs = Number(options.maxResponseSize);
+            if (Number.isFinite(mrs) && mrs >= 0) maxResponseSize = mrs;
+        }
         var pending = new Promise(function(resolve, reject) {
             try {
-                var result = __fetchAsync(fetchUrl, method, JSON.stringify(headersObj), body);
+                var result = __fetchAsync(fetchUrl, method, JSON.stringify(headersObj), body, maxResponseSize);
                 resolve(result);
             } catch(e) {
                 reject(e);

@@ -144,7 +144,7 @@ Gaps identified against 3va's own attack surface (its HTTP/WS/MQTT/IMAP builtins
 | CRLF sanitization in `res.setHeader()`/`res.writeHead()` | HTTP server | ✅ Implemented (`ERR_INVALID_HTTP_TOKEN`/`ERR_INVALID_CHAR`, enforced in JS layer and native writer; tests in `crates/js/tests/http_server.rs`) |
 | `Transfer-Encoding: chunked` support in request parser | HTTP server | ✅ Implemented (chunked decoding, CL+TE smuggling rejected `400`; tests in `crates/js/tests/http_server.rs`) |
 | Decompression ratio/size cap (`zlib` builtin + PM tarball extraction) | zlib, PM | ✅ Implemented (`MAX_DECOMPRESSED_OUTPUT_BYTES`/`MAX_DECOMPRESSION_RATIO` in `zlib.rs`; `MAX_EXTRACTED_FILE_BYTES`/`MAX_EXTRACTED_TOTAL_BYTES` in `lib.rs`/`fetcher.rs`) |
-| Response size cap on `fetch()` | fetch | ❌ Not implemented |
+| Response size cap on `fetch()` | fetch | ✅ Implemented (`MAX_RESPONSE_BODY_BYTES` = 512 MiB streaming cap + early `Content-Length` reject; per-call `{ maxResponseSize }` option; tests in `crates/js/tests/fetch_response_cap.rs`) |
 | Connect/read timeouts on MQTT and IMAP client sockets | MQTT, IMAP | ❌ Not implemented |
 | Automatic malware/secrets scan during `3va install` (today: `3va audit` only, on demand) | PM | ❌ Not implemented |
 | Typosquatting detection (edit-distance vs. popular package names) | PM | ❌ Not implemented |
