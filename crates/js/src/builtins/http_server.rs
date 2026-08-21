@@ -581,8 +581,24 @@ async fn handle_connection(
             Err(ParseError::Silent(_)) => break,
         };
 
+        // Resolve the effective client IP: the peer itself, or — when the
+        // peer is a trusted proxy that sent X-Forwarded-For — the forwarded
+        // address. Used for both rate-limit accounting and remoteAddress.
+        let req_ip = fw
+            .as_ref()
+            .as_ref()
+            .map(|f| {
+                let xff = parsed
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k == "x-forwarded-for")
+                    .map(|(_, v)| v.as_str());
+                f.client_ip_from_xff(ip, xff)
+            })
+            .unwrap_or(ip);
+
         if let Some(firewall) = fw.as_ref().as_ref() {
-            match firewall.check_request(ip) {
+            match firewall.check_request(req_ip) {
                 FirewallDecision::Allow => {}
                 decision => {
                     let resp = format!(
@@ -605,13 +621,13 @@ async fn handle_connection(
         let body_str = String::from_utf8_lossy(&parsed.body);
         let json = format!(
             "{{\"method\":\"{m}\",\"url\":\"{u}\",\"headers\":{{{h}}},\"body\":\"{b}\",\
-             \"conn_id\":{c},\"remoteAddress\":\"{ip}\"}}",
+             \"conn_id\":{c},\"remoteAddress\":\"{rip}\"}}",
             m = json_escape(&parsed.method),
             u = json_escape(&parsed.path),
             h = hdr_pairs.join(","),
             b = json_escape(&body_str),
             c = conn_id,
-            ip = ip,
+            rip = req_ip,
         );
 
         ready

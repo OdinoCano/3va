@@ -4098,6 +4098,7 @@ async fn main() -> anyhow::Result<()> {
                             min_body_rate_bps: fc.min_body_rate_bps,
                             adaptive_rate_limit: fc.adaptive_rate_limit,
                             ewma_alpha_pct: fc.ewma_alpha_pct,
+                            trusted_proxies: fc.trusted_proxies.clone(),
                         }
                     })
                     .unwrap_or_default();

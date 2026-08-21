@@ -78,6 +78,11 @@ pub struct FirewallConfig {
     /// EWMA smoothing factor in % (0–100). Higher adapts faster.
     #[serde(rename = "ewmaAlphaPct")]
     pub ewma_alpha_pct: u32,
+    /// Reverse proxies trusted to set X-Forwarded-For (IPs or CIDRs). When
+    /// the direct peer is trusted, remoteAddress reports the forwarded
+    /// client IP; otherwise the header is ignored.
+    #[serde(rename = "trustedProxies")]
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for FirewallConfig {
@@ -101,6 +106,7 @@ impl Default for FirewallConfig {
             min_body_rate_bps: 100,
             adaptive_rate_limit: false,
             ewma_alpha_pct: 20,
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -388,5 +394,6 @@ mod tests {
         assert_eq!(fw_cfg.min_body_rate_bps, crate_cfg.min_body_rate_bps);
         assert_eq!(fw_cfg.adaptive_rate_limit, crate_cfg.adaptive_rate_limit);
         assert_eq!(fw_cfg.ewma_alpha_pct, crate_cfg.ewma_alpha_pct);
+        assert_eq!(fw_cfg.trusted_proxies, crate_cfg.trusted_proxies);
     }
 }
