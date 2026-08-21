@@ -466,6 +466,162 @@ async fn server_survives_oversized_content_length_with_early_close() {
     assert_eq!(response_status(&resp), 200);
 }
 
+// ── Header injection (CRLF) rejection ──────────────────────────────────────────
+
+fn standalone_res_js() -> &'static str {
+    "var http = require('http'); var res = new http.ServerResponse(new http.IncomingMessage({}));"
+}
+
+/// res.setHeader('X-Foo', 'bar\r\nX-Evil: 1') must throw TypeError
+/// ERR_INVALID_CHAR instead of letting CR/LF into the response buffer.
+#[tokio::test]
+async fn set_header_rejects_crlf_injection() {
+    let mut e = engine_with_net().await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            {setup}
+            try {{
+                res.setHeader('X-Foo', 'bar\r\nX-Evil: 1');
+                'no-throw';
+            }} catch (err) {{
+                (err instanceof TypeError) + ':' + err.code;
+            }}
+            "#,
+            setup = standalone_res_js()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        r, "true:ERR_INVALID_CHAR",
+        "expected ERR_INVALID_CHAR TypeError"
+    );
+}
+
+#[tokio::test]
+async fn set_header_rejects_bare_cr_lf_and_del() {
+    let mut e = engine_with_net().await;
+    for evil in ["a\rb", "a\nb", "a\u{0}b", "a\u{7F}b"] {
+        let r = e
+            .eval_to_string(&format!(
+                r#"
+                {setup}
+                try {{
+                    res.setHeader('X-Foo', {evil:?});
+                    'no-throw';
+                }} catch (err) {{
+                    err.code;
+                }}
+                "#,
+                setup = standalone_res_js(),
+                evil = evil
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r, "ERR_INVALID_CHAR", "value {evil:?} must be rejected");
+    }
+}
+
+/// Invalid header names (non-token chars incl. CR/LF) are rejected like Node's
+/// ERR_INVALID_HTTP_TOKEN.
+#[tokio::test]
+async fn set_header_rejects_invalid_header_name() {
+    let mut e = engine_with_net().await;
+    for bad_name in ["X Foo", "X\rFoo", "X\nFoo", "", "X(Foo)"] {
+        let r = e
+            .eval_to_string(&format!(
+                r#"
+                {setup}
+                try {{
+                    res.setHeader({bad:?}, 'value');
+                    'no-throw';
+                }} catch (err) {{
+                    (err instanceof TypeError) + ':' + err.code;
+                }}
+                "#,
+                setup = standalone_res_js(),
+                bad = bad_name
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r, "true:ERR_INVALID_HTTP_TOKEN",
+            "name {bad_name:?} must be rejected"
+        );
+    }
+}
+
+/// writeHead(200, {{...}}) with an injected header must throw before any state
+/// is recorded.
+#[tokio::test]
+async fn write_head_rejects_crlf_in_headers() {
+    let mut e = engine_with_net().await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            {setup}
+            try {{
+                res.writeHead(200, {{ 'X-Foo': 'bar\r\nSet-Cookie: pwned=1' }});
+                'no-throw';
+            }} catch (err) {{
+                err.code + ':' + res.headersSent + ':' + res.statusCode;
+            }}
+            "#,
+            setup = standalone_res_js()
+        ))
+        .await
+        .unwrap();
+    // Validation happens before writeHead records anything.
+    assert_eq!(r, "ERR_INVALID_CHAR:false:200");
+}
+
+/// Valid headers keep working through both setHeader and writeHead.
+#[tokio::test]
+async fn valid_headers_still_accepted() {
+    let mut e = engine_with_net().await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            {setup}
+            res.setHeader('X-Foo', 'bar');
+            var viaWriteHead = true;
+            try {{
+                res.writeHead(200, {{ 'Content-Type': 'text/plain', 'X-Token': "!#$%&'*+.^_`|~az09-" }});
+            }} catch (err) {{ viaWriteHead = err.code; }}
+            JSON.stringify([res.getHeader('X-Foo'), viaWriteHead, res.statusMessage]);
+            "#,
+            setup = standalone_res_js()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, r#"["bar",true,"OK"]"#);
+}
+
+/// Last-line-of-defense: headers smuggled into `_headers` without going through
+/// setHeader/writeHead are rejected by the native response writer when the
+/// response is flushed.
+#[tokio::test]
+async fn smuggled_header_caught_by_native_writer() {
+    let mut e = engine_with_net().await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            {setup}
+            res._headers['X-Evil'] = 'a\r\nb';
+            try {{
+                res.end('x');
+                'no-throw';
+            }} catch (err) {{
+                err.code;
+            }}
+            "#,
+            setup = standalone_res_js()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "ERR_INVALID_CHAR");
+}
+
 // ── Firewall tests ─────────────────────────────────────────────────────────────
 
 /// Verify that every accepted request contains the `remoteAddress` of the client

@@ -3337,17 +3337,54 @@ pub fn inject_require(
                 this.headersSent = false;
             };
             util.inherits(httpServerResponse, Writable);
-            httpServerResponse.prototype.setHeader = function(name, value) { this._headers[name] = value; return this; };
+            // Header validation — same rules as Node's lib/_http_outgoing.js:
+            // names must be HTTP tokens, values must not carry CR/LF or other
+            // control bytes (HTTP response splitting / header injection).
+            var __isValidHeaderToken = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+            var __validateHeaderName = function(name) {
+                if (typeof name !== 'string' || name.length === 0 || !__isValidHeaderToken.test(name)) {
+                    var ne = new TypeError('Header name must be a valid HTTP token [' + JSON.stringify(String(name)) + ']');
+                    ne.code = 'ERR_INVALID_HTTP_TOKEN';
+                    throw ne;
+                }
+            };
+            var __validateHeaderValue = function(name, value) {
+                var s = String(value);
+                for (var i = 0; i < s.length; i++) {
+                    var c = s.charCodeAt(i);
+                    // Reject CRLF and every other control byte except tab (0x09),
+                    // plus DEL (0x7F). Mirrors Node's checkInvalidHeaderChar.
+                    if ((c <= 0x1F && c !== 0x09) || c === 0x7F) {
+                        var ve = new TypeError('Invalid character in header content [' + JSON.stringify(String(name).toLowerCase()) + ']');
+                        ve.code = 'ERR_INVALID_CHAR';
+                        throw ve;
+                    }
+                }
+            };
+            httpServerResponse.prototype.setHeader = function(name, value) {
+                __validateHeaderName(name);
+                __validateHeaderValue(name, value);
+                this._headers[name] = value;
+                return this;
+            };
             httpServerResponse.prototype.getHeader = function(name) { return this._headers[name]; };
             httpServerResponse.prototype.removeHeader = function(name) { delete this._headers[name]; return this; };
             httpServerResponse.prototype.hasHeader = function(name) { return Object.prototype.hasOwnProperty.call(this._headers, name); };
             httpServerResponse.prototype.getHeaders = function() { return this._headers; };
             httpServerResponse.prototype.writeHead = function(statusCode, statusMessage, headers) {
-                this.statusCode = statusCode;
                 if (typeof statusMessage === 'object' && statusMessage !== null) { headers = statusMessage; statusMessage = undefined; }
+                // Validate before touching any state so a rejected header leaves
+                // the response untouched (same observable behaviour as Node).
+                if (headers) {
+                    for (var k in headers) if (Object.prototype.hasOwnProperty.call(headers, k)) {
+                        __validateHeaderName(k);
+                        __validateHeaderValue(k, headers[k]);
+                    }
+                }
+                this.statusCode = statusCode;
                 this.statusMessage = statusMessage || HTTP_STATUS_CODES[String(statusCode)] || '';
                 if (headers) {
-                    for (var k in headers) if (Object.prototype.hasOwnProperty.call(headers, k)) this._headers[k] = headers[k];
+                    for (var k2 in headers) if (Object.prototype.hasOwnProperty.call(headers, k2)) this._headers[k2] = headers[k2];
                 }
                 this.headersSent = true;
                 this._header = true;
