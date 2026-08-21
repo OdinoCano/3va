@@ -9,6 +9,15 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **Automatic malware/secrets scan on `3va install`**: every freshly downloaded package tarball is
+  now scanned with the same malware and secrets engines `3va audit` uses, after integrity
+  verification and before the package is written to the store or linked into `node_modules/`;
+  CRITICAL/HIGH findings abort that package's install with a report in the audit output format
+  (`[SEVERITY] file:line — type — detail`). Previously packages were written to disk unscanned
+  until an explicit `3va audit`. Skip the scan with `--no-scan` (e.g. CI flows that audit
+  separately). Tests: `security_scan_passes_a_clean_package`,
+  `security_scan_aborts_package_with_embedded_aws_key`, `security_scan_respects_skip_flag`
+  (`crates/pm/src/lib.rs`); documented in `docs/10-security/01-static-analysis.md`.
 - **HTTP response header injection guard**: `res.setHeader()`/`res.writeHead()` now reject header
   names that are not RFC 7230 tokens (`ERR_INVALID_HTTP_TOKEN`) and values containing control
   bytes (`ERR_INVALID_CHAR`; everything ≤ 0x1F except tab, plus DEL). Enforced twice: in the JS

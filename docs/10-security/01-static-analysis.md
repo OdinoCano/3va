@@ -35,17 +35,18 @@ Scans installed code in `node_modules/` for known malicious patterns using both 
 
 ### Usage
 
-The malware scanner does **not** run automatically during `3va install` — it only runs when explicitly invoked via `3va audit` (Phase 1). A package with no lifecycle scripts (the only thing `install` blocks by default) is written to disk unscanned until you run `audit` yourself.
+The malware scanner runs **automatically during `3va install`** on every newly downloaded tarball, together with the secrets scanner (§1.3): packages are scanned after integrity verification and before they are written to the store or `node_modules/`. CRITICAL/HIGH findings abort the install of that package with a report in the audit output format. Skip it with `--no-scan` (e.g. CI flows that run `3va audit` separately).
 
 ```bash
-3va install axios --allow-net=registry.npmjs.org  # not scanned by this step
+3va install axios --allow-net=registry.npmjs.org  # scanned automatically; CRITICAL/HIGH aborts the install
+3va install axios --no-scan                       # opt out; run audit yourself
 
-# Explicit audit (malware is Phase 1) — run this after installing
+# Explicit audit still available
 3va audit
 3va audit --json
 ```
 
-Making this automatic (scan-on-install, not just on-demand) is tracked in `docs/12-roadmap/01-roadmap.md`.
+Verified by the `security_scan_*` unit tests in `crates/pm/src/lib.rs` (`security_scan_passes_a_clean_package`, `security_scan_aborts_package_with_embedded_aws_key`, `security_scan_respects_skip_flag`).
 
 ## 1.3 Secrets Scanner
 
