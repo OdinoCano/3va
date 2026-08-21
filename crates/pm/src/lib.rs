@@ -13,6 +13,7 @@ pub mod secrets;
 pub mod semver;
 pub mod signature_verifier;
 pub mod store;
+pub mod typosquat;
 pub mod workspace;
 pub mod workspace_v2;
 pub mod yarn_lock;
@@ -1841,6 +1842,9 @@ async fn install_with_transitive(
                         info.latest.as_deref(),
                     );
                     if let Some(meta) = info.version_meta.get(&ver) {
+                        // Supply-chain guard: flag names suspiciously close
+                        // to a popular package before anything is installed.
+                        crate::typosquat::warn_if_typosquat(&pkg_name);
                         resolved.insert(
                             pkg_name.clone(),
                             (ver.clone(), meta.tarball.clone(), meta.integrity.clone()),
