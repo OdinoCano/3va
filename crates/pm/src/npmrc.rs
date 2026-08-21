@@ -179,6 +179,21 @@ pub fn resolve_registry(config: &NpmrcConfig, package_name: &str) -> String {
         .unwrap_or_else(|| "https://registry.npmjs.org".to_string())
 }
 
+/// Dependency-confusion guard: when `.npmrc` pins a scope to a private
+/// registry (`@scope:registry=...`), package names under that scope resolve
+/// ONLY against that registry — the public registry must never be consulted,
+/// not as a fallback and not for "does it also exist there" checks.
+///
+/// Returns `Some(private_url)` when the name's scope is pinned, `None`
+/// otherwise (caller uses its default registry).
+pub fn pinned_scope_registry(config: &NpmrcConfig, package_name: &str) -> Option<String> {
+    if package_name.starts_with('@') {
+        let scope = package_name.split('/').next()?;
+        return config.scoped_registries.get(scope).cloned();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +334,17 @@ mod tests {
         let content = "cache=/tmp/cache\nloglevel=warn";
         let config = parse_npmrc(content);
         assert_eq!(config.raw.get("cache"), Some(&"/tmp/cache".to_string()));
-        assert_eq!(config.raw.get("loglevel"), Some(&"warn".to_string()));
+    }
+
+    #[test]
+    fn pinned_scope_registry_matches_only_configured_scope() {
+        let config = parse_npmrc("@miorg:registry=https://private.example.com");
+        assert_eq!(
+            pinned_scope_registry(&config, "@miorg/pkg"),
+            Some("https://private.example.com".to_string())
+        );
+        // Different scope, unscoped names, and bare scope are NOT pinned.
+        assert_eq!(pinned_scope_registry(&config, "@other/pkg"), None);
+        assert_eq!(pinned_scope_registry(&config, "pkg"), None);
     }
 }

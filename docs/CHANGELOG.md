@@ -9,6 +9,15 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **Dependency-confusion protection**: scopes pinned in `.npmrc` via `@scope:registry=...` now
+  resolve only against that private registry during install — the resolver never consults the
+  public registry for those names, and a failed private-registry lookup aborts the install with
+  an explicit "dependency-confusion guard" error instead of silently falling back (previously
+  scoped registries were parsed but never used, and resolution errors were demoted to log lines).
+  A notice is printed when `.npmrc` sets a default `registry=` that differs from the `--allow-net`
+  target. Tests: `pinned_scope_registry_matches_only_configured_scope` (`npmrc.rs`),
+  `scoped_pin_resolves_only_against_private_registry` (mock private registry end-to-end),
+  `pinned_scope_with_dead_private_registry_refuses_public_fallback` (`lib.rs`).
 - **Typosquatting detection on install**: new `typosquat` module
   (`crates/pm/src/typosquat.rs`) carries an embedded list of popular/most-impersonated npm
   packages (`popular_packages.txt`, ~60 entries) and flags dependency names whose Levenshtein

@@ -1694,6 +1694,19 @@ async fn install_with_transitive(
     let registry = Registry::from_allowed_host(&allowed_host);
     let base_url = registry.base_url().to_string();
 
+    // Dependency-confusion guard: .npmrc may pin scopes to private registries.
+    let npmrc_cfg = npmrc::discover_npmrc(Some(project_root));
+    if let Some(cfg_reg) = &npmrc_cfg.registry
+        && cfg_reg.trim_end_matches('/') != base_url.trim_end_matches('/')
+    {
+        eprintln!(
+            "! Dependency-confusion notice: .npmrc sets registry={} but this install \
+             resolves against {} (--allow-net). Scopes pinned via '@scope:registry=' \
+             always use their private registry and never fall back to the public one.",
+            cfg_reg, base_url
+        );
+    }
+
     // Two clients:
     // - meta_client: for JSON metadata requests (gzip on → server sends compressed JSON)
     // - dl_client: for tarball downloads (gzip off → tarballs are already .tgz, double-decompression breaks them)
@@ -1713,6 +1726,9 @@ async fn install_with_transitive(
     // ── Phase 1: parallel BFS metadata resolution ─────────────────────────────
     // resolved: name → (version, tarball_url, integrity)
     let mut resolved: Map<String, (String, String, Option<String>)> = Map::new();
+    // Dependency-confusion guard violations abort the whole install — they
+    // must never be demoted to a log line.
+    let mut guard_errors: Vec<String> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
 
     let manifest_val: Option<serde_json::Value> =
@@ -1814,7 +1830,10 @@ async fn install_with_transitive(
         let mut set: JoinSet<PackageFetchResult> = JoinSet::new();
         for (pkg_name, requested_ver) in needs_fetch {
             let client = client.clone();
-            let base = base_url.clone();
+            // Dependency-confusion guard: a scope pinned via .npmrc resolves
+            // only against its private registry — never the public one.
+            let pinned = npmrc::pinned_scope_registry(&npmrc_cfg, &pkg_name);
+            let base = pinned.clone().unwrap_or_else(|| base_url.clone());
             let registry = registry.clone();
             set.spawn(async move {
                 let version_to_fetch = requested_ver.as_deref().unwrap_or("latest");
@@ -1823,7 +1842,23 @@ async fn install_with_transitive(
                         lookup_jsr_with_deps(&client, &pkg_name, version_to_fetch).await?
                     }
                     Registry::Npm | Registry::Yarn | Registry::Custom(_) => {
-                        lookup_npm_version(&client, &base, &pkg_name, version_to_fetch).await?
+                        match lookup_npm_version(&client, &base, &pkg_name, version_to_fetch).await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                if let Some(pin) = &pinned {
+                                    return Err(anyhow::anyhow!(
+                                        "dependency-confusion guard: '{}' is pinned to private \
+                                         registry {} via .npmrc, which failed ({}). Refusing to \
+                                         fall back to the public registry.",
+                                        pkg_name,
+                                        pin,
+                                        e
+                                    ));
+                                }
+                                return Err(e);
+                            }
+                        }
                     }
                 };
                 Ok((pkg_name, version_to_fetch.to_string(), info, deps))
@@ -1871,7 +1906,12 @@ async fn install_with_transitive(
                     }
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!("Failed to resolve package: {}", e);
+                    let msg = e.to_string();
+                    if msg.contains("dependency-confusion guard") {
+                        guard_errors.push(msg);
+                    } else {
+                        tracing::warn!("Failed to resolve package: {}", e);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Task panic during resolution: {}", e);
@@ -1881,6 +1921,10 @@ async fn install_with_transitive(
         for (dep, range) in next_wave_deps {
             current_wave.push((dep, Some(range)));
         }
+    }
+
+    if !guard_errors.is_empty() {
+        anyhow::bail!("{}", guard_errors.join("\n"));
     }
 
     // ── Phase 2: parallel download + extract ──────────────────────────────────
@@ -3782,6 +3826,7 @@ mod tests {
 
     #[test]
     fn security_scan_aborts_package_with_embedded_aws_key() {
+        let _scan_env = SCAN_ENV_LOCK.lock().unwrap();
         // Matches the aws_access_key pattern (Critical): AKIA + 16 chars.
         let evil = b"const cfg = { accessKeyId: 'AKIAIOSFODNN7EXAMPLE' };".to_vec();
         let tgz = make_tgz(&[("package/index.js", evil)]);
@@ -3793,15 +3838,153 @@ mod tests {
         );
     }
 
+    /// Serializes tests that touch the `_3VA_SKIP_SCAN` env var — cargo runs
+    /// tests in parallel threads and env state is process-global.
+    static SCAN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn security_scan_respects_skip_flag() {
-        // SAFETY: single-threaded test process for this env var (tests in this
-        // module do not touch it concurrently).
+        let _scan_env = SCAN_ENV_LOCK.lock().unwrap();
+        // SAFETY: single-threaded w.r.t. this env var (guarded above).
         unsafe { std::env::set_var("_3VA_SKIP_SCAN", "1") };
         let evil = b"const cfg = { accessKeyId: 'AKIAIOSFODNN7EXAMPLE' };".to_vec();
         let tgz = make_tgz(&[("package/index.js", evil)]);
         let r = scan_tarball_before_install("evil-pkg", "1.0.0", &tgz);
         unsafe { std::env::remove_var("_3VA_SKIP_SCAN") };
         r.expect("--no-scan (_3VA_SKIP_SCAN=1) must skip the scan entirely");
+    }
+
+    /// Minimal HTTP/1.1 server for registry mocks: one `Connection: close`
+    /// response per connection, served until the harness drops the handle.
+    type MockHandler = dyn Fn(&str, &str) -> (u16, Vec<u8>) + Send + Sync;
+
+    struct MockRegistry {
+        url: String,
+    }
+
+    impl MockRegistry {
+        fn start(handler: std::sync::Arc<MockHandler>) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let base = std::sync::Arc::new(format!("http://{}", addr));
+            let base_for_thread = base.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let mut buf = [0u8; 4096];
+                    let _ = std::io::Read::read(&mut stream, &mut buf); // request head
+                    let req = String::from_utf8_lossy(&buf);
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let (status, body) = handler(&path, &base_for_thread);
+                    let status_text = if status == 200 { "OK" } else { "Not Found" };
+                    let resp = format!(
+                        "HTTP/1.1 {} {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                        status,
+                        status_text,
+                        body.len()
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+                    let _ = std::io::Write::write_all(&mut stream, &body);
+                }
+            });
+            MockRegistry {
+                url: (*base).clone(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_pin_resolves_only_against_private_registry() {
+        let seen_paths: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let paths_for_handler = seen_paths.clone();
+        let reg = MockRegistry::start(std::sync::Arc::new(move |path, base| {
+            paths_for_handler.lock().unwrap().push(path.to_string());
+            if path.ends_with(".tgz") {
+                let tgz = make_tgz(&[(
+                    "package/index.js",
+                    b"module.exports = 'from-private-registry';".to_vec(),
+                )]);
+                (200, tgz)
+            } else {
+                // Version metadata endpoint ({base}/@miorg/pkg/1.0.0)
+                let meta = serde_json::json!({
+                    "name": "@miorg/pkg",
+                    "version": "1.0.0",
+                    "dist": {
+                        "tarball": format!("{}/@miorg/pkg/-/pkg-1.0.0.tgz", base)
+                    }
+                });
+                (200, serde_json::to_vec(&meta).unwrap())
+            }
+        }));
+
+        // Project with .npmrc pinning @miorg to the mock private registry.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".npmrc"),
+            format!("@miorg:registry={}", reg.url),
+        )
+        .unwrap();
+
+        // --allow-net points somewhere else entirely; the pin must win.
+        let allow = ["registry.npmjs.org"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let result = install_with_transitive(
+            "@miorg/pkg@1.0.0",
+            false,
+            Some(allow.as_slice()),
+            root.path(),
+            false,
+        )
+        .await;
+        if let Err(e) = &result {
+            panic!("install against private mock failed: {e}");
+        }
+        let pkg_js = root.path().join("node_modules/@miorg/pkg/index.js");
+        let content = std::fs::read_to_string(&pkg_js).unwrap_or_default();
+        assert!(
+            content.contains("from-private-registry"),
+            "package must be installed from the private registry (index.js = {content:?})"
+        );
+        // Every request the client made must have gone to our mock — no
+        // public-registry lookup happened.
+        let seen = seen_paths.lock().unwrap();
+        assert!(
+            !seen.is_empty(),
+            "private registry mock must have been consulted"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_scope_with_dead_private_registry_refuses_public_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        // Port 1 on localhost is never listening → instant connection refused.
+        std::fs::write(
+            root.path().join(".npmrc"),
+            "@dead:registry=http://127.0.0.1:1",
+        )
+        .unwrap();
+        let err = install_with_transitive(
+            "@dead/pkg@1.0.0",
+            false,
+            Some(
+                ["127.0.0.1"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            ),
+            root.path(),
+            false,
+        )
+        .await
+        .expect_err("dead private registry must fail loudly");
+        assert!(
+            err.to_string().contains("dependency-confusion guard"),
+            "expected guard error, got: {err}"
+        );
+        assert!(!root.path().join("node_modules/@dead").exists());
     }
 }
