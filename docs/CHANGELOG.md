@@ -9,6 +9,15 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **Adaptive rate limiting in the firewall**: new `adaptive_rate_limit` mode (off by default)
+  keeps a per-IP EWMA of observed legitimate traffic over 1-second windows and raises that IP's
+  effective threshold to `max(rate_limit_rps, ceil(ewma × 1.5))`, capped at
+  `rate_limit_rps × 4` — gradually growing legitimate traffic is no longer rate-limited, while a
+  burst from an unseen IP still hits the static limit (EWMA = 0 → static). Smoothing knob:
+  `ewma_alpha_pct` (0–100, default 20); formula and knobs documented in
+  `docs/10-security/08-firewall.md`. Tests: `ewma_update_tracks_samples_with_configurable_smoothing`,
+  `effective_rps_rises_with_baseline_and_stays_capped`,
+  `growing_legitimate_traffic_raises_limit_without_violations` (`crates/firewall`).
 - **npm provenance / Sigstore attestation verification on install**: new `provenance` module
   (`crates/pm/src/provenance.rs`) downloads a package's attestations from the registry provenance
   endpoint and verifies each Sigstore bundle: the DSSE envelope signature is checked (ECDSA
