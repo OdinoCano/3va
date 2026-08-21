@@ -9,6 +9,35 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Added
 
+- **HTTP response header injection guard**: `res.setHeader()`/`res.writeHead()` now reject header
+  names that are not RFC 7230 tokens (`ERR_INVALID_HTTP_TOKEN`) and values containing control
+  bytes (`ERR_INVALID_CHAR`; everything ≤ 0x1F except tab, plus DEL). Enforced twice: in the JS
+  compat layer before state mutation, and again in the native response writer (so a bypass via
+  raw `respond*` internals still throws). Tests: `set_header_rejects_crlf_injection`,
+  `set_header_rejects_bare_cr_lf_and_del`, `set_header_rejects_invalid_header_name`,
+  `write_head_rejects_crlf_in_headers`, `smuggled_header_caught_by_native_writer`
+  (`crates/js/tests/http_server.rs`).
+- **`Transfer-Encoding: chunked` support in the HTTP request parser**, with request-smuggling
+  rejection: a request carrying both `Content-Length` and `Transfer-Encoding` is answered `400`;
+  a final non-chunked transfer coding gets `501`; a chunked body larger than the configured
+  body cap gets `413`; malformed chunk sizes are rejected `400`. Chunk extensions are parsed and
+  ignored; trailers are read (bounded by the same byte budget as headers) and discarded. Tests:
+  `chunked_body_decoded_same_as_content_length`,
+  `content_length_plus_transfer_encoding_rejected_400` (`crates/js/tests/http_server.rs`) and
+  `chunked_body_decoded`, `multi_chunk_body_with_large_chunk_decoded`,
+  `content_length_plus_transfer_encoding_rejected_as_smuggling`, `malformed_chunk_size_rejected_with_400`
+  (unit, `crates/js/src/builtins/http_server.rs`).
+- **Decompression-bomb caps**: the four `zlib` decompressors (`gunzip`/`inflate`/
+  `inflateRaw`/`brotliDecompress`) stream through a counting reader that aborts once output
+  exceeds `MAX_DECOMPRESSED_OUTPUT_BYTES` (512 MiB) or the incremental expansion ratio passes
+  `MAX_DECOMPRESSION_RATIO`:1 (4096:1, armed after `RATIO_MIN_INPUT_BYTES` = 256 KiB of input).
+  Package extraction now enforces per-entry and cumulative declared-size caps before any bytes
+  are written: `MAX_EXTRACTED_FILE_BYTES` (512 MiB) and `MAX_EXTRACTED_TOTAL_BYTES` (2 GiB) in
+  both `extract_tarball` (`crates/pm/src/lib.rs`) and `PackageFetcher::extract`
+  (`crates/pm/src/fetcher.rs`). Tests: `builtins::zlib::tests::*`
+  (`crates/js/src/builtins/zlib.rs`), `tests::extract_tarball_*` (`crates/pm/src/lib.rs`),
+  `fetcher::tests::extract_*` (`crates/pm/src/fetcher.rs`).
+
 - **Adaptive rate limiting (HTTP firewall)**: each auto-block now adds a per-IP *strike* and the
   block duration escalates as `blockDurationSecs × blockEscalationFactor^(strikes-1)`, capped at
   `maxBlockDurationSecs` (defaults: 300 s base, ×2, 1 h cap). The strike history persists across
@@ -49,6 +78,12 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   died with autorestart disabled — the supervisor exits and the process shows `error`.
 
 ### Changed
+
+- **README / roadmap / SECURITY.md no longer list the header-injection, chunked-TE and
+  compression-bomb gaps as open** — all three are implemented (see *Added* above). The roadmap
+  security-backlog table marks those rows done; README's Known Limitations drops the stale
+  `setHeader`/`writeHead` CRLF and decompression-cap warnings and now states that chunked
+  transfer coding is supported with CL+TE smuggling rejected.
 
 - **README** no longer lists RUDY and adaptive rate limiting as roadmap items — both are
   implemented (RUDY via `minBodyRateBps` + `bodyTimeoutMs` in the HTTP layer; adaptive escalation in
