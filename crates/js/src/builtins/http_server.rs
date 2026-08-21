@@ -107,6 +107,24 @@ fn js_code_err<'s>(
         .unwrap_or_else(|| v8::undefined(scope).into())
 }
 
+/// Build a `TypeError` carrying a Node-style `.code` without compiling a
+/// script (nested `Script::run` inside a native callback can fail silently
+/// and yield `undefined`). Used for exceptions thrown from native fns.
+fn js_type_error_with_code<'s>(
+    scope: &mut PinScope<'s, '_>,
+    code: &str,
+    msg: &str,
+) -> v8::Local<'s, v8::Value> {
+    let msg_str = V8String::new(scope, msg).unwrap();
+    let err = v8::Exception::type_error(scope, msg_str);
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(err) {
+        let key = V8String::new(scope, "code").unwrap();
+        let val = V8String::new(scope, code).unwrap();
+        obj.set(scope, key.into(), val.into());
+    }
+    err
+}
+
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -133,6 +151,41 @@ fn parse_extra_headers(headers_json: &str) -> Vec<(String, String)> {
             })
         })
         .unwrap_or_default()
+}
+
+/// Header-name validity, matching the JS-side check in modules.rs (RFC 7230
+/// token charset). The JS layer (`setHeader`/`writeHead`) already rejects
+/// invalid names; this is the last line of defense before bytes hit the wire,
+/// covering headers placed into `_headers` without going through those APIs.
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            matches!(
+                b,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            ) || b.is_ascii_alphanumeric()
+        })
+}
+
+/// Header-value validity: no CR/LF or other control bytes except tab (HTTP
+/// response splitting). Bytes >= 0x80 pass through (latin1/UTF-8 payloads).
+fn is_valid_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || !(0x00..=0x1F).contains(&b) && b != 0x7F)
 }
 
 #[derive(Debug)]
@@ -688,9 +741,19 @@ pub fn inject_http_server(
                 resp.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
                 for (k, v) in &extra {
                     let kl = k.to_lowercase();
-                    if kl != "content-length" && kl != "connection" {
-                        resp.push_str(&format!("{}: {}\r\n", k, v));
+                    if kl == "content-length" || kl == "connection" {
+                        continue;
                     }
+                    if !is_valid_header_name(k) || !is_valid_header_value(v) {
+                        let err = js_type_error_with_code(
+                            scope,
+                            "ERR_INVALID_CHAR",
+                            &format!("Invalid character in header content [\"{kl}\"]"),
+                        );
+                        scope.throw_exception(err);
+                        return;
+                    }
+                    resp.push_str(&format!("{}: {}\r\n", k, v));
                 }
                 resp.push_str("\r\n");
 
@@ -759,9 +822,19 @@ pub fn inject_http_server(
                 resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
                 for (k, v) in &extra {
                     let kl = k.to_lowercase();
-                    if kl != "content-length" && kl != "connection" && kl != "transfer-encoding" {
-                        resp.push_str(&format!("{}: {}\r\n", k, v));
+                    if kl == "content-length" || kl == "connection" || kl == "transfer-encoding" {
+                        continue;
                     }
+                    if !is_valid_header_name(k) || !is_valid_header_value(v) {
+                        let err = js_type_error_with_code(
+                            scope,
+                            "ERR_INVALID_CHAR",
+                            &format!("Invalid character in header content [\"{kl}\"]"),
+                        );
+                        scope.throw_exception(err);
+                        return;
+                    }
+                    resp.push_str(&format!("{}: {}\r\n", k, v));
                 }
                 resp.push_str("\r\n");
 
