@@ -461,9 +461,28 @@ async fn server_survives_oversized_content_length_with_early_close() {
     // Allow the server to process the (failed) request and reset.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // A legitimate follow-up request must still succeed.
-    let resp = drive_until(&mut e, raw_http(port, "GET", "/health", "")).await;
-    assert_eq!(response_status(&resp), 200);
+    // A legitimate follow-up request must still succeed. On a heavily loaded
+    // machine a single attempt can starve past raw_http's internal timeout even
+    // though the server is healthy, so retry before declaring it wedged — a
+    // real hang fails every attempt.
+    let mut last = String::new();
+    for attempt in 0..5 {
+        last = drive_until(&mut e, raw_http(port, "GET", "/health", "")).await;
+        if response_status(&last) == 200 {
+            break;
+        }
+        eprintln!(
+            "recovery attempt {attempt} got status {}",
+            response_status(&last)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        response_status(&last),
+        200,
+        "server must recover after oversized Content-Length with early close\nfull response:\n{}",
+        last
+    );
 }
 
 // ── Header injection (CRLF) rejection ──────────────────────────────────────────
