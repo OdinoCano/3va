@@ -1,6 +1,6 @@
 [package]
 name = "vvva_config"
-version = "2.5.0"
+version = "2.6.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Project configuration schema and loader for the 3va JavaScript runtime (3va.config.toml / .json)"
@@ -18,4 +18,4 @@ regex-lite = "0.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-vvva_firewall = { version = "2.5.0", path = "../firewall" }
+vvva_firewall = { version = "2.6.0", path = "../firewall" }

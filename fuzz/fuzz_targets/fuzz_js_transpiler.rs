@@ -225,7 +225,7 @@ fn static_esm_to_cjs(source: &str) -> String {
                     // exercise the same code paths without panicking.
                     let mut j = i;
                     let mut depth: i32 = 0;
-                    let mut stmt_start = j;
+                    let stmt_start = j;
                     while j < len {
                         let cj = src[j];
                         if cj == b'"' || cj == b'\'' || cj == b'`' {
@@ -303,7 +303,7 @@ fn static_esm_to_cjs(source: &str) -> String {
                     let mut j = i;
                     let mut depth: i32 = 0;
                     let mut entered = false;
-                    let mut stmt_start = j;
+                    let stmt_start = j;
                     // Look ahead: if next non-space is function/async/class,
                     // collect up to matching brace; else collect to semicolon.
                     let mut probe = after + 1;

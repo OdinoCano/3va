@@ -2535,14 +2535,26 @@ fn resolve_start_entry(
     let extra_args: Vec<String> = tokens.map(String::from).collect();
 
     let shim_path = cwd.join("node_modules").join(".bin").join(bin_name);
-    let shim_content = std::fs::read_to_string(&shim_path).map_err(|_| {
-        anyhow::anyhow!(
+    if shim_path.symlink_metadata().is_err() {
+        anyhow::bail!(
             "scripts.{} runs '{}', but {} was not found — is the dependency installed?",
             script_name,
             bin_name,
             shim_path.display()
-        )
-    })?;
+        );
+    }
+
+    // Real npm/yarn installs on POSIX link `node_modules/.bin/*` as a plain
+    // symlink straight to the package's JS entry (see `bin-links` in npm) —
+    // no shim script, no marker comment. Resolve that case directly instead
+    // of trying to parse it as a shim.
+    if shim_path.is_symlink() {
+        let target = std::fs::canonicalize(&shim_path)
+            .map_err(|e| anyhow::anyhow!("{} is a broken symlink: {}", shim_path.display(), e))?;
+        return Ok((target, extra_args));
+    }
+
+    let shim_content = std::fs::read_to_string(&shim_path)?;
     let js_entry = shim_content
         .lines()
         .rev()

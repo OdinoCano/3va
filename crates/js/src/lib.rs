@@ -378,6 +378,19 @@ impl JsEngine {
             .map(|u| u.to_string())
             .unwrap_or_else(|_| format!("file://{}", filename.replace('\\', "/")));
 
+        // The file passed to `3va run`/`3va start` is the program the user
+        // explicitly chose to execute — even when it physically lives under
+        // `node_modules/<pkg>` (e.g. a real npm/yarn `.bin` symlink target
+        // like `node_modules/react-native/cli.js`). `__pkgScopeFor()` in
+        // modules.rs derives permission scope purely from path shape, so
+        // without this it would sandbox the entry script itself as if it
+        // were merely a transitively-required dependency of some other app.
+        // Record the entry's own node_modules package name (if any) so the
+        // require() wrapper can treat that one scope as an alias for "."
+        // — every *other* dependency the entry script pulls in is still
+        // scoped normally.
+        let entry_pkg_scope = entry_package_scope(&dirname);
+
         let code = transpiler::replace_import_meta(&code);
 
         {
@@ -390,9 +403,14 @@ impl JsEngine {
             let f = filename.replace('\\', "\\\\").replace('\'', "\\'");
             let d = dirname.replace('\\', "\\\\").replace('\'', "\\'");
             let u = meta_url.replace('\\', "\\\\").replace('\'', "\\'");
+            let entry_scope_js = match &entry_pkg_scope {
+                Some(name) => format!("'{}'", name.replace('\\', "\\\\").replace('\'', "\\'")),
+                None => "null".to_string(),
+            };
 
             let setup = format!(
-                "globalThis.__filename = '{f}'; globalThis.__dirname = '{d}';\
+                "globalThis.__vvva_entry_scope = {entry_scope_js};\
+             globalThis.__filename = '{f}'; globalThis.__dirname = '{d}';\
              globalThis.__vvva_meta_url__ = '{u}';\
              globalThis.__vvva_meta_env__ = (typeof process !== 'undefined' ? \
                 Object.assign(Object.create(null), \
@@ -410,11 +428,14 @@ impl JsEngine {
              if (globalThis.process && Array.isArray(globalThis.process.argv) \
              && globalThis.process.argv.length < 2) \
              {{ globalThis.process.argv.push('{f}'); }}\
-             if (typeof globalThis.require !== 'undefined') \
-               globalThis.require.main = {{ \
+             if (typeof globalThis.require !== 'undefined') {{ \
+               var __vvva_entry_module__ = {{ \
                  id: '.', filename: '{f}', loaded: true, \
                  exports: {{}}, parent: null, children: [], paths: [] \
-               }};",
+               }}; \
+               globalThis.require.main = __vvva_entry_module__; \
+               globalThis.module = __vvva_entry_module__; \
+             }}",
                 f = f,
                 d = d,
                 u = u,
@@ -449,11 +470,10 @@ impl JsEngine {
         let has_listener = || {
             builtins::http_server::has_active_listeners() || builtins::tcp::has_active_listeners()
         };
-        let max_iterations = if self.server_mode || has_listener() {
-            usize::MAX
-        } else {
-            100_000
-        };
+        let has_child = builtins::child_process::has_active_children;
+        // Bare cap for a script with no listener/child/server_mode at any
+        // point — a runaway-timer safety net, not a budget for real work.
+        const BOUNDED_MAX_ITERATIONS: usize = 100_000;
         let mut iterations = 0usize;
         let mut last_heartbeat = std::time::Instant::now();
 
@@ -533,11 +553,22 @@ impl JsEngine {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
 
+            // Recomputed every iteration — a listener/child/server_mode that
+            // only becomes true partway through the script (e.g. a CLI that
+            // spawns a build subprocess after several awaited steps) must
+            // still lift the iteration cap from here on. Computing this once
+            // up front (the old `max_iterations`) let a slow-to-appear child
+            // process get silently abandoned once the bounded cap was hit,
+            // even while `still_pending` below was reporting real work —
+            // exactly the `3va run .../cli.js -- run-android` bug where the
+            // whole process exited cleanly mid-Gradle-build.
+            let unlimited = self.server_mode || has_listener() || has_child();
             let still_pending = self.timer_manager.has_pending()
                 || self.runtime_core.lock().unwrap().pending_task_count() > 0
                 || builtins::napi::has_pending_native_async()
-                || has_listener();
-            if !still_pending || iterations >= max_iterations {
+                || has_listener()
+                || has_child();
+            if !still_pending || (!unlimited && iterations >= BOUNDED_MAX_ITERATIONS) {
                 break;
             }
         }
@@ -565,6 +596,38 @@ impl JsEngine {
         });
         Ok(std::string::String::from_utf8(buf)?)
     }
+}
+
+/// Mirrors `__pkgScopeFor()` in `builtins/modules.rs`: the innermost
+/// `node_modules/<pkg>` (or `node_modules/@scope/pkg`) segment in `dir`, or
+/// `None` when `dir` isn't inside any `node_modules` (the app's own code —
+/// `__pkgScopeFor` returns `'.'` in that case).
+fn entry_package_scope(dir: &str) -> Option<std::string::String> {
+    let mut last = None;
+    let mut rest = dir;
+    while let Some(idx) = rest
+        .find("node_modules/")
+        .or_else(|| rest.find("node_modules\\"))
+    {
+        let after = &rest[idx + "node_modules/".len()..];
+        let mut seg = after.split(['/', '\\']);
+        let first = seg.next().unwrap_or("");
+        let pkg = if let Some(name) = first.strip_prefix('@') {
+            let second = seg.next().unwrap_or("");
+            if second.is_empty() {
+                first.to_string()
+            } else {
+                format!("@{name}/{second}")
+            }
+        } else {
+            first.to_string()
+        };
+        if !pkg.is_empty() {
+            last = Some(pkg);
+        }
+        rest = after;
+    }
+    last
 }
 
 fn is_esm_source(code: &str) -> bool {

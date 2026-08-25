@@ -13,10 +13,36 @@ use vvva_permissions::{Capability, PermissionState};
 struct StreamChild {
     stdin: Option<std::process::ChildStdin>,
     stdout_buf: Arc<Mutex<Vec<u8>>>,
-    done: Arc<AtomicBool>,
+    eof: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
+    exit_code: Arc<Mutex<Option<i32>>>,
     control_buf: Arc<Mutex<Vec<u8>>>,
     control_done: Arc<AtomicBool>,
-    _child: std::process::Child,
+    pid: u32,
+}
+
+/// Maps a single Node `stdio` slot value to a `Stdio`. Only the two modes
+/// real callers in this codebase use are recognized (`execa` passes
+/// `stdio: [...]` with `'inherit'`/`'pipe'` entries) — anything else falls
+/// back to `pipe`, the old hardcoded behavior.
+fn stdio_from_char(c: char) -> std::process::Stdio {
+    if c == 'i' {
+        std::process::Stdio::inherit()
+    } else {
+        std::process::Stdio::piped()
+    }
+}
+
+fn child_is_done(c: &StreamChild) -> bool {
+    c.eof.load(Ordering::SeqCst) && c.exited.load(Ordering::SeqCst)
+}
+
+pub fn has_active_children() -> bool {
+    child_table()
+        .lock()
+        .unwrap()
+        .values()
+        .any(|c| !child_is_done(c))
 }
 
 static CHILD_TABLE: OnceLock<Mutex<HashMap<u32, StreamChild>>> = OnceLock::new();
@@ -497,6 +523,19 @@ pub fn inject_child_process(
             } else {
                 vec![]
             };
+            // 3-char mode string "xyz" for [stdin, stdout, stderr]: 'i' =
+            // inherit the real fd, anything else = pipe (the old hardcoded
+            // behavior). Without this, `execa`'s `stdio: ['inherit', ...]`
+            // (used by react-native's own CLI to stream Gradle's build
+            // output straight to the terminal) was silently ignored —
+            // stdin/stdout were always piped regardless of what was asked
+            // for, starving Gradle of a real stdin and hiding its output.
+            let stdio_mode = args.get(2).to_rust_string_lossy(scope);
+            let mut mode_chars = stdio_mode.chars();
+            let stdin_inherit = mode_chars.next() == Some('i');
+            let stdout_inherit = mode_chars.next() == Some('i');
+            let stdin_mode = stdio_from_char(if stdin_inherit { 'i' } else { 'p' });
+            let stdout_mode = stdio_from_char(if stdout_inherit { 'i' } else { 'p' });
 
             // Create a pipe for fd 3 (--control-fd=3 used by workerd). Unix-only:
             // `libc::pipe`/`dup2`/fd passing to a child has no Windows equivalent
@@ -518,8 +557,8 @@ pub fn inject_child_process(
                 unsafe {
                     std::process::Command::new(&cmd)
                         .args(&arg_vec)
-                        .stdin(std::process::Stdio::piped())
-                        .stdout(std::process::Stdio::piped())
+                        .stdin(stdin_mode)
+                        .stdout(stdout_mode)
                         .stderr(std::process::Stdio::inherit())
                         .pre_exec(move || {
                             if pipe_ok && write_fd >= 0 {
@@ -541,8 +580,8 @@ pub fn inject_child_process(
             #[cfg(not(unix))]
             let child_result = std::process::Command::new(&cmd)
                 .args(&arg_vec)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
+                .stdin(stdin_mode)
+                .stdout(stdout_mode)
                 .stderr(std::process::Stdio::inherit())
                 .spawn();
 
@@ -556,23 +595,42 @@ pub fn inject_child_process(
 
             match child_result {
                 Ok(mut child) => {
-                    let stdin = child.stdin.take().unwrap();
-                    let stdout = child.stdout.take().unwrap();
+                    // `Child.stdin`/`.stdout` are only populated when spawned
+                    // with `Stdio::piped()` — `Stdio::inherit()` leaves them
+                    // `None`. The old unconditional `.unwrap()` here is what
+                    // made `stdio: 'inherit'` impossible to request at all;
+                    // now there's genuinely nothing to read/write for an
+                    // inherited stream, so treat it as already at EOF/absent
+                    // rather than reading from a pipe that doesn't exist.
+                    let stdin = child.stdin.take();
+                    let stdout = child.stdout.take();
+                    let pid = child.id();
                     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-                    let done = Arc::new(AtomicBool::new(false));
-                    let buf2 = buf.clone();
-                    let done2 = done.clone();
-                    std::thread::spawn(move || {
-                        use std::io::Read;
-                        let mut reader = stdout;
-                        let mut tmp = [0u8; 4096];
-                        loop {
-                            match reader.read(&mut tmp) {
-                                Ok(0) | Err(_) => break,
-                                Ok(n) => buf2.lock().unwrap().extend_from_slice(&tmp[..n]),
+                    let eof = Arc::new(AtomicBool::new(stdout.is_none()));
+                    if let Some(stdout) = stdout {
+                        let buf2 = buf.clone();
+                        let eof2 = eof.clone();
+                        std::thread::spawn(move || {
+                            use std::io::Read;
+                            let mut reader = stdout;
+                            let mut tmp = [0u8; 4096];
+                            loop {
+                                match reader.read(&mut tmp) {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => buf2.lock().unwrap().extend_from_slice(&tmp[..n]),
+                                }
                             }
-                        }
-                        done2.store(true, Ordering::SeqCst);
+                            eof2.store(true, Ordering::SeqCst);
+                        });
+                    }
+                    let exited = Arc::new(AtomicBool::new(false));
+                    let exit_code: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+                    let exited2 = exited.clone();
+                    let exit_code2 = exit_code.clone();
+                    std::thread::spawn(move || {
+                        let code = child.wait().ok().and_then(|st| st.code()).or(Some(-1));
+                        *exit_code2.lock().unwrap() = code;
+                        exited2.store(true, Ordering::SeqCst);
                     });
                     let ctrl_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
                     let ctrl_done = Arc::new(AtomicBool::new(false));
@@ -610,12 +668,14 @@ pub fn inject_child_process(
                     child_table().lock().unwrap().insert(
                         id,
                         StreamChild {
-                            stdin: Some(stdin),
+                            stdin,
                             stdout_buf: buf,
-                            done,
+                            eof,
+                            exited,
+                            exit_code,
                             control_buf: ctrl_buf,
                             control_done: ctrl_done,
-                            _child: child,
+                            pid,
                         },
                     );
                     rv.set(v8::Integer::new_from_unsigned(scope, id).into());
@@ -708,10 +768,7 @@ pub fn inject_child_process(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
             let table = child_table().lock().unwrap();
-            let done = table
-                .get(&id)
-                .map(|c| c.done.load(Ordering::SeqCst))
-                .unwrap_or(true);
+            let done = table.get(&id).map(child_is_done).unwrap_or(true);
             rv.set(v8::Boolean::new(scope, done).into());
         },
     )
@@ -723,11 +780,40 @@ pub fn inject_child_process(
         spawn_done_fn.into(),
     );
 
+    // ── __spawnExitCode(id) → i32 | undefined ────────────────────────────────
+    let spawn_exit_code_fn = v8::Function::builder(
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let table = child_table().lock().unwrap();
+            if let Some(c) = table.get(&id)
+                && let Some(code) = *c.exit_code.lock().unwrap()
+            {
+                rv.set(v8::Integer::new(scope, code).into());
+            }
+        },
+    )
+    .build(scope)
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__spawnExitCode").unwrap().into(),
+        spawn_exit_code_fn.into(),
+    );
+
     // ── __spawnKill(id) ───────────────────────────────────────────────────────
     let spawn_kill_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
-            child_table().lock().unwrap().remove(&id);
+            let mut table = child_table().lock().unwrap();
+            if let Some(c) = table.get(&id)
+                && !c.exited.load(Ordering::SeqCst)
+            {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(c.pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            table.remove(&id);
         },
     )
     .build(scope)
@@ -1018,10 +1104,21 @@ pub fn inject_child_process(
                 },
 
                 spawn: function(command, args, opts) {
+                    if (!Array.isArray(args)) { opts = args || {}; args = []; }
                     args = args || [];
                     opts = opts || {};
-                    var id = __spawnCreate(command, args);
-                    var pollTimer = null;
+                    // Node's `stdio` option: a single string applies to all
+                    // three streams, or an array gives one per stream.
+                    // Encoded here as a 3-char "ipp"-style string ('i' =
+                    // inherit, else pipe) for __spawnCreate to read back —
+                    // v8 function args don't carry structured objects
+                    // cleanly across this boundary the way arrays/strings do.
+                    var stdioOpt = opts.stdio;
+                    var stdioArr = Array.isArray(stdioOpt) ? stdioOpt : [stdioOpt, stdioOpt, stdioOpt];
+                    var stdioModeStr = [0, 1, 2].map(function(i) {
+                        return stdioArr[i] === 'inherit' ? 'i' : 'p';
+                    }).join('');
+                    var id = __spawnCreate(command, args, stdioModeStr);
 
                     function toBytes(chunk) {
                         if (typeof chunk === 'string') {
@@ -1042,9 +1139,53 @@ pub fn inject_child_process(
                             return s;
                         }
                     }
-                    function schedulePoll() {
-                        startStdoutPoll();
+
+                    var cp;
+                    var _closed = false;
+
+                    function drainOut() {
+                        var data = __spawnPollOut(id);
+                        while (data && data.length) {
+                            var chunk = bytesToChunk(data);
+                            stdout._dataListeners.slice().forEach(function(fn) { fn(chunk); });
+                            data = __spawnPollOut(id);
+                        }
                     }
+
+                    function finalize() {
+                        if (_closed) return;
+                        _closed = true;
+                        drainOut();
+                        var code = __spawnExitCode(id);
+                        stdout._endListeners.forEach(function(fn) { fn(); });
+                        stderr._endListeners.forEach(function(fn) { fn(); });
+                        cp._closeListeners.slice().forEach(function(fn) { fn(code == null ? 0 : code, null); });
+                        __spawnKill(id);
+                    }
+
+                    // A macrotask (setTimeout), not a bare microtask
+                    // (Promise.resolve().then), and specifically for the
+                    // FIRST check too. A process that finishes near-
+                    // instantly (a trivial `sh -c "echo x; exit 0"`) can
+                    // already show __spawnIsDone() === true by the very next
+                    // microtask tick — but callers like `execa` still need
+                    // several of their own synchronous/microtask setup
+                    // steps (module loading, stdio wiring, registering
+                    // stream listeners) to run first. Finalizing before
+                    // those listeners exist means `execa`'s stdout/stderr
+                    // stream promises (piped in via get-stream) never see
+                    // their 'end' and hang forever, even though the process
+                    // genuinely already exited. A macrotask runs strictly
+                    // after the current microtask queue drains, giving that
+                    // synchronous continuation a real chance to finish.
+                    function watchExit(delayMs) {
+                        setTimeout(function() {
+                            if (_closed) return;
+                            if (__spawnIsDone(id)) finalize();
+                            else watchExit(5);
+                        }, delayMs);
+                    }
+
                     var stdin = {
                         _listeners: {},
                         write: function(chunk, cb) {
@@ -1077,7 +1218,7 @@ pub fn inject_child_process(
                             __spawnEnd(id);
                             var self = this;
                             Promise.resolve().then(function() { self.emit('finish'); });
-                            schedulePoll();
+                            startStdoutPoll();
                             return this;
                         },
                         removeListener: function(ev, fn) {
@@ -1088,26 +1229,17 @@ pub fn inject_child_process(
                         destroy: function() { __spawnKill(id); },
                         unref: function() {}
                     };
+
                     var _stdoutPolling = false;
                     function startStdoutPoll() {
-                        if (_stdoutPolling) return;
+                        if (_stdoutPolling || _closed) return;
                         _stdoutPolling = true;
                         (function pollStdout() {
                             Promise.resolve().then(function() {
-                                var data = __spawnPollOut(id);
-                                if (data && data.length) {
-                                    var chunk = bytesToChunk(data);
-                                    stdout._dataListeners.forEach(function(fn) { fn(chunk); });
-                                }
+                                if (_closed) { _stdoutPolling = false; return; }
+                                drainOut();
                                 if (__spawnIsDone(id)) {
-                                    var tail = __spawnPollOut(id);
-                                    if (tail && tail.length) {
-                                        var tc = bytesToChunk(tail);
-                                        stdout._dataListeners.forEach(function(fn) { fn(tc); });
-                                    }
-                                    stdout._endListeners.forEach(function(fn) { fn(); });
-                                    cp._closeListeners.forEach(function(fn) { fn(0, null); });
-                                    __spawnKill(id);
+                                    finalize();
                                     _stdoutPolling = false;
                                 } else {
                                     setTimeout(pollStdout, 0);
@@ -1115,6 +1247,7 @@ pub fn inject_child_process(
                             });
                         })();
                     }
+
                     var stdout = {
                         _dataListeners: [],
                         _endListeners: [],
@@ -1139,11 +1272,38 @@ pub fn inject_child_process(
                     };
                     var stderr = {
                         _listeners: [],
-                        on: function(ev, fn) { if (ev === 'data') this._listeners.push(fn); return this; },
+                        _endListeners: [],
+                        // stderr is never actually captured natively today
+                        // (the child's real fd 2 always goes straight to
+                        // this process's own inherited stderr, so 'data'
+                        // never fires) — but consumers like `get-stream`
+                        // (which `execa` uses via `getStreamPromise` to
+                        // await stdout/stderr alongside the exit code) wait
+                        // on the stream's 'end' event to resolve. Never
+                        // emitting it left `Promise.all([processDone,
+                        // stdoutPromise, stderrPromise, ...])` hung forever
+                        // even after the process had genuinely exited —
+                        // `await execa(...)` on any real command with the
+                        // default `stdio` never returned.
+                        on: function(ev, fn) {
+                            if (ev === 'data') this._listeners.push(fn);
+                            else if (ev === 'end' || ev === 'close') this._endListeners.push(fn);
+                            return this;
+                        },
                         once: function(ev, fn) { return this.on(ev, fn); },
                         pipe: function(dest) {
                             this.on('data', function(chunk) {
                                 if (dest && typeof dest.write === 'function') dest.write(chunk);
+                            });
+                            // Missing on this stream (unlike stdout's own
+                            // .pipe() below) is exactly what made
+                            // stream.pipeline()/get-stream hang: without
+                            // forwarding 'end' into dest.end(), the
+                            // destination buffer stream never emits
+                            // 'finish', so pipeline()'s pump() never
+                            // advances and its promise never resolves.
+                            this.on('end', function() {
+                                if (dest && typeof dest.end === 'function') dest.end();
                             });
                             return dest;
                         },
@@ -1171,15 +1331,13 @@ pub fn inject_child_process(
                     };
                     (function pollControl() {
                         Promise.resolve().then(function() {
+                            if (_closed) return;
                             var data = __spawnPollControl(id);
                             if (data && data.length) {
                                 var chunk = bytesToChunk(data);
-                                var str = typeof chunk === 'string' ? chunk : (chunk instanceof Uint8Array ? new TextDecoder().decode(chunk) : String(chunk));
-                                console.error('[3va-ctrl] fd3 data:', str.slice(0, 500));
                                 controlStream._dataListeners.forEach(function(fn) { fn(chunk); });
                             }
                             if (__spawnIsControlDone(id)) {
-                                console.error('[3va-ctrl] fd3 done');
                                 controlStream._endListeners.forEach(function(fn) { fn(); });
                             } else {
                                 setTimeout(pollControl, 20);
@@ -1187,12 +1345,23 @@ pub fn inject_child_process(
                         });
                     })();
 
-                    var cp = {
-                        stdin: stdin,
-                        stdout: stdout,
+                    // Real Node sets `child.stdin`/`child.stdout` to `null`
+                    // when that slot's stdio mode is 'inherit' (or 'ignore')
+                    // rather than 'pipe' — there's no stream to read/write.
+                    // Libraries like execa branch on `if (spawned.stdout)` to
+                    // decide whether to consume it as a stream; exposing a
+                    // stub object here even when nothing was ever piped made
+                    // execa wait on a stream that was never really there,
+                    // hanging the whole `await execa(...)` indefinitely.
+                    var exposedStdin = stdioModeStr.charAt(0) === 'i' ? null : stdin;
+                    var exposedStdout = stdioModeStr.charAt(1) === 'i' ? null : stdout;
+                    cp = {
+                        stdin: exposedStdin,
+                        stdout: exposedStdout,
                         stderr: stderr,
-                        stdio: [stdin, stdout, stderr, controlStream],
+                        stdio: [exposedStdin, exposedStdout, stderr, controlStream],
                         pid: 0,
+                        killed: false,
                         _closeListeners: [],
                         _errorListeners: [],
                         on: function(ev, fn) {
@@ -1222,11 +1391,24 @@ pub fn inject_child_process(
                             }
                             return this;
                         },
-                        kill: function() { __spawnKill(id); },
+                        kill: function() {
+                            this.killed = true;
+                            __spawnKill(id);
+                        },
                         ref: function() {},
                         unref: function() {}
                     };
 
+                    // A generous first delay, not 0 — libraries like execa
+                    // defer their own stream-consumption setup (get-stream,
+                    // stream.pipeline) behind their own lazy-promise/onetime
+                    // machinery, which can take more than a single tick to
+                    // actually register listeners after spawn() returns. A
+                    // process that finishes near-instantly must not
+                    // finalize before those listeners exist, or their
+                    // stream promises hang forever despite the process
+                    // having genuinely already exited.
+                    watchExit(15);
                     return cp;
                 },
 
@@ -1261,6 +1443,28 @@ pub fn inject_child_process(
                     var out = (enc === 'utf8' || enc === 'utf-8') ? raw.stdout : (typeof Buffer !== 'undefined' ? Buffer.from(raw.stdout) : raw.stdout);
                     var err = (enc === 'utf8' || enc === 'utf-8') ? raw.stderr : (typeof Buffer !== 'undefined' ? Buffer.from(raw.stderr) : raw.stderr);
                     return { status: raw.status, stdout: out, stderr: err, pid: raw.pid || 0, signal: null, error: null };
+                },
+
+                execFileSync: function(file, args, opts) {
+                    if (!Array.isArray(args)) { opts = args || {}; args = []; }
+                    opts = opts || {};
+                    var raw;
+                    if (opts.input !== undefined) {
+                        var inputStr = typeof opts.input === 'string' ? opts.input : String(opts.input);
+                        raw = JSON.parse(__spawnSyncWithStdin(file, args, inputStr));
+                    } else {
+                        raw = JSON.parse(__spawnSyncExec(file, args));
+                    }
+                    if (raw.status !== 0) {
+                        var err = new Error('Command failed: ' + file + ' ' + args.join(' ') + '\n' + raw.stderr);
+                        err.status = raw.status;
+                        err.stderr = raw.stderr;
+                        err.stdout = raw.stdout;
+                        throw err;
+                    }
+                    var enc = opts.encoding || null;
+                    if (enc === 'utf8' || enc === 'utf-8') return raw.stdout;
+                    return typeof Buffer !== 'undefined' ? Buffer.from(raw.stdout) : raw.stdout;
                 },
 
                 promisify: function(fn) {
