@@ -1,4 +1,15 @@
+use std::io::Write;
 use v8::{Function, FunctionCallbackArguments, PinScope, ReturnValue};
+
+/// `println!`/`eprintln!` panic on a write failure (e.g. EPIPE from a closed
+/// reader — piping through `| head`, a dropped SSH session, a terminal that
+/// closed) — and since this fires from a V8 callback, that panic unwinds
+/// across an FFI boundary, which Rust turns into an abort() instead of a
+/// normal panic: the whole process SIGABRTs over a single failed console.log
+/// write. Write directly and discard the error instead.
+fn write_line(mut w: impl Write, s: &str) {
+    let _ = writeln!(w, "{s}");
+}
 
 pub fn inject_console(scope: &mut PinScope) -> anyhow::Result<()> {
     let context = scope.get_current_context();
@@ -11,11 +22,11 @@ pub fn inject_console(scope: &mut PinScope) -> anyhow::Result<()> {
             let msg = args.get(1).to_rust_string_lossy(scope);
 
             match level.as_str() {
-                "warn" => eprintln!("[WARN] {msg}"),
-                "error" => eprintln!("[ERROR] {msg}"),
-                "info" => println!("[INFO] {msg}"),
-                "debug" => println!("[DEBUG] {msg}"),
-                _ => println!("{msg}"),
+                "warn" => write_line(std::io::stderr(), &format!("[WARN] {msg}")),
+                "error" => write_line(std::io::stderr(), &format!("[ERROR] {msg}")),
+                "info" => write_line(std::io::stdout(), &format!("[INFO] {msg}")),
+                "debug" => write_line(std::io::stdout(), &format!("[DEBUG] {msg}")),
+                _ => write_line(std::io::stdout(), &msg),
             }
             rv.set(v8::undefined(scope).into());
         },
@@ -38,6 +49,12 @@ pub fn inject_console(scope: &mut PinScope) -> anyhow::Result<()> {
                     out.push('null');
                 } else if (a === undefined) {
                     out.push('undefined');
+                } else if (a instanceof Error) {
+                    // JSON.stringify(error) serializes to '{}' — message/stack
+                    // are non-enumerable own properties — which is why errors
+                    // logged via console.error/log used to print as an empty
+                    // object instead of their stack trace, like Node does.
+                    out.push(a.stack || (a.name + ': ' + a.message));
                 } else if (typeof a === 'object' || Array.isArray(a)) {
                     try { out.push(JSON.stringify(a)); } catch (_) { out.push('[object Object]'); }
                 } else {

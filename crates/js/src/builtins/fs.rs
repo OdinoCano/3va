@@ -2098,7 +2098,7 @@ pub fn inject_fs(
 
         // Build fs.promises from fs async methods
         ['readFile','writeFile','appendFile','readdir','mkdir','rm','rmdir','unlink','rename',
-         'copyFile','chmod','symlink','stat','lstat','realpath','access'].forEach(function(fn) {
+         'copyFile','chmod','symlink','readlink','stat','lstat','realpath','access'].forEach(function(fn) {
             fs.promises[fn] = function() {
                 var args = Array.prototype.slice.call(arguments);
                 return new Promise(function(resolve, reject) {

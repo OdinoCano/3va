@@ -1732,6 +1732,10 @@ pub fn inject_require(
                     freemem: function() { return __osFreeMem(); },
                     uptime: function() { return __osUptime(); },
                     cpus: function() { return JSON.parse(__osCpus()); },
+                    availableParallelism: function() {
+                        var list = JSON.parse(__osCpus());
+                        return (list && list.length) || 1;
+                    },
                     networkInterfaces: function() { return JSON.parse(__osNetworkInterfaces()); },
                     platform: function() { return __osPlatform(); },
                     arch: function() { return __osArch(); },
@@ -2262,6 +2266,7 @@ pub fn inject_require(
             Stream.PassThrough = PassThrough;
             Stream.Duplex = Duplex;
             Stream.Stream = Stream;
+            Stream.EventEmitter = EventEmitter;
             Stream.isDisturbed = function(s) {
                 return !!(s && s._readableState && (s._readableState.disturbed || s._readableState.ended || s._readableState.aborted));
             };
@@ -2715,12 +2720,23 @@ pub fn inject_require(
                         dirname: function(path) {
                             path = toSep(String(path || ''));
                             if (!path) return '.';
+                            // Raw string split on the last separator — like Node,
+                            // NOT the "." / ".." resolving splitNormalize() used by
+                            // join/resolve/normalize. A trailing "." is a literal
+                            // path segment here (dirname("/a/b/.") === "/a/b"), not
+                            // something to collapse away first — collapsing it
+                            // before popping the last segment strips one level too
+                            // many (this broke Metro's entry-point resolution,
+                            // which represents "the project root itself" as
+                            // projectRoot + "/.").
                             var isAbsolute = p.isAbsolute(path);
-                            var parts = splitNormalize(path, sep, isAbsolute);
-                            parts.pop();
-                            var result = parts.join(sep);
-                            if (isAbsolute) result = sep + result;
-                            return result || (isAbsolute ? sep : '.');
+                            var end = path.length;
+                            while (end > 1 && path.charAt(end - 1) === sep) end--;
+                            var trimmed = path.slice(0, end);
+                            var idx = trimmed.lastIndexOf(sep);
+                            if (idx === -1) return isAbsolute ? sep : '.';
+                            if (idx === 0) return sep;
+                            return trimmed.slice(0, idx);
                         },
                         basename: function(path, ext) {
                             path = toSep(String(path || ''));
@@ -2963,7 +2979,13 @@ pub fn inject_require(
                 function urlFormat(obj) {
                     if (typeof obj === 'string') return obj;
                     if (obj && obj.href) return obj.href;
-                    var s = (obj.protocol || '') + '//';
+                    // Node normalizes a protocol missing its trailing ':' (e.g.
+                    // { protocol: 'http' }, as react-native's own CLI passes) —
+                    // without this, the result is missing the colon entirely
+                    // ('http//host:port/'), which `new URL()` then rejects.
+                    var proto = obj.protocol || '';
+                    if (proto && proto.charAt(proto.length - 1) !== ':') proto += ':';
+                    var s = proto + '//';
                     if (obj.auth) s += obj.auth + '@';
                     s += (obj.host || obj.hostname || '');
                     if (obj.port) s += ':' + obj.port;
@@ -3098,8 +3120,16 @@ pub fn inject_require(
             }
             util.inherits(Server, EventEmitter);
 
-            Server.prototype.listen = function(port, host, cb) {
+            Server.prototype.listen = function(port, host, backlog, cb) {
                 var self = this;
+                // Real Node accepts listen(port, host, backlog, callback) —
+                // Metro's own earlyPortCheck calls it exactly that way
+                // (backlog explicitly undefined, callback as the 4th arg).
+                // Without shifting here, a 4-arg call silently drops the real
+                // callback (this function used to only declare 3 params), so
+                // the 'listening' event never fires and any caller awaiting
+                // it — like earlyPortCheck's Promise — hangs forever.
+                if (typeof backlog === 'function') { cb = backlog; backlog = undefined; }
                 if (typeof host === 'function') { cb = host; host = '0.0.0.0'; }
                 host = host || '0.0.0.0';
                 var result = __netListen(port, host);
@@ -3454,16 +3484,29 @@ pub fn inject_require(
                     if (__fixed) merged = __fixed;
                     __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged);
                 } else {
+                    // Route through __httpRespondBytes (JS-side TextEncoder,
+                    // not the native __httpRespond(string) path) even for a
+                    // plain string body. __httpRespond converts the V8
+                    // string to a Rust String via to_rust_string_lossy(),
+                    // which for a large multi-megabyte string containing
+                    // multi-byte UTF-8 sequences (e.g. Metro serving a JS
+                    // bundle as a single ~4M-character string) was silently
+                    // corrupting individual characters — not consistently,
+                    // and not in a way curl-from-localhost's own single-shot
+                    // fetch always reproduced, which is what made it look
+                    // connection/cache-dependent. TextEncoder is a
+                    // spec'd, well-exercised primitive with no such issue at
+                    // this scale, so encoding here in JS and always calling
+                    // the byte-safe responder sidesteps the native
+                    // conversion entirely rather than depending on finding
+                    // the exact defect in it.
                     var body = this._chunks.join('');
                     var __fixedS = __viteFix(body);
-                    if (__fixedS) {
-                        if (typeof Buffer !== 'undefined') {
-                            __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__fixedS, 'utf-8'));
-                        } else {
-                            __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__fixedS));
-                        }
+                    var __finalS = __fixedS || body;
+                    if (typeof Buffer !== 'undefined') {
+                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'));
                     } else {
-                        __httpRespond(this._connId, this.statusCode, this.statusMessage, headersJson, body);
+                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS));
                     }
                 }
                 setTimeout(function() { self.emit('finish'); self.emit('close'); if (typeof callback === 'function') callback(); }, 0);
@@ -4342,7 +4385,15 @@ pub fn inject_require(
             var re = /[\/\\]node_modules[\/\\](@[^\/\\]+[\/\\][^\/\\]+|[^\/\\]+)/g;
             var last = null, m;
             while ((m = re.exec(dir)) !== null) { last = m[1]; }
-            return last || '.';
+            if (!last) return '.';
+            // The entry file passed to `3va run`/`3va start` is the program
+            // the user explicitly chose to execute, even when it physically
+            // lives under node_modules/<pkg> (a real npm/yarn `.bin` symlink
+            // target, e.g. node_modules/react-native/cli.js). Treat its own
+            // package the same as app code ('.') — every *other* dependency
+            // it requires is still scoped normally.
+            if (globalThis.__vvva_entry_scope && last === globalThis.__vvva_entry_scope) return '.';
+            return last;
         }
 
         // Only builtins that themselves perform capability-gated native calls
@@ -4830,6 +4881,21 @@ fn substitute_exports_wildcard(
     }
 }
 
+/// Node's `patternKeyCompare`: sorts candidate wildcard keys so the most
+/// specific one is tried first. `baseLength` is the length of the key up to
+/// and including its `*` — a longer literal prefix wins; ties go to the
+/// longer overall key (e.g. `"./src/*.js"` beats `"./src/*"` for the same
+/// prefix, because the former's literal `.js` suffix is more specific).
+/// Without this, iterating `exports` in whatever order `serde_json::Map`
+/// happens to give (alphabetical, since it's a `BTreeMap` without the
+/// `preserve_order` feature) can match a broader pattern first and — since
+/// the old code accepted the first structural match without checking the
+/// substituted path actually exists — silently produce a wrong path (e.g.
+/// double-appending `.js`) instead of falling through to the correct key.
+fn pattern_key_base_len(key: &str) -> Option<usize> {
+    key.find('*').map(|i| i + 1)
+}
+
 pub fn resolve_exports_pattern(
     exports: &serde_json::Map<String, serde_json::Value>,
     subpath: &str,
@@ -4837,6 +4903,7 @@ pub fn resolve_exports_pattern(
 ) -> Option<Option<PathBuf>> {
     // Node.js exports wildcard matching: key may contain exactly one '*'
     // e.g. "./drivers/*" with value {"require": "./drivers/*.cjs", "import": "./drivers/*.mjs"}
+    let mut candidates: Vec<(&str, &serde_json::Value)> = Vec::new();
     for (key, val) in exports {
         let Some(star) = key.find('*') else { continue };
         let prefix = &key[..star];
@@ -4853,7 +4920,18 @@ pub fn resolve_exports_pattern(
         if !suffix.is_empty() && !subpath.ends_with(suffix) {
             continue;
         }
-        let capture = &subpath[plen..n - slen];
+        candidates.push((key, val));
+    }
+    candidates.sort_by(|(a, _), (b, _)| {
+        let base_a = pattern_key_base_len(a).unwrap_or(a.len());
+        let base_b = pattern_key_base_len(b).unwrap_or(b.len());
+        base_b.cmp(&base_a).then(b.len().cmp(&a.len()))
+    });
+    for (key, val) in candidates {
+        let star = key.find('*').unwrap();
+        let prefix = &key[..star];
+        let suffix = &key[star + 1..];
+        let capture = &subpath[prefix.len()..subpath.len() - suffix.len()];
         if let Some(resolved) = substitute_exports_wildcard(val, capture, pkg_dir) {
             return Some(Some(resolved));
         }

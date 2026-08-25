@@ -9,7 +9,7 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
         // to detect browser vs Node.js and calls self.writeFileSync when self is defined.
         // Real Node.js has no global `self`. Keep navigator for web-compat.
         globalThis.navigator = {
-            userAgent: '3va/2.5.0',
+            userAgent: '3va/2.6.0',
             onLine: true,
         };
 
@@ -606,6 +606,9 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
             if (type === 'abort') {
                 this._listeners = this._listeners.filter(function(l) { return l !== listener; });
             }
+        };
+        AbortSignal.prototype.throwIfAborted = function() {
+            if (this.aborted) throw this.reason !== undefined ? this.reason : new Error('AbortError');
         };
         AbortSignal.abort = function(reason) {
             var signal = new AbortSignal();

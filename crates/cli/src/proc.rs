@@ -183,21 +183,26 @@ fn list_all_processes() -> Vec<ProcessInfo> {
     processes
 }
 
-/// Resolve `entry` to an absolute path against `cwd`, and the directory the
-/// app should run from — otherwise a relative entry (e.g. "index.js") no
-/// longer points at the right file once the child's cwd changes.
+/// Resolve `entry` to an absolute path against `cwd`. The app always runs
+/// from `cwd` itself — same as `npm run <script>`/`node file.js`, where the
+/// child's `process.cwd()` is wherever the command was invoked from, never
+/// derived from the resolved binary's own location. That distinction matters
+/// once `entry` comes from `resolve_start_entry()` resolving a package.json
+/// script through a `node_modules/.bin` symlink (e.g. `android` →
+/// `node_modules/react-native/cli.js`): using the entry's *own* directory as
+/// cwd used to make a spawned Metro report its project root as
+/// `node_modules/react-native` instead of the real project root, so
+/// `react-native run-android`'s own dev-server check saw a mismatched
+/// `X-React-Native-Project-Root` and treated an already-running Metro as a
+/// conflicting process on the port rather than recognizing it. `abs_entry`
+/// is already absolute, so the spawned process finds it regardless of cwd.
 fn resolve_entry_and_run_dir(entry: &Path, cwd: &Path) -> (PathBuf, PathBuf) {
     let abs_entry = if entry.is_absolute() {
         entry.to_path_buf()
     } else {
         cwd.join(entry)
     };
-    let run_dir = abs_entry
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| cwd.to_path_buf());
-    (abs_entry, run_dir)
+    (abs_entry, cwd.to_path_buf())
 }
 
 /// Everything the supervisor needs to spawn and keep an app cohort alive:
@@ -345,10 +350,11 @@ fn spawn_app_instance(
     if cluster {
         cmd.env("VVVA_CLUSTER", "1");
     }
-    cmd.arg(entry)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null());
+    cmd.arg(entry);
+    if !args.is_empty() {
+        cmd.arg("--").args(args);
+    }
+    cmd.current_dir(cwd).stdin(std::process::Stdio::null());
 
     if inherit_stdio {
         cmd.stdout(std::process::Stdio::inherit())

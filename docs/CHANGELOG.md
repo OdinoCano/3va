@@ -7,6 +7,8 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+## [v2.6.0] — 2026-08-25
+
 ### Added
 
 - **`X-Forwarded-For` support behind a trusted reverse proxy**: new `trustedProxies` firewall
@@ -150,6 +152,113 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Fixed
 
+- **`3va start`/`3va run` couldn't drive a real npm project's dev toolchain end-to-end** — found and
+  fixed while running React Native's CLI (Metro + Gradle + ADB) under 3va instead of Node. Nine
+  separate defects, each masking the next until fixed:
+  - `resolve_start_entry()` (`crates/cli/src/main.rs`) only recognized npm/pnpm-style shim
+    *scripts* (`# cmd-shim-target=` marker comment) for a `package.json` script's `node_modules/.bin`
+    binary — a real npm/yarn install on POSIX links `.bin/*` as a plain symlink instead, which made
+    `3va start <script>` fail on any project not installed by 3va's own package manager. Now follows
+    the symlink directly via `std::fs::canonicalize` when no marker is present.
+  - `spawn_app_instance()` (`crates/cli/src/proc.rs`) forwarded a script's extra CLI args to the
+    spawned `3va run` without a `--` separator, so clap parsed them as flags to `run` itself
+    (`unexpected argument`) instead of passing them through to the script.
+  - `require.main === module` was always `false` for the entry file — `require.main` was built as a
+    fresh object literal distinct from the `module` binding the entry script's own top-level code
+    resolves to. Broke the extremely common `if (require.main === module) { main() }` idiom;
+    `globalThis.module` is now set to the same object as `require.main` before the entry script runs.
+  - `resolve_exports_pattern()` (`crates/js/src/builtins/modules.rs`) picked the first structurally
+    matching `package.json["exports"]` wildcard key in whatever order `serde_json::Map` iterates
+    (alphabetical), not the most specific one, and accepted a match without checking the resulting
+    path existed — `metro-runtime`'s `"./src/*"` (broad) could out-race `"./src/*.js"` (specific) for
+    the same subpath, silently resolving to a nonexistent double-extensioned file. Candidates are now
+    sorted by Node's own `patternKeyCompare` rule (longer literal prefix wins, then longer full key)
+    before the first match is taken.
+  - `url.format()` didn't append `:` to a `protocol` value missing its trailing colon (e.g.
+    `{ protocol: 'http' }`, exactly how a project's own dev-server tooling — not just this one — may
+    construct it) — produced a colon-less scheme (`http//host:port/`) that `new URL()` then rejected.
+  - `child_process.execFileSync` and `os.availableParallelism()` were unimplemented — both are
+    common enough in real dev-server code (worker-pool sizing, environment probes) to block startup
+    outright rather than just missing a feature.
+  - `fs.promises.readlink` was missing from the `fs.promises` auto-wrap list in `fs.rs` (present as
+    `fs.readlink`/`fs.readlinkSync`, never promisified).
+  - `console.log`/`console.error` formatted any `Error` argument via `JSON.stringify`, which drops
+    `message`/`stack` (both non-enumerable) and always printed `{}` — masked the real cause of every
+    downstream failure investigated while chasing this list. Now prints `.stack` (falling back to
+    `name: message`), matching Node.
+  - **`path.dirname()` over-stripped a trailing `"."` path segment** — it ran the same `.`/`..`-
+    resolving normalization used by `join`/`resolve` before popping the last segment, so
+    `dirname("/a/b/.")` returned `/a` instead of `/a/b` (Node's `dirname` is a raw last-separator
+    split; a trailing `.` is a literal segment to pop, not something to resolve away first). This
+    broke Metro's own entry-point resolution, which represents "the project root itself" as
+    `projectRoot + "/."` — every relative import from the entry point resolved one directory too
+    high.
+  - `Stream.EventEmitter` (`require('stream').EventEmitter`, a real, if legacy, Node export) wasn't
+    set — broke any package whose own class does
+    `class X extends require('stream').EventEmitter {}` (`jest-worker` does, transitively pulled in
+    by Metro's transform-worker pool).
+- **`resolve_entry_and_run_dir()` (`crates/cli/src/proc.rs`) set a `3va start` (background/daemon
+  path only — `3va start --attach`'s `run_supervisor()` already used real `cwd`) child process's
+  `cwd` to the *resolved entry file's own directory* instead of the directory `3va start` was
+  invoked from.** Real Node/npm always run a script with `cwd` set to wherever the command was
+  invoked (`npm run <script>`'s child never inherits `node_modules/<pkg>`'s own directory as cwd,
+  even though that's where the resolved binary lives) — every dev-server tool that derives its
+  project root from `process.cwd()` got a nonsense value once `resolve_start_entry()` (above) started
+  resolving scripts through real `node_modules/.bin` symlinks. Concretely: a background-started Metro
+  reported its `X-React-Native-Project-Root` as `node_modules/react-native` instead of the real
+  project, so `react-native run-android`'s own "is a dev server for this project already running?"
+  check saw a mismatched header and treated an already-running, correctly-serving Metro as a
+  conflicting process on the port, dropping into an interactive "use a different port?" prompt that
+  then hung forever (no TTY to answer it in a supervised/`--attach` context). `run_dir` is now always
+  the invocation `cwd`, matching `run_supervisor()`'s already-correct behavior — `abs_entry` is
+  already absolute, so the spawned process still finds the entry file regardless.
+- **`AbortSignal.prototype.throwIfAborted` was missing.**
+- **`net.Server.prototype.listen` didn't support `listen(port, host, backlog, callback)`** — only
+  the 3-arg `(port, host, cb)` form was implemented, so a real 4-arg call (Metro's own
+  `earlyPortCheck()` calls it exactly that way, backlog explicitly `undefined`) silently dropped the
+  actual callback: `cb` was `undefined`, the `'listening'` event listener was never registered, and
+  the caller's `await new Promise(...)` around it hung forever with no error, no timeout — appearing
+  from the outside as Metro simply never starting. Every native HTTP request against a server bound
+  this way returned "Empty reply from server" because the accept loop's listener was correctly bound
+  but nothing was ever waiting on `'listening'` to proceed past it.
+- **The event loop's iteration cap (`run_event_loop`, `crates/js/src/lib.rs`) was computed once, up
+  front** — `usize::MAX` if a listener/child process/`server_mode` was *already* active at the very
+  start, else a bounded `100_000`. A child process that only appears later in the script (e.g. after
+  several awaited startup steps — device detection, emulator boot, etc.) never lifted that bound: the
+  script could hit the 100,000-iteration ceiling and the whole process would exit cleanly with status
+  0 mid-build, orphaning the still-running child (observed as `3va run .../cli.js -- run-android`
+  silently abandoning a real `./gradlew` invocation right after forking it, with no error). The
+  bound is now `self.server_mode || has_listener() || has_child()` re-evaluated every iteration
+  alongside `still_pending`, not cached from the loop's first pass.
+- **`child_process.spawn()`'s `opts.stdio` was silently ignored** — `__spawnCreate` always piped
+  stdin/stdout natively and exposed non-`null` stub stream objects for `cp.stdin`/`cp.stdout`
+  regardless of what was requested, unlike real Node where an `'inherit'` slot is `null` on the
+  returned `ChildProcess`. Libraries that branch on `if (spawned.stdout)` to decide whether to
+  consume a stream (e.g. `execa`, used by React Native's own CLI to stream Gradle's build output to
+  the terminal) saw a stream that was never actually there, hanging on it forever. `__spawnCreate`
+  now takes a 3-char stdio mode string and wires real `Stdio::inherit()`/`Stdio::piped()`
+  accordingly; `cp.stdin`/`cp.stdout` are `null` when inherited.
+- **`stderr.pipe(dest)` never forwarded the source's `'end'` event into `dest.end()`** (unlike
+  `stdout.pipe()`, which already did) — anything consuming child stderr via `stream.pipeline()` /
+  `get-stream` (again, `execa`'s own dependency chain) had its destination stream's `.end()` never
+  called, so it never emitted `'finish'`, so the consumer's promise never resolved — despite the
+  child process having already exited cleanly.
+- **Race: a child process finishing near-instantly could finalize before a caller's own stream
+  listeners were registered.** `watchExit()`'s first liveness check ran on a bare microtask
+  (`Promise.resolve().then(...)`), which can already observe `__spawnIsDone() === true` for a
+  trivial command (`sh -c "echo x; exit 0"`) before a caller like `execa` — whose own stdout/stderr
+  consumption is itself deferred behind several layers of lazy-promise/`onetime()` wrapping — has
+  gotten around to subscribing. The close event fired to zero listeners and was gone by the time
+  they existed, hanging any promise waiting on stream completion forever even though the process had
+  genuinely already exited. The first check is now a real macrotask (`setTimeout(..., 15)`, not 0),
+  giving that synchronous/microtask setup room to finish first; polling backs off to 5ms after.
+- **`console.log`/`console.error`/`console.info`/`console.debug` crashed the entire process with
+  `SIGABRT`** if the underlying stdout/stderr write failed — most commonly a broken pipe (`| head`,
+  a closed terminal, a dropped SSH session). Rust's `println!`/`eprintln!` panic on a write error by
+  design, and that panic — raised from inside a V8 callback, i.e. across an FFI boundary — unwinds
+  into an abort instead of a normal panic. Console output is now written directly via `std::io`,
+  discarding (not panicking on) a failed write, matching how a failed `console.log` behaves in Node
+  (silently, since stdout there is also best-effort).
 - **`reject_stream` sent RST instead of a clean FIN** for rejected connections whose client had
   already sent unread request bytes (blocked-IP 403/503 path). The socket now drains briefly before
   closing, so blocked clients actually receive their 403/503 response instead of a
