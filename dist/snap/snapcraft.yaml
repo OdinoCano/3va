@@ -21,6 +21,10 @@ website: https://github.com/OdinoCano/3va
 grade: stable
 confinement: strict
 
+platforms:
+  amd64:
+  arm64:
+
 # Strict confinement mirrors 3va's deny-by-default philosophy at the
 # distribution layer.  Scripts that need real filesystem or network access
 # must use 3va's own permission flags; the snap does not pre-grant anything
