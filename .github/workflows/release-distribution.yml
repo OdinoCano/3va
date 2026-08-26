@@ -517,15 +517,13 @@ jobs:
           $nupkg = "dist\chocolatey\3va.$($env:VERSION -replace '^v','').nupkg"
           $output = choco push $nupkg --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY 2>&1
           Write-Host $output
-          # 403 on a new package ID = Chocolatey requires first-time submission via
-          # the web portal (https://push.chocolatey.org/) before API pushes are
-          # allowed.  Treat this as a warning, not a hard failure, so the rest of
-          # the distribution jobs still succeed.
+          # The `3va` package ID is already approved and live on the community
+          # feed, so any push failure here (403 included) is a real problem —
+          # an expired/invalid CHOCO_API_KEY, a revoked maintainer, etc. — not
+          # the "brand-new package needs manual first submission" case. Fail
+          # the job so it doesn't silently leave a version unpublished.
           if ($LASTEXITCODE -ne 0) {
-            if ($output -match '403') {
-              Write-Warning "choco push returned 403. If this is a new package ID, submit the .nupkg manually at https://push.chocolatey.org/ to get it approved. Subsequent version pushes will then work via this workflow."
-              exit 0
-            }
+            Write-Error "choco push failed (exit $LASTEXITCODE). Check that CHOCO_API_KEY in the 'chocolate' environment is a valid, non-expired API key with push rights on the '3va' package."
             exit $LASTEXITCODE
           }
 
