@@ -7,6 +7,71 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+### Fixed
+
+- **Multi-byte UTF-8 corruption in streamed/chunked data paths — the "Metro under `3va start`
+  serves bundles with emoji/accented characters replaced by U+FFFD" bug.** Found while serving a
+  React Native bundle (~4 MB, assembled from streamed chunks) through `http.ServerResponse`: the
+  on-device client decoded individual multi-byte sequences (emoji, accented characters) as the
+  UTF-8 replacement character, deterministically, with a fully cleared cache — while a single-shot
+  fetch of the same URL from localhost came back byte-identical to stock Node. Three stacked
+  defects, each independently sufficient to corrupt the payload, all in the byte→string direction
+  (the earlier suspicion of `to_rust_string_lossy()` in `http_server.rs` — the *string→bytes*
+  direction — was a red herring, which is why bypassing it changed nothing):
+  - **The runtime's only `TextDecoder` (the fallback installed by `crates/js/src/builtins/buffer.rs`)
+    never decoded 4-byte UTF-8 sequences.** Its final branch was `else { i += 3; str += '\uFFFD' }`:
+    every lead byte F0–F7 (all astral-plane characters — every emoji) collapsed to a single U+FFFD
+    on *any* decode, regardless of chunking, and a sequence truncated at the buffer end read past
+    the array (`undefined & 0x3F` → wrong code points) instead of yielding U+FFFD. Since
+    `Buffer.prototype.toString('utf8')` routes through this decoder, **every** Buffer→string
+    conversion in the entire runtime mangled emoji — including `string_decoder`'s, which made even
+    a correct incremental decoder useless. Rewritten to spec: full 1–4 byte decoding with surrogate
+    pair generation, overlong/surrogate/out-of-range rejection, one U+FFFD per invalid maximal
+    subpart, `latin1`/`binary`/`ascii` label support, and WHATWG `{ stream: true }` incremental
+    decoding (incomplete trailing bytes held back for the next call — which `TextDecoderStream`
+    had been passing all along to a decoder that silently ignored it).
+  - **`Readable.prototype.setEncoding()` stored the encoding but never used it** — `push()`
+    emitted raw byte chunks, so code following Node semantics
+    (`stream.setEncoding('utf8'); stream.on('data', c => s += c)`) coerced each chunk to a string
+    independently, corrupting every multi-byte sequence straddling a chunk boundary (with 3va's
+    `fs.ReadStream` 64 KiB default `highWaterMark`, at deterministic 64 KiB offsets — matching the
+    "consistently and reproducibly" report, and explaining why a request served through a path
+    that never decoded (one large string body, single `res.end()`) came back clean). The stream
+    layer now routes encoding through the existing (fixed) `StringDecoder`: `setEncoding()` and the
+    `{ encoding }` constructor option create one long-lived decoder per stream, `push()` decodes
+    byte chunks through it (strings pass through; objectMode is exempt), `push(null)` flushes the
+    held-back trailing bytes as a final `'data'` event before `'end'`, and `read()` joins buffered
+    strings. `http.IncomingMessage` request bodies now flow through `push()` instead of a bare
+    `emit('data')`, so `req.setEncoding()` is honored too.
+  - **`StringDecoder.prototype.write()` dropped its pending incomplete sequence whenever two
+    consecutive writes both ended mid-sequence** — the second write's truncated tail overwrote
+    `this._incomplete` and the first write's held-back bytes vanished (data loss, not just
+    replacement chars), and a raw `Uint8Array` input took the `Buffer.isBuffer()`-is-loose path
+    into `Uint8Array.prototype.toString()`, returning comma-joined digit strings. Rewritten to
+    prepend the pending bytes *before* scanning for the new truncation point, and to normalize
+    non-`Buffer` inputs via `Buffer.from()`.
+  - Same-class fixes elsewhere: `process.stdin`'s pump used a **fresh `TextDecoder` per chunk**
+    (the textbook boundary bug — now one persistent decoder, flushed at EOF), and the `ftp`, `pop3`
+    and `irc` line readers did the same on every 64 KiB socket read (now one persistent
+    `{ stream: true }` decoder per connection, flushed at transfer end for FTP data reads).
+  Verified with a deterministic repro (no Metro/device needed): a payload with é/€/😀 positioned
+  to straddle consecutive 64 KiB chunk boundaries round-trips byte-identically through
+  `Readable.setEncoding('utf8')` + chunked `push()`, and an end-to-end HTTP test assembles a
+  bundle-shaped body from a byte stream and asserts the served response is byte-identical to the
+  original UTF-8. Tests: `crates/js/tests/utf8_stream_integrity.rs`
+  (`textdecoder_decodes_four_byte_utf8_sequences`,
+  `textdecoder_replaces_truncated_sequence_with_single_replacement_char`,
+  `textdecoder_stream_mode_holds_incomplete_sequence`,
+  `buffer_tostring_roundtrips_multibyte_characters`,
+  `string_decoder_reassembles_sequences_split_across_chunks`,
+  `string_decoder_consecutive_writes_ending_mid_sequence`,
+  `string_decoder_end_flushes_dangling_bytes_as_replacement`,
+  `readable_setencoding_reassembles_multibyte_across_64k_boundaries`,
+  `readable_constructor_encoding_option_is_honored`,
+  `readable_read_returns_decoded_string_when_encoding_set`,
+  `http_bundle_assembly_serves_multibyte_intact`). The README's "run Metro under real Node.js"
+  workaround is no longer needed.
+
 ## [v2.6.0] — 2026-08-25
 
 ### Added

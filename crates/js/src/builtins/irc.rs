@@ -315,7 +315,12 @@ pub fn inject_irc(
                 try {
                     var chunk = __ircRead(self._id, 65536);
                     delay = 1;
-                    self._lineBuffer += new TextDecoder().decode(new Uint8Array(chunk));
+                    // One long-lived decoder per connection: a fresh
+                    // TextDecoder per chunk would replace any multi-byte
+                    // sequence split across two reads with U+FFFD; {stream:
+                    // true} holds the incomplete tail bytes back instead.
+                    if (!self._textDecoder) self._textDecoder = new TextDecoder();
+                    self._lineBuffer += self._textDecoder.decode(new Uint8Array(chunk), { stream: true });
                     var lines = self._lineBuffer.split('\n');
                     self._lineBuffer = lines.pop();
                     for (var i = 0; i < lines.length; i++) {

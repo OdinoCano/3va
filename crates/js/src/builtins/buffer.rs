@@ -25,11 +25,27 @@ if (typeof globalThis.TextEncoder === 'undefined') {
     };
 }
 if (typeof globalThis.TextDecoder === 'undefined') {
-    globalThis.TextDecoder = function TextDecoder(enc) { this.encoding = enc || 'utf-8'; };
-    globalThis.TextDecoder.prototype.decode = function(buf) {
-        if (!buf) return '';
+    // Correct UTF-8 decoder: handles 1-4 byte sequences (4-byte sequences are
+    // surrogate pairs in JS strings — the previous implementation replaced
+    // every one with U+FFFD, corrupting all astral-plane characters such as
+    // emoji on any Buffer→string conversion), replaces truncated/invalid
+    // sequences with U+FFFD instead of reading past the end of the buffer,
+    // honours the latin1/binary/ascii labels, and supports incremental
+    // decoding via { stream: true } (incomplete trailing bytes are held back
+    // and prepended to the next call, the WHATWG streaming semantics that
+    // TextDecoderStream relies on).
+    globalThis.TextDecoder = function TextDecoder(enc, options) {
+        var norm = String(enc || 'utf-8').toLowerCase().replace(/[^a-z0-9]/g, '');
+        this.encoding = (norm === 'latin1' || norm === 'binary') ? 'latin1' : (norm === 'ascii' ? 'ascii' : 'utf-8');
+        this.fatal = !!(options && options.fatal);
+        this._pending = null;
+    };
+    globalThis.TextDecoder.prototype.decode = function(buf, options) {
+        var stream = !!(options && options.stream);
         var bytes;
-        if (buf instanceof Uint8Array) {
+        if (buf == null) {
+            bytes = new Uint8Array(0);
+        } else if (buf instanceof Uint8Array) {
             bytes = buf;
         } else if (buf instanceof DataView) {
             bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -40,13 +56,60 @@ if (typeof globalThis.TextDecoder === 'undefined') {
         } else {
             bytes = new Uint8Array(buf);
         }
-        var str = '', i = 0;
-        while (i < bytes.length) {
-            var b = bytes[i++];
-            if (b < 0x80) { str += String.fromCharCode(b); }
-            else if ((b & 0xE0) === 0xC0) { str += String.fromCharCode(((b&0x1F)<<6)|(bytes[i++]&0x3F)); }
-            else if ((b & 0xF0) === 0xE0) { str += String.fromCharCode(((b&0x0F)<<12)|((bytes[i++]&0x3F)<<6)|(bytes[i++]&0x3F)); }
-            else { i += 3; str += '�'; }
+        if (this._pending && this._pending.length) {
+            var merged = new Uint8Array(this._pending.length + bytes.length);
+            merged.set(this._pending, 0);
+            merged.set(bytes, this._pending.length);
+            bytes = merged;
+            this._pending = null;
+        }
+        var str = '', i = 0, len = bytes.length;
+        if (this.encoding !== 'utf-8') {
+            for (; i < len; i++) {
+                var c = bytes[i];
+                if (this.encoding === 'ascii' && c > 0x7F) c = 0xFFFD;
+                str += String.fromCharCode(c);
+            }
+            return str;
+        }
+        while (i < len) {
+            var b = bytes[i];
+            if (b < 0x80) { str += String.fromCharCode(b); i++; continue; }
+            var need, cp;
+            if ((b & 0xE0) === 0xC0) { need = 1; cp = b & 0x1F; }
+            else if ((b & 0xF0) === 0xE0) { need = 2; cp = b & 0x0F; }
+            else if ((b & 0xF8) === 0xF0) { need = 3; cp = b & 0x07; }
+            else {
+                if (this.fatal) throw new TypeError('The encoded data is not valid.');
+                str += '\uFFFD'; i++; continue;
+            }
+            if (i + need >= len) {
+                // Truncated sequence at the end of the input: when streaming,
+                // hold the incomplete bytes back for the next call instead of
+                // corrupting them in place.
+                if (stream) { this._pending = bytes.slice(i); return str; }
+                if (this.fatal) throw new TypeError('The encoded data is not valid.');
+                str += '\uFFFD';
+                return str;
+            }
+            var ok = true;
+            for (var j = 1; j <= need; j++) {
+                var cc = bytes[i + j];
+                if ((cc & 0xC0) !== 0x80) { ok = false; break; }
+                cp = (cp << 6) | (cc & 0x3F);
+            }
+            if (!ok || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) ||
+                (need === 1 && cp < 0x80) || (need === 2 && cp < 0x800) || (need === 3 && cp < 0x10000)) {
+                if (this.fatal) throw new TypeError('The encoded data is not valid.');
+                str += '\uFFFD'; i++; continue;
+            }
+            if (cp < 0x10000) {
+                str += String.fromCharCode(cp);
+            } else {
+                cp -= 0x10000;
+                str += String.fromCharCode(0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF));
+            }
+            i += need + 1;
         }
         return str;
     };

@@ -564,7 +564,12 @@ pub fn inject_ftp(
                 try {
                     var chunk = __ftpRead(self._id, 65536);
                     delay = 1;
-                    self._lineBuffer += new TextDecoder().decode(new Uint8Array(chunk));
+                    // One long-lived decoder per connection: a fresh
+                    // TextDecoder per chunk would replace any multi-byte
+                    // sequence split across two reads with U+FFFD; {stream:
+                    // true} holds the incomplete tail bytes back instead.
+                    if (!self._textDecoder) self._textDecoder = new TextDecoder();
+                    self._lineBuffer += self._textDecoder.decode(new Uint8Array(chunk), { stream: true });
                     var lines = self._lineBuffer.split('\n');
                     self._lineBuffer = lines.pop();
                     for (var i = 0; i < lines.length; i++) {
@@ -767,11 +772,12 @@ pub fn inject_ftp(
                 self._sendAwait('LIST' + (path ? ' ' + path : ''), false, function(err2) {
                     if (err2) { __ftpDataClose(self._id); if (callback) callback(err2, []); return; }
                     var data = '';
+                    var dataDecoder = new TextDecoder();
                     var delay = 1;
                     function readData() {
                         try {
                             var chunk = __ftpDataRead(self._id, 65536);
-                            data += new TextDecoder().decode(new Uint8Array(chunk));
+                            data += dataDecoder.decode(new Uint8Array(chunk), { stream: true });
                             delay = 1;
                             setTimeout(readData, 0);
                         } catch (e) {
@@ -781,6 +787,9 @@ pub fn inject_ftp(
                                 return;
                             }
                             __ftpDataClose(self._id);
+                            // Flush any incomplete trailing sequence the
+                            // streaming decoder was holding back.
+                            data += dataDecoder.decode();
                             var lines = data.split('\n').filter(function(l) { return l.length > 0; });
                             var items = lines.map(function(line) {
                                 var parts = line.match(/^([drwx\-]{10})\s +\d+\s +\S+\s +\S+\s +(\d+)\s +\w+\s +[\d\s:]+[\d]\s +(.*)$/);

@@ -1956,6 +1956,68 @@ pub fn inject_require(
                 globalThis.__requireCache['node:cluster'] = cluster;
             })();
 
+            // ── StringDecoder ─────────────────────────────────────────────────────
+            // Incremental, chunk-boundary-safe decoding (Node's string_decoder).
+            // One long-lived instance per stream holds back an incomplete
+            // trailing multi-byte UTF-8 sequence and prepends it to the next
+            // chunk, so sequences split across read boundaries are reassembled
+            // instead of being corrupted into U+FFFD. Defined at top level (not
+            // inside the string_decoder IIFE further down) so the stream
+            // classes below can route setEncoding() through it; the IIFE only
+            // registers it in the require cache.
+            function StringDecoder(encoding) {
+                this.encoding = (encoding || 'utf8').toLowerCase().replace(/[-_]/g, '');
+                if (this.encoding === 'utf8') this.encoding = 'utf8';
+                this._incomplete = null;
+            }
+            StringDecoder.prototype.write = function(buf) {
+                if (typeof buf === 'string') return buf;
+                if (!(buf instanceof Buffer)) buf = Buffer.from(buf);
+                if (buf.length === 0) return '';
+                if (this.encoding === 'utf8') {
+                    if (this._incomplete) {
+                        buf = Buffer.concat([this._incomplete, buf]);
+                        this._incomplete = null;
+                    }
+                    // Walk back over the continuation bytes of the final
+                    // sequence; if that sequence is truncated at the end of
+                    // this chunk, hold it back for the next write().
+                    var i = buf.length;
+                    while (i > 0 && (buf[i - 1] & 0xC0) === 0x80) i--;
+                    var complete = buf.length;
+                    if (i === 0) {
+                        // Entire chunk is continuation bytes of a sequence
+                        // started in a previous chunk.
+                        complete = 0;
+                    } else if ((buf[i - 1] & 0x80) !== 0) {
+                        var b = buf[i - 1];
+                        var bytesNeeded = (b & 0xE0) === 0xC0 ? 2 : (b & 0xF0) === 0xE0 ? 3 : (b & 0xF8) === 0xF0 ? 4 : 0;
+                        if (bytesNeeded === 0) {
+                            // Invalid lead byte: decode lossily, hold nothing.
+                            complete = i;
+                        } else if (i - 1 + bytesNeeded > buf.length) {
+                            // Final sequence truncated at the chunk boundary.
+                            complete = i - 1;
+                        }
+                    }
+                    if (complete < buf.length) {
+                        this._incomplete = buf.slice(complete);
+                        if (complete === 0) return '';
+                    }
+                    return buf.slice(0, complete).toString('utf8');
+                }
+                return buf.toString(this.encoding);
+            };
+            StringDecoder.prototype.end = function(buf) {
+                var ret = '';
+                if (buf) ret = this.write(buf);
+                if (this._incomplete) {
+                    ret += this._incomplete.toString('utf8');
+                    this._incomplete = null;
+                }
+                return ret;
+            };
+
             function Stream() { EventEmitter.call(this); }
             util.inherits(Stream, EventEmitter);
             Stream.prototype.pipe = function() { return this; };
@@ -1964,6 +2026,12 @@ pub fn inject_require(
                 this.readable = true;
                 this._readableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, buffer: [], ended: false, flowing: false };
                 if (opts && typeof opts.read === 'function') this._read = opts.read;
+                // Node: { encoding: 'utf8' } in the constructor is equivalent
+                // to calling setEncoding() — 'data' events carry decoded
+                // strings, with multi-byte sequences split across chunk
+                // boundaries reassembled by the decoder instead of being
+                // corrupted at each boundary.
+                if (opts && opts.encoding && opts.encoding !== 'buffer') this.setEncoding(opts.encoding);
             }
             util.inherits(Readable, Stream);
             Object.defineProperty(Readable, Symbol.hasInstance, {
@@ -1987,14 +2055,36 @@ pub fn inject_require(
             Readable.prototype.read = function(n) {
                 if (!this._readableState.flowing) this._read(n || 0);
                 var buf = this._readableState.buffer.splice(0);
-                return buf.length ? Buffer.concat ? Buffer.concat(buf) : buf[0] : null;
+                if (!buf.length) return null;
+                // With setEncoding() the buffer holds decoded strings.
+                if (typeof buf[0] === 'string') return buf.join('');
+                return Buffer.concat ? Buffer.concat(buf) : buf[0];
             };
             Readable.prototype.push = function(chunk) {
                 if (chunk === null) {
+                    // Flush any incomplete trailing multi-byte sequence the
+                    // decoder has been holding back as a final 'data' event.
+                    if (this._decoder) {
+                        var tail = this._decoder.end();
+                        this._decoder = null;
+                        if (tail) {
+                            var hasDataT = this._events && this._events['data'] && this._events['data'].length > 0;
+                            if (!hasDataT) this._readableState.buffer.push(tail);
+                            this.emit('data', tail);
+                        }
+                    }
                     this._readableState.ended = true;
                     this.emit('end');
                     this.emit('readable');
                 } else {
+                    // Honor setEncoding(): decode byte chunks through the
+                    // stream's long-lived StringDecoder so sequences split
+                    // across chunks are reassembled, never re-decoded
+                    // per-chunk (which would corrupt boundary-straddling
+                    // multi-byte characters into U+FFFD).
+                    if (this._decoder && !this._readableState.objectMode && typeof chunk !== 'string') {
+                        chunk = this._decoder.write(chunk);
+                    }
                     var hasDataL = this._events && this._events['data'] && this._events['data'].length > 0;
                     if (!hasDataL) this._readableState.buffer.push(chunk);
                     if (this._events && this._events['readable'] && this._events['readable'].length) {
@@ -2016,7 +2106,15 @@ pub fn inject_require(
             Readable.prototype.unpipe = function(dest) { return this; };
             Readable.prototype.resume = function() { this._readableState.flowing = true; this._read(0); return this; };
             Readable.prototype.pause = function() { this._readableState.flowing = false; return this; };
-            Readable.prototype.setEncoding = function(enc) { this._encoding = enc; return this; };
+            // setEncoding() creates the long-lived decoder used by push():
+            // storing the value alone is not enough — consumers that collect
+            // 'data' chunks as strings rely on Node's semantics where each
+            // multi-byte sequence split across chunks is reassembled.
+            Readable.prototype.setEncoding = function(enc) {
+                this._encoding = enc;
+                this._decoder = (enc && enc !== 'buffer') ? new StringDecoder(enc) : null;
+                return this;
+            };
             Readable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
             Readable.prototype[Symbol.asyncIterator] = function() {
                 var self = this, done = false;
@@ -2467,7 +2565,15 @@ pub fn inject_require(
                 stdin._paused = true;
                 stdin._ended = false;
                 stdin._encoding = null;
-                stdin.setEncoding = function(enc) { this._encoding = enc; return this; };
+                stdin._decoder = null;
+                // Encoding is honored through a long-lived StringDecoder, not
+                // a fresh TextDecoder per chunk: a fresh decoder replaces any
+                // multi-byte sequence split across two reads with U+FFFD.
+                stdin.setEncoding = function(enc) {
+                    this._encoding = enc;
+                    this._decoder = (enc && enc !== 'buffer') ? new StringDecoder(enc) : null;
+                    return this;
+                };
                 stdin.pause = function() { this._paused = true; return this; };
                 stdin.resume = function() {
                     if (!this._paused) return this;
@@ -2482,12 +2588,17 @@ pub fn inject_require(
                         if (self._ended) return;
                         if (chunk.length === 0) {
                             self._ended = true;
+                            if (self._decoder) {
+                                var tail = self._decoder.end();
+                                self._decoder = null;
+                                if (tail) self.emit('data', tail);
+                            }
                             self.emit('end');
                             self.emit('close');
                             return;
                         }
-                        var data = self._encoding
-                            ? new TextDecoder(self._encoding === 'utf8' ? 'utf-8' : self._encoding).decode(chunk)
+                        var data = self._decoder
+                            ? self._decoder.write(chunk)
                             : (typeof Buffer !== 'undefined' ? Buffer.from(chunk) : chunk);
                         self.emit('data', data);
                         if (!self._paused) self._pump();
@@ -3572,8 +3683,13 @@ pub fn inject_require(
                         self.emit('connection', req.socket);
                         (function(req) {
                             setTimeout(function() {
-                                if (req._body) req.emit('data', typeof Buffer !== 'undefined' ? Buffer.from(req._body) : req._body);
-                                req.emit('end');
+                                // Deliver through push() (not a bare emit)
+                                // so req.setEncoding() is honored: push()
+                                // runs the chunk through the stream's
+                                // StringDecoder and flushes any trailing
+                                // incomplete sequence before 'end'.
+                                if (req._body) req.push(typeof Buffer !== 'undefined' ? Buffer.from(req._body) : req._body);
+                                req.push(null);
                             }, 0);
                         })(req);
                     }
@@ -4117,47 +4233,9 @@ pub fn inject_require(
         })();
 
         (function() {
-            function StringDecoder(encoding) {
-                this.encoding = (encoding || 'utf8').toLowerCase().replace(/[-_]/g, '');
-                if (this.encoding === 'utf8' || this.encoding === 'utf-8') this.encoding = 'utf8';
-                this._incomplete = null;
-            }
-            StringDecoder.prototype.write = function(buf) {
-                if (typeof buf === 'string') return buf;
-                if (!Buffer.isBuffer(buf)) buf = Buffer.from(buf);
-                if (buf.length === 0) return '';
-                if (this.encoding === 'utf8') {
-                    var i = buf.length;
-                    while (i > 0 && (buf[i - 1] & 0xC0) === 0x80) i--;
-                    if (i > 0 && (buf[i - 1] & 0x80) !== 0) {
-                        var bytesNeeded = 0;
-                        var b = buf[i - 1];
-                        if ((b & 0xE0) === 0xC0) bytesNeeded = 2;
-                        else if ((b & 0xF0) === 0xE0) bytesNeeded = 3;
-                        else if ((b & 0xF8) === 0xF0) bytesNeeded = 4;
-                        if (i + bytesNeeded - 1 > buf.length) {
-                            this._incomplete = buf.slice(i - 1);
-                            return buf.slice(0, i - 1).toString('utf8');
-                        }
-                    }
-                    if (this._incomplete) {
-                        var combined = Buffer.concat([this._incomplete, buf]);
-                        this._incomplete = null;
-                        return combined.toString('utf8');
-                    }
-                    return buf.toString('utf8');
-                }
-                return buf.toString(this.encoding);
-            };
-            StringDecoder.prototype.end = function(buf) {
-                var ret = '';
-                if (buf) ret = this.write(buf);
-                if (this._incomplete) {
-                    ret += this._incomplete.toString('utf8');
-                    this._incomplete = null;
-                }
-                return ret;
-            };
+            // StringDecoder itself is defined at top level (see the stream
+            // section) so Readable/stdin can share it; here it is only
+            // exposed as the string_decoder module.
             globalThis.__requireCache['string_decoder'] = { StringDecoder: StringDecoder };
             globalThis.__requireCache['node:string_decoder'] = globalThis.__requireCache['string_decoder'];
         })();
