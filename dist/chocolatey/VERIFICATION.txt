@@ -20,7 +20,7 @@ File: 3va-v2.6.0-x86_64-pc-windows-msvc.zip
 2. Download the file.
 3. Verify SHA256:
      PowerShell: (Get-FileHash '.\3va-v2.6.0-x86_64-pc-windows-msvc.zip' -Algorithm SHA256).Hash
-   Expected:    90f4b7675363410f4ed9a8e2c3caa3c357a383334ebdcbf94009f74e00f4fdd2
+   Expected:    9e9524a3a66fe03138cd92c014f05bba530bab3f52241d8ca2e8ccb748139ba4
 
 The SHA256 is also published alongside each release asset as
   3va-v2.6.0-x86_64-pc-windows-msvc.zip.sha256
