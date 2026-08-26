@@ -598,7 +598,15 @@ jobs:
   # this workflow triggers on.
   publish-snap:
     name: Publish to Snap Store
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-latest
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     environment: snap
     steps:
       - uses: actions/checkout@v4
@@ -613,7 +621,7 @@ jobs:
         if: env.DRY_RUN == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: dry-run-snap
+          name: dry-run-snap-${{ matrix.arch }}
           path: ${{ steps.build.outputs.snap }}
           retention-days: 7
 
