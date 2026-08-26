@@ -519,25 +519,6 @@ for the full design, prior-art comparison, and real third-party interop test res
 
 ## Known Limitations & Roadmap
 
-- **Multi-byte UTF-8 characters can arrive corrupted in a large string response body served through
-  `http.ServerResponse`** — found running Metro (React Native's bundler) under `3va start`: the
-  served JS bundle (~4 MB, one large string body) was byte-for-byte identical to what a stock
-  Node.js Metro process serves for the same content when captured via a simple single-shot fetch,
-  yet on-device (a real Android client, not `curl`) it decoded with individual multi-byte sequences
-  (emoji, accented characters) replaced by the UTF-8 replacement character (`�`), consistently and
-  reproducibly with a fully cleared cache. Ruled out so far: `fs.readFileSync` (round-trips a known
-  multi-byte source file correctly in isolation), `child_process.fork()`/worker IPC (round-trips a
-  multi-byte string through a real fork correctly in isolation), Metro's on-disk cache (wiped
-  entirely, corruption persists identically), and the HTTP response body's string→bytes conversion
-  in `httpServerResponse.prototype.end()` (routed through `TextEncoder` instead of the native
-  `__httpRespond(string)` path — `crates/js/src/builtins/http_server.rs`'s
-  `body_arg.to_rust_string_lossy(scope)` — as a suspect; no change in the corruption). Not yet
-  isolated to a specific stage; most likely candidate remaining is somewhere in Metro's own
-  in-process bundle assembly (module concatenation across a jest-worker-parallelized transform
-  pipeline) interacting with a 3va-provided API. Workaround: run Metro (or any dev-server serving
-  large multi-byte-heavy string bodies) under real Node.js; the rest of a project's tooling invoked
-  via `3va run`/`3va start` (build/install/launch through a spawned CLI, Gradle, ADB, etc.) is
-  unaffected.
 - **Android arm64**: not built from `main` since v2.2.0; workaround via the `android-pre-v8` branch (see [Platform Support](#platform-support)).
 - **HTTP layer**: RUDY (R-U-Dead-Yet) detection is implemented (`minBodyRateBps` minimum body rate + `bodyTimeoutMs` body deadline) and rate limiting is adaptive — repeat offenders get escalating auto-block durations (`blockEscalationFactor` up to `maxBlockDurationSecs`, reset after `strikeDecaySecs` of calm). The shipped default is still a fixed base of 100 req/s and 50 connections per source IP; adaptivity adjusts the *block penalty* for repeat offenders, not the per-IP token-bucket rate. Connection tracking is per source IP only — behind a reverse proxy that collapses clients onto one IP, the proxy's IP is what gets limited (no `X-Forwarded-For` trust yet). The request parser supports `Transfer-Encoding: chunked` and rejects requests carrying both `Content-Length` and `Transfer-Encoding` with `400` (request-smuggling guard; verified by the `content_length_plus_transfer_encoding_rejected_400` end-to-end test).
 - **Malware/secrets scanning is not automatic on `3va install`** — despite `docs/10-security/01-static-analysis.md` previously implying otherwise, the scanner only runs when you explicitly call `3va audit` / `3va audit --secrets`. Run it yourself after installing new dependencies.

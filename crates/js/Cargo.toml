@@ -124,6 +124,10 @@ path = "tests/imap_module.rs"
 name = "pq_tls"
 path = "tests/pq_tls.rs"
 
+[[test]]
+name = "utf8_stream_integrity"
+path = "tests/utf8_stream_integrity.rs"
+
 [dependencies]
 v8.workspace = true
 anyhow.workspace = true
