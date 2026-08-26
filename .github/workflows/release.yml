@@ -272,10 +272,10 @@ jobs:
           }
 
           publish_crate vvva_permissions   && sleep 60
+          publish_crate vvva_firewall      && sleep 60
           publish_crate vvva_config        && sleep 60
           publish_crate vvva_core          && sleep 60
           publish_crate vvva_crypto        && sleep 60
-          publish_crate vvva_firewall      && sleep 60
           publish_crate vvva_pm            && sleep 60
           publish_crate vvva_js            && sleep 60
           publish_crate vvva_wasm          && sleep 60
