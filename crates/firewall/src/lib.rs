@@ -90,6 +90,16 @@ pub struct FirewallConfig {
     /// Minimum body receive rate in bytes per second. Connections dripping
     /// body data slower than this are dropped (RUDY mitigation). 0 = disabled.
     pub min_body_rate_bps: u32,
+
+    /// Maximum idle time, in milliseconds, to wait for the next request on a
+    /// reused (keep-alive) connection before closing it silently. Protects
+    /// against Slowloris on idle keep-alive sockets.
+    pub keepalive_timeout_ms: u64,
+
+    /// Maximum number of requests served on a single TCP connection before it
+    /// is force-closed (responds with `Connection: close`). Bounds per-connection
+    /// resource usage.
+    pub max_requests_per_conn: u32,
 }
 
 impl Default for FirewallConfig {
@@ -108,6 +118,8 @@ impl Default for FirewallConfig {
             max_header_bytes: 16_384,
             max_body_bytes: 0,
             min_body_rate_bps: 100,
+            keepalive_timeout_ms: 5_000,
+            max_requests_per_conn: 1_000,
         }
     }
 }
@@ -319,6 +331,12 @@ impl Firewall {
         }
         *self.conn_per_ip.lock().unwrap().entry(ip).or_insert(0) += 1;
         *self.conn_total.lock().unwrap() += 1;
+    }
+
+    /// Number of currently open TCP connections (after `on_connect`/`on_disconnect`).
+    /// Used by tests to verify connections are released exactly once.
+    pub fn active_connection_count(&self) -> u32 {
+        *self.conn_total.lock().unwrap()
     }
 
     /// Register that a connection has been closed.

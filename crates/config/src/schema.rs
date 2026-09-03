@@ -60,6 +60,13 @@ pub struct FirewallConfig {
     /// this are dropped (RUDY mitigation). 0 = disabled.
     #[serde(rename = "minBodyRateBps")]
     pub min_body_rate_bps: u32,
+    /// Max idle time (ms) to wait for the next request on a keep-alive
+    /// connection before closing it. Stops Slowloris on idle sockets.
+    #[serde(rename = "keepaliveTimeoutMs")]
+    pub keepalive_timeout_ms: u64,
+    /// Max requests served on a single TCP connection before force-closing.
+    #[serde(rename = "maxRequestsPerConn")]
+    pub max_requests_per_conn: u32,
 }
 
 impl Default for FirewallConfig {
@@ -78,6 +85,8 @@ impl Default for FirewallConfig {
             max_header_bytes: 16_384,
             max_body_bytes: 0,
             min_body_rate_bps: 100,
+            keepalive_timeout_ms: 5_000,
+            max_requests_per_conn: 1_000,
         }
     }
 }
