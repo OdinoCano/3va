@@ -25,17 +25,16 @@ async fn engine_with_net() -> JsEngine {
 /// hang/fail depending on how `cargo test` was invoked.
 #[cfg(unix)]
 fn redirect_stdin_to_devnull() {
+    // Use libc's bindings rather than a hand-rolled `extern "C"` block: `open`
+    // is variadic in C, and a fixed-arity local declaration trips the
+    // `invalid_runtime_symbol_definitions` lint (deny-by-default on recent
+    // rustc). libc already declares the correct signature.
+    let path = std::ffi::CString::new("/dev/null").unwrap();
     unsafe {
-        unsafe extern "C" {
-            fn open(path: *const std::os::raw::c_char, flags: i32) -> i32;
-            fn dup2(oldfd: i32, newfd: i32) -> i32;
-            fn close(fd: i32) -> i32;
-        }
-        let path = std::ffi::CString::new("/dev/null").unwrap();
-        let fd = open(path.as_ptr(), 0 /* O_RDONLY */);
+        let fd = libc::open(path.as_ptr(), libc::O_RDONLY);
         if fd >= 0 {
-            dup2(fd, 0);
-            close(fd);
+            libc::dup2(fd, 0);
+            libc::close(fd);
         }
     }
 }
