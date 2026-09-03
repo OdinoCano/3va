@@ -383,6 +383,113 @@ async fn server_keep_alive_multiple_requests_same_connection() {
     assert_eq!(count, "3");
 }
 
+/// `max_requests_per_conn` caps how many requests a single keep-alive
+/// connection serves: after the cap the server closes the socket even though
+/// the client never sent `Connection: close`.
+#[tokio::test]
+async fn keep_alive_connection_closed_after_max_requests_per_conn() {
+    let port = free_port();
+    let mut e = engine_with_firewall(FirewallConfig {
+        max_requests_per_conn: 3,
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{
+            res.writeHead(200, {{ 'Content-Type': 'text/plain' }});
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let eof_after_cap = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 4096];
+        for _ in 0..3u32 {
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                .await
+                .unwrap();
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(n > 0, "expected a response within the cap");
+        }
+        // 4th request on the same connection: the server capped at 3 and closed.
+        let _ = stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await;
+        matches!(
+            tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await,
+            Ok(Ok(0))
+        )
+    })
+    .await;
+
+    assert!(
+        eof_after_cap,
+        "connection should be closed by the server after max_requests_per_conn"
+    );
+}
+
+/// `keepalive_timeout_ms` bounds how long an idle reused connection is held
+/// open: after one request, a connection that goes quiet past the (short) idle
+/// deadline is closed by the server rather than parked open.
+#[tokio::test]
+async fn idle_keep_alive_connection_closed_after_keepalive_timeout() {
+    let port = free_port();
+    let mut e = engine_with_firewall(FirewallConfig {
+        keepalive_timeout_ms: 300,
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let closed_when_idle = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 4096];
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let n = stream.read(&mut buf).await.unwrap();
+        assert!(n > 0, "first request should be answered");
+        // Stay silent past keepalive_timeout_ms (300ms); the server must drop it.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        matches!(
+            tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await,
+            Ok(Ok(0))
+        )
+    })
+    .await;
+
+    assert!(
+        closed_when_idle,
+        "idle keep-alive connection should be closed after keepalive_timeout_ms"
+    );
+}
+
 /// Verify that `req.headers['content-length']` in JS reflects the bytes that
 /// were actually allocated and read — not the raw value from the request header.
 ///

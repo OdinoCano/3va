@@ -534,10 +534,12 @@ async fn handle_connection(
     server_id: u32,
     hdr_timeout: std::time::Duration,
     body_timeout: std::time::Duration,
+    keepalive_timeout: std::time::Duration,
     max_hdr_count: usize,
     max_hdr_bytes: usize,
     max_body: usize,
     min_body_rate: u32,
+    max_requests_per_conn: u32,
     conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
     conn_nid: Arc<Mutex<u32>>,
     fw: Arc<Option<Arc<Firewall>>>,
@@ -556,10 +558,23 @@ async fn handle_connection(
     let (resp_tx, mut resp_rx) = mpsc::channel::<PendingResponse>(16);
     conns.lock().unwrap().insert(conn_id, ConnEntry { resp_tx });
 
+    // Requests already served on this TCP connection. The first request gets
+    // the full `hdr_timeout`; every reused-connection request afterwards is
+    // bounded by the shorter `keepalive_timeout` so an idle keep-alive socket
+    // can't be parked open (Slowloris on keep-alive). `max_requests_per_conn`
+    // caps how many we serve before closing, regardless of the client's
+    // `Connection` header.
+    let mut requests_served: u32 = 0;
+
     loop {
+        let hdr_deadline = if requests_served == 0 {
+            hdr_timeout
+        } else {
+            keepalive_timeout
+        };
         let parsed = match parse_request(
             &mut reader,
-            hdr_timeout,
+            hdr_deadline,
             body_timeout,
             max_hdr_count,
             max_hdr_bytes,
@@ -637,6 +652,8 @@ async fn handle_connection(
             .or_default()
             .push_back(json);
 
+        requests_served += 1;
+
         let conn_hdr = parsed
             .headers
             .iter()
@@ -644,11 +661,12 @@ async fn handle_connection(
             .map(|(_, v)| v.to_lowercase());
         // HTTP/1.1 defaults to keep-alive unless the client says close; HTTP/1.0
         // defaults to close unless the client explicitly asks to keep the
-        // connection alive.
+        // connection alive. The per-connection request cap forces a close
+        // regardless of what the client asked for.
         let close_after = match conn_hdr.as_deref() {
             Some(v) => v == "close",
             None => parsed.http10,
-        };
+        } || requests_served >= max_requests_per_conn;
 
         let resp = match tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx.recv()).await {
             Ok(Some(r)) if r.conn_id == conn_id => r,
@@ -791,10 +809,12 @@ pub fn inject_http_server(
                                         let (
                                             hdr_timeout,
                                             body_timeout,
+                                            keepalive_timeout,
                                             max_hdr_count,
                                             max_hdr_bytes,
                                             max_body,
                                             min_body_rate,
+                                            max_requests_per_conn,
                                         ) = if let Some(firewall) = fw.as_ref().as_ref() {
                                             let c = &firewall.config;
                                             (
@@ -802,19 +822,25 @@ pub fn inject_http_server(
                                                     c.header_timeout_ms,
                                                 ),
                                                 std::time::Duration::from_millis(c.body_timeout_ms),
+                                                std::time::Duration::from_millis(
+                                                    c.keepalive_timeout_ms,
+                                                ),
                                                 c.max_header_count as usize,
                                                 c.max_header_bytes as usize,
                                                 c.max_body_bytes as usize,
                                                 c.min_body_rate_bps,
+                                                c.max_requests_per_conn,
                                             )
                                         } else {
                                             (
                                                 std::time::Duration::from_secs(10),
                                                 std::time::Duration::from_secs(30),
+                                                std::time::Duration::from_secs(5),
                                                 100,
                                                 16_384,
                                                 0,
                                                 100,
+                                                1_000,
                                             )
                                         };
 
@@ -829,10 +855,12 @@ pub fn inject_http_server(
                                                 id,
                                                 hdr_timeout,
                                                 body_timeout,
+                                                keepalive_timeout,
                                                 max_hdr_count,
                                                 max_hdr_bytes,
                                                 max_body,
                                                 min_body_rate,
+                                                max_requests_per_conn,
                                                 conns2,
                                                 conn_nid2,
                                                 fw2,

@@ -11,7 +11,7 @@
 //! | **Header flood** | `max_header_count` + `max_header_bytes` limits |
 //! | **Rate-based DDoS** | Token-bucket per IP; IPs that exceed `auto_block_threshold` violations are blocked |
 //! | **Adaptive (repeat offenders)** | Each auto-block adds a strike; the block duration escalates as `block_duration_secs × factor^(strikes-1)` up to `max_block_duration_secs`, and the history clears after `strike_decay_secs` of calm |
-//! | **Connection exhaustion** | `max_connections_per_ip` and `max_connections_total` caps |
+//! | **Connection exhaustion** | `max_connections_per_ip` and `max_connections_total` caps, plus `keepalive_timeout_ms` (idle keep-alive deadline) and `max_requests_per_conn` (per-connection request cap) |
 //!
 //! ## Quick start
 //!
@@ -38,6 +38,8 @@
 //!     headerTimeoutMs: 10_000,
 //!     bodyTimeoutMs: 30_000,
 //!     minBodyRateBps: 100,
+//!     keepaliveTimeoutMs: 5_000,
+//!     maxRequestsPerConn: 1_000,
 //!   }
 //! }
 //! ```
@@ -106,6 +108,18 @@ pub struct FirewallConfig {
     /// body data slower than this are dropped (RUDY mitigation). 0 = disabled.
     pub min_body_rate_bps: u32,
 
+    /// Idle deadline, in milliseconds, for the next request on a reused
+    /// (keep-alive) connection: after the first request, each subsequent
+    /// request line + headers must arrive within this window or the socket is
+    /// closed. Shorter than `header_timeout_ms` so an idle keep-alive socket
+    /// can't be held open indefinitely (Slowloris on keep-alive).
+    pub keepalive_timeout_ms: u64,
+
+    /// Maximum number of requests served on a single TCP connection before the
+    /// server closes it. Bounds per-connection resource usage regardless of
+    /// what the client's `Connection` header asks for.
+    pub max_requests_per_conn: u32,
+
     /// Adaptive rate limiting: when enabled, an IP whose observed legitimate
     /// traffic baseline (EWMA over 1-second windows) exceeds the static
     /// `rate_limit_rps` gets a proportionally raised threshold instead of
@@ -144,6 +158,8 @@ impl Default for FirewallConfig {
             max_header_bytes: 16_384,
             max_body_bytes: 0,
             min_body_rate_bps: 100,
+            keepalive_timeout_ms: 5_000,
+            max_requests_per_conn: 1_000,
             adaptive_rate_limit: false,
             ewma_alpha_pct: 20,
             trusted_proxies: Vec::new(),

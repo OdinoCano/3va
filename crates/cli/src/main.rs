@@ -4108,6 +4108,8 @@ async fn main() -> anyhow::Result<()> {
                             max_header_bytes: fc.max_header_bytes,
                             max_body_bytes: fc.max_body_bytes,
                             min_body_rate_bps: fc.min_body_rate_bps,
+                            keepalive_timeout_ms: fc.keepalive_timeout_ms,
+                            max_requests_per_conn: fc.max_requests_per_conn,
                             adaptive_rate_limit: fc.adaptive_rate_limit,
                             ewma_alpha_pct: fc.ewma_alpha_pct,
                             trusted_proxies: fc.trusted_proxies.clone(),

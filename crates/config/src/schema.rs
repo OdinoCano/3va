@@ -71,6 +71,14 @@ pub struct FirewallConfig {
     /// this are dropped (RUDY mitigation). 0 = disabled.
     #[serde(rename = "minBodyRateBps")]
     pub min_body_rate_bps: u32,
+    /// Idle deadline (ms) for the next request on a reused keep-alive
+    /// connection. Shorter than `headerTimeoutMs`; stops Slowloris on idle
+    /// keep-alive sockets.
+    #[serde(rename = "keepaliveTimeoutMs")]
+    pub keepalive_timeout_ms: u64,
+    /// Max requests served on one TCP connection before the server closes it.
+    #[serde(rename = "maxRequestsPerConn")]
+    pub max_requests_per_conn: u32,
     /// Adaptive rate limiting: raise the per-IP threshold from the observed
     /// legitimate-traffic EWMA baseline instead of a fixed number.
     #[serde(rename = "adaptiveRateLimit")]
@@ -104,6 +112,8 @@ impl Default for FirewallConfig {
             max_header_bytes: 16_384,
             max_body_bytes: 0,
             min_body_rate_bps: 100,
+            keepalive_timeout_ms: 5_000,
+            max_requests_per_conn: 1_000,
             adaptive_rate_limit: false,
             ewma_alpha_pct: 20,
             trusted_proxies: Vec::new(),
@@ -392,6 +402,11 @@ mod tests {
         );
         assert_eq!(fw_cfg.strike_decay_secs, crate_cfg.strike_decay_secs);
         assert_eq!(fw_cfg.min_body_rate_bps, crate_cfg.min_body_rate_bps);
+        assert_eq!(fw_cfg.keepalive_timeout_ms, crate_cfg.keepalive_timeout_ms);
+        assert_eq!(
+            fw_cfg.max_requests_per_conn,
+            crate_cfg.max_requests_per_conn
+        );
         assert_eq!(fw_cfg.adaptive_rate_limit, crate_cfg.adaptive_rate_limit);
         assert_eq!(fw_cfg.ewma_alpha_pct, crate_cfg.ewma_alpha_pct);
         assert_eq!(fw_cfg.trusted_proxies, crate_cfg.trusted_proxies);
