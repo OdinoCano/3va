@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -3019,6 +3019,44 @@ enum Commands {
         /// Package name to explain
         package: String,
     },
+    /// Fetch a package and run it once through the same sandbox as `3va run`
+    /// — deny-by-default, prompts for any capability, never a special case.
+    Dlx {
+        /// Package to fetch and run (e.g. cowsay or cowsay@1.6.0)
+        package: String,
+
+        /// Registry host to allow network access to. Use --allow-net= to allow all.
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_net: Option<Vec<String>>,
+
+        /// Allow read access to specified paths. Use --allow-read= (no value) to allow all paths.
+        #[arg(long = "allow-read", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_read: Option<Vec<String>>,
+
+        /// Allow write access to specified paths. Use --allow-write= (no value) to allow all paths.
+        #[arg(long = "allow-write", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_write: Option<Vec<String>>,
+
+        /// Allow environment variable access.
+        #[arg(long = "allow-env", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_env: Option<Vec<String>>,
+
+        /// Allow spawning child processes
+        #[arg(long = "allow-child-process")]
+        allow_child_process: bool,
+
+        /// Allow FFI calls to native libraries.
+        #[arg(long = "allow-ffi", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_ffi: Option<Vec<String>>,
+
+        /// Never prompt for ungranted permissions — silently deny them instead.
+        #[arg(long = "no-prompt")]
+        no_prompt: bool,
+
+        /// Arguments to pass to the package's bin script (after --)
+        #[arg(last = true)]
+        script_args: Vec<String>,
+    },
     /// Open an editable copy of an installed package for patching
     Patch {
         /// Package name (must already be installed)
@@ -3631,17 +3669,17 @@ async fn main() -> anyhow::Result<()> {
             heap_snapshot,
             script_args,
         } => {
+            // Discover the project config ONCE and reuse it for the port and
+            // firewall lookups below. This avoids two separate parent-directory
+            // walks + config parses on every `run` startup.
+            let run_cwd = file
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| Path::new(".").to_path_buf());
+            let project_config = ProjectConfig::discover(run_cwd).ok().flatten();
+
             // Resolve port: CLI flag > config file > env (set PORT so scripts see it)
-            let effective_port = port.or_else(|| {
-                ProjectConfig::discover(
-                    file.parent()
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or(std::env::current_dir().unwrap_or_default()),
-                )
-                .ok()
-                .flatten()
-                .and_then(|c| c.run.port)
-            });
+            let effective_port = port.or_else(|| project_config.as_ref().and_then(|c| c.run.port));
             if let Some(p) = effective_port {
                 std::env::set_var("PORT", p.to_string());
             }
@@ -3675,13 +3713,8 @@ async fn main() -> anyhow::Result<()> {
 
             // Build firewall from project config (falls back to safe defaults).
             let firewall = {
-                let cwd = file
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .to_path_buf();
-                let fw_cfg = ProjectConfig::discover(cwd)
-                    .ok()
-                    .flatten()
+                let fw_cfg = project_config
+                    .as_ref()
                     .map(|c| {
                         let fc = &c.firewall;
                         FirewallConfig {
@@ -3698,6 +3731,8 @@ async fn main() -> anyhow::Result<()> {
                             max_header_bytes: fc.max_header_bytes,
                             max_body_bytes: fc.max_body_bytes,
                             min_body_rate_bps: fc.min_body_rate_bps,
+                            keepalive_timeout_ms: fc.keepalive_timeout_ms,
+                            max_requests_per_conn: fc.max_requests_per_conn,
                         }
                     })
                     .unwrap_or_default();
@@ -4462,6 +4497,45 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Why { package } => {
             pm_why(package)?;
+        }
+        Commands::Dlx {
+            package,
+            allow_net,
+            allow_read,
+            allow_write,
+            allow_env,
+            allow_child_process,
+            allow_ffi,
+            no_prompt,
+            script_args,
+        } => {
+            let cwd = std::env::current_dir()?;
+            let pkg_dir = vvva_pm::dlx_fetch(&cwd, package, allow_net.as_deref()).await?;
+            let entry = vvva_pm::dlx_entry(&pkg_dir)?;
+
+            // No package.json permissions are read here on purpose: a dlx'd
+            // package only ever gets what the user explicitly grants on this
+            // invocation, never capabilities it declares for itself.
+            let pkg_permissions = ThreeVaPermissions::default();
+            let permissions = build_permissions(
+                allow_read.as_deref(),
+                allow_write.as_deref(),
+                allow_net.as_deref(),
+                allow_env.as_deref(),
+                *allow_child_process,
+                allow_ffi.as_deref(),
+                std::io::stderr().is_terminal() && !*no_prompt,
+                &pkg_permissions,
+            );
+            let permissions = Arc::new(permissions);
+
+            let engine = vvva_js::JsEngine::new_with_firewall_and_inspector(
+                permissions.clone(),
+                Firewall::new(FirewallConfig::default()),
+                None,
+            )
+            .await?;
+            engine.eval_file_with_args(&entry, script_args).await?;
         }
         Commands::Patch { package } => {
             let cwd = std::env::current_dir()?;

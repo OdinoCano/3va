@@ -399,6 +399,26 @@ pub fn virtual_entry_name(name: &str) -> String {
     name.replace('/', "+")
 }
 
+/// Recursively copy `src` into `dst`, always copying file contents (never
+/// hardlinking). Used by `dlx` so the scratch copy it runs can never mutate
+/// the shared global store via a hardlink.
+pub fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", src.display(), e))?
+    {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn link_or_copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)

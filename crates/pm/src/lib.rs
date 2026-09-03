@@ -18,7 +18,7 @@ pub mod workspace_v2;
 pub mod yarn_lock;
 
 pub use secrets::{SecretFinding, SecretsScanner, Severity as SecretSeverity};
-pub use store::{ContentStore, PruneResult, StoreStats, virtual_entry_name};
+pub use store::{ContentStore, PruneResult, StoreStats, copy_dir_recursive, virtual_entry_name};
 pub use workspace::{WorkspaceConfig, WorkspacePackage, create_workspace_symlinks, merged_deps};
 pub use workspace_v2::{
     PackageRunResult, RunStatus, WorkspaceGraph, git_changed_files, print_run_results,
@@ -544,6 +544,89 @@ async fn download_tarball_with_client(
         MAX_RETRIES + 1,
         url
     )))
+}
+
+// ── dlx ───────────────────────────────────────────────────────────────────────
+// `3va dlx <pkg>`: fetch through the exact same verified-download path as
+// `install`, then hand the entry file to the caller so it can be executed
+// through the *existing* `3va run` sandbox — not a special case, no new
+// execution surface.
+
+/// Resolve, download, verify, and store `spec` (e.g. `cowsay` or
+/// `cowsay@1.6.0`), then return the path to a read-execute scratch copy of
+/// the package (a real copy, not a store hardlink, so nothing the package
+/// does at runtime can touch the shared global store).
+pub async fn dlx_fetch(
+    project_root: &Path,
+    spec: &str,
+    allow_net: Option<&[String]>,
+) -> anyhow::Result<PathBuf> {
+    let (name, requested_ver) = parse_package_spec(spec)?;
+    let allowed_host = match allow_net {
+        None => anyhow::bail!("Network access denied: --allow-net not specified"),
+        Some(hosts) => hosts.first().map(|s| s.as_str()).unwrap_or("").to_string(),
+    };
+    let registry = Registry::from_allowed_host(&allowed_host);
+    let reg_name = registry.display_name().to_string();
+    let base_url = registry.base_url().to_string();
+    let client = reqwest::Client::builder().gzip(true).build()?;
+    let version_to_fetch = requested_ver.as_deref().unwrap_or("latest");
+
+    let (info, _deps) = match &registry {
+        Registry::Jsr => lookup_jsr_with_deps(&client, &name, version_to_fetch).await?,
+        Registry::Npm | Registry::Yarn | Registry::Custom(_) => {
+            lookup_npm_version(&client, &base_url, &name, version_to_fetch).await?
+        }
+    };
+    let ver = select_best_version(&info.versions, version_to_fetch, info.latest.as_deref());
+    let Some(meta) = info.version_meta.get(&ver) else {
+        anyhow::bail!("No version of '{}' satisfies '{}'", name, version_to_fetch);
+    };
+
+    let global_store = ContentStore::global();
+    if !global_store.is_cached(&reg_name, &name, &ver) {
+        let bytes = download_tarball_with_client(&client, &meta.tarball).await?;
+        let verifier = SignatureVerifier::sha512();
+        if let Some(int_hash) = &meta.integrity
+            && matches!(
+                verifier.verify_from_registry(&bytes, Some(int_hash)),
+                VerificationStatus::Mismatch | VerificationStatus::Failed(_)
+            )
+        {
+            anyhow::bail!("Integrity check failed for {}@{}", name, ver);
+        }
+        global_store.store_tarball(&bytes, &reg_name, &name, &ver)?;
+    }
+
+    let entry = format!("{}@{}", virtual_entry_name(&name), ver);
+    let run_dir = project_root.join(".3va").join("dlx").join(&entry);
+    if !run_dir.join("package.json").exists() {
+        let pristine = global_store.package_path(&reg_name, &name, &ver);
+        copy_dir_recursive(&pristine, &run_dir)?;
+    }
+    Ok(run_dir)
+}
+
+/// Resolve a dlx-fetched package's executable entry: its `bin` field if
+/// present (string or the first entry of an object), else `main`, else
+/// `index.js`.
+pub fn dlx_entry(pkg_dir: &Path) -> anyhow::Result<PathBuf> {
+    let content = std::fs::read_to_string(pkg_dir.join("package.json"))?;
+    let val: serde_json::Value = serde_json::from_str(&content)?;
+    let rel = match &val["bin"] {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(obj) => {
+            let name = val["name"].as_str().unwrap_or("");
+            let short_name = name.rsplit('/').next().unwrap_or(name);
+            obj.get(short_name)
+                .or_else(|| obj.values().next())
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow::anyhow!("Package has no usable 'bin' entry"))?
+        }
+        _ => val["main"].as_str().unwrap_or("index.js").to_string(),
+    };
+    Ok(pkg_dir.join(rel))
 }
 
 /// Download a tarball with up to `MAX_RETRIES` retries and exponential backoff.
@@ -1687,14 +1770,15 @@ fn create_virtual_symlink(
         } else {
             format!(".3va/{}/node_modules/{}", entry, name)
         };
-        std::os::unix::fs::symlink(&rel_target, &link_path).map_err(|e| {
-            anyhow::anyhow!(
-                "Cannot create symlink {} → {}: {}",
-                link_path.display(),
-                rel_target,
-                e
-            )
-        })?;
+        if let Err(e) = std::os::unix::fs::symlink(&rel_target, &link_path) {
+            // Network shares (SMB/CIFS) reject symlinks — fall back to copying
+            // the package out of the virtual store, same as the Windows branch.
+            tracing::warn!(
+                "symlink {} → {rel_target} failed ({e}); copying instead",
+                link_path.display()
+            );
+            store::link_or_copy_dir(_virtual_pkg_path, &link_path)?;
+        }
     }
 
     #[cfg(not(unix))]

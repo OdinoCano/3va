@@ -249,24 +249,23 @@ pub fn create_workspace_symlinks(root: &Path, packages: &[WorkspacePackage]) -> 
                     };
 
                     #[cfg(unix)]
-                    std::os::unix::fs::symlink(&abs_target, &link_path).map_err(|e| {
-                        anyhow::anyhow!(
-                            "Cannot create symlink {} → {}: {}",
-                            link_path.display(),
-                            abs_target.display(),
-                            e
-                        )
-                    })?;
-
+                    let link_res = std::os::unix::fs::symlink(&abs_target, &link_path);
                     #[cfg(windows)]
-                    std::os::windows::fs::symlink_dir(&abs_target, &link_path).map_err(|e| {
-                        anyhow::anyhow!(
-                            "Cannot create symlink {} → {}: {}",
+                    let link_res = std::os::windows::fs::symlink_dir(&abs_target, &link_path);
+
+                    // Network shares (SMB/CIFS) and unprivileged Windows reject
+                    // symlinks — fall back to a plain recursive copy of the local
+                    // package source. Edits to the source won't propagate, but a
+                    // failed install is worse.
+                    if let Err(e) = link_res {
+                        tracing::warn!(
+                            "{}: symlink {} → {} failed ({e}); copying instead",
+                            pkg.name,
                             link_path.display(),
-                            abs_target.display(),
-                            e
-                        )
-                    })?;
+                            abs_target.display()
+                        );
+                        crate::store::link_or_copy_dir(&abs_target, &link_path)?;
+                    }
 
                     tracing::info!(
                         "{}: linked workspace dep {} → {}",

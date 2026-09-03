@@ -32,6 +32,18 @@ async fn engine_with_firewall(config: FirewallConfig) -> JsEngine {
         .unwrap()
 }
 
+/// Like `engine_with_firewall`, but also returns the `Firewall` handle so tests
+/// can inspect live connection accounting (e.g. `active_connection_count`).
+async fn engine_with_firewall_arc(config: FirewallConfig) -> (JsEngine, Arc<Firewall>) {
+    let perms = PermissionState::new();
+    perms.grant(Capability::Network("127.0.0.1".to_string()));
+    let fw = Firewall::new(config);
+    let e = JsEngine::new_with_firewall(Arc::new(perms), fw.clone())
+        .await
+        .unwrap();
+    (e, fw)
+}
+
 fn free_port() -> u16 {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
@@ -639,4 +651,521 @@ async fn firewall_slowloris_timeout_and_recovery() {
         .await
         .unwrap();
     assert_eq!(count, "1");
+}
+
+// ── keep-alive tests ─────────────────────────────────────────────────────────────
+
+/// Read exactly one full HTTP/1.1 response from `stream` (headers + body, sized by
+/// `Content-Length`) without consuming any bytes that belong to a subsequent
+/// keep-alive request on the same connection.
+async fn read_one_response(stream: &mut TcpStream) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let mut header_end: Option<usize> = None;
+    loop {
+        let n = stream.read(&mut tmp).await.expect("read response headers");
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            header_end = Some(pos + 4);
+            break;
+        }
+        assert!(buf.len() < (1 << 20), "response headers grew too large");
+    }
+    let header_end = match header_end {
+        Some(h) => h,
+        None => return String::from_utf8_lossy(&buf).to_string(),
+    };
+    let header_str = String::from_utf8_lossy(&buf[..header_end]);
+    let content_length: usize = header_str
+        .lines()
+        .find_map(|l| {
+            if l.to_ascii_lowercase().starts_with("content-length:") {
+                l.split_once(':')?.1.trim().parse().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    while buf.len() < header_end + content_length {
+        let n = stream.read(&mut tmp).await.expect("read response body");
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    String::from_utf8_lossy(&buf[..header_end + content_length]).to_string()
+}
+
+/// Send a single request on an already-open `stream` and read the response.
+/// `conn_header` lets the caller request keep-alive or close.
+async fn request_on(
+    stream: &mut TcpStream,
+    method: &str,
+    path: &str,
+    body: &str,
+    conn_header: &str,
+) -> String {
+    let req = if body.is_empty() {
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{conn_header}\r\n\r\n")
+    } else {
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len}\r\n{conn_header}\r\n\r\n{body}",
+            len = body.len(),
+        )
+    };
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .expect("write request");
+    stream.flush().await.expect("flush request");
+    read_one_response(stream).await
+}
+
+/// Two requests over a single keep-alive connection must each get a correct
+/// response, with the socket staying open in between.
+#[tokio::test]
+async fn keepalive_serves_two_requests_on_one_connection() {
+    let port = free_port();
+    let e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('resp ' + req.url); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let (r1, r2) = drive_until(&e, async move {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let r1 = request_on(&mut stream, "GET", "/one", "", "Connection: keep-alive").await;
+        let r2 = request_on(&mut stream, "GET", "/two", "", "Connection: keep-alive").await;
+        let _ = stream.shutdown().await;
+        (r1, r2)
+    })
+    .await;
+
+    assert_eq!(response_status(&r1), 200, "full r1:\n{r1}");
+    assert_eq!(response_body(&r1), "resp /one");
+    assert_eq!(response_status(&r2), 200, "full r2:\n{r2}");
+    assert_eq!(response_body(&r2), "resp /two");
+}
+
+/// When the client sends `Connection: close`, the server responds once and then
+/// closes the socket (the next read returns EOF).
+#[tokio::test]
+async fn client_connection_close_closes_socket() {
+    let port = free_port();
+    let e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('bye'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let (r1, n) = drive_until(&e, async move {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let r1 = request_on(&mut stream, "GET", "/", "", "Connection: close").await;
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
+        (r1, n)
+    })
+    .await;
+
+    assert_eq!(response_status(&r1), 200, "full r1:\n{r1}");
+    match n {
+        Ok(Ok(0)) => {}
+        other => panic!("expected EOF after Connection: close, got {:?}", other),
+    }
+}
+
+/// A keep-alive connection left idle past `keepalive_timeout_ms` must be closed
+/// silently by the server (Slowloris-on-idle mitigation), not held open forever.
+#[tokio::test]
+async fn idle_keepalive_connection_is_closed_by_server() {
+    let port = free_port();
+    let e = engine_with_firewall(FirewallConfig {
+        keepalive_timeout_ms: 300,
+        max_requests_per_conn: 1000,
+        ..FirewallConfig::default()
+    })
+    .await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.on('error', function() {{}});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let (r1, n) = drive_until(&e, async move {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let r1 = request_on(&mut stream, "GET", "/", "", "Connection: keep-alive").await;
+        // Send no further requests; the server must drop the idle socket after
+        // keepalive_timeout_ms (300 ms) rather than holding it open.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
+        (r1, n)
+    })
+    .await;
+
+    assert_eq!(response_status(&r1), 200, "full r1:\n{r1}");
+    match n {
+        Ok(Ok(0)) => {}
+        other => panic!(
+            "expected server to close idle keep-alive connection, got {:?}",
+            other
+        ),
+    }
+}
+
+/// A client that pipelines two requests in a single write: the server cannot carry
+/// the coalesced second request across the keep-alive boundary, so it answers the
+/// first and forces `Connection: close` (dropping the second), never hanging the
+/// client. This is the safe fallback required because pipelined bytes would
+/// otherwise be lost in `reader.into_inner()`.
+#[tokio::test]
+async fn pipelined_requests_force_connection_close() {
+    let port = free_port();
+    let e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('resp ' + req.url); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let (r1, n) = drive_until(&e, async move {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let pipeline = "GET /one HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n\
+             GET /two HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n"
+            .to_string();
+        stream.write_all(pipeline.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let r1 = read_one_response(&mut stream).await;
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
+        (r1, n)
+    })
+    .await;
+
+    assert_eq!(response_status(&r1), 200, "full r1:\n{r1}");
+    assert_eq!(response_body(&r1), "resp /one");
+    assert!(
+        r1.contains("Connection: close"),
+        "pipelined connection must be forced closed:\n{r1}"
+    );
+    match n {
+        Ok(Ok(0)) => {}
+        other => panic!(
+            "expected EOF after forced close on pipelined request, got {:?}",
+            other
+        ),
+    }
+}
+
+/// A server whose `'error'` handler re-throws must survive a keep-alive client
+/// that disconnects after its first response without sending a second request.
+/// Previously the EOF/read on the next accept surfaced `server.emit('error')`,
+/// which this handler re-threw and crashed the server.
+#[tokio::test]
+async fn rethrowing_error_handler_survives_keepalive_client_close() {
+    let port = free_port();
+    let e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.on('error', function(e) {{ throw e; }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    // One keep-alive request, read the response, then close the socket without a
+    // second request.
+    drive_until(&e, async move {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let r1 = request_on(&mut stream, "GET", "/", "", "Connection: keep-alive").await;
+        let _ = stream.shutdown().await;
+        r1
+    })
+    .await;
+
+    // Let the event loop process the now-closed connection.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The server must still accept new connections and respond normally.
+    let resp = drive_until(&e, raw_http(port, "GET", "/after", "")).await;
+    assert_eq!(
+        response_status(&resp),
+        200,
+        "server must survive client close and keep serving:\n{resp}"
+    );
+}
+
+/// A keep-alive connection left idle must NOT head-of-line block a brand-new
+/// connection. With the old single-outstanding accept loop, `__httpAcceptAsync`
+/// blocked up to `keepalive_timeout_ms` reading the idle socket before it could
+/// serve the second connection. The new design parses every connection on its
+/// own task and queues ready requests, so a new client is served immediately.
+#[tokio::test]
+async fn head_of_line_idle_keepalive_does_not_block_others() {
+    let port = free_port();
+    let e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let (resp, elapsed) = drive_until(&e, async move {
+        // Connection A: one keep-alive request, then deliberately left idle
+        // (no second request sent).
+        let mut a = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let _ = request_on(&mut a, "GET", "/a", "", "Connection: keep-alive").await;
+
+        // Connection B: a fresh request that must be served promptly even though
+        // A's socket is idle in keep-alive.
+        let start = tokio::time::Instant::now();
+        let mut b = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let resp = request_on(&mut b, "GET", "/b", "", "Connection: close").await;
+        (resp, start.elapsed())
+    })
+    .await;
+
+    assert_eq!(response_status(&resp), 200, "full resp:\n{resp}");
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "B was blocked by idle A (head-of-line): took {elapsed:?}",
+    );
+}
+
+/// 50 connections opened simultaneously, each issuing a single request, must
+/// all get a 200 — and the whole batch must complete quickly. This exercises
+/// the accept task + one-connection-task-per-socket model: connections are
+/// parsed concurrently instead of being serialized behind one `__httpAcceptAsync`.
+#[tokio::test]
+async fn many_simultaneous_connections_all_served() {
+    let port = free_port();
+    let e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let (statuses, elapsed) = drive_until(&e, async move {
+        let start = tokio::time::Instant::now();
+        let mut handles = Vec::new();
+        for _ in 0..50u32 {
+            handles.push(tokio::spawn(async move {
+                let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+                    .await
+                    .unwrap();
+                request_on(&mut s, "GET", "/", "", "Connection: close").await
+            }));
+        }
+        let mut statuses = Vec::new();
+        for h in handles {
+            statuses.push(h.await.unwrap());
+        }
+        (statuses, start.elapsed())
+    })
+    .await;
+
+    assert_eq!(statuses.len(), 50, "expected 50 responses");
+    for s in &statuses {
+        assert_eq!(response_status(s), 200, "full resp:\n{s}");
+    }
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "wall time too high (serialized accept?): {elapsed:?}",
+    );
+}
+
+/// After N keep-alive requests over a single connection that is then closed,
+/// the firewall's active connection count must return to 0 — proving
+/// `on_connect` and `on_disconnect` are each called exactly once per TCP
+/// connection (no leak, no double-accounting) under the new task model.
+#[tokio::test]
+async fn firewall_connection_count_balances_to_zero() {
+    let port = free_port();
+    let (e, fw) = engine_with_firewall_arc(FirewallConfig {
+        keepalive_timeout_ms: 5_000,
+        max_requests_per_conn: 1_000,
+        ..FirewallConfig::default()
+    })
+    .await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let n = 5u32;
+    drive_until(&e, async move {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        for i in 0..n {
+            // Keep-alive for all but the last request; close on the final one.
+            let conn = if i + 1 < n {
+                "Connection: keep-alive"
+            } else {
+                "Connection: close"
+            };
+            let resp = request_on(&mut stream, "GET", "/", "", conn).await;
+            assert_eq!(response_status(&resp), 200, "full resp:\n{resp}");
+        }
+        let _ = stream.shutdown().await;
+        n
+    })
+    .await;
+
+    // Wait (briefly) for the server to tear the connection down.
+    let mut waited = Duration::from_millis(0);
+    while fw.active_connection_count() != 0 && waited < Duration::from_secs(2) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        waited += Duration::from_millis(50);
+    }
+    assert_eq!(
+        fw.active_connection_count(),
+        0,
+        "connection leaked: firewall still tracks an open connection",
+    );
+}
+
+/// Closing a server must stop its accept task so the listener is released: a
+/// client connecting afterwards must NOT receive a 200 (it gets refused/EOF),
+/// and the same port must be re-bindable without EADDRINUSE.
+#[tokio::test]
+async fn close_releases_listener_and_allows_relisten() {
+    let port = free_port();
+    let e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        globalThis.__closeServer = function() {{ _server.close(); }};
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    // Close the server from JS.
+    e.eval_to_string("globalThis.__closeServer()")
+        .await
+        .unwrap();
+    // Give the accept task time to observe the shutdown and drop the listener.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A client connecting now must NOT be served. Either the OS refuses the
+    // connection or the socket is gone (immediate EOF), never a 200 response.
+    let outcome = drive_until(&e, async move {
+        match TcpStream::connect(format!("127.0.0.1:{port}")).await {
+            Ok(mut s) => {
+                let mut buf = [0u8; 1];
+                match tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await {
+                    Ok(Ok(0)) => "eof",  // socket closed, no response
+                    Ok(Ok(_)) => "data", // unexpected response bytes
+                    Ok(Err(_)) => "readerr",
+                    Err(_) => "timeout",
+                }
+            }
+            Err(_) => "refused",
+        }
+    })
+    .await;
+    assert!(
+        outcome == "refused" || outcome == "eof",
+        "expected connection refused/EOF after close, got {outcome}",
+    );
+
+    // Re-listening on the same port must succeed (no EADDRINUSE).
+    let relisten = e
+        .eval_to_string(&format!(
+            r#"
+        var http2 = require('http');
+        var s2 = http2.createServer(function(req, res) {{ res.end('again'); }});
+        s2.listen({port}, '127.0.0.1');
+        'relistened'
+        "#,
+            port = port,
+        ))
+        .await;
+    assert!(
+        relisten.is_ok(),
+        "re-listen on same port failed: {relisten:?}"
+    );
 }
