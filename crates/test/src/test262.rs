@@ -13,10 +13,12 @@ use vvva_permissions::{Capability, PermissionState};
 /// Minimal `$262` host object (see test262's INTERPRETING.md). `createRealm`
 /// delegates to `JsEngine::install_test262_realm_support`'s native
 /// `__native_createRealm` (a real `v8::Context` in the same isolate — must be
-/// installed on the engine before this script runs, see call sites of
-/// `install_test262_realm_support`). `agent` needs OS threads + cross-isolate
-/// shared memory that `JsEngine` doesn't expose yet; tests that touch
-/// `$262.agent` are filtered out before we even get here (see `run_case`).
+/// installed on the engine before this script runs). `agent` delegates to
+/// `JsEngine::install_test262_agent_support`'s native `__native_agent`
+/// (`start`/`broadcast`/`getReport`/`sleep`/`monotonicNow`) — each
+/// `$262.agent.start(script)` spawns a real OS thread with its own isolate;
+/// `receiveBroadcast`/`report`/`leaving` are installed directly in that
+/// agent's own global scope by `run_agent_thread`, not here.
 const DOLLAR_262_JS: &str = r#"
 var $262 = {
   global: globalThis,
@@ -27,6 +29,13 @@ var $262 = {
     throw new Test262Error('$262.detachArrayBuffer requires ArrayBuffer.prototype.transfer, which this engine build does not expose');
   },
   createRealm: function() { return __native_createRealm(); },
+  agent: {
+    start: function(src) { __native_agent.start(src); },
+    broadcast: function(sab, id) { __native_agent.broadcast(sab, id === undefined ? 0 : id); },
+    getReport: function() { return __native_agent.getReport(); },
+    sleep: function(ms) { __native_agent.sleep(ms); },
+    monotonicNow: function() { return __native_agent.monotonicNow(); },
+  },
 };
 if (typeof globalThis.print !== 'function') {
   Object.defineProperty(globalThis, 'print', { value: function() {}, writable: true, configurable: true });
@@ -130,6 +139,10 @@ fn build_script(harness_dir: &Path, meta: &TestMeta, body: &str, strict: bool) -
                  globalThis.print = function(msg) { globalThis.__asyncPrints.push(String(msg)); };\n",
             );
         }
+        // Must come before `includes`: some harness files (e.g.
+        // atomicsHelper.js) reference `$262.agent` at top-level load time,
+        // not just inside function bodies, so $262 has to already exist.
+        out.push_str(DOLLAR_262_JS);
         for f in &meta.includes {
             if let Ok(s) = std::fs::read_to_string(harness_dir.join(f)) {
                 out.push_str(&s);
@@ -145,8 +158,6 @@ fn build_script(harness_dir: &Path, meta: &TestMeta, body: &str, strict: bool) -
                 out.push('\n');
             }
         }
-        // Needs Test262Error from sta.js above, so it can't run under `raw`.
-        out.push_str(DOLLAR_262_JS);
     }
     out.push_str(body);
     out
@@ -220,6 +231,7 @@ fn build_module_harness(harness_dir: &Path, meta: &TestMeta) -> String {
                  globalThis.print = function(msg) { globalThis.__asyncPrints.push(String(msg)); };\n",
             );
         }
+        out.push_str(DOLLAR_262_JS);
         for f in &meta.includes {
             if let Ok(s) = std::fs::read_to_string(harness_dir.join(f)) {
                 out.push_str(&s);
@@ -232,7 +244,6 @@ fn build_module_harness(harness_dir: &Path, meta: &TestMeta) -> String {
                 out.push('\n');
             }
         }
-        out.push_str(DOLLAR_262_JS);
     }
     out
 }
@@ -341,6 +352,14 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
             status: TestStatus::Failed,
             duration_ms: start.elapsed().as_millis() as u64,
             error: Some(format!("failed to install $262 realm support: {e}")),
+        }];
+    }
+    if let Err(e) = engine.install_test262_agent_support().await {
+        return vec![TestResult {
+            name: display,
+            status: TestStatus::Failed,
+            duration_ms: start.elapsed().as_millis() as u64,
+            error: Some(format!("failed to install $262 agent support: {e}")),
         }];
     }
 
@@ -468,16 +487,6 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
     };
     let meta = parse_meta(&source);
 
-    // $262.agent requires worker threads + shared memory — skip unconditionally.
-    if source.contains("$262.agent") {
-        return vec![TestResult {
-            name: display,
-            status: TestStatus::Skipped,
-            duration_ms: 0,
-            error: None,
-        }];
-    }
-
     // Module tests are routed to a dedicated pipeline that writes the module
     // to a temp directory and uses eval_file (which auto-detects ESM and
     // transpiles to CJS).  Module tests run exactly once (ESM is always
@@ -540,6 +549,15 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
                 status: TestStatus::Failed,
                 duration_ms: start.elapsed().as_millis() as u64,
                 error: Some(format!("failed to install $262 realm support: {e}")),
+            });
+            continue;
+        }
+        if let Err(e) = engine.install_test262_agent_support().await {
+            results.push(TestResult {
+                name,
+                status: TestStatus::Failed,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("failed to install $262 agent support: {e}")),
             });
             continue;
         }
