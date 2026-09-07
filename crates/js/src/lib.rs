@@ -40,6 +40,25 @@ pub static V8_PLATFORM: std::sync::OnceLock<v8::SharedRef<v8::Platform>> =
 /// number of times from any number of places in the process — e.g. once per
 /// `JsEngine`, plus any standalone `v8::Isolate` created outside of one
 /// (like the CJS export-name probe in `vvva_cli`).
+/// When a script fails, which stage produced the exception — surfaced in the
+/// error message as e.g. `"[parse] SyntaxError: ..."` so callers (like the
+/// test262 runner, which must match tc39/test262's `negative.phase`) can tell
+/// a compile-time failure from a runtime one without re-running the script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalPhase {
+    Parse,
+    Runtime,
+}
+
+impl std::fmt::Display for EvalPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            EvalPhase::Parse => "parse",
+            EvalPhase::Runtime => "runtime",
+        })
+    }
+}
+
 pub fn ensure_v8_initialized() {
     V8_INIT.call_once(|| {
         let platform = v8::new_default_platform(0, false).make_shared();
@@ -271,14 +290,29 @@ impl JsEngine {
         let scope = std::pin::pin!(v8::HandleScope::new(&mut *self.isolate));
         let mut scope = scope.init();
         let context = v8::Local::new(&scope, &context_global);
-        let scope = v8::ContextScope::new(&mut scope, context);
-        let source = v8::String::new(&scope, &code).unwrap();
-        let script = v8::Script::compile(&scope, source, None)
-            .ok_or_else(|| anyhow::anyhow!("compile error"))?;
-        let _result = script
-            .run(&scope)
-            .ok_or_else(|| anyhow::anyhow!("execution error"))?;
-        Ok(())
+        let mut scope = v8::ContextScope::new(&mut scope, context);
+        v8::tc_scope!(let try_catch, &mut scope);
+        let source = v8::String::new(try_catch, &code).unwrap();
+        let script = match v8::Script::compile(try_catch, source, None) {
+            Some(s) => s,
+            None => {
+                let text = try_catch
+                    .exception()
+                    .map(|e| e.to_rust_string_lossy(try_catch))
+                    .unwrap_or_else(|| "unknown error".to_string());
+                return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Parse));
+            }
+        };
+        match script.run(try_catch) {
+            Some(_) => Ok(()),
+            None => {
+                let text = try_catch
+                    .exception()
+                    .map(|e| e.to_rust_string_lossy(try_catch))
+                    .unwrap_or_else(|| "unknown error".to_string());
+                Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Runtime))
+            }
+        }
     }
 
     pub async fn eval_to_string(&mut self, code: &str) -> anyhow::Result<String> {
@@ -300,6 +334,22 @@ impl JsEngine {
     pub async fn idle(&mut self) {
         pump_v8_platform_tasks(&self.isolate);
         self.isolate.perform_microtask_checkpoint();
+    }
+
+    /// Fires any expired `setTimeout`/`setInterval` callbacks a script
+    /// registered, running the JS side of each timer. `idle()` only drains
+    /// V8 platform tasks and microtasks — it never advances the timer wheel —
+    /// so async work that is paced by `setTimeout` (common in
+    /// test262 `flags: [async]` cases) needs this called in its own poll
+    /// loop to make progress.
+    pub async fn pump_timers(&mut self) -> anyhow::Result<()> {
+        let tm = self.timer_manager.clone();
+        let context_global = self.context.clone().expect("engine not initialized");
+        let scope = std::pin::pin!(v8::HandleScope::new(&mut *self.isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &context_global);
+        let mut scope = v8::ContextScope::new(&mut scope, context);
+        builtins::timers::TimerManager::fire_pending(&mut scope, tm)
     }
 
     pub async fn with_scope<R>(
@@ -398,7 +448,7 @@ impl JsEngine {
             let scope = std::pin::pin!(v8::HandleScope::new(&mut *self.isolate));
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &context_global);
-            let scope = v8::ContextScope::new(&mut scope, context);
+            let mut scope = v8::ContextScope::new(&mut scope, context);
 
             let f = filename.replace('\\', "\\\\").replace('\'', "\\'");
             let d = dirname.replace('\\', "\\\\").replace('\'', "\\'");
@@ -445,10 +495,24 @@ impl JsEngine {
             let _ = v8::Script::compile(&scope, setup_src, None).and_then(|s| s.run(&scope));
 
             let code_src = v8::String::new(&scope, &code).unwrap();
-            v8::Script::compile(&scope, code_src, None)
-                .ok_or_else(|| anyhow::anyhow!("compile error in {filename}"))?
-                .run(&scope)
-                .ok_or_else(|| anyhow::anyhow!("execution error in {filename}"))?;
+            v8::tc_scope!(let try_catch, &mut scope);
+            let script = match v8::Script::compile(try_catch, code_src, None) {
+                Some(s) => s,
+                None => {
+                    let text = try_catch
+                        .exception()
+                        .map(|e| e.to_rust_string_lossy(try_catch))
+                        .unwrap_or_else(|| "unknown error".to_string());
+                    return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Parse));
+                }
+            };
+            if script.run(try_catch).is_none() {
+                let text = try_catch
+                    .exception()
+                    .map(|e| e.to_rust_string_lossy(try_catch))
+                    .unwrap_or_else(|| "unknown error".to_string());
+                return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Runtime));
+            }
         }
 
         self.run_event_loop().await?;

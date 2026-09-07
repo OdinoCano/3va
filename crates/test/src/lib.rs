@@ -4,6 +4,7 @@ pub mod coverage;
 pub mod framework;
 pub mod runner;
 pub mod security;
+pub mod test262;
 
 pub use coverage::{generate_coverage_report, print_coverage_report, CoverageReport};
 pub use framework::{
