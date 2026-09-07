@@ -61,9 +61,14 @@ for f in "$ROOT_DIR"/crates/*/Cargo.toml; do
     fi
 done
 
-# ── process.rs runtime version strings ─────────────────────────────────────────
+# ── Runtime-visible version strings (process.versions['3va'], navigator.userAgent) ──
 echo "  • Updating crates/js/src/builtins/process.rs..."
-sed -i "s/\"3va\/\$CURRENT\"/\"3va\/$NEXT\"/g" "$ROOT_DIR/crates/js/src/builtins/process.rs"
+sed -i "s/set_str(scope, versions, \"3va\", \"$CURRENT\")/set_str(scope, versions, \"3va\", \"$NEXT\")/g" \
+    "$ROOT_DIR/crates/js/src/builtins/process.rs"
+
+echo "  • Updating crates/js/src/builtins/web_globals.rs..."
+sed -i "s/userAgent: '3va\/$CURRENT'/userAgent: '3va\/$NEXT'/g" \
+    "$ROOT_DIR/crates/js/src/builtins/web_globals.rs"
 
 # ── CHANGELOG.md ──────────────────────────────────────────────────────────────
 echo "  • Updating docs/CHANGELOG.md..."
@@ -81,6 +86,7 @@ DIST_FILES=(
     "Formula/3va.rb"
     "dist/cargo-wrapper/three-va/Cargo.toml"
     "dist/chocolatey/3va.nuspec"
+    "dist/chocolatey/tools/chocolateyInstall.ps1"
     "dist/homebrew/Formula/3va.rb"
     "dist/nix/default.nix"
     "dist/nix/flake.nix"

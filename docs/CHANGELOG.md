@@ -7,6 +7,31 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+## [v2.7.0] — 2026-09-07
+
+### Added
+
+- **test262 conformance runner** (`crates/test/src/test262.rs`, `cargo test -p vvva_test --test test262 -- --ignored`). Downloads via
+  `scripts/setup-test262.sh` (not committed). Hand-rolled frontmatter parser (no `serde_yaml` dependency — test262 metadata is flat
+  `key: value` plus `[a, b]` flow-sequences). Supports:
+  - Sync tests (strict/sloppy variants, `negative` phase+type matching).
+  - `flags: [async]` (`$DONE`, real `pump_timers()`+`idle()` polling — 5,624 tests).
+  - `flags: [module]` — routed through the existing `transpile_to_cjs` + `require()` pipeline (832 tests, ~62% pass; the rest need real
+    `v8::Module` for module-linking early-error semantics, documented as a known gap).
+  - `$262.createRealm()` — a genuine `v8::Context` in the same isolate, with matching security tokens so cross-realm property access
+    doesn't hit V8's default access checks (284 tests).
+  - `$262.agent` (worker/shared-memory API) — each `start(script)` spawns a real OS thread with its own `v8::Isolate`;
+    `SharedArrayBuffer` backing stores cross threads via an asserted-safe wrapper, and V8's own `Atomics.wait`/`notify` handle
+    cross-isolate synchronization without any reimplementation needed (112/112 tests passing).
+  - See `docs/09-testing/06-test262.md` for full coverage status; `intl402/` (ECMA-402 `Intl.*`, 3,357 tests) is deliberately paused —
+    documented there, not a partial/half implementation.
+
+### Changed
+
+- `JsEngine::eval()` now uses `v8::TryCatch` and surfaces the real V8 exception, tagged with the failing phase — e.g.
+  `"[parse] SyntaxError: ..."` or `"[runtime] TypeError: ..."` — instead of the generic `"compile error"`/`"execution error"` strings it
+  returned before. Improves error visibility across the engine, not just for test262.
+
 ### Fixed
 
 - **Multi-byte UTF-8 corruption in streamed/chunked data paths — the "Metro under `3va start`
