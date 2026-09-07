@@ -6874,7 +6874,7 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "vvva_bundler"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "notify",
@@ -6898,7 +6898,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_cli"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6930,7 +6930,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_config"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "regex-lite",
@@ -6943,7 +6943,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_core"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -6952,7 +6952,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_crypto"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "hex",
  "hmac 0.12.1",
@@ -6969,7 +6969,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_firewall"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "serde",
  "tokio",
@@ -6978,7 +6978,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_js"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -7048,7 +7048,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_permissions"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7061,7 +7061,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_pm"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7090,7 +7090,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_test"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -7110,7 +7110,7 @@ dependencies = [
 
 [[package]]
 name = "vvva_wasm"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "tempfile",
