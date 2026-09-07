@@ -7,22 +7,22 @@ class ThreeVa < Formula
   on_macos do
     on_intel do
       url "https://github.com/OdinoCano/3va/releases/download/v2.7.0/3va-v2.7.0-x86_64-apple-darwin.tar.gz"
-      sha256 "01742f5f8f654e2866e04f2d66f7e69460c74fbe888ab2d839ccce42374adf11"
+      sha256 "5e97edac03c1fcffe1ed4845f88b2d46ea1e3c50c72c2c3b9d3f05fb4e463fbc"
     end
     on_arm do
       url "https://github.com/OdinoCano/3va/releases/download/v2.7.0/3va-v2.7.0-aarch64-apple-darwin.tar.gz"
-      sha256 "a6e04c2b27472c44a10f2726d1ff1f0d9c5f80c0895b764b8359b26ccaf28d21"
+      sha256 "16a2c32ff2dd75083d5a4d144c9796086dfb01e4e1e62168ba698beb55c5b29f"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/OdinoCano/3va/releases/download/v2.7.0/3va-v2.7.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "a662727e715dffa070ed83e05cbbf1771c97652b31e086df1a5403ec4613aea5"
+      sha256 "39f643ad054bc3b035fdae9d969011e5fc1d79210af4445709de0e4b3e2d68d6"
     end
     on_arm do
       url "https://github.com/OdinoCano/3va/releases/download/v2.7.0/3va-v2.7.0-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "76a5c3e736f975c2e4377092e622330724dc2d1d4d210b1263c79a629e3a286f"
+      sha256 "382e5e4434c3dee3e781e8a05718c4f680fba2cd2f051354224d9e0722348180"
     end
   end
 
