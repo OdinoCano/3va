@@ -11,8 +11,11 @@ use vvva_js::JsEngine;
 use vvva_permissions::{Capability, PermissionState};
 
 /// Minimal `$262` host object (see test262's INTERPRETING.md). `createRealm`
-/// and `agent` need a second V8 context / OS threads that `JsEngine` doesn't
-/// expose yet, so they throw instead of silently no-op-ing; tests that touch
+/// delegates to `JsEngine::install_test262_realm_support`'s native
+/// `__native_createRealm` (a real `v8::Context` in the same isolate — must be
+/// installed on the engine before this script runs, see call sites of
+/// `install_test262_realm_support`). `agent` needs OS threads + cross-isolate
+/// shared memory that `JsEngine` doesn't expose yet; tests that touch
 /// `$262.agent` are filtered out before we even get here (see `run_case`).
 const DOLLAR_262_JS: &str = r#"
 var $262 = {
@@ -23,9 +26,7 @@ var $262 = {
     if (typeof buffer.transfer === 'function') { buffer.transfer(0); return null; }
     throw new Test262Error('$262.detachArrayBuffer requires ArrayBuffer.prototype.transfer, which this engine build does not expose');
   },
-  createRealm: function() {
-    throw new Test262Error('$262.createRealm is not supported (no multi-realm support in JsEngine yet)');
-  },
+  createRealm: function() { return __native_createRealm(); },
 };
 if (typeof globalThis.print !== 'function') {
   Object.defineProperty(globalThis, 'print', { value: function() {}, writable: true, configurable: true });
@@ -334,6 +335,15 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
         }
     };
 
+    if let Err(e) = engine.install_test262_realm_support().await {
+        return vec![TestResult {
+            name: display,
+            status: TestStatus::Failed,
+            duration_ms: start.elapsed().as_millis() as u64,
+            error: Some(format!("failed to install $262 realm support: {e}")),
+        }];
+    }
+
     // Populate globals via the harness (assert, Test262Error, $262, ...).
     if let Err(e) = engine.eval(&harness).await {
         return vec![TestResult {
@@ -524,6 +534,15 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
                 continue;
             }
         };
+        if let Err(e) = engine.install_test262_realm_support().await {
+            results.push(TestResult {
+                name,
+                status: TestStatus::Failed,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("failed to install $262 realm support: {e}")),
+            });
+            continue;
+        }
 
         let (status, error) = if meta.is_async() {
             match run_async(&mut engine, &script).await {
