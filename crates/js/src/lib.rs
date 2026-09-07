@@ -79,6 +79,117 @@ fn pump_v8_platform_tasks(isolate: &v8::Isolate) {
     }
 }
 
+/// Realms created via `$262.createRealm()` (see `install_realm_support`),
+/// keyed by index. Stored as isolate embedder data so the registry outlives
+/// any single callback invocation, for as long as the isolate lives.
+type RealmRegistry = std::cell::RefCell<Vec<v8::Global<v8::Context>>>;
+
+/// Sets `globalThis.__native_createRealm` in the current context to a
+/// function that creates a new `v8::Context` in the same isolate and
+/// returns `{ global, evalScript }` for it.
+fn install_realm_support(scope: &mut v8::ContextScope<v8::HandleScope>) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let create_fn = v8::Function::new(scope, create_realm_callback).unwrap();
+    let key = v8::String::new(scope, "__native_createRealm").unwrap();
+    global.set(scope, key.into(), create_fn.into());
+}
+
+fn create_realm_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let new_ctx = v8::Context::new(scope, Default::default());
+    // Match the caller's security token so cross-realm property access on
+    // the new realm's global proxy (e.g. `other.Function`, `other.Array`)
+    // isn't rejected by V8's default access checks — without this, every
+    // access from outside the new context throws a bare "no access"
+    // TypeError, defeating the entire point of exposing `.global`.
+    let caller_token = scope.get_current_context().get_security_token(scope);
+    new_ctx.set_security_token(caller_token);
+    let global_handle = v8::Global::new(scope.as_ref(), new_ctx);
+
+    if scope.get_slot::<RealmRegistry>().is_none() {
+        scope.set_slot(RealmRegistry::default());
+    }
+    let idx = {
+        let registry = scope.get_slot::<RealmRegistry>().unwrap();
+        let mut list = registry.borrow_mut();
+        list.push(global_handle);
+        list.len() - 1
+    };
+
+    let result = v8::Object::new(scope);
+
+    let global_key = v8::String::new(scope, "global").unwrap();
+    let new_global = new_ctx.global(scope);
+    result.set(scope, global_key.into(), new_global.into());
+
+    let idx_num = v8::Number::new(scope, idx as f64);
+    let eval_fn = v8::Function::builder(realm_eval_script_callback)
+        .data(idx_num.into())
+        .build(scope)
+        .unwrap();
+    let eval_key = v8::String::new(scope, "evalScript").unwrap();
+    result.set(scope, eval_key.into(), eval_fn.into());
+
+    rv.set(result.into());
+}
+
+/// `evalScript(src)` on a realm object returned by `$262.createRealm()`:
+/// compiles and runs `src` inside that realm's own `v8::Context`. On
+/// failure, rethrows the realm's own exception value as-is (not a copy or a
+/// message string) so tests checking cross-realm identity (e.g.
+/// `err.constructor === realm.global.SyntaxError`) see the real thing.
+fn realm_eval_script_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let idx = args.data().number_value(scope).unwrap_or(-1.0);
+    let src = args.get(0).to_rust_string_lossy(scope);
+
+    let ctx_global = {
+        let Some(registry) = scope.get_slot::<RealmRegistry>() else {
+            let msg = v8::String::new(scope, "realm registry missing").unwrap();
+            scope.throw_exception(msg.into());
+            return;
+        };
+        let list = registry.borrow();
+        let Some(g) = (idx >= 0.0).then(|| list.get(idx as usize)).flatten() else {
+            let msg = v8::String::new(scope, "invalid realm handle").unwrap();
+            scope.throw_exception(msg.into());
+            return;
+        };
+        g.clone()
+    };
+
+    let context = v8::Local::new(scope, &ctx_global);
+    let mut ctx_scope = v8::ContextScope::new(scope, context);
+    v8::tc_scope!(let try_catch, &mut ctx_scope);
+    let Some(source) = v8::String::new(try_catch, &src) else {
+        return;
+    };
+    let script = match v8::Script::compile(try_catch, source, None) {
+        Some(s) => s,
+        None => {
+            if let Some(exc) = try_catch.exception() {
+                try_catch.throw_exception(exc);
+            }
+            return;
+        }
+    };
+    match script.run(try_catch) {
+        Some(result) => rv.set(result),
+        None => {
+            if let Some(exc) = try_catch.exception() {
+                try_catch.throw_exception(exc);
+            }
+        }
+    }
+}
+
 pub struct JsEngine {
     isolate: v8::OwnedIsolate,
     context: Option<v8::Global<v8::Context>>,
@@ -313,6 +424,23 @@ impl JsEngine {
                 Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Runtime))
             }
         }
+    }
+
+    /// Installs `globalThis.__native_createRealm`, the native primitive
+    /// behind test262's `$262.createRealm()`: creates a brand new
+    /// `v8::Context` in this same isolate — fresh intrinsics (its own
+    /// Array/Object/Error/etc, distinct by identity from the caller's) —
+    /// and returns `{ global, evalScript }` for it. Realms are kept alive
+    /// in an isolate-slot registry for the engine's lifetime so returned
+    /// handles don't dangle once this call returns.
+    pub async fn install_test262_realm_support(&mut self) -> anyhow::Result<()> {
+        let context_global = self.context.clone().expect("engine not initialized");
+        let scope = std::pin::pin!(v8::HandleScope::new(&mut *self.isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &context_global);
+        let mut scope = v8::ContextScope::new(&mut scope, context);
+        install_realm_support(&mut scope);
+        Ok(())
     }
 
     pub async fn eval_to_string(&mut self, code: &str) -> anyhow::Result<String> {
