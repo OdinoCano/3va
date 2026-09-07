@@ -10,6 +10,7 @@ pub mod transpiler;
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use v8::Isolate;
 use vvva_core::Runtime;
@@ -187,6 +188,309 @@ fn realm_eval_script_callback(
                 try_catch.throw_exception(exc);
             }
         }
+    }
+}
+
+// ─── $262.agent support (test262's worker/shared-memory API) ──────────────
+//
+// Each agent is a real OS thread with its own `v8::Isolate` — isolates
+// aren't `Send`, so this can't be simulated with async tasks the way
+// createRealm's realms are (those stay in one isolate). What crosses
+// threads is only the `SharedArrayBuffer`'s backing store; V8's own
+// Atomics.wait/notify implementation already handles cross-isolate
+// synchronization correctly once the same backing store is shared, so
+// there's no wait/notify logic to reimplement here — just plumbing.
+
+/// A `v8::SharedRef<v8::BackingStore>` derefs to `[Cell<u8>]`, so the v8
+/// crate deliberately leaves it `!Sync` — callers must synchronize access
+/// themselves. Test262's `SharedArrayBuffer`/`Atomics` contract *is* that
+/// synchronization (same guarantee `Deno`/Node's `worker_threads` build on),
+/// so this wrapper asserts it to let the handle cross a channel.
+struct SendableBackingStore(v8::SharedRef<v8::BackingStore>);
+unsafe impl Send for SendableBackingStore {}
+
+type BroadcastMsg = (SendableBackingStore, i32);
+
+/// Per-test-case `$262.agent` state: install a fresh one per
+/// `install_test262_agent_support` call (i.e. per test262 case) so agents
+/// from unrelated test files — each running on their own thread via
+/// `test262::run_suite` — never cross-talk.
+#[derive(Default)]
+pub struct AgentHub {
+    mailboxes: Mutex<Vec<std::sync::mpsc::Sender<BroadcastMsg>>>,
+    reports: Mutex<std::collections::VecDeque<String>>,
+}
+
+/// Hard cap on how long a spawned agent thread waits for broadcasts before
+/// giving up and exiting, in case a test never calls `$262.agent.leaving()`.
+/// Matches the largest timeout test262's own harness uses
+/// (`$262.agent.timeouts.huge`, see harness/atomicsHelper.js) with headroom.
+const AGENT_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn process_start() -> std::time::Instant {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(std::time::Instant::now)
+}
+
+fn install_agent_sleep_and_clock(scope: &mut v8::PinScope, target: v8::Local<v8::Object>) {
+    let sleep_fn = v8::Function::new(scope, agent_sleep_callback).unwrap();
+    let key = v8::String::new(scope, "sleep").unwrap();
+    target.set(scope, key.into(), sleep_fn.into());
+
+    let now_fn = v8::Function::new(scope, agent_monotonic_now_callback).unwrap();
+    let key = v8::String::new(scope, "monotonicNow").unwrap();
+    target.set(scope, key.into(), now_fn.into());
+}
+
+fn agent_sleep_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let ms = args.get(0).number_value(scope).unwrap_or(0.0);
+    if ms > 0.0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
+}
+
+fn agent_monotonic_now_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ms = process_start().elapsed().as_secs_f64() * 1000.0;
+    rv.set(v8::Number::new(scope, ms).into());
+}
+
+/// Installs the MAIN-thread-side `$262.agent` primitives (`start`,
+/// `broadcast`, `getReport`, plus `sleep`/`monotonicNow`) onto `target`
+/// (the JS object test262.rs's `$262.agent` literal will use), backed by a
+/// fresh `AgentHub` stashed in this context's isolate slot.
+fn install_agent_main(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    target: v8::Local<v8::Object>,
+) {
+    scope.set_slot(Arc::new(AgentHub::default()));
+
+    let start_fn = v8::Function::new(scope, agent_start_callback).unwrap();
+    let key = v8::String::new(scope, "start").unwrap();
+    target.set(scope, key.into(), start_fn.into());
+
+    let broadcast_fn = v8::Function::new(scope, agent_broadcast_callback).unwrap();
+    let key = v8::String::new(scope, "broadcast").unwrap();
+    target.set(scope, key.into(), broadcast_fn.into());
+
+    let get_report_fn = v8::Function::new(scope, agent_get_report_callback).unwrap();
+    let key = v8::String::new(scope, "getReport").unwrap();
+    target.set(scope, key.into(), get_report_fn.into());
+
+    install_agent_sleep_and_clock(scope, target);
+}
+
+fn agent_start_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let Some(hub) = scope.get_slot::<Arc<AgentHub>>().cloned() else {
+        let msg = v8::String::new(scope, "$262.agent used before installation").unwrap();
+        scope.throw_exception(msg.into());
+        return;
+    };
+    let src = args.get(0).to_rust_string_lossy(scope);
+
+    let (tx, rx) = std::sync::mpsc::channel::<BroadcastMsg>();
+    hub.mailboxes.lock().unwrap().push(tx);
+
+    std::thread::spawn(move || run_agent_thread(hub, rx, src));
+}
+
+fn agent_broadcast_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let Some(hub) = scope.get_slot::<Arc<AgentHub>>().cloned() else {
+        return;
+    };
+    let Ok(sab) = args.get(0).try_cast::<v8::SharedArrayBuffer>() else {
+        let msg =
+            v8::String::new(scope, "$262.agent.broadcast expects a SharedArrayBuffer").unwrap();
+        scope.throw_exception(msg.into());
+        return;
+    };
+    let id = args.get(1).number_value(scope).unwrap_or(0.0) as i32;
+    let store = sab.get_backing_store();
+
+    let mut mailboxes = hub.mailboxes.lock().unwrap();
+    mailboxes.retain(|tx| tx.send((SendableBackingStore(store.clone()), id)).is_ok());
+}
+
+fn agent_get_report_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Some(hub) = scope.get_slot::<Arc<AgentHub>>().cloned() else {
+        return;
+    };
+    let next = hub.reports.lock().unwrap().pop_front();
+    match next {
+        Some(s) => {
+            let v = v8::String::new(scope, &s).unwrap();
+            rv.set(v.into());
+        }
+        None => rv.set_null(),
+    }
+}
+
+/// Per-agent-isolate state for the callback registered via
+/// `$262.agent.receiveBroadcast(fn)`, and the flag `$262.agent.leaving()`
+/// sets to tell `run_agent_thread`'s loop to stop.
+#[derive(Default)]
+struct AgentSideState {
+    receive_broadcast: std::cell::RefCell<Option<v8::Global<v8::Function>>>,
+    leaving: std::cell::Cell<bool>,
+}
+
+/// Runs one `$262.agent.start(script)` agent: a bare isolate + context on
+/// its own OS thread (isolates aren't `Send`, so this can't share the
+/// caller's). Evaluates `script`, then services broadcasts (invoking any
+/// `receiveBroadcast` callback the script registered) until `leaving()` is
+/// called, the channel closes, or `AGENT_MAX_LIFETIME` elapses.
+fn run_agent_thread(hub: Arc<AgentHub>, rx: std::sync::mpsc::Receiver<BroadcastMsg>, src: String) {
+    ensure_v8_initialized();
+    let mut isolate = v8::Isolate::new(Default::default());
+    isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+
+    let scope = std::pin::pin!(v8::HandleScope::new(&mut isolate));
+    let mut scope = scope.init();
+    let context = v8::Context::new(&scope, Default::default());
+    let mut scope = v8::ContextScope::new(&mut scope, context);
+
+    scope.set_slot(hub.clone());
+    scope.set_slot(Rc::new(AgentSideState::default()));
+
+    let global = scope.get_current_context().global(&scope);
+    let dollar262 = v8::Object::new(&scope);
+    let agent_obj = v8::Object::new(&scope);
+
+    let recv_fn = v8::Function::new(&mut scope, agent_receive_broadcast_callback).unwrap();
+    let key = v8::String::new(&scope, "receiveBroadcast").unwrap();
+    agent_obj.set(&scope, key.into(), recv_fn.into());
+
+    let report_fn = v8::Function::new(&mut scope, agent_report_callback).unwrap();
+    let key = v8::String::new(&scope, "report").unwrap();
+    agent_obj.set(&scope, key.into(), report_fn.into());
+
+    let leaving_fn = v8::Function::new(&mut scope, agent_leaving_callback).unwrap();
+    let key = v8::String::new(&scope, "leaving").unwrap();
+    agent_obj.set(&scope, key.into(), leaving_fn.into());
+
+    install_agent_sleep_and_clock(&mut scope, agent_obj);
+
+    let key = v8::String::new(&scope, "agent").unwrap();
+    dollar262.set(&scope, key.into(), agent_obj.into());
+    let key = v8::String::new(&scope, "$262").unwrap();
+    global.set(&scope, key.into(), dollar262.into());
+
+    {
+        v8::tc_scope!(let try_catch, &mut scope);
+        if let Some(source) = v8::String::new(try_catch, &src) {
+            match v8::Script::compile(try_catch, source, None) {
+                Some(script) => {
+                    if script.run(try_catch).is_none()
+                        && let Some(exc) = try_catch.exception()
+                    {
+                        eprintln!(
+                            "[test262 agent] script threw: {}",
+                            exc.to_rust_string_lossy(try_catch)
+                        );
+                    }
+                }
+                None => {
+                    if let Some(exc) = try_catch.exception() {
+                        eprintln!(
+                            "[test262 agent] parse error: {}",
+                            exc.to_rust_string_lossy(try_catch)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let deadline = std::time::Instant::now() + AGENT_MAX_LIFETIME;
+    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match rx.recv_timeout(remaining) {
+            Ok((store, id)) => {
+                let state = scope.get_slot::<Rc<AgentSideState>>().unwrap().clone();
+                let callback = state.receive_broadcast.borrow().clone();
+                if let Some(cb) = callback {
+                    v8::tc_scope!(let try_catch, &mut scope);
+                    let func = v8::Local::new(try_catch, &cb);
+                    let sab = v8::SharedArrayBuffer::with_backing_store(try_catch, &store.0);
+                    let id_val = v8::Number::new(try_catch, id as f64);
+                    let recv = v8::undefined(try_catch);
+                    if func
+                        .call(try_catch, recv.into(), &[sab.into(), id_val.into()])
+                        .is_none()
+                        && let Some(exc) = try_catch.exception()
+                    {
+                        eprintln!(
+                            "[test262 agent] receiveBroadcast threw: {}",
+                            exc.to_rust_string_lossy(try_catch)
+                        );
+                    }
+                }
+                if scope
+                    .get_slot::<Rc<AgentSideState>>()
+                    .unwrap()
+                    .leaving
+                    .get()
+                {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+fn agent_receive_broadcast_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let Some(state) = scope.get_slot::<Rc<AgentSideState>>().cloned() else {
+        return;
+    };
+    let Ok(func) = args.get(0).try_cast::<v8::Function>() else {
+        return;
+    };
+    *state.receive_broadcast.borrow_mut() = Some(v8::Global::new(scope.as_ref(), func));
+}
+
+fn agent_report_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let Some(hub) = scope.get_slot::<Arc<AgentHub>>().cloned() else {
+        return;
+    };
+    let msg = args.get(0).to_rust_string_lossy(scope);
+    hub.reports.lock().unwrap().push_back(msg);
+}
+
+fn agent_leaving_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    if let Some(state) = scope.get_slot::<Rc<AgentSideState>>() {
+        state.leaving.set(true);
     }
 }
 
@@ -440,6 +744,25 @@ impl JsEngine {
         let context = v8::Local::new(&scope, &context_global);
         let mut scope = v8::ContextScope::new(&mut scope, context);
         install_realm_support(&mut scope);
+        Ok(())
+    }
+
+    /// Installs `$262.agent` support for the test262 runner: creates a
+    /// fresh `globalThis.__native_agent` object with `start`/`broadcast`/
+    /// `getReport`/`sleep`/`monotonicNow` bound to real cross-thread
+    /// primitives (see the `$262.agent` module comment near `AgentHub`).
+    pub async fn install_test262_agent_support(&mut self) -> anyhow::Result<()> {
+        let context_global = self.context.clone().expect("engine not initialized");
+        let scope = std::pin::pin!(v8::HandleScope::new(&mut *self.isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &context_global);
+        let mut scope = v8::ContextScope::new(&mut scope, context);
+
+        let global = scope.get_current_context().global(&scope);
+        let agent_obj = v8::Object::new(&scope);
+        install_agent_main(&mut scope, agent_obj);
+        let key = v8::String::new(&scope, "__native_agent").unwrap();
+        global.set(&scope, key.into(), agent_obj.into());
         Ok(())
     }
 
