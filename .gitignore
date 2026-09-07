@@ -63,3 +63,5 @@ dist/snap/*.snap
 # .semgrep/   → reglas de seguridad, deben commitearse
 # .cargo-husky/ → hooks source, debe commitearse
 # Cargo.lock  → trackeado para reproducibilidad y auditoría de supply chain
+# test262 suite — downloaded by scripts/setup-test262.sh, not committed
+tests/test262/
