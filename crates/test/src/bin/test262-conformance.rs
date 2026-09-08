@@ -37,9 +37,22 @@ fn main() {
     // this engine's $262.agent/createRealm — one hung this binary for over
     // an hour (a test blocked forever on Atomics.wait with no notify, most
     // likely) before this got scoped down. Same three trees, aggregated.
-    let mut summary = run_suite(&root, "language", &["*"]);
-    for subdir in ["built-ins", "intl402"] {
+    //
+    // Prints each subdir's own summary line to stderr as it finishes, not
+    // just the aggregate at the very end: the full run takes long enough
+    // (an hour-plus on a CI runner) that "is this actually still moving, or
+    // stuck" needs a real answer from the log, not just an assumption.
+    let mut summary = vvva_test::test262::Test262Summary::default();
+    for subdir in ["language", "built-ins", "intl402"] {
+        let start = std::time::Instant::now();
         let s = run_suite(&root, subdir, &["*"]);
+        eprintln!(
+            "[test262-conformance] {subdir}: {} passed, {} failed, {} skipped ({:.0}s)",
+            s.passed,
+            s.failed,
+            s.skipped,
+            start.elapsed().as_secs_f64()
+        );
         summary.passed += s.passed;
         summary.failed += s.failed;
         summary.skipped += s.skipped;
