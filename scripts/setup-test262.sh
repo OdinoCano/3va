@@ -3,6 +3,7 @@
 # Not a submodule: test262 is ~70k files with a large history, and we only
 # ever need the current tree, so a shallow clone keeps the main repo clean.
 set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 DIR="tests/test262"
 
