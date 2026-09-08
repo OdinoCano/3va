@@ -12,6 +12,7 @@ pub mod ftp;
 pub mod grpc;
 pub mod http_server;
 pub mod imap;
+pub mod intl;
 pub mod irc;
 pub mod modules;
 pub mod mqtt;
@@ -129,6 +130,7 @@ pub fn inject_all(
     let _ = script.run(scope);
 
     t!("web_globals", web_globals::inject_web_globals(scope))?;
+    t!("intl", intl::inject_intl(scope))?;
     t!("fetch", fetch::inject_fetch(scope, permissions.clone()))?;
     t!("fs", fs::inject_fs(scope, permissions.clone()))?;
     t!("tcp", tcp::inject_tcp(scope, permissions.clone()))?;
