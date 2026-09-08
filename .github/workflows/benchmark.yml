@@ -33,7 +33,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # Deliberately no Swatinem/rust-cache here (unlike other workflows in
+      # this repo that don't need one either — release.yml builds `v8` from
+      # scratch every time and never hits this). rusty_v8's build script
+      # produces a ~100+ MB static lib that rust-cache's size-based pruning
+      # strips before saving, but the "build script already ran" fingerprint
+      # gets cached anyway — cargo then skips re-running it and the linker
+      # can't find the .a file that was never actually restored. Three
+      # consecutive runs of this workflow failed on exactly that ("could not
+      # find native static library `rusty_v8`") before this got removed.
 
       - uses: actions/setup-node@v4
         with:
