@@ -602,6 +602,17 @@ fn try_run_package_script(name: &str) -> anyhow::Result<bool> {
     // running an arbitrary command the moment someone types `3va <name>` —
     // matching why `3va install` never runs postinstall scripts at all.
     let pkg_permissions = read_package_json_permissions(&cwd);
+
+    if pkg_permissions.no_delegate || std::env::args().any(|a| a == "--no-delegate") {
+        eprintln!(
+            "[3va] \"{name}\" isn't a 3va command. package.json declares scripts.{name} = {script_cmd:?}.\n\
+             Delegating to an external package manager is disabled (--no-delegate or \"3va\": {{ \"no-delegate\": true }}).\n\
+             That external binary would run outside 3va's capability model entirely, so this is a hard\n\
+             refusal, not a prompt you could otherwise say yes to — run {script_cmd:?} yourself directly if you need it."
+        );
+        std::process::exit(1);
+    }
+
     let skip_prompt =
         pkg_permissions.no_prompt || std::env::args().any(|a| a == "--yes" || a == "-y");
 
@@ -2609,6 +2620,12 @@ fn read_package_json_permissions(start_dir: &std::path::Path) -> ThreeVaPermissi
     };
     // "3va": { "no-prompt": true } — equivale a pasar --no-prompt en cada `3va run`.
     merged.no_prompt = json["3va"]["no-prompt"].as_bool().unwrap_or(false);
+    // "3va": { "no-delegate": true } — nunca ejecutar scripts.<name> vía el
+    // package manager real (npm/pnpm/yarn/bun), ni con prompt. Ese binario
+    // externo corre fuera del modelo de capabilities (ver
+    // try_run_package_script), así que esta es la única forma real de negar
+    // esa superficie por completo en vez de confiar en responder "N" cada vez.
+    merged.no_delegate = json["3va"]["no-delegate"].as_bool().unwrap_or(false);
     let Some(scopes) = json["3va"]["permissions"].as_object() else {
         return merged;
     };
@@ -2718,6 +2735,7 @@ struct ThreeVaPermissions {
     allow_child_process: bool,
     allow_ffi: Vec<String>,
     no_prompt: bool,
+    no_delegate: bool,
     deny_read: Vec<String>,
     deny_write: Vec<String>,
     deny_net: Vec<String>,
@@ -6904,6 +6922,28 @@ mod tests {
         let pkg_permissions = read_package_json_permissions(dir.path());
         assert!(pkg_permissions.no_prompt);
         assert!(pkg_permissions.allow_env.contains(&"SHELL".to_string()));
+    }
+
+    #[test]
+    fn package_json_no_delegate_flag_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"3va": {"no-delegate": true}}"#,
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        assert!(pkg_permissions.no_delegate);
+    }
+
+    #[test]
+    fn package_json_no_delegate_defaults_to_false() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{"name": "test"}"#).unwrap();
+
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        assert!(!pkg_permissions.no_delegate);
     }
 
     #[test]
