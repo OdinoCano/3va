@@ -66,5 +66,14 @@ for kind, suffix in (("http", "http"), ("mem", "mem")):
         text,
     )
 
+test262_values = {}
+section_match = re.search(r"## ECMAScript conformance \(test262\)\n\n(.*?)\n\n", bench, re.S)
+section = section_match.group(1) if section_match else ""
+for line in section.splitlines():
+    m = re.match(r"\|\s*(\S+)\s*\|\s*([\d.]+% \([^)]*\))\s*\|", line)
+    if m:
+        test262_values[m.group(1)] = m.group(2)
+text = fill({f"test262-{k}": v for k, v in test262_values.items()}, text)
+
 readme.write_text(text)
 EOF

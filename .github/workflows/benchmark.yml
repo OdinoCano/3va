@@ -6,6 +6,11 @@ name: Benchmark
 # treat these numbers as regression signal against previous runs of this
 # workflow, not as the headline figures for the README — see bench/README.md
 # for the reference run those figures are backed by.
+#
+# Also runs the full test262 conformance suite (~53k tests, language/ +
+# built-ins/ + intl402/) and reports 3va's real pass rate — this is why the
+# job can take noticeably longer than a pure perf benchmark would; see
+# docs/09-testing/06-test262.md for the methodology and known gaps.
 
 on:
   workflow_dispatch:
