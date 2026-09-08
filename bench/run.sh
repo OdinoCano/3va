@@ -98,10 +98,19 @@ print(f"| {sys.argv[2]} | {data['mean']*1000:.1f} ms | {data['min']*1000:.1f}–
 EOF
 }
 
-install_row "3va" "$BIN_3VA install --allow-net=registry.npmjs.org" "$BIN_3VA install --allow-net=registry.npmjs.org"
-[ "$HAVE_NODE" = 1 ] && command -v npm >/dev/null 2>&1 && \
-  install_row "npm" "npm install --silent" "npm install --silent"
-[ "$HAVE_BUN" = 1 ] && install_row "bun" "bun install" "bun install"
+# `|| true` on each: this whole script runs under `set -e`, and
+# install_row's setup step redirects to /dev/null — an install failure
+# (registry hiccup, rate limit, whatever) would otherwise silently abort
+# every section after it (HTTP throughput, memory, and the test262
+# conformance run below) with zero error output, while the CI step itself
+# still reports success (the workflow's `| tee` doesn't set `pipefail`).
+# One tool failing to install now just skips its own row, same as the
+# already-documented "not on PATH" case.
+install_row "3va" "$BIN_3VA install --allow-net=registry.npmjs.org" "$BIN_3VA install --allow-net=registry.npmjs.org" || true
+if [ "$HAVE_NODE" = 1 ] && command -v npm >/dev/null 2>&1; then
+  install_row "npm" "npm install --silent" "npm install --silent" || true
+fi
+[ "$HAVE_BUN" = 1 ] && { install_row "bun" "bun install" "bun install" || true; }
 echo
 echo "_Node has no bundled installer of its own (npm/yarn/pnpm are separate_"
 echo "_tools), so its row above is npm's. Any row missing from the table_"
@@ -194,9 +203,9 @@ print(f"| {sys.argv[2]} | {rps:,.0f} | {success:.1f}% | {idle_mb:.1f} MB | {load
 EOF
 }
 
-bench_http "3va" "$BIN_3VA run server.js --allow-net= --allow-read=." 8811
-if [ "$HAVE_NODE" = 1 ]; then bench_http "node" "node server.js" 8812; fi
-if [ "$HAVE_BUN" = 1 ]; then bench_http "bun" "bun run server.js" 8813; fi
+bench_http "3va" "$BIN_3VA run server.js --allow-net= --allow-read=." 8811 || true
+if [ "$HAVE_NODE" = 1 ]; then bench_http "node" "node server.js" 8812 || true; fi
+if [ "$HAVE_BUN" = 1 ]; then bench_http "bun" "bun run server.js" 8813 || true; fi
 echo
 echo "_3va's HTTP throughput above uses bench/3va.config.json's opened-up_"
 echo "_firewall limits (this directory is the server's cwd). With 3va's_"
