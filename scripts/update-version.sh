@@ -70,6 +70,15 @@ echo "  • Updating crates/js/src/builtins/web_globals.rs..."
 sed -i "s/userAgent: '3va\/$CURRENT'/userAgent: '3va\/$NEXT'/g" \
     "$ROOT_DIR/crates/js/src/builtins/web_globals.rs"
 
+# ── README.md Comparison table ────────────────────────────────────────────────
+# Everything else in that table (perf/conformance figures) is CI-generated —
+# see bench/run.sh and bench/sync-readme.sh — but the version string itself
+# isn't a benchmark output, so it's bumped here like any other reference.
+echo "  • Updating README.md Comparison table..."
+sed -i "s/\*\*3va $CURRENT\*\*/**3va $NEXT**/g" "$ROOT_DIR/README.md"
+sed -i "s#→ \[v$CURRENT\](https://github.com/OdinoCano/3va/releases/tag/v$CURRENT)#→ [v$NEXT](https://github.com/OdinoCano/3va/releases/tag/v$NEXT)#g" \
+    "$ROOT_DIR/README.md"
+
 # ── CHANGELOG.md ──────────────────────────────────────────────────────────────
 echo "  • Updating docs/CHANGELOG.md..."
 if grep -q "## \[${CURRENT}\]" "$ROOT_DIR/docs/CHANGELOG.md" 2>/dev/null; then
@@ -113,7 +122,7 @@ REMAINING=$(cd "$ROOT_DIR" && grep -rn "$CURRENT" \
     --include="*.yaml" --include="*.yml" --include="*.nuspec" \
     --include="*.rs" \
     bucket/ Formula/ dist/ crates/*/Cargo.toml crates/js/src/ \
-    docs/ 2>/dev/null | grep -v target | grep -v vendor | grep -v ".git" || true)
+    docs/ README.md 2>/dev/null | grep -v target | grep -v vendor | grep -v ".git" || true)
 
 if [[ -n "$REMAINING" ]]; then
     echo "WARNING: Some references to $CURRENT remain:"

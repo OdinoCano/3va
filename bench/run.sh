@@ -205,4 +205,20 @@ echo "_load test like this one is mostly rejected with 403 — that's the_"
 echo "_firewall working as designed, not a bug. See bench/README.md._"
 echo
 
+# ── ECMAScript conformance (test262) ────────────────────────────────────────
+# Only 3va: Node.js and Bun's numbers in the README are their own public,
+# self-reported figures (V8/JavaScriptCore's own test262 runs), not something
+# this script measures — running the full suite against them here would just
+# duplicate work their own CI already does. What's new is that 3va's number
+# stops being self-reported too: this actually runs all ~53k tests (see
+# crates/test/src/test262.rs and docs/09-testing/06-test262.md) and reports
+# the real pass rate.
+if [ ! -d ../tests/test262/harness ]; then
+  echo "test262 suite not found — downloading (scripts/setup-test262.sh)..." >&2
+  bash ../scripts/setup-test262.sh >&2
+fi
+( cd .. && cargo build --release -p vvva_test --bin test262-conformance ) >&2
+../target/release/test262-conformance ../tests/test262
+echo
+
 echo "Done."
