@@ -2271,7 +2271,7 @@ async fn install_with_transitive(
     }
 
     // Delegate manifest update to a lightweight helper using the same logic as before
-    install_package_impl(root_spec, force, allow_net, project_root, true)
+    install_package_impl(root_spec, force, allow_net, project_root, true, false)
         .await
         .or_else(|_| {
             // If impl fails (package already there), update manifest manually
@@ -2751,7 +2751,7 @@ pub async fn update_packages(
     for pkg in &targets {
         if let Some(reg) = lockfile.registry_for(pkg) {
             let host = reg.to_string();
-            install_package_impl(pkg, true, Some(&[host]), &cwd, true).await?;
+            install_package_impl(pkg, true, Some(&[host]), &cwd, true, true).await?;
         }
     }
 
@@ -2828,6 +2828,7 @@ async fn install_package_impl(
     allow_net: Option<&[String]>,
     project_root: &Path,
     update_manifest: bool,
+    scan: bool,
 ) -> anyhow::Result<()> {
     let (pkg_name, requested_version) = parse_package_spec(input)?;
 
@@ -3019,6 +3020,19 @@ async fn install_package_impl(
                         println!("  (!) Integrity unverified");
                     }
                 }
+            }
+
+            // Security scan (malware + secrets) before the package becomes active
+            // anywhere. The top-level `install`/`reinstall`/`workspace` flow already
+            // scans in `install_with_transitive` Phase 2, so only `update` passes
+            // `scan=true` here to scan freshly downloaded bytes before they reach the
+            // global store and node_modules.
+            if scan
+                && let Err(report) =
+                    scan_tarball_before_install(&pkg_name, &resolved_version, &tarball_bytes)
+            {
+                let _ = std::fs::remove_file(&cached_tarball);
+                anyhow::bail!("{}@{} — {}", pkg_name, resolved_version, report);
             }
 
             // Atomically store — concurrent processes writing the same package are safe.

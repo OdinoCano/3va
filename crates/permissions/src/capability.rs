@@ -161,6 +161,37 @@ impl PermissionState {
         result
     }
 
+    /// Like [`check`], but never appends to the audit log.
+    ///
+    /// Used for low-level runtime housekeeping that should not count as
+    /// user-visible capability usage — most notably pre-filtering the
+    /// `process.env` object at engine init, which probes every variable just
+    /// to build the object and would otherwise swamp `3va permissions learn`
+    /// with the entire host environment instead of the handful of variables
+    /// the script actually read.
+    pub fn check_quiet(&self, required: &Capability) -> bool {
+        self.check_inner(required)
+    }
+
+    /// Record a capability check to the audit log without any side effect of
+    /// [`check`]: no interactive prompt, no deny-by-default recording, no
+    /// change in behavior for the caller. Only used when an audit log is
+    /// attached (e.g. `3va permissions learn`).
+    ///
+    /// This backs the `process.env` Proxy's `__envAudit` hook: the object
+    /// handed to scripts already contains only permitted variables, so reads
+    /// are never re-gated — we only want the read to show up in the audit log
+    /// so `learn` reports the variables a script actually touched instead of
+    /// the full host environment.
+    pub fn audit_env_read(&self, variable: &str) {
+        if self.audit_log.is_none() || self.audit_denied_only {
+            return;
+        }
+        let cap = Capability::EnvVar(variable.to_string());
+        let allowed = self.check_inner(&cap);
+        self.record_audit(&cap, allowed);
+    }
+
     fn check_inner(&self, required: &Capability) -> bool {
         // Paso 1: deny_all global por categoría
         match required {

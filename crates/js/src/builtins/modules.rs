@@ -2613,9 +2613,24 @@ pub fn inject_require(
                 process.stdin = stdin;
 
                 var __envTarget = process.env || {};
+                // Expose the raw (unproxied) env object so one-time init
+                // spreads (e.g. `__vvva_meta_env__`'s Object.assign over
+                // process.env) copy values without firing the read-audit
+                // `get` trap for every variable — otherwise `3va permissions
+                // learn` would report the entire host environment instead of
+                // only the variables the script actually read.
+                globalThis.__vvva_env_raw__ = __envTarget;
                 process.env = new Proxy(__envTarget, {
                     get: function(target, prop) {
                         if (prop === '__isProxy') return true;
+                        // Record a real read of this variable (used by `3va
+                        // permissions learn`). __envTarget already holds only
+                        // the permitted variables, so this re-check changes
+                        // nothing about what callers can see — it only makes
+                        // the capability check visible to the audit log.
+                        if (typeof prop === 'string' && typeof __envAudit === 'function') {
+                            __envAudit(prop);
+                        }
                         return target[prop];
                     },
                     set: function(target, prop, value) { target[prop] = String(value); return true; },
