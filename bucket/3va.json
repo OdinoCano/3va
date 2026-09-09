@@ -6,7 +6,7 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/OdinoCano/3va/releases/download/v2.8.0/3va-v2.8.0-x86_64-pc-windows-msvc.zip",
-      "hash": "32fa5df89d78c6e49c247f1846004ba5f37820ec6cb76ddf369ab0a1f49bed83",
+      "hash": "ef5d06225eb83ff118673436b237ed1d24422e1772772adef6288d3154cd9bd4",
       "bin": "3va.exe"
     }
   },
