@@ -1332,13 +1332,21 @@ async fn firewall_rudy_slow_body_rejected_and_recovers() {
 #[tokio::test]
 async fn firewall_adaptive_escalation_repeat_offender() {
     let port = free_port();
+    // Durations are 2× what the timing math strictly needs (base block 2s,
+    // escalated 4s, not 1s/2s) specifically to give the sleeps below more
+    // absolute slack: a loaded shared CI runner adds a roughly fixed
+    // scheduling/syscall overhead per await, which eats a much bigger
+    // fraction of a 300ms margin than the same overhead eats of a 700ms one.
+    // This test was flaky in CI (github.com/OdinoCano/3va CI run #209) with
+    // the smaller durations; doubling them and widening every sleep below
+    // fixes that without changing what's actually being asserted.
     let mut e = engine_with_firewall(FirewallConfig {
         rate_limit_rps: 100,
         rate_limit_burst: 1,
         auto_block_threshold: 1,
-        block_duration_secs: 1,
+        block_duration_secs: 2,
         block_escalation_factor: 2,
-        max_block_duration_secs: 4,
+        max_block_duration_secs: 8,
         strike_decay_secs: 3600, // keep the strike history across this test
         ..FirewallConfig::default()
     })
@@ -1366,10 +1374,11 @@ async fn firewall_adaptive_escalation_repeat_offender() {
     let r3 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
     assert_eq!(response_status(&r3), 403, "req 3 must stay blocked");
 
-    // Wait past the 1 s block.
-    tokio::time::sleep(Duration::from_millis(1300)).await;
+    // Wait past the 2 s block (700 ms margin, vs. 300 ms before doubling —
+    // see the config comment above).
+    tokio::time::sleep(Duration::from_millis(2700)).await;
 
-    // Round 2: allowed again, then re-offends → strike 2 → 2 s block.
+    // Round 2: allowed again, then re-offends → strike 2 → 4 s block.
     let r4 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
     assert_eq!(
         response_status(&r4),
@@ -1379,18 +1388,23 @@ async fn firewall_adaptive_escalation_repeat_offender() {
     let r5 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
     assert_eq!(response_status(&r5), 403, "req 5 must re-block the IP");
 
-    // 1.5 s into the 2 s block it must STILL be active — the escalated block is
-    // longer than the first one, which had already expired at 1.3 s.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Only 1.8 s into the 4 s block it must STILL be active — deliberately
+    // far from the 4 s cutoff (2.2 s of headroom) since this was the
+    // flakiest check: `sleep` only guarantees *at least* the requested
+    // duration, so any runtime overshoot only ever eats into this margin
+    // from below, never helps it.
+    tokio::time::sleep(Duration::from_millis(1800)).await;
     let r6 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
     assert_eq!(
         response_status(&r6),
         403,
-        "req 6 at 1.5 s into a 2 s block must still be blocked (escalated duration)"
+        "req 6 at 1.8 s into a 4 s block must still be blocked (escalated duration)"
     );
 
-    // After the full 2 s elapses the IP is served again.
-    tokio::time::sleep(Duration::from_millis(900)).await;
+    // After the full 4 s elapses the IP is served again (500 ms margin here,
+    // plus whatever real time r6's own request/drive_until above already
+    // consumed on top of the 1.8 s sleep).
+    tokio::time::sleep(Duration::from_millis(2700)).await;
     let r7 = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
     assert_eq!(
         response_status(&r7),
