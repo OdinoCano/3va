@@ -204,14 +204,38 @@ Permission scopes can be widened to cover all values:
 3va run app.ts --allow-read --allow-net  # unrestricted read + network
 ```
 
-### Permission analysis commands
+### Don't want to figure out the flags yourself?
 
-Two commands help derive the minimum permission set:
+You don't have to read the `package.json` format below, or hand-write a single `--allow-*` flag. One command does it for you:
 
 ```bash
-3va permissions suggest          # static analysis of source files → suggested flags
-3va permissions learn app.ts     # run with all permissions, report which were used
+3va permissions learn app.ts
 ```
+
+This actually **runs your script** (with everything open, so it works end-to-end once), watches what it touches, and hands you back the exact flags to lock it down — no guessing, no trial-and-error loop of "run it, see what got denied, add a flag, repeat":
+
+```
+$ 3va permissions learn app.ts
+Running 'app.ts' with all permissions to observe usage...
+[... your script's normal output ...]
+
+Observed usage — suggested `3va.config.toml` section:
+
+[run.permissions]
+net = ["api.example.com"]
+read = ["./app.ts"]
+write = ["./output.txt"]
+env = ["NODE_ENV"]
+
+Equivalent CLI flags:
+3va run app.ts --allow-net=api.example.com --allow-read=./app.ts --allow-write=./output.txt --allow-env=NODE_ENV
+```
+
+Copy the last line. Done — that's the minimum permission set your script actually needs, not a guess.
+
+If you'd rather not execute anything yet (e.g. reviewing an unfamiliar script before running it), `3va permissions suggest app.ts` does the same job by reading the source instead of running it — faster and safer to run blind, but a starting point rather than the final word, since it can't see what a conditional branch or dynamic `require()` would touch at runtime.
+
+The `package.json` section further down is for teams who want the grants checked into version control instead of typed on the command line every time — worth doing once a project stabilizes, not something you need on day one.
 
 ### Package-level permission declarations
 

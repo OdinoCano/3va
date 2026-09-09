@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -6163,7 +6163,7 @@ fn permissions_suggest(paths: &[PathBuf], flags: bool) -> anyhow::Result<()> {
 
 // ── permissions learn ─────────────────────────────────────────────────────────
 
-async fn permissions_learn(file: &PathBuf, script_args: &[String]) -> anyhow::Result<()> {
+async fn permissions_learn(file: &Path, script_args: &[String]) -> anyhow::Result<()> {
     use std::collections::BTreeSet;
     use vvva_permissions::AuditEvent;
 
