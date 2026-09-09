@@ -7,6 +7,23 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+## [v2.8.0] — 2026-09-09
+
+### Added
+
+- **`3va build`/other unrecognized `package.json` scripts can now be hard-refused**: `--no-delegate` (or `"3va": { "no-delegate": true }`) makes `try_run_package_script` refuse to delegate to the project's package manager (npm/pnpm/yarn/bun) instead of prompting — the delegated binary runs entirely outside `vvva_permissions`' capability model, so this is a policy decision, not a permission grant.
+- **ECMAScript (test262) conformance is now CI-measured**, not self-reported: `crates/test/src/test262.rs` runs the real tc39/test262 suite (`language/` + `built-ins/` + `intl402/`, ~98.5k tests) against 3va, wired into `bench/run.sh`/README's `<!--BENCH:-->` mechanism. Current: **96.9% (95447/98532)**. See [`docs/09-testing/06-test262.md`](docs/09-testing/06-test262.md) for the category breakdown and known gaps.
+- **First real pass at Node.js's own official test suite compatibility**: closed a chain of gaps in `test/common/index.js` (required by essentially every Node test file) that crashed before any test-specific code ran — `util.getCallSites`, `process.config.variables`, `process.umask`, `process.features`, `buffer.atob`/`btoa` module exports, `net.get/setDefaultAutoSelectFamilyAttemptTimeout`. Groundwork, not a finished harness — no CI wiring yet.
+
+### Fixed
+
+- **`scripts/update-version.sh` never touched README.md's Comparison table** (found stuck on an old version for two releases) — now bumps the `**3va X.Y.Z**` header and "First release → latest" row, and fixes a pre-existing bug in that row (the latest-version link pointed at the `v1.0.0` tag).
+- **CI: `Swatinem/rust-cache` was breaking the `v8`/`rusty_v8` build** in `benchmark.yml` (three consecutive failures — "could not find native static library `rusty_v8`") — rust-cache's size-based pruning strips the ~100+ MB static lib but still caches the build script's "already ran" fingerprint, so cargo skipped re-downloading it on a cache hit. Removed the cache step (matches `release.yml`, which never used one and never hit this).
+- **CI: a single failed benchmark section (e.g. `3va install` hitting a transient error) silently killed every section after it**, including the whole test262 run, while the CI step still reported green (the workflow's `| tee` doesn't set `pipefail` against `bench/run.sh`'s own `set -e`). Each optional section is now independently fault-tolerant; the workflow step itself now uses `set -o pipefail` so a genuine full-script failure is visible.
+- **`scripts/setup-test262.sh` assumed it always runs from the repo root** — called from `bench/run.sh` (which `cd`s into `bench/` first), it downloaded test262 into `bench/tests/test262` instead of the repo root, and the conformance binary then failed with "not found" immediately after. Now `cd`s to its own script directory's parent first, like `bench/run.sh` itself already does.
+- **A single test262 file hung the runner indefinitely**: `built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji.js`, a `/v`-flag regex matching every RGI emoji sequence as a Unicode-Sets string-set alternation, didn't finish inside a 300s budget even run alone with nothing else on the machine. V8's own Irregexp engine (RegExp isn't wrapped anywhere in `crates/js`), not a 3va bug — excluded with the isolation evidence documented in `crates/test/src/test262.rs`. Unblocked the real conformance number: a full run went from "over an hour, never finishing" to 274s.
+- **`firewall_adaptive_escalation_repeat_offender` was flaky in CI**: asserted timing-gated firewall state transitions with tight `tokio::time::sleep` margins (300ms over a 1s block, 500ms under a 2s cutoff) that a loaded shared CI runner's scheduling overhead could eat into. Doubled the configured durations and widened every sleep proportionally without changing what the test verifies.
+
 ## [v2.7.0] — 2026-09-07
 
 ### Added
