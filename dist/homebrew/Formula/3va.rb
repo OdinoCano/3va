@@ -1,7 +1,7 @@
 class ThreeVa < Formula
   desc "Secure-by-default JavaScript and TypeScript runtime"
   homepage "https://github.com/OdinoCano/3va"
-  url "https://github.com/OdinoCano/3va/archive/refs/tags/v2.7.0.tar.gz"
+  url "https://github.com/OdinoCano/3va/archive/refs/tags/v2.8.0.tar.gz"
   sha256 "2711e97425cc961c11790471ab51d8c0723e92f19a27003b15f13aafbe46bc97"
   license "MIT"
 
