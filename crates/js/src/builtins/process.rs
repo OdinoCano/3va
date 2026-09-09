@@ -19,6 +19,35 @@ fn env_perms() -> Arc<PermissionState> {
     })
 }
 
+/// `process.umask([mask])`: sets the process's file-mode creation mask if
+/// `mask` is given, always returning the *previous* mask — matching Node's
+/// `process.umask()` semantics. `None` peeks the current mask without
+/// changing it (POSIX has no direct getter, so this sets a throwaway value
+/// and immediately restores whatever the real mask turned out to be).
+#[cfg(unix)]
+fn umask_get_or_set(mask: Option<u32>) -> u32 {
+    unsafe {
+        match mask {
+            Some(m) => libc::umask(m as libc::mode_t) as u32,
+            None => {
+                let old = libc::umask(0o022);
+                libc::umask(old);
+                old as u32
+            }
+        }
+    }
+}
+
+// Windows has no umask() syscall in `libc` — MSVCRT's _umask exists but
+// behaves differently (no group/other bits) and isn't bound by the `libc`
+// crate at all. Report 0 rather than link-failing; matches this codebase's
+// existing pattern of a platform-specific no-op over a hard error for a
+// concept the target OS doesn't really have.
+#[cfg(not(unix))]
+fn umask_get_or_set(_mask: Option<u32>) -> u32 {
+    0
+}
+
 fn set_fn(
     scope: &mut ContextScope<HandleScope>,
     obj: v8::Local<v8::Object>,
@@ -672,6 +701,91 @@ pub fn inject_process(
     {
         let key = v8::String::new(scope, "versions").unwrap().into();
         process.set(scope, key, versions.into());
+    }
+
+    // `process.config.variables` — real Node exposes its GYP build config
+    // here. 3va isn't built that way, so this is a best-effort shape: only
+    // the two flags this engine can actually answer honestly (i18n/Temporal,
+    // both true — see docs/09-testing/06-test262.md's intl402 coverage) are
+    // set true; everything else defaults false rather than claiming a
+    // capability (asan builds, node_use_ffi's exact semantics, perfetto,
+    // shared-lib builds) 3va doesn't actually match Node's on. Exists mainly
+    // so `process.config.variables.x` reads don't throw — several widely
+    // used Node test helpers (test/common/index.js) read this at module load
+    // time, unconditionally, before any test-specific code runs.
+    {
+        let config = v8::Object::new(scope);
+        let variables = v8::Object::new(scope);
+        let set_bool = |scope: &mut PinScope, obj: v8::Local<v8::Object>, name: &str, v: bool| {
+            let key = v8::String::new(scope, name).unwrap().into();
+            let val = v8::Boolean::new(scope, v).into();
+            obj.set(scope, key, val);
+        };
+        set_bool(scope, variables, "v8_enable_i18n_support", true);
+        set_bool(scope, variables, "v8_enable_temporal_support", true);
+        set_bool(scope, variables, "node_shared", false);
+        set_bool(scope, variables, "node_use_ffi", false);
+        set_bool(scope, variables, "v8_use_perfetto", false);
+        {
+            let key = v8::String::new(scope, "asan").unwrap().into();
+            let val = v8::Integer::new(scope, 0).into();
+            variables.set(scope, key, val);
+        }
+        let key = v8::String::new(scope, "variables").unwrap().into();
+        config.set(scope, key, variables.into());
+        let key = v8::String::new(scope, "config").unwrap().into();
+        process.set(scope, key, config.into());
+    }
+
+    set_fn(
+        scope,
+        process,
+        "umask",
+        |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let arg = args.get(0);
+            let old = if arg.is_undefined() {
+                // POSIX has no "peek" umask syscall — set to some throwaway
+                // value, capture what it returns (the real previous mask),
+                // then immediately restore that. Not atomic across threads,
+                // same limitation Node's own no-arg process.umask() has.
+                umask_get_or_set(None)
+            } else {
+                let mask = if arg.is_string() {
+                    let s = arg.to_rust_string_lossy(scope);
+                    let s = s.trim();
+                    let s = s.strip_prefix("0o").unwrap_or(s);
+                    u32::from_str_radix(s, 8).unwrap_or(0)
+                } else {
+                    arg.number_value(scope).unwrap_or(0.0) as u32
+                };
+                umask_get_or_set(Some(mask))
+            };
+            rv.set(v8::Number::new(scope, old as f64).into());
+        },
+    );
+
+    // `process.features` — real Node reports actual compiled-in feature
+    // flags here. `inspector` is true because 3va does have a CDP inspector
+    // (`--inspect`, see docs); the rest (dtls/quic/require_module) are false
+    // rather than guessed, since claiming them would make test helpers like
+    // `skipIfInspectorDisabled` believe a capability exists that doesn't
+    // actually match Node's own semantics for that feature here.
+    {
+        let features = v8::Object::new(scope);
+        let set_bool = |scope: &mut PinScope, obj: v8::Local<v8::Object>, name: &str, v: bool| {
+            let key = v8::String::new(scope, name).unwrap().into();
+            let val = v8::Boolean::new(scope, v).into();
+            obj.set(scope, key, val);
+        };
+        set_bool(scope, features, "inspector", true);
+        set_bool(scope, features, "debug", false);
+        set_bool(scope, features, "dtls", false);
+        set_bool(scope, features, "quic", false);
+        set_bool(scope, features, "require_module", true);
+        set_bool(scope, features, "typescript", true);
+        set_bool(scope, features, "openssl_is_boringssl", false);
+        let key = v8::String::new(scope, "features").unwrap().into();
+        process.set(scope, key, features.into());
     }
 
     let platform = if cfg!(target_os = "linux") {

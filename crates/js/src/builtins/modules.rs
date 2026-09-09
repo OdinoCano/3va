@@ -941,6 +941,32 @@ pub fn inject_require(
                         if (c) { open = '\x1b[' + c[0] + 'm' + open; close = close + '\x1b[' + c[1] + 'm'; }
                     }
                     return open + String(text) + close;
+                },
+                getCallSites: function(frameCountOrOptions) {
+                    // Node's real getCallSites() returns real file/line info per
+                    // frame; this engine doesn't set a script's ScriptOrigin when
+                    // compiling, so V8's CallSite objects come back with empty
+                    // getFileName()/getLineNumber() here. Still returns real,
+                    // correctly-shaped frame objects (functionName included) —
+                    // enough that callers relying on getCallSites() existing and
+                    // returning an array of the right length (e.g. test harnesses'
+                    // mustNotCall()) don't crash, even though scriptName/lineNumber
+                    // read as empty/0 instead of the real location.
+                    var frameCount = typeof frameCountOrOptions === 'number' ? frameCountOrOptions : 10;
+                    var orig = Error.prepareStackTrace;
+                    var holder = {};
+                    Error.prepareStackTrace = function(_, stack) { return stack; };
+                    Error.captureStackTrace(holder, util.getCallSites);
+                    var stack = holder.stack;
+                    Error.prepareStackTrace = orig;
+                    return (stack || []).slice(0, frameCount).map(function(cs) {
+                        return {
+                            functionName: cs.getFunctionName() || '',
+                            scriptName: cs.getFileName() || '',
+                            lineNumber: cs.getLineNumber() || 0,
+                            column: cs.getColumnNumber() || 0,
+                        };
+                    });
                 }
             };
             globalThis.__requireCache['util'] = util;
@@ -2978,7 +3004,7 @@ pub fn inject_require(
             // Node.js require('buffer') returns { Buffer, SlowBuffer, Blob, File, constants, ...staticMethods }
             (function() {
                 var B = globalThis.Buffer;
-                var bufMod = { Buffer: B, SlowBuffer: B, Blob: globalThis.Blob, File: globalThis.File, constants: { MAX_LENGTH: 2147483647, MAX_STRING_LENGTH: 1073741823 } };
+                var bufMod = { Buffer: B, SlowBuffer: B, Blob: globalThis.Blob, File: globalThis.File, atob: globalThis.atob, btoa: globalThis.btoa, constants: { MAX_LENGTH: 2147483647, MAX_STRING_LENGTH: 1073741823 } };
                 ['from','alloc','allocUnsafe','allocUnsafeSlow','isBuffer','isEncoding','byteLength','concat','compare'].forEach(function(k) {
                     if (B[k]) bufMod[k] = B[k].bind(B);
                 });
@@ -3320,6 +3346,7 @@ pub fn inject_require(
                 return sock.connect(port, host, cb);
             }
 
+            var __autoSelectFamilyAttemptTimeout = 250;
             globalThis.__requireCache['net'] = {
                 Socket: Socket,
                 Server: Server,
@@ -3329,6 +3356,17 @@ pub fn inject_require(
                 isIP: function(s) { return /^(\d{1,3}\.){3}\d{1,3}$/.test(s) ? 4 : (String(s).indexOf(':') !== -1 ? 6 : 0); },
                 isIPv4: function(s) { return /^(\d{1,3}\.){3}\d{1,3}$/.test(s); },
                 isIPv6: function(s) { return String(s).indexOf(':') !== -1; },
+                // 3va has no Happy-Eyeballs dual-stack connection racing (the
+                // feature this timeout actually governs in real Node) — this
+                // is just a stored value so code that reads/writes it (like
+                // test/common's startup tuning) doesn't crash, not a real
+                // attempt-timeout that changes connection behavior.
+                getDefaultAutoSelectFamily: function() { return true; },
+                setDefaultAutoSelectFamily: function() {},
+                getDefaultAutoSelectFamilyAttemptTimeout: function() { return __autoSelectFamilyAttemptTimeout; },
+                setDefaultAutoSelectFamilyAttemptTimeout: function(ms) {
+                    __autoSelectFamilyAttemptTimeout = Math.max(1, Number(ms) || 0);
+                },
             };
             globalThis.__requireCache['node:net'] = globalThis.__requireCache['net'];
 
