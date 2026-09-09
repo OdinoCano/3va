@@ -2,6 +2,23 @@ use std::sync::Arc;
 use v8::{ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue};
 use vvva_permissions::{Capability, PermissionState};
 
+// Thread-local for the same reason as FS_PERMISSIONS in fs.rs: closures passed
+// to set_fn() must be zero-sized (v8's UnitValue assert), so state can't be
+// captured — and a OnceLock would leak the *first* engine's grants to every
+// later engine in the process. Each JsEngine's isolate never migrates threads,
+// so a thread-local scopes permissions correctly per engine.
+thread_local! {
+    static ENV_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn env_perms() -> Arc<PermissionState> {
+    ENV_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_process not called on this thread")
+    })
+}
+
 fn set_fn(
     scope: &mut ContextScope<HandleScope>,
     obj: v8::Local<v8::Object>,
@@ -550,6 +567,7 @@ pub fn inject_process(
     permissions: Arc<PermissionState>,
 ) -> anyhow::Result<()> {
     let permissions: &'static Arc<PermissionState> = Box::leak(Box::new(permissions));
+    ENV_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions.clone()));
     let context = scope.get_current_context();
     let globals = context.global(scope);
 
@@ -806,7 +824,11 @@ pub fn inject_process(
     // env: expose variables that pass permission check (replaced by Proxy in modules.rs)
     let env_obj = v8::Object::new(scope);
     for (key, val) in std::env::vars() {
-        if permissions.check(&Capability::EnvVar(key.clone())) {
+        // check_quiet: building process.env probes every variable; recording
+        // each one would drown `3va permissions learn` in the whole host
+        // environment. Actual reads are audited later via the __envAudit
+        // hook in the process.env Proxy (see modules.rs).
+        if permissions.check_quiet(&Capability::EnvVar(key.clone())) {
             set_str(scope, env_obj, &key, &val);
         }
     }
@@ -814,6 +836,20 @@ pub fn inject_process(
         let key = v8::String::new(scope, "env").unwrap().into();
         process.set(scope, key, env_obj.into());
     }
+
+    // __envAudit(key): record a real process.env read (used by the Proxy).
+    // Audits only — no prompt, no deny, and no change to what callers see:
+    // env_obj already holds only permitted variables. See
+    // PermissionState::audit_env_read for the rationale.
+    set_fn(
+        scope,
+        globals,
+        "__envAudit",
+        |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
+            let key = args.get(0).to_rust_string_lossy(scope);
+            env_perms().audit_env_read(&key);
+        },
+    );
 
     // memoryUsage(): real RSS on Linux
     set_fn(

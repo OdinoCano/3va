@@ -919,7 +919,8 @@ impl JsEngine {
                     PROD: (process.env && process.env.NODE_ENV) !== 'development', \
                     DEV:  (process.env && process.env.NODE_ENV) === 'development', \
                     SSR:  true, \
-                    BASE_URL: '/' }}, process.env) : \
+                    BASE_URL: '/' }}, (typeof globalThis.__vvva_env_raw__ !== 'undefined') \
+                       ? globalThis.__vvva_env_raw__ : (process.env || {{}})) : \
                 {{ MODE: 'production', PROD: true, DEV: false, SSR: true, BASE_URL: '/' }});\
              if (typeof globalThis.__vvva_meta_resolve__ === 'undefined') \
                 globalThis.__vvva_meta_resolve__ = function(s) {{ return require.resolve(s); }};\

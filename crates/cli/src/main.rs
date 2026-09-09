@@ -6168,13 +6168,23 @@ async fn permissions_learn(file: &PathBuf, script_args: &[String]) -> anyhow::Re
     use vvva_permissions::AuditEvent;
 
     // Grant every capability so nothing is blocked during observation.
+    //
+    // Both "/" and "." are granted for path capabilities: "/" covers absolute
+    // targets and files the script reads (canonicalize works on existing
+    // files), while "." covers *new* files written via relative paths — a
+    // relative path like "./out.txt" that doesn't exist yet can't be
+    // canonicalized, so it never starts_with "/" and an absolute root alone
+    // would wrongly deny (and silently miss) writes of fresh files.
     let mut permissions = vvva_permissions::PermissionState::new();
     permissions.grant(vvva_permissions::Capability::FileRead(PathBuf::from("/")));
+    permissions.grant(vvva_permissions::Capability::FileRead(PathBuf::from(".")));
     permissions.grant(vvva_permissions::Capability::FileWrite(PathBuf::from("/")));
+    permissions.grant(vvva_permissions::Capability::FileWrite(PathBuf::from(".")));
     permissions.grant(vvva_permissions::Capability::Network("*".to_string()));
     permissions.grant(vvva_permissions::Capability::EnvAccess);
     permissions.grant(vvva_permissions::Capability::SpawnProcess);
     permissions.grant(vvva_permissions::Capability::FFI(PathBuf::from("/")));
+    permissions.grant(vvva_permissions::Capability::FFI(PathBuf::from(".")));
 
     let log = Arc::new(Mutex::new(vvva_permissions::AuditLog::new()));
     permissions.enable_audit(log.clone(), false); // record all checks, not just denials
@@ -6188,21 +6198,10 @@ async fn permissions_learn(file: &PathBuf, script_args: &[String]) -> anyhow::Re
 
     let mut engine = vvva_js::JsEngine::new(permissions.clone()).await?;
 
-    if !script_args.is_empty() {
-        let file_arg = serde_json::to_string(file.to_str().unwrap_or(""))?;
-        let args_json = serde_json::to_string(script_args)?;
-        let _ = engine
-            .eval(&format!(
-                "globalThis.process = globalThis.process || {{}}; \
-                 globalThis.process.argv = ['3va', {file_arg}].concat({args_json});"
-            ))
-            .await;
-    }
-
-    let src = std::fs::read_to_string(file)
-        .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", file.display(), e))?;
-
-    if let Err(e) = engine.eval(&src).await {
+    // eval_file_with_args (not a raw eval) so TypeScript, JSX, ESM, and
+    // top-level await all go through the same transpile path as `3va run` —
+    // a raw eval would choke on `interface`/type annotations and `import`.
+    if let Err(e) = engine.eval_file_with_args(file, script_args).await {
         eprintln!("Warning: script exited with error: {e}");
         eprintln!("Permissions observed before the error are still reported.\n");
     }
