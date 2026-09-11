@@ -4,10 +4,13 @@
 [![Security](https://github.com/OdinoCano/3va/actions/workflows/security.yml/badge.svg)](https://github.com/OdinoCano/3va/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust Edition 2024](https://img.shields.io/badge/Rust-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/)
+[![Docs](https://img.shields.io/badge/docs-3va--docs-blue.svg)](https://3va-docs-n48j.vercel.app/)
 
 > *Veni, Vidi, Vici, Abiit — He came, he saw, he conquered, he left.*
 
 **3va** is a JavaScript and TypeScript runtime written in Rust with deny-by-default security. It bundles a package manager, process manager, test runner, bundler, and dev server — no pm2, no separate build tool, no extra config.
+
+📖 **[Full documentation](https://3va-docs-n48j.vercel.app/)**
 
 ---
 
