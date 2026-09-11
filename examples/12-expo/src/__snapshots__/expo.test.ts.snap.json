@@ -1,0 +1,3 @@
+{
+  "snapshot theme > all dark mode colors": "{\n  \"background\": \"#000000\",\n  \"surface\": \"#1c1c1e\",\n  \"text\": \"#ffffff\",\n  \"muted\": \"#999999\",\n  \"primary\": \"#0A84FF\",\n  \"danger\": \"#FF453A\",\n  \"success\": \"#30D158\",\n  \"border\": \"#38383a\"\n}"
+}
