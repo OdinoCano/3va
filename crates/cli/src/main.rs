@@ -2818,8 +2818,18 @@ fn build_permissions(
             let root = PathBuf::from("/");
             permissions.grant(vvva_permissions::Capability::FileRead(root));
         } else {
+            // Resolve relative paths against the invocation cwd so that
+            // `--allow-read=./config` matches requests made with an absolute
+            // path (path.resolve / __dirname joins) — matching the behaviour
+            // documented for package.json grants. Fails closed: an unwritable
+            // cwd keeps the raw path as a literal grant rather than stripping it.
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             for path in reads {
-                let raw = PathBuf::from(path);
+                let raw = if Path::new(path).is_absolute() {
+                    PathBuf::from(path)
+                } else {
+                    cwd.join(path)
+                };
                 // Grant both the path as specified AND its canonicalized form.
                 // This lets users write --allow-read=/lib even when /lib is a
                 // symlink to /usr/lib — paths under both /lib and /usr/lib match.
@@ -2850,8 +2860,13 @@ fn build_permissions(
             let root = PathBuf::from("/");
             permissions.grant(vvva_permissions::Capability::FileWrite(root));
         } else {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             for path in writes {
-                let raw = PathBuf::from(path);
+                let raw = if Path::new(path).is_absolute() {
+                    PathBuf::from(path)
+                } else {
+                    cwd.join(path)
+                };
                 permissions.grant(vvva_permissions::Capability::FileWrite(raw.clone()));
                 if let Ok(canon) = raw.canonicalize() {
                     if canon != raw {
@@ -6201,10 +6216,26 @@ async fn permissions_learn(file: &Path, script_args: &[String]) -> anyhow::Resul
     // eval_file_with_args (not a raw eval) so TypeScript, JSX, ESM, and
     // top-level await all go through the same transpile path as `3va run` —
     // a raw eval would choke on `interface`/type annotations and `import`.
-    if let Err(e) = engine.eval_file_with_args(file, script_args).await {
-        eprintln!("Warning: script exited with error: {e}");
-        eprintln!("Permissions observed before the error are still reported.\n");
+    let eval = async {
+        if let Err(e) = engine.eval_file_with_args(file, script_args).await {
+            eprintln!("Warning: script exited with error: {e}");
+            eprintln!("Permissions observed before the error are still reported.\n");
+        }
+    };
+    tokio::pin!(eval);
+    tokio::select! {
+        _ = &mut eval => {}
+        _ = tokio::signal::ctrl_c() => {
+            // Long-running scripts (HTTP servers, workers) never return on
+            // their own. Ctrl+C cancels the eval at its next event-loop
+            // checkpoint and we report what was observed up to that point —
+            // the whole point of `learn` for a service you can't let "just
+            // finish".
+            println!("\nInterrupted — reporting observed usage...\n");
+        }
     }
+    // `eval` is done (or was cancelled by Ctrl+C), so no more audit events
+    // will be recorded; the engine and its isolate drop naturally at scope end.
 
     let audit = log.lock().unwrap();
 

@@ -1,0 +1,3 @@
+{
+  "snapshot testing > math result snapshot": "{\n  \"add\": 5,\n  \"multiply\": 20,\n  \"fibonacci\": 21\n}"
+}

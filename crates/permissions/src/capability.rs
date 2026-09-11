@@ -443,16 +443,37 @@ fn canon_path(p: &std::path::Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// Make a relative path absolute against the process cwd, leaving absolute
+/// paths untouched. Like `canon_path` this falls back to the literal path when
+/// the cwd is unavailable — the caller keeps the raw path in that case, so
+/// matching simply behaves as it did before (fails closed rather than wide).
+fn absolutize(p: &std::path::Path) -> PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    }
+}
+
 /// Check if `target` is covered by `allowed`, resolving symlinks on both sides
 /// so that `/lib64` (symlink → `/usr/lib64`) matches `--allow-read=/lib64`.
+///
+/// Both sides are absolutized against the process cwd first, so a grant from a
+/// CLI flag (`--allow-read=./config` resolved to `$CWD/config`) matches an
+/// application request regardless of whether that request was made with a
+/// relative or absolute path.
 fn path_covered_by(target: &std::path::Path, allowed: &std::path::Path) -> bool {
     let norm_t = normalize_path(target);
     let norm_a = normalize_path(allowed);
-    if norm_t.starts_with(norm_a.as_ref()) {
+    let abs_t = absolutize(norm_t.as_ref());
+    let abs_a = absolutize(norm_a.as_ref());
+    if abs_t.starts_with(&abs_a) {
         return true;
     }
     // Re-check after resolving symlinks on both sides.
-    canon_path(norm_t.as_ref()).starts_with(canon_path(norm_a.as_ref()))
+    canon_path(&abs_t).starts_with(canon_path(&abs_a))
 }
 
 /// Wildcard/loopback addresses a server binds to when the app didn't ask for

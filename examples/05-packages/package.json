@@ -1,0 +1,16 @@
+{
+  "name": "3va-example-packages",
+  "version": "1.0.0",
+  "dependencies": {
+    "is-odd": "^3.0.1",
+    "ms": "^2.1.3"
+  },
+  "3va": {
+    "no-prompt": true,
+    "permissions": {
+      ".": {
+        "allow-read": ["./node_modules/is-odd", "./node_modules/ms", "./node_modules/is-number"]
+      }
+    }
+  }
+}

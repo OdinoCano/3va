@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Bundled 3va app</title>
+</head>
+<body>
+  <h1>Bundled 3va app</h1>
+  <pre id="out">Loading…</pre>
+  <script src="/bundle.js"></script>  <!-- served from the built bundle -->
+  <script>
+    const out = document.getElementById("out");
+    out.textContent = JSON.stringify(createMessage("browser"), null, 2);
+  </script>
+</body>
+</html>

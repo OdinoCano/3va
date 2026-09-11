@@ -1,0 +1,12 @@
+{
+  "name": "3va-example-process-manager",
+  "version": "1.0.0",
+  "3va": {
+    "no-prompt": true,
+    "permissions": {
+      ".": {
+        "allow-net": ["*"]
+      }
+    }
+  }
+}

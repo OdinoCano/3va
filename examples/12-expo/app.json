@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "expo-3va-demo",
+    "slug": "expo-3va-demo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "expodemo",
+    "userInterfaceStyle": "automatic"
+  }
+}
