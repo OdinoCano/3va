@@ -1,5 +1,6 @@
 //! HTTP/1.1 server backend for `http.createServer()`.
 
+use crate::builtins::NativeCtxRegistry;
 use crate::builtins::v8_compat::uint8array_to_vec;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -694,6 +695,7 @@ pub fn inject_http_server(
     scope: &mut PinScope,
     permissions: Arc<PermissionState>,
     firewall: Option<Arc<Firewall>>,
+    native_ctx: &mut NativeCtxRegistry,
 ) -> anyhow::Result<()> {
     let servers: Arc<Mutex<HashMap<u32, Arc<TcpListener>>>> = Arc::new(Mutex::new(HashMap::new()));
     let conns: Arc<Mutex<HashMap<u32, ConnEntry>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -705,7 +707,7 @@ pub fn inject_http_server(
     let global = context.global(scope);
 
     {
-        let ctx_ptr = Box::leak(Box::new(HttpListenCtx {
+        let ctx_ptr = native_ctx.leak(HttpListenCtx {
             perms: permissions.clone(),
             servers: servers.clone(),
             conns: conns.clone(),
@@ -713,7 +715,7 @@ pub fn inject_http_server(
             ready: ready.clone(),
             nid: next_server_id.clone(),
             fw: fw.clone(),
-        })) as *mut HttpListenCtx as *mut std::ffi::c_void;
+        });
         let external = v8::External::new(scope, ctx_ptr);
         let http_listen_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -897,9 +899,9 @@ pub fn inject_http_server(
     }
 
     {
-        let ctx_ptr = Box::leak(Box::new(HttpAcceptCtx {
+        let ctx_ptr = native_ctx.leak(HttpAcceptCtx {
             ready: ready.clone(),
-        })) as *mut HttpAcceptCtx as *mut std::ffi::c_void;
+        });
         let external = v8::External::new(scope, ctx_ptr);
         // Non-blocking: pops one ready request's JSON for `server_id`, or
         // returns null if none has finished parsing yet. The actual accept +
@@ -942,9 +944,9 @@ pub fn inject_http_server(
     }
 
     {
-        let ctx_ptr = Box::leak(Box::new(HttpRespondCtx {
+        let ctx_ptr = native_ctx.leak(HttpRespondCtx {
             conns: conns.clone(),
-        })) as *mut HttpRespondCtx as *mut std::ffi::c_void;
+        });
         let external = v8::External::new(scope, ctx_ptr);
         let http_respond_fn = v8::Function::builder(
             |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1019,9 +1021,9 @@ pub fn inject_http_server(
     }
 
     {
-        let ctx_ptr = Box::leak(Box::new(HttpRespondCtx {
+        let ctx_ptr = native_ctx.leak(HttpRespondCtx {
             conns: conns.clone(),
-        })) as *mut HttpRespondCtx as *mut std::ffi::c_void;
+        });
         let external = v8::External::new(scope, ctx_ptr);
         let http_respond_bytes_fn = v8::Function::builder(
             |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1100,9 +1102,7 @@ pub fn inject_http_server(
     }
 
     {
-        let servers_ptr = Box::leak(Box::new(servers.clone()))
-            as *const Arc<Mutex<HashMap<u32, Arc<TcpListener>>>>
-            as *mut std::ffi::c_void;
+        let servers_ptr = native_ctx.leak(servers.clone());
         let external = v8::External::new(scope, servers_ptr);
         let http_close_fn = v8::Function::builder(
             |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1129,9 +1129,7 @@ pub fn inject_http_server(
     }
 
     {
-        let servers_ptr = Box::leak(Box::new(servers.clone()))
-            as *const Arc<Mutex<HashMap<u32, Arc<TcpListener>>>>
-            as *mut std::ffi::c_void;
+        let servers_ptr = native_ctx.leak(servers.clone());
         let external = v8::External::new(scope, servers_ptr);
         let http_server_port_fn = v8::Function::builder(
             |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1166,7 +1164,6 @@ pub fn inject_http_server(
 // ── HTTP/2 server bindings ─────────────────────────────────────────────────
 
 use std::collections::VecDeque;
-use std::ffi::c_void;
 
 struct H2ServerState {
     listener: Option<Arc<TcpListener>>,
@@ -1198,6 +1195,7 @@ type H2Clients = Arc<Mutex<HashMap<u32, Arc<Mutex<H2ClientState>>>>>;
 pub fn inject_http2_server(
     scope: &mut PinScope,
     permissions: Arc<PermissionState>,
+    native_ctx: &mut NativeCtxRegistry,
 ) -> anyhow::Result<()> {
     let h2_servers: H2Servers = Arc::new(Mutex::new(HashMap::new()));
     let h2_clients: H2Clients = Arc::new(Mutex::new(HashMap::new()));
@@ -1210,9 +1208,7 @@ pub fn inject_http2_server(
     {
         let servers = h2_servers.clone();
         let nid = h2_next_id.clone();
-        let ctx_ptr = Box::leak(Box::new((permissions.clone(), servers, nid)))
-            as *mut (Arc<PermissionState>, H2Servers, Arc<Mutex<u32>>)
-            as *mut c_void;
+        let ctx_ptr = native_ctx.leak((permissions.clone(), servers, nid));
         let external = v8::External::new(scope, ctx_ptr);
         let listen_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1321,7 +1317,7 @@ pub fn inject_http2_server(
     // __h2AcceptPoll(serverId) → JSON or null
     {
         let servers = h2_servers.clone();
-        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let ctx_ptr = native_ctx.leak(servers);
         let external = v8::External::new(scope, ctx_ptr);
         let poll_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1352,7 +1348,7 @@ pub fn inject_http2_server(
     // __h2ServerPort(serverId) → port
     {
         let servers = h2_servers.clone();
-        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let ctx_ptr = native_ctx.leak(servers);
         let external = v8::External::new(scope, ctx_ptr);
         let port_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1388,7 +1384,7 @@ pub fn inject_http2_server(
     // __h2ServerClose(serverId)
     {
         let servers = h2_servers.clone();
-        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let ctx_ptr = native_ctx.leak(servers);
         let external = v8::External::new(scope, ctx_ptr);
         let close_fn = v8::Function::builder(
             |_scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1415,7 +1411,7 @@ pub fn inject_http2_server(
     // __h2StreamRespond(serverId, streamId, headers_json) → bool
     {
         let servers = h2_servers.clone();
-        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let ctx_ptr = native_ctx.leak(servers);
         let external = v8::External::new(scope, ctx_ptr);
         let respond_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1483,7 +1479,7 @@ pub fn inject_http2_server(
     // __h2StreamWrite(serverId, streamId, data) → bool
     {
         let servers = h2_servers.clone();
-        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let ctx_ptr = native_ctx.leak(servers);
         let external = v8::External::new(scope, ctx_ptr);
         let write_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1533,7 +1529,7 @@ pub fn inject_http2_server(
     // __h2StreamEnd(serverId, streamId, data?) → bool
     {
         let servers = h2_servers.clone();
-        let ctx_ptr = Box::leak(Box::new(servers)) as *mut H2Servers as *mut c_void;
+        let ctx_ptr = native_ctx.leak(servers);
         let external = v8::External::new(scope, ctx_ptr);
         let end_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1587,9 +1583,7 @@ pub fn inject_http2_server(
         let clients = h2_clients.clone();
         let nid = h2_next_client_id.clone();
         let perms2 = permissions.clone();
-        let ctx_ptr = Box::leak(Box::new((perms2, clients, nid)))
-            as *mut (Arc<PermissionState>, H2Clients, Arc<Mutex<u32>>)
-            as *mut c_void;
+        let ctx_ptr = native_ctx.leak((perms2, clients, nid));
         let external = v8::External::new(scope, ctx_ptr);
         let connect_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1675,7 +1669,7 @@ pub fn inject_http2_server(
     // __h2ClientReady(clientId) → bool (check if handshake completed)
     {
         let clients = h2_clients.clone();
-        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let ctx_ptr = native_ctx.leak(clients);
         let external = v8::External::new(scope, ctx_ptr);
         let ready_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1704,7 +1698,7 @@ pub fn inject_http2_server(
     // __h2ClientRequest(clientId, headers_json) → streamId or -1
     {
         let clients = h2_clients.clone();
-        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let ctx_ptr = native_ctx.leak(clients);
         let external = v8::External::new(scope, ctx_ptr);
         let req_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1819,7 +1813,7 @@ pub fn inject_http2_server(
     // __h2ClientStreamWrite(clientId, streamId, data) → bool
     {
         let clients = h2_clients.clone();
-        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let ctx_ptr = native_ctx.leak(clients);
         let external = v8::External::new(scope, ctx_ptr);
         let write_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1870,7 +1864,7 @@ pub fn inject_http2_server(
     // __h2ClientStreamEnd(clientId, streamId, data?) → bool
     {
         let clients = h2_clients.clone();
-        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let ctx_ptr = native_ctx.leak(clients);
         let external = v8::External::new(scope, ctx_ptr);
         let end_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1921,7 +1915,7 @@ pub fn inject_http2_server(
     // __h2ClientPoll(clientId) → JSON or null
     {
         let clients = h2_clients.clone();
-        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let ctx_ptr = native_ctx.leak(clients);
         let external = v8::External::new(scope, ctx_ptr);
         let poll_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -1952,7 +1946,7 @@ pub fn inject_http2_server(
     // __h2ClientClose(clientId)
     {
         let clients = h2_clients.clone();
-        let ctx_ptr = Box::leak(Box::new(clients)) as *mut H2Clients as *mut c_void;
+        let ctx_ptr = native_ctx.leak(clients);
         let external = v8::External::new(scope, ctx_ptr);
         let close_fn = v8::Function::builder(
             |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
