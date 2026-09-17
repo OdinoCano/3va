@@ -5,12 +5,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust Edition 2024](https://img.shields.io/badge/Rust-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/)
 [![Docs](https://img.shields.io/badge/docs-3va--docs-blue.svg)](https://3va-docs-n48j.vercel.app/)
+[![Audio Overview](https://img.shields.io/badge/%F0%9F%8E%A7_Audio_Overview-Espa%C3%B1ol-orange.svg)](https://notebooklm.google.com/notebook/040c3292-f15b-45e0-91ae-aab027c54b12/artifact/ea4b59f6-61fc-41df-9b76-d265ff543e3c?utm_source=nlmm_share)
 
 > *Veni, Vidi, Vici, Abiit — He came, he saw, he conquered, he left.*
 
 **3va** is a JavaScript and TypeScript runtime written in Rust with deny-by-default security. It bundles a package manager, process manager, test runner, bundler, and dev server — no pm2, no separate build tool, no extra config.
 
-📖 **[Full documentation](https://3va-docs-n48j.vercel.app/)**
+📖 **[Full documentation](https://3va-docs-n48j.vercel.app/)** · 🎧 **[Resumen en audio (Español) vía NotebookLM](https://notebooklm.google.com/notebook/040c3292-f15b-45e0-91ae-aab027c54b12/artifact/ea4b59f6-61fc-41df-9b76-d265ff543e3c?utm_source=nlmm_share)**
 
 ---
 
