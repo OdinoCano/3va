@@ -8,7 +8,7 @@
     <owners>OdinoCano</owners>
     <projectUrl>https://github.com/OdinoCano/3va</projectUrl>
     <packageSourceUrl>https://github.com/OdinoCano/3va/tree/main/dist/chocolatey</packageSourceUrl>
-    <iconUrl>https://raw.githubusercontent.com/OdinoCano/3va/main/docs/logo.png</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/OdinoCano/3va@main/docs/logo.png</iconUrl>
     <licenseUrl>https://github.com/OdinoCano/3va/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <docsUrl>https://github.com/OdinoCano/3va/wiki</docsUrl>
