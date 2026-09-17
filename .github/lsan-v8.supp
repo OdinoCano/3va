@@ -1,0 +1,23 @@
+# LeakSanitizer suppressions for the nightly ASan CI job.
+#
+# `create_annex` is the vendored `v8` crate's own per-isolate bookkeeping
+# allocation (IsolateAnnex) — not code owned by this repo, and not
+# something we can fix here. It's tiny (8 bytes) and one-time per isolate
+# (one per process in a real 3va run, reclaimed by the OS at exit); it only
+# shows up as an ASan finding because the test binary creates and drops
+# many isolates in one process. Everything in `crates/js` is expected to be
+# leak-clean — see `builtins::NativeCtxRegistry` and
+# `shared_array_buffer_allocator()` in crates/js/src/lib.rs for how the
+# equivalent 'static-native-data problems are actually fixed (not just
+# suppressed) on our side.
+leak:*Isolate*create_annex*
+
+# NOTE: there is also a separate, still-unexplained ~288 byte leak per
+# JsEngine instance (see e.g. `crates/js/tests/async_hooks_module.rs`),
+# distinct from the Box::leak-based leaks fixed in this same change
+# (http_server.rs, process.rs, timers.rs — see `builtins::NativeCtxRegistry`)
+# and from the array-buffer-allocator sharing added in
+# `shared_array_buffer_allocator()`. Its allocating frame gets inlined away
+# unpredictably across builds, so it hasn't been pinned to a specific line
+# yet. Deliberately left unsuppressed here — the nightly sanitizer job will
+# keep flagging it until it's actually root-caused.

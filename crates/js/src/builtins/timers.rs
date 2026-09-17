@@ -1,3 +1,4 @@
+use crate::builtins::NativeCtxRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -164,72 +165,69 @@ impl Default for TimerManager {
 pub fn inject_timers(
     scope: &mut ContextScope<HandleScope>,
     manager: Arc<TimerManager>,
+    native_ctx: &mut NativeCtxRegistry,
 ) -> anyhow::Result<()> {
-    let mgr_ptr = Arc::into_raw(manager.clone()) as *mut std::ffi::c_void;
+    let mgr_ptr = native_ctx.leak(manager.clone());
     let external = v8::External::new(scope, mgr_ptr);
     let native_set_timeout = v8::Function::builder(
         |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
             let mgr = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                Arc::from_raw(ptr as *const TimerManager)
+                &*(ptr as *const Arc<TimerManager>)
             };
             let id = args.get(0).uint32_value(scope).unwrap_or(0) as u64;
             let ms = args.get(1).uint32_value(scope).unwrap_or(0) as u64;
             mgr.set_timeout(id, ms);
-            std::mem::forget(mgr);
         },
     )
     .data(external.into())
     .build(scope)
     .unwrap();
 
-    let mgr_ptr = Arc::into_raw(manager.clone()) as *mut std::ffi::c_void;
+    let mgr_ptr = native_ctx.leak(manager.clone());
     let external = v8::External::new(scope, mgr_ptr);
     let native_set_interval = v8::Function::builder(
         |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
             let mgr = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                Arc::from_raw(ptr as *const TimerManager)
+                &*(ptr as *const Arc<TimerManager>)
             };
             let id = args.get(0).uint32_value(scope).unwrap_or(0) as u64;
             let ms = args.get(1).uint32_value(scope).unwrap_or(0) as u64;
             mgr.set_interval(id, ms);
-            std::mem::forget(mgr);
         },
     )
     .data(external.into())
     .build(scope)
     .unwrap();
 
-    let mgr_ptr = Arc::into_raw(manager.clone()) as *mut std::ffi::c_void;
+    let mgr_ptr = native_ctx.leak(manager.clone());
     let external = v8::External::new(scope, mgr_ptr);
     let native_set_interval_background = v8::Function::builder(
         |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
             let mgr = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                Arc::from_raw(ptr as *const TimerManager)
+                &*(ptr as *const Arc<TimerManager>)
             };
             let id = args.get(0).uint32_value(scope).unwrap_or(0) as u64;
             let ms = args.get(1).uint32_value(scope).unwrap_or(0) as u64;
             mgr.set_interval_background(id, ms);
-            std::mem::forget(mgr);
         },
     )
     .data(external.into())
     .build(scope)
     .unwrap();
 
-    let mgr_ptr = Arc::into_raw(manager.clone()) as *mut std::ffi::c_void;
+    let mgr_ptr = native_ctx.leak(manager.clone());
     let external = v8::External::new(scope, mgr_ptr);
     let native_clear_timer = v8::Function::builder(
         |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
             let mgr = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                Arc::from_raw(ptr as *const TimerManager)
+                &*(ptr as *const Arc<TimerManager>)
             };
             let id = args.get(0).uint32_value(scope).unwrap_or(0) as u64;
             mgr.cancel(id);
-            std::mem::forget(mgr);
         },
     )
     .data(external.into())

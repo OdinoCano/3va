@@ -595,7 +595,6 @@ pub fn inject_process(
     scope: &mut ContextScope<HandleScope>,
     permissions: Arc<PermissionState>,
 ) -> anyhow::Result<()> {
-    let permissions: &'static Arc<PermissionState> = Box::leak(Box::new(permissions));
     ENV_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions.clone()));
     let context = scope.get_current_context();
     let globals = context.global(scope);

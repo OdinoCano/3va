@@ -37,6 +37,23 @@ static V8_INIT: std::sync::Once = std::sync::Once::new();
 pub static V8_PLATFORM: std::sync::OnceLock<v8::SharedRef<v8::Platform>> =
     std::sync::OnceLock::new();
 
+// Shared across every isolate instead of leaving `CreateParams::default()`
+// to hand each one a fresh `new_default_allocator()`: same malloc/free
+// behavior, but one native allocation for the process instead of one per
+// isolate (relevant for `$262.agent` isolates and any short-lived `3va run`
+// process that creates several engines).
+static V8_ARRAY_BUFFER_ALLOCATOR: std::sync::OnceLock<v8::SharedPtr<v8::Allocator>> =
+    std::sync::OnceLock::new();
+
+fn shared_array_buffer_allocator() -> v8::SharedPtr<v8::Allocator> {
+    V8_ARRAY_BUFFER_ALLOCATOR
+        .get_or_init(|| {
+            let unique: v8::SharedRef<v8::Allocator> = v8::new_default_allocator().into();
+            unique.into()
+        })
+        .clone()
+}
+
 /// Initializes the V8 platform, if it hasn't been already. Safe to call any
 /// number of times from any number of places in the process — e.g. once per
 /// `JsEngine`, plus any standalone `v8::Isolate` created outside of one
@@ -360,7 +377,9 @@ struct AgentSideState {
 /// called, the channel closes, or `AGENT_MAX_LIFETIME` elapses.
 fn run_agent_thread(hub: Arc<AgentHub>, rx: std::sync::mpsc::Receiver<BroadcastMsg>, src: String) {
     ensure_v8_initialized();
-    let mut isolate = v8::Isolate::new(Default::default());
+    let mut isolate = v8::Isolate::new(
+        v8::Isolate::create_params().array_buffer_allocator(shared_array_buffer_allocator()),
+    );
     isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
 
     let scope = std::pin::pin!(v8::HandleScope::new(&mut isolate));
@@ -516,6 +535,9 @@ pub struct JsEngine {
     // (LOW_MEMORY_HINT_INTERVAL) so busy periods aren't paused by a full
     // GC on every single tick.
     last_low_memory_hint: std::time::Instant,
+    // Backs the raw pointers handed to V8 `External` callback data (see
+    // `builtins::NativeCtxRegistry`) so they're freed when the engine is.
+    native_ctx: builtins::NativeCtxRegistry,
 }
 
 const LOW_MEMORY_HINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -568,7 +590,9 @@ impl JsEngine {
         }
 
         let t1 = std::time::Instant::now();
-        let mut isolate = Isolate::new(Default::default());
+        let mut isolate = Isolate::new(
+            Isolate::create_params().array_buffer_allocator(shared_array_buffer_allocator()),
+        );
         if trace {
             eprintln!("[startup] Isolate::new: {:?}", t1.elapsed());
         }
@@ -595,6 +619,7 @@ impl JsEngine {
             ws_pool: ws_pool.clone(),
             last_low_memory_hint: std::time::Instant::now(),
             server_mode: false,
+            native_ctx: builtins::NativeCtxRegistry::default(),
         };
 
         engine.initialize(permissions, timer_manager, firewall, ws_pool)?;
@@ -628,7 +653,14 @@ impl JsEngine {
         }
 
         let t = std::time::Instant::now();
-        builtins::inject_all(&mut scope, permissions, timer_manager, firewall, ws_pool)?;
+        builtins::inject_all(
+            &mut scope,
+            permissions,
+            timer_manager,
+            firewall,
+            ws_pool,
+            &mut self.native_ctx,
+        )?;
         if trace {
             eprintln!("[startup] builtins::inject_all: {:?}", t.elapsed());
         }

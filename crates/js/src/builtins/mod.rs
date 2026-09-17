@@ -40,12 +40,39 @@ use vvva_permissions::PermissionState;
 
 pub use timers::TimerManager;
 
+/// Owns the heap allocations backing V8 `External` callback data.
+///
+/// V8 function callbacks need a raw pointer that stays valid for as long as
+/// the callback itself can be invoked (i.e. the engine's lifetime), which
+/// native code usually gets via `Box::leak`. But a real `Box::leak` is never
+/// freed even after the owning `JsEngine` (and its isolate) are dropped —
+/// harmless for a real process, which creates one engine and exits, but it
+/// accumulates across the many engines a single test binary creates and
+/// drops, which is what trips AddressSanitizer's leak checker in CI.
+/// Stashing the boxes here instead ties their lifetime to the `JsEngine`
+/// (see its `native_ctx` field) so they're freed once the engine — and every
+/// callback that could still dereference them — is gone. The heap address
+/// handed to V8 stays stable because moving a `Box` moves only the pointer,
+/// not the pointee.
+#[derive(Default)]
+pub struct NativeCtxRegistry(Vec<Box<dyn std::any::Any>>);
+
+impl NativeCtxRegistry {
+    pub fn leak<T: 'static>(&mut self, value: T) -> *mut std::ffi::c_void {
+        let mut boxed: Box<T> = Box::new(value);
+        let ptr = boxed.as_mut() as *mut T as *mut std::ffi::c_void;
+        self.0.push(boxed);
+        ptr
+    }
+}
+
 pub fn inject_all(
     scope: &mut ContextScope<HandleScope>,
     permissions: Arc<PermissionState>,
     timer_manager: Arc<TimerManager>,
     firewall: Option<Arc<Firewall>>,
     ws_pool: websocket::WsPool,
+    native_ctx: &mut NativeCtxRegistry,
 ) -> anyhow::Result<()> {
     let __trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
     macro_rules! t {
@@ -60,7 +87,10 @@ pub fn inject_all(
     }
 
     t!("console", console::inject_console(scope))?;
-    t!("timers", timers::inject_timers(scope, timer_manager))?;
+    t!(
+        "timers",
+        timers::inject_timers(scope, timer_manager, native_ctx)
+    )?;
 
     let atob_btoa = r#"
 (function() {
@@ -137,11 +167,11 @@ pub fn inject_all(
     t!("grpc", grpc::inject_grpc(scope, permissions.clone()))?;
     t!(
         "http_server",
-        http_server::inject_http_server(scope, permissions.clone(), firewall)
+        http_server::inject_http_server(scope, permissions.clone(), firewall, native_ctx)
     )?;
     t!(
         "http2_server",
-        http_server::inject_http2_server(scope, permissions.clone())
+        http_server::inject_http2_server(scope, permissions.clone(), native_ctx)
     )?;
     t!("os_info", os_info::inject_os_info(scope))?;
     t!(
