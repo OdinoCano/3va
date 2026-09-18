@@ -55,21 +55,22 @@ fn child_table() -> &'static Mutex<HashMap<u32, StreamChild>> {
 pub fn inject_child_process(
     scope: &mut ContextScope<HandleScope>,
     permissions: Arc<PermissionState>,
+    native_ctx: &mut crate::builtins::NativeCtxRegistry,
 ) -> anyhow::Result<()> {
     let context = scope.get_current_context();
     let global = context.global(scope);
 
-    // Leak once per engine and hand every closure a pointer via v8::External,
-    // instead of a process-wide static (which corrupted permission checks
-    // across concurrently-running engines/tests).
-    let perms_ptr = Arc::into_raw(permissions) as *mut std::ffi::c_void;
+    // Stored once per engine and hand every closure a pointer via
+    // v8::External, instead of a process-wide static (which corrupted
+    // permission checks across concurrently-running engines/tests).
+    let perms_ptr = native_ctx.leak(permissions);
     let external = v8::External::new(scope, perms_ptr);
 
     let exec_async_fn = v8::Function::builder(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const PermissionState)
+                &*(ptr as *const Arc<PermissionState>)
             };
             let cmd_arg = args.get(0);
             let cmd = cmd_arg
@@ -147,7 +148,7 @@ pub fn inject_child_process(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const PermissionState)
+                &*(ptr as *const Arc<PermissionState>)
             };
             let cmd_arg = args.get(0);
             let command = cmd_arg.to_rust_string_lossy(_scope);
@@ -199,7 +200,7 @@ pub fn inject_child_process(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const PermissionState)
+                &*(ptr as *const Arc<PermissionState>)
             };
             let cmd_arg = args.get(0);
             let cmd = cmd_arg
@@ -261,7 +262,7 @@ pub fn inject_child_process(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const PermissionState)
+                &*(ptr as *const Arc<PermissionState>)
             };
             let cmd_arg = args.get(0);
             let command = cmd_arg
@@ -323,7 +324,7 @@ pub fn inject_child_process(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const PermissionState)
+                &*(ptr as *const Arc<PermissionState>)
             };
             let cmd_arg = args.get(0);
             let cmd = cmd_arg
@@ -412,7 +413,7 @@ pub fn inject_child_process(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const PermissionState)
+                &*(ptr as *const Arc<PermissionState>)
             };
             let cmd_arg = args.get(0);
             let cmd = cmd_arg
@@ -503,7 +504,7 @@ pub fn inject_child_process(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const PermissionState)
+                &*(ptr as *const Arc<PermissionState>)
             };
             if !perms.check(&Capability::SpawnProcess) {
                 let e = V8String::new(scope, "Process spawn denied").unwrap();
@@ -891,7 +892,7 @@ pub fn inject_child_process(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const PermissionState)
+                &*(ptr as *const Arc<PermissionState>)
             };
             if !perms.check(&Capability::SpawnProcess) {
                 eprintln!("[__clusterFork] SpawnProcess denied (perms={:?})", perms);

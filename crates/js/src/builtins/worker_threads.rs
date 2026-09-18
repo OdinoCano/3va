@@ -89,8 +89,8 @@ pub fn inject_worker_threads_native(scope: &mut PinScope, permissions: Arc<Permi
                         let out = in_clone.clone();
                         let recv2 = recv.clone();
                         let inject_result = engine
-                            .with_scope(|scope| {
-                                inject_worker_globals(scope, &worker_data, out, recv2)
+                            .with_scope(|scope, native_ctx| {
+                                inject_worker_globals(scope, &worker_data, out, recv2, native_ctx)
                             })
                             .await;
                         if let Err(e) = inject_result {
@@ -310,6 +310,7 @@ fn inject_worker_globals(
     worker_data_json: &str,
     outgoing: Arc<Mutex<VecDeque<String>>>,
     receiver: Arc<Mutex<std::sync::mpsc::Receiver<String>>>,
+    native_ctx: &mut crate::builtins::NativeCtxRegistry,
 ) -> anyhow::Result<()> {
     let context = scope.get_current_context();
     let global = context.global(scope);
@@ -342,17 +343,16 @@ fn inject_worker_globals(
         let _ = script.run(scope);
     }
 
-    let out_ptr = Arc::into_raw(outgoing) as *mut std::ffi::c_void;
+    let out_ptr = native_ctx.leak(outgoing);
     let out_external = v8::External::new(scope, out_ptr);
     let post_to_parent = v8::Function::builder(
         |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
             let fn_out = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                Arc::from_raw(ptr as *const Mutex<VecDeque<String>>)
+                &*(ptr as *const Arc<Mutex<VecDeque<String>>>)
             };
             let json = args.get(0).to_rust_string_lossy(scope);
             fn_out.lock().unwrap().push_back(json);
-            std::mem::forget(fn_out);
         },
     )
     .data(out_external.into())
@@ -366,20 +366,19 @@ fn inject_worker_globals(
         post_to_parent.into(),
     );
 
-    let recv_ptr = Arc::into_raw(receiver) as *mut std::ffi::c_void;
+    let recv_ptr = native_ctx.leak(receiver);
     let recv_external = v8::External::new(scope, recv_ptr);
     let recv_fn = v8::Function::builder(
         |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let fn_recv = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                Arc::from_raw(ptr as *const Mutex<std::sync::mpsc::Receiver<String>>)
+                &*(ptr as *const Arc<Mutex<std::sync::mpsc::Receiver<String>>>)
             };
             let msg = fn_recv.lock().unwrap().try_recv().ok();
             match msg {
                 Some(s) => rv.set(v8::String::new(scope, &s).unwrap().into()),
                 None => rv.set(v8::undefined(scope).into()),
             }
-            std::mem::forget(fn_recv);
         },
     )
     .data(recv_external.into())

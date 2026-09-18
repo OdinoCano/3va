@@ -185,7 +185,7 @@ pub fn inject_all(
     t!("zlib", zlib::inject_zlib(scope))?;
     t!(
         "child_process",
-        child_process::inject_child_process(scope, permissions.clone())
+        child_process::inject_child_process(scope, permissions.clone(), native_ctx)
     )?;
     t!("crypto", crypto::inject_crypto(scope))?;
     t!("ffi", ffi::inject_ffi(scope, permissions.clone()))?;
@@ -200,9 +200,15 @@ pub fn inject_all(
     t!("sqlite", sqlite::inject_sqlite(scope))?;
     t!("event_source", event_source::inject_event_source(scope));
     t!("imap", imap::inject_imap(scope, permissions.clone()));
-    t!("irc", irc::inject_irc(scope, permissions.clone()));
+    t!(
+        "irc",
+        irc::inject_irc(scope, permissions.clone(), native_ctx)
+    );
     t!("ftp", ftp::inject_ftp(scope, permissions.clone()));
-    t!("pop3", pop3::inject_pop3(scope, permissions.clone()));
+    t!(
+        "pop3",
+        pop3::inject_pop3(scope, permissions.clone(), native_ctx)
+    );
     t!("mqtt", mqtt::inject_mqtt(scope, permissions.clone()));
     t!("ssh", ssh::inject_ssh(scope, permissions.clone()));
     t!("webrtc", webrtc::inject_webrtc(scope, permissions.clone()));
