@@ -837,14 +837,14 @@ impl JsEngine {
 
     pub async fn with_scope<R>(
         &mut self,
-        f: impl FnOnce(&mut v8::ContextScope<v8::HandleScope>) -> R,
+        f: impl FnOnce(&mut v8::ContextScope<v8::HandleScope>, &mut builtins::NativeCtxRegistry) -> R,
     ) -> R {
         let context_global = self.context.clone().expect("engine not initialized");
         let scope = std::pin::pin!(v8::HandleScope::new(&mut *self.isolate));
         let mut scope = scope.init();
         let context = v8::Local::new(&scope, &context_global);
         let mut scope = v8::ContextScope::new(&mut scope, context);
-        f(&mut scope)
+        f(&mut scope, &mut self.native_ctx)
     }
 
     pub async fn eval_file_with_args(

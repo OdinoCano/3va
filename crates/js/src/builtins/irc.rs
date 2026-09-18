@@ -63,13 +63,10 @@ fn next_irc_id() -> IrcId {
 pub fn inject_irc(
     scope: &mut v8::ContextScope<v8::HandleScope>,
     permissions: Arc<PermissionState>,
+    native_ctx: &mut crate::builtins::NativeCtxRegistry,
 ) {
     let context = scope.get_current_context();
     let global = context.global(scope);
-    let _perms = permissions.clone();
-    let _perms2 = permissions.clone();
-    let _perms3 = permissions.clone();
-    let _perms4 = permissions.clone();
 
     let create_fn = v8::Function::new(
         scope,
@@ -87,13 +84,13 @@ pub fn inject_irc(
         create_fn.into(),
     );
 
-    let perms_ptr = Arc::into_raw(permissions.clone()) as *mut std::ffi::c_void;
+    let perms_ptr = native_ctx.leak(permissions.clone());
     let external = v8::External::new(scope, perms_ptr);
     let connect_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const PermissionState)
+                &*(ptr as *const Arc<PermissionState>)
             };
             let id = args.get(0).uint32_value(scope).unwrap_or(0) as IrcId;
             let host = args.get(1).to_rust_string_lossy(scope);
