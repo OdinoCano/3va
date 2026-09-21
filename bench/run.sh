@@ -73,6 +73,17 @@ hf_row "3va" "$BIN_3VA run hello.js --allow-read=."
 [ "$HAVE_BUN" = 1 ] && hf_row "bun" "bun run hello.js"
 echo
 
+# Same hello world in TypeScript (Deno/Bun publish this as "TypeScript startup").
+# 3va and Bun run .ts directly; Node needs >= 23.6 (built-in type stripping).
+echo "## Startup (TypeScript hello world)"
+echo
+echo "| Runtime | Mean | Range |"
+echo "|---|---|---|"
+hf_row "3va-ts" "$BIN_3VA run hello.ts --allow-read=." | sed 's/^| 3va-ts /| 3va /' || true
+[ "$HAVE_NODE" = 1 ] && { hf_row "node-ts" "node hello.ts" | sed 's/^| node-ts /| node /' || true; }
+[ "$HAVE_BUN" = 1 ] && { hf_row "bun-ts" "bun run hello.ts" | sed 's/^| bun-ts /| bun /' || true; }
+echo
+
 # ── Install: warm, already satisfied ────────────────────────────────────────
 # Same operation for every tool: `is-odd` is already in package.json and
 # already on disk, so this measures the "is anything to do?" resolution
@@ -118,11 +129,53 @@ echo "_means that tool wasn't on \$PATH when this ran, not that it was_"
 echo "_skipped on purpose — see bench/README.md._"
 echo
 
+# ── Install: real app, warm cache ────────────────────────────────────────────
+# Same protocol Bun's homepage uses: package.json from Bun's bench/install
+# (create-t3-app, hundreds of transitive packages), lockfile present, cache
+# warm, node_modules removed before every timed run. The first (untimed)
+# install populates the cache + lockfile; --no-scan is passed to 3va because
+# npm/bun don't scan either (3va audit is benchmarked separately, if at all).
+echo "## Package install, real app (T3 stack, warm cache, lockfile, no node_modules)"
+echo
+echo "| Tool | Median | Range |"
+echo "|---|---|---|"
+
+install_app_row() {
+  local label="$1" cmd="$2"
+  local dir="$RESULTS_DIR/app-$label"
+  mkdir -p "$dir"
+  cp install/package.json "$dir/package.json"
+  ( cd "$dir" && eval "$cmd" >/dev/null 2>&1 )
+  if [ ! -e "$dir/node_modules/next" ]; then
+    echo "| $label | failed | first install did not produce node_modules/next |"
+    return 0
+  fi
+  ( cd "$dir" && hyperfine --runs 3 --prepare 'rm -rf node_modules' \
+      --export-json "$RESULTS_DIR/app-$label.json" "$cmd" >&2 ) || {
+    echo "| $label | failed | install exited non-zero |"; return 0; }
+  if [ ! -e "$dir/node_modules/next" ]; then
+    echo "| $label | failed | timed install left node_modules/next missing |"
+    return 0
+  fi
+  python3 - "$RESULTS_DIR/app-$label.json" "$label" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))["results"][0]
+print(f"| {sys.argv[2]} | {d['median']*1000:,.0f} ms | {d['min']*1000:,.0f}–{d['max']*1000:,.0f} ms |")
+EOF
+}
+
+install_app_row "3va" "$BIN_3VA install --no-scan --allow-net=registry.npmjs.org" || true
+if [ "$HAVE_NODE" = 1 ] && command -v npm >/dev/null 2>&1; then
+  install_app_row "npm" "npm install --silent --no-audit --no-fund" || true
+fi
+[ "$HAVE_BUN" = 1 ] && { install_app_row "bun" "bun install" || true; }
+echo
+
 # ── HTTP throughput + memory ─────────────────────────────────────────────────
 echo "## HTTP throughput (100k requests, 1,000 concurrent) and memory"
 echo
-echo "| Runtime | Req/s | Success | Memory (idle) | Memory (post-load) |"
-echo "|---|---|---|---|---|"
+echo "| Runtime | Req/s | Success | Memory (idle) | Memory (post-load) | p99 latency | Peak memory |"
+echo "|---|---|---|---|---|---|---|"
 
 # Sets the global SERVER_PID rather than `echo`ing the PID for a caller to
 # capture via `$(...)` — a background job started inside a function called
@@ -143,6 +196,11 @@ start_server() {
 
 rss_kb() {
   awk '/^VmRSS:/ {print $2}' "/proc/$1/status" 2>/dev/null || echo "0"
+}
+
+# VmHWM = peak resident set over the process's lifetime (true peak memory).
+hwm_kb() {
+  awk '/^VmHWM:/ {print $2}' "/proc/$1/status" 2>/dev/null || echo "0"
 }
 
 # Polls instead of a single fixed sleep: a loaded machine (or a runtime
@@ -180,7 +238,7 @@ bench_http() {
   start_server "$cmd" "$port"
   local pid="$SERVER_PID"
   if ! wait_for_server "$port" "$pid"; then
-    echo "| $label | — | — | — | server did not start |"
+    echo "| $label | — | — | — | — | — | server did not start |"
     kill -9 "$pid" 2>/dev/null || true
     return
   fi
@@ -190,20 +248,25 @@ bench_http() {
   out=$(oha -n 100000 -c 1000 --no-tui --output-format json "http://127.0.0.1:$port/" 2>/dev/null)
   local loaded_kb
   loaded_kb=$(rss_kb "$pid")
+  local peak_kb
+  peak_kb=$(hwm_kb "$pid")
   kill -9 "$pid" 2>/dev/null || true
   echo "$out" > "$RESULTS_DIR/http-$label.json"
-  python3 - "$RESULTS_DIR/http-$label.json" "$label" "$idle_kb" "$loaded_kb" <<'EOF'
+  python3 - "$RESULTS_DIR/http-$label.json" "$label" "$idle_kb" "$loaded_kb" "$peak_kb" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 rps = d["summary"]["requestsPerSec"]
 success = d["summary"]["successRate"] * 100
 idle_mb = int(sys.argv[3]) / 1024
 loaded_mb = int(sys.argv[4]) / 1024
-print(f"| {sys.argv[2]} | {rps:,.0f} | {success:.1f}% | {idle_mb:.1f} MB | {loaded_mb:.1f} MB |")
+peak_mb = int(sys.argv[5]) / 1024
+p99 = (d.get("latencyPercentiles") or {}).get("p99")
+p99_s = f"{p99 * 1000:.2f} ms" if p99 is not None else "—"
+print(f"| {sys.argv[2]} | {rps:,.0f} | {success:.1f}% | {idle_mb:.1f} MB | {loaded_mb:.1f} MB | {p99_s} | {peak_mb:.1f} MB |")
 EOF
 }
 
-bench_http "3va" "$BIN_3VA run server.js --allow-net= --allow-read=." 8811 || true
+bench_http "3va" "$BIN_3VA run server.js --allow-net= --allow-read=. --allow-env=PORT" 8811 || true
 if [ "$HAVE_NODE" = 1 ]; then bench_http "node" "node server.js" 8812 || true; fi
 if [ "$HAVE_BUN" = 1 ]; then bench_http "bun" "bun run server.js" 8813 || true; fi
 echo
@@ -213,6 +276,32 @@ echo "_**default** firewall (100 req/s, 50 connections per IP) a single-IP_"
 echo "_load test like this one is mostly rejected with 403 — that's the_"
 echo "_firewall working as designed, not a bug. See bench/README.md._"
 echo
+
+# ── Express 5 hello world (Bun's bench/express) ─────────────────────────────
+# Same app Bun publishes. Dependencies are installed with npm (or bun) so this
+# measures the *runtime* running Express, not each tool's installer.
+echo "## Express 5 hello world (Bun's bench/express, 100k requests, 1,000 concurrent) and memory"
+echo
+echo "| Runtime | Req/s | Success | Memory (idle) | Memory (post-load) | p99 latency | Peak memory |"
+echo "|---|---|---|---|---|---|---|"
+if command -v npm >/dev/null 2>&1; then
+  ( cd express && npm install --silent --no-audit --no-fund ) >&2 || true
+elif [ "$HAVE_BUN" = 1 ]; then
+  ( cd express && bun install ) >&2 || true
+fi
+if [ -d express/node_modules/express ]; then
+  bench_http "3va" "$BIN_3VA run express/express.mjs --allow-net= --allow-read=express --allow-env=PORT" 8821 || true
+  if [ "$HAVE_NODE" = 1 ]; then bench_http "node" "node express/express.mjs" 8822 || true; fi
+  if [ "$HAVE_BUN" = 1 ]; then bench_http "bun" "bun run express/express.mjs" 8823 || true; fi
+else
+  echo "| — | — | — | — | — | — | express dependencies did not install |"
+fi
+echo
+
+if [ -n "${BENCH_SKIP_TEST262:-}" ]; then
+  echo "Done (test262 skipped: BENCH_SKIP_TEST262 set)."
+  exit 0
+fi
 
 # ── ECMAScript conformance (test262) ────────────────────────────────────────
 # Only 3va: Node.js and Bun's numbers in the README are their own public,

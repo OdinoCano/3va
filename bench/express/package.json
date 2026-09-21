@@ -1,0 +1,6 @@
+{
+  "name": "express",
+  "private": true,
+  "type": "module",
+  "dependencies": { "express": "5" }
+}

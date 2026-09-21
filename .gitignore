@@ -65,3 +65,6 @@ dist/snap/*.snap
 # Cargo.lock  → trackeado para reproducibilidad y auditoría de supply chain
 # test262 suite — downloaded by scripts/setup-test262.sh, not committed
 tests/test262/
+
+bench/express/node_modules/
+bench/express/package-lock.json

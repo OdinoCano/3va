@@ -32,6 +32,31 @@ skipped rather than faked.
   handler, same shape for every runtime so the comparison is the runtime,
   not three different servers).
 
+## Same workloads Bun and Deno publish
+
+Where the other runtimes publish their benchmark source, this directory reuses
+it so the numbers are comparable in *what* is measured (not in hardware):
+
+- **Express 5 hello world** — `express/express.mjs` is Bun's `bench/express`
+  verbatim. Dependencies are installed with npm (or bun) so this measures the
+  runtime running Express, not each tool's installer.
+- **Package install, real app** — `install/package.json` is Bun's
+  `bench/install` (create-t3-app, hundreds of transitive packages). Protocol:
+  cache warm, lockfile present, `node_modules` removed before every timed run,
+  median of 3. `3va install` runs with `--no-scan` because npm/bun don't scan;
+  a tool whose install doesn't produce `node_modules/next` is reported as
+  `failed`, never as a fast time.
+- **TypeScript startup** — `hello.ts` (3va and Bun run it directly; Node needs
+  >= 23.6 for built-in type stripping).
+- **p99 latency and peak memory** — every HTTP table reports `oha`'s p99 and
+  the process's `VmHWM` (true peak RSS), not just idle/post-load.
+
+Deno's homepage numbers ("realworld", gzip `DecompressionStream`) don't have
+public source we could find, so they are not reproduced here. 3va has no
+`CompressionStream`/`DecompressionStream` yet.
+
+`BENCH_SKIP_TEST262=1 bash bench/run.sh` skips the (slow) conformance run.
+
 ## Why `3va.config.json` exists in this directory
 
 3va's HTTP server firewalls by default: 100 req/s and 50 simultaneous
