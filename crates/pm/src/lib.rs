@@ -206,6 +206,15 @@ async fn lookup_npm_compat(
     base_url: &str,
     pkg_name: &str,
 ) -> anyhow::Result<RegistryInfo> {
+    let data = fetch_packument(client, base_url, pkg_name).await?;
+    Ok(registry_info_from_packument(&data, base_url, pkg_name))
+}
+
+async fn fetch_packument(
+    client: &reqwest::Client,
+    base_url: &str,
+    pkg_name: &str,
+) -> anyhow::Result<serde_json::Value> {
     let url = format!("{}/{}", base_url, pkg_name);
     let resp = client
         .get(&url)
@@ -224,7 +233,14 @@ async fn lookup_npm_compat(
         anyhow::bail!("Registry returned HTTP {}", resp.status());
     }
 
-    let data: serde_json::Value = resp.json().await?;
+    Ok(resp.json().await?)
+}
+
+fn registry_info_from_packument(
+    data: &serde_json::Value,
+    base_url: &str,
+    pkg_name: &str,
+) -> RegistryInfo {
     let latest = data["dist-tags"]["latest"].as_str().map(|s| s.to_string());
 
     let mut versions = Vec::new();
@@ -242,11 +258,11 @@ async fn lookup_npm_compat(
         }
     }
 
-    Ok(RegistryInfo {
+    RegistryInfo {
         versions,
         latest,
         version_meta,
-    })
+    }
 }
 
 /// Fetch only the metadata for a specific version using the abbreviated endpoint.
@@ -268,7 +284,7 @@ async fn lookup_npm_version(
 
     if resp.status().as_u16() == 404 || !resp.status().is_success() {
         // Fall back to full packument to get dist-tags etc.
-        return lookup_npm_compat_with_deps(client, base_url, pkg_name).await;
+        return lookup_npm_compat_with_deps(client, base_url, pkg_name, version).await;
     }
 
     let meta: serde_json::Value = resp.json().await?;
@@ -320,11 +336,26 @@ async fn lookup_npm_compat_with_deps(
     client: &reqwest::Client,
     base_url: &str,
     pkg_name: &str,
+    range: &str,
 ) -> anyhow::Result<(RegistryInfo, Vec<(String, String)>)> {
-    let info = lookup_npm_compat(client, base_url, pkg_name).await?;
-    // For the full packument we don't know which version was picked yet,
-    // return empty deps — they'll be read after extract.
-    Ok((info, Vec::new()))
+    let data = fetch_packument(client, base_url, pkg_name).await?;
+    let info = registry_info_from_packument(&data, base_url, pkg_name);
+    let deps = dep_specs_for_range(&data, &info, range);
+    Ok((info, deps))
+}
+
+/// `GET /<pkg>/<x>` only resolves exact versions and dist-tags, so any range
+/// (`5`, `5.x`, `^2.0.0` — i.e. most transitive deps) lands on the full
+/// packument. Pick the same version the caller will pick from `range` and
+/// return *its* dependencies; returning none silently truncated the tree
+/// (`"express": "5"` installed express alone, without `body-parser` etc.).
+fn dep_specs_for_range(
+    packument: &serde_json::Value,
+    info: &RegistryInfo,
+    range: &str,
+) -> Vec<(String, String)> {
+    let ver = select_best_version(&info.versions, range, info.latest.as_deref());
+    collect_dep_specs(&packument["versions"][ver.as_str()])
 }
 
 async fn lookup_jsr(client: &reqwest::Client, pkg_name: &str) -> anyhow::Result<RegistryInfo> {
@@ -3656,6 +3687,33 @@ mod config_deps_tests {
         )
         .unwrap();
         install_config_deps(dir.path(), None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod range_dep_tests {
+    use super::{dep_specs_for_range, registry_info_from_packument};
+
+    #[test]
+    fn range_fallback_returns_deps_of_best_matching_version() {
+        let packument = serde_json::json!({
+            "dist-tags": {"latest": "6.0.0"},
+            "versions": {
+                "5.1.0": {"dependencies": {"old": "^1.0.0"}, "dist": {"tarball": "t/5.1.0"}},
+                "5.2.1": {"dependencies": {"body-parser": "^2.2.1"}, "dist": {"tarball": "t/5.2.1"}},
+                "6.0.0": {"dependencies": {"new": "^9.0.0"}, "dist": {"tarball": "t/6.0.0"}},
+            }
+        });
+        let info = registry_info_from_packument(&packument, "https://r", "express");
+        // "5" is not a version or dist-tag; the registry 404s on /express/5.
+        assert_eq!(
+            dep_specs_for_range(&packument, &info, "5"),
+            vec![("body-parser".to_string(), "^2.2.1".to_string())]
+        );
+        assert_eq!(
+            dep_specs_for_range(&packument, &info, "^5.0.0"),
+            vec![("body-parser".to_string(), "^2.2.1".to_string())]
+        );
     }
 }
 
