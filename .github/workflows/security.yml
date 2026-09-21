@@ -98,6 +98,24 @@ jobs:
       # known rustdoc + -Z sanitizer + -Zbuild-std interaction). The unit and
       # integration tests below are what actually exercise unsafe code paths
       # anyway; doc examples aren't what these gates are for.
+      # LSan can only match `.github/lsan-v8.supp` entries against *symbolized*
+      # frames. Without a findable llvm-symbolizer the leak report is raw
+      # addresses, nothing matches, and the known v8 `create_annex` leak fails
+      # the job. Versioned binaries (llvm-symbolizer-18) aren't on PATH under
+      # the plain name, so resolve one explicitly.
+      - name: Locate llvm-symbolizer
+        run: |
+          sym="$(command -v llvm-symbolizer || true)"
+          if [ -z "$sym" ]; then
+            sym="$(ls /usr/bin/llvm-symbolizer-* 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+          if [ -z "$sym" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq llvm
+            sym="$(ls /usr/bin/llvm-symbolizer-* | sort -V | tail -n 1)"
+          fi
+          echo "Using $sym"
+          echo "ASAN_SYMBOLIZER_PATH=$sym" >> "$GITHUB_ENV"
       - name: AddressSanitizer
         run: |
           LSAN_OPTIONS="suppressions=$GITHUB_WORKSPACE/.github/lsan-v8.supp" \
