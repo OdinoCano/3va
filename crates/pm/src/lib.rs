@@ -315,14 +315,25 @@ async fn lookup_npm_version(
     Ok((info, dep_specs))
 }
 
-/// Pull `dependencies` + `peerDependencies` (name, range) pairs out of an
-/// npm registry version object. Peers are treated identically to regular
-/// deps so autoinstall reuses the same BFS and permission grant.
+/// Pull `dependencies` + non-optional `peerDependencies` (name, range) pairs
+/// out of an npm registry version object. Peers are treated identically to
+/// regular deps so autoinstall reuses the same BFS and permission grant,
+/// *except* a peer marked `peerDependenciesMeta.<name>.optional` — npm,
+/// pnpm and Yarn all skip those by default, and pulling them in anyway
+/// balloons the tree with dependencies the consumer opted out of (e.g.
+/// drizzle-orm's ~28 mostly-optional peers: React Native, Prisma, several
+/// native SQLite bindings — none needed unless the app actually uses that
+/// backend).
 fn collect_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)> {
     let mut dep_specs = Vec::new();
     for key in ["dependencies", "peerDependencies"] {
         if let Some(deps) = meta[key].as_object() {
             for (dep_name, dep_ver) in deps {
+                if key == "peerDependencies"
+                    && meta["peerDependenciesMeta"][dep_name]["optional"] == true
+                {
+                    continue;
+                }
                 if let Some(dv) = dep_ver.as_str() {
                     dep_specs.push((dep_name.clone(), dv.to_string()));
                 }
@@ -3767,6 +3778,32 @@ mod peer_dep_tests {
         assert_eq!(
             collect_dep_specs(&meta),
             vec![("lodash".to_string(), "^4.0.0".to_string())]
+        );
+    }
+
+    #[test]
+    fn optional_peer_dependencies_are_skipped() {
+        // Matches npm/pnpm/Yarn's default: a peer marked optional in
+        // peerDependenciesMeta is not auto-installed. Regression test for
+        // drizzle-orm-style manifests where most of ~28 peers are optional.
+        let meta = serde_json::json!({
+            "dependencies": {"lodash": "^4.0.0"},
+            "peerDependencies": {
+                "react": "^18.0.0",
+                "expo-sqlite": "^14.0.0",
+            },
+            "peerDependenciesMeta": {
+                "expo-sqlite": {"optional": true},
+            },
+        });
+        let mut specs = collect_dep_specs(&meta);
+        specs.sort();
+        assert_eq!(
+            specs,
+            vec![
+                ("lodash".to_string(), "^4.0.0".to_string()),
+                ("react".to_string(), "^18.0.0".to_string()),
+            ]
         );
     }
 }
