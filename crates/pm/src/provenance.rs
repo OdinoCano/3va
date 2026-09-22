@@ -198,27 +198,55 @@ fn verify_dsse_signature(
 }
 
 /// Expected subject forms for `{pkg}@{version}` in an in-toto statement.
+/// Builds the npm registry's purl for a package name, matching real
+/// attestation subjects exactly: a scoped name's leading `@` is percent-
+/// encoded (`%40`) but the `/` before the package name is left bare —
+/// e.g. `@babel/traverse` → `pkg:npm/%40babel/traverse`. Getting this
+/// wrong makes every scoped package's (valid) provenance look tampered.
+fn npm_purl_name(pkg_name: &str) -> String {
+    match pkg_name.strip_prefix('@') {
+        Some(rest) => format!("pkg:npm/%40{rest}"),
+        None => format!("pkg:npm/{pkg_name}"),
+    }
+}
+
 fn subject_matches(statement: &Value, pkg_name: &str, version: &str) -> bool {
+    let purl = format!("{}@{version}", npm_purl_name(pkg_name));
     statement["subject"]
         .as_array()
         .map(|subjects| {
             subjects.iter().any(|s| {
-                s["name"].as_str() == Some(&format!("pkg:npm/{pkg_name}@{version}"))
+                s["name"].as_str() == Some(&purl)
                     || s["name"].as_str() == Some(&format!("{pkg_name}@{version}"))
             })
         })
         .unwrap_or(false)
 }
 
+/// Outcome of [`verify_attestations`] on a response with no hard failure.
+#[derive(Debug)]
+pub enum VerifyOutcome {
+    /// `n` attestations were cryptographically checked and matched.
+    Verified(usize),
+    /// The bundle uses a verification-material format this verifier doesn't
+    /// support yet (e.g. a bare `publicKey` hint instead of an X.509 leaf
+    /// certificate) — not evidence of tampering, just nothing we can check.
+    /// Treated the same as "no provenance published" by the caller.
+    Unsupported(String),
+}
+
 /// Verify every attestation in a registry provenance response.
 ///
-/// Returns the number of cryptographically verified bundles. Any malformed or
-/// tampered attestation is a hard error (`Err`).
+/// Returns [`VerifyOutcome::Verified`] with the number of cryptographically
+/// checked bundles, or [`VerifyOutcome::Unsupported`] when the bundle's
+/// format can't be checked at all. Any malformed, mismatched, or tampered
+/// attestation — i.e. anything actually indicating a problem rather than
+/// just "unverifiable" — is a hard error (`Err`).
 pub fn verify_attestations(
     response: &Value,
     pkg_name: &str,
     version: &str,
-) -> Result<usize, String> {
+) -> Result<VerifyOutcome, String> {
     let attestations = response["attestations"]
         .as_array()
         .ok_or("provenance response missing 'attestations' array")?;
@@ -284,8 +312,14 @@ pub fn verify_attestations(
                 extract_ec_public_key(&der)?
             }
             None => {
-                // Older bundles carry a key hint only; nothing to verify against.
-                return Err("bundle verificationMaterial carries no x509CertificateChain".into());
+                // Older/alternate bundles carry a bare public-key hint
+                // instead of a Fulcio-issued cert — a legitimate Sigstore
+                // shape (see `undici`'s real npm attestations), just one
+                // this verifier can't check without a trusted keyring to
+                // resolve the hint against. Not a tampering signal.
+                return Ok(VerifyOutcome::Unsupported(
+                    "bundle verificationMaterial carries no x509CertificateChain".into(),
+                ));
             }
         };
 
@@ -318,7 +352,7 @@ pub fn verify_attestations(
         }
         verified += 1;
     }
-    Ok(verified)
+    Ok(VerifyOutcome::Verified(verified))
 }
 
 #[cfg(test)]
@@ -343,9 +377,27 @@ mod tests {
     #[test]
     fn real_npm_provenance_fixture_verifies() {
         let resp: Value = serde_json::from_str(FIXTURE).unwrap();
-        let n = verify_attestations(&resp, "sigstore", "3.0.0")
-            .expect("real npm provenance bundle must verify");
-        assert_eq!(n, 1, "fixture holds one SLSA provenance attestation");
+        match verify_attestations(&resp, "sigstore", "3.0.0")
+            .expect("real npm provenance bundle must verify")
+        {
+            VerifyOutcome::Verified(n) => {
+                assert_eq!(n, 1, "fixture holds one SLSA provenance attestation")
+            }
+            VerifyOutcome::Unsupported(why) => panic!("expected Verified, got Unsupported: {why}"),
+        }
+    }
+
+    #[test]
+    fn scoped_package_purl_matches_real_npm_subject_encoding() {
+        // Real npm attestation subjects percent-encode only the leading
+        // `@` of a scope (`pkg:npm/%40babel/traverse@7.29.8`), not the `/`
+        // — this used to be built unencoded and rejected every scoped
+        // package's valid provenance as a subject mismatch.
+        assert_eq!(
+            npm_purl_name("@babel/traverse"),
+            "pkg:npm/%40babel/traverse"
+        );
+        assert_eq!(npm_purl_name("undici"), "pkg:npm/undici");
     }
 
     #[test]

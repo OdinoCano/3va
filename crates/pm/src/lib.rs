@@ -2005,11 +2005,19 @@ async fn install_with_transitive(
         let zero_install_on = zero_install_cache_enabled(manifest_val.as_ref());
         let project_root_owned = project_root.to_path_buf();
 
+        // Provenance fetch is a per-package network round-trip (registry
+        // attestations endpoint), same as the tarball download — it used
+        // to run *after* this JoinSet drained, one package at a time in
+        // the single-threaded loop below, which serialized hundreds of
+        // network calls that the downloads above already run concurrently.
+        // Firing it alongside the download inside the same spawned task
+        // (via `tokio::join!`) gets it the same concurrency for free.
         #[allow(clippy::type_complexity)]
         let mut dl_set: JoinSet<(
             String,
             String,
             anyhow::Result<(Vec<u8>, Option<String>)>,
+            anyhow::Result<Option<serde_json::Value>>,
         )> = JoinSet::new();
 
         for (pkg_name, ver, tarball_url, integrity) in to_install.iter().cloned() {
@@ -2019,34 +2027,44 @@ async fn install_with_transitive(
             let gs = global_store.clone();
             let rn = reg_name.clone();
             let root = project_root_owned.clone();
+            let meta = meta_client.clone();
+            let pkg_base = npmrc::pinned_scope_registry(&npmrc_cfg, &pkg_name)
+                .unwrap_or_else(|| base_url.clone());
 
             dl_set.spawn(async move {
-                let result = async {
-                    // Zero-install cache: committed, hash-verified — checked
-                    // before any network call, including the global store.
-                    if zero_install_on
-                        && let Some(bytes) = read_zero_install_cache(&root, &pkg_name, &ver)
-                    {
-                        return Ok((bytes, integrity));
-                    }
-                    // Check global store first (zero network)
-                    if gs.is_cached(&rn, &pkg_name, &ver) {
-                        return Ok((Vec::new(), integrity));
-                    }
-                    // Check per-project tarball cache
-                    if cached_path.exists() {
-                        let bytes = std::fs::read(&cached_path)?;
-                        return Ok((bytes, integrity));
-                    }
-                    // Download
+                // Cache checks are local I/O, no network — resolved before
+                // deciding whether a provenance fetch (which always hits
+                // the registry) is even worth doing. A package we already
+                // have needs no re-verification, matching npm/bun's
+                // cache-hit behavior instead of re-fetching Sigstore
+                // attestations for every already-installed package on
+                // every warm install.
+                if zero_install_on
+                    && let Some(bytes) = read_zero_install_cache(&root, &pkg_name, &ver)
+                {
+                    return (pkg_name, ver, Ok((bytes, integrity)), Ok(None));
+                }
+                if gs.is_cached(&rn, &pkg_name, &ver) {
+                    return (pkg_name, ver, Ok((Vec::new(), integrity)), Ok(None));
+                }
+                if cached_path.exists() {
+                    return match std::fs::read(&cached_path) {
+                        Ok(bytes) => (pkg_name, ver, Ok((bytes, integrity)), Ok(None)),
+                        Err(e) => (pkg_name, ver, Err(e.into()), Ok(None)),
+                    };
+                }
+
+                let download_fut = async {
                     let bytes = download_tarball_with_client(&client, &tarball_url)
                         .await
                         .map_err(|e| anyhow::anyhow!("{}@{} — {}", pkg_name, ver, e))?;
                     let _ = std::fs::write(&cached_path, &bytes);
                     Ok((bytes, integrity))
-                }
-                .await;
-                (pkg_name, ver, result)
+                };
+                let provenance_fut =
+                    provenance::fetch_attestations(&meta, &pkg_base, &pkg_name, &ver);
+                let (result, provenance_result) = tokio::join!(download_fut, provenance_fut);
+                (pkg_name, ver, result, provenance_result)
             });
         }
 
@@ -2055,7 +2073,7 @@ async fn install_with_transitive(
 
         while let Some(result) = dl_set.join_next().await {
             match result {
-                Ok((pkg_name, ver, Ok((bytes, integrity)))) => {
+                Ok((pkg_name, ver, Ok((bytes, integrity)), provenance_result)) => {
                     // If bytes is empty → was in global store already
                     let final_bytes = if bytes.is_empty() {
                         Vec::new() // store.link_to_virtual_store handles it
@@ -2081,32 +2099,37 @@ async fn install_with_transitive(
                             continue;
                         }
                         // Provenance verification (npm attestations /
-                        // Sigstore bundles). Missing attestation = "no
-                        // provenance" (fatal only with --require-provenance);
-                        // an invalid attestation is always fatal.
+                        // Sigstore bundles) — already fetched concurrently
+                        // with the download above. Missing attestation =
+                        // "no provenance" (fatal only with
+                        // --require-provenance); an invalid attestation is
+                        // always fatal.
                         {
-                            let pkg_base = npmrc::pinned_scope_registry(&npmrc_cfg, &pkg_name)
-                                .unwrap_or_else(|| base_url.clone());
                             let require_provenance =
                                 std::env::var("_3VA_REQUIRE_PROVENANCE").as_deref() == Ok("1");
-                            match provenance::fetch_attestations(
-                                &meta_client,
-                                &pkg_base,
-                                &pkg_name,
-                                &ver,
-                            )
-                            .await
-                            {
+                            match provenance_result {
                                 Ok(Some(att)) => {
-                                    if let Err(why) =
-                                        provenance::verify_attestations(&att, &pkg_name, &ver)
-                                    {
-                                        errors.push(format!(
-                                            "{pkg_name}@{ver} — invalid provenance: {why}"
-                                        ));
-                                        continue;
-                                    } else {
-                                        println!("  ✓ provenance verified for {pkg_name}@{ver}");
+                                    match provenance::verify_attestations(&att, &pkg_name, &ver) {
+                                        Ok(provenance::VerifyOutcome::Verified(_)) => {
+                                            println!(
+                                                "  ✓ provenance verified for {pkg_name}@{ver}"
+                                            );
+                                        }
+                                        Ok(provenance::VerifyOutcome::Unsupported(why)) => {
+                                            if require_provenance {
+                                                errors.push(format!(
+                                                    "{pkg_name}@{ver} — provenance required but \
+                                                     its bundle format can't be verified: {why}"
+                                                ));
+                                                continue;
+                                            }
+                                        }
+                                        Err(why) => {
+                                            errors.push(format!(
+                                                "{pkg_name}@{ver} — invalid provenance: {why}"
+                                            ));
+                                            continue;
+                                        }
                                     }
                                 }
                                 Ok(None) => {
@@ -2268,7 +2291,7 @@ async fn install_with_transitive(
                     }
                     println!("  ✓ {}@{}", pkg_name, ver);
                 }
-                Ok((pkg_name, ver, Err(e))) => {
+                Ok((pkg_name, ver, Err(e), _)) => {
                     errors.push(format!("Download failed {}@{}: {}", pkg_name, ver, e));
                 }
                 Err(e) => {
