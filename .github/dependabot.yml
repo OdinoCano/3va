@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # bench/install and bench/express are benchmark fixtures, not code 3va
+  # ships or runs: bench/install/package.json is Bun's own published
+  # bench/install manifest reused verbatim (see bench/README.md) so the
+  # install-time comparison is apples-to-apples with Bun's numbers, and
+  # bench/express is Bun's bench/express. Their dependency *versions* are
+  # deliberately pinned to match what Bun measures — bumping them for a
+  # vulnerability would silently break that comparability, and nothing in
+  # either directory is imported or executed outside `bash bench/run.sh`.
+  # open-pull-requests-limit: 0 stops Dependabot from opening version-bump
+  # PRs against them; it does not affect the Security tab's vulnerability
+  # alerts, which are dismissed separately with a "not used" reason.
+  - package-ecosystem: npm
+    directory: /bench/install
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+  - package-ecosystem: npm
+    directory: /bench/express
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
