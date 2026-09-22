@@ -5,7 +5,8 @@
 #
 # syntax=docker/dockerfile:1
 
-FROM debian:trixie-slim
+# Build stage: fetch the release binary. curl/tar stay here, out of the final image.
+FROM debian:trixie-slim AS fetch
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl tar \
@@ -24,6 +25,15 @@ RUN case "${TARGETARCH}" in \
   && rm /tmp/3va.tar.gz \
   && chmod +x /usr/local/bin/3va \
   && /usr/local/bin/3va --version
+
+FROM debian:trixie-slim
+
+# ca-certificates is a runtime need (TLS for fetch/--allow-net), not just for the download.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=fetch /usr/local/bin/3va /usr/local/bin/3va
 
 RUN groupadd --gid 10001 3va \
   && useradd --uid 10001 --gid 10001 --home-dir /app --no-log-init --no-create-home 3va

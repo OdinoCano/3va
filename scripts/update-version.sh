@@ -89,6 +89,10 @@ fi
 echo "  • Updating docs/12-roadmap/01-roadmap.md..."
 sed -i "s/Current Status (v${CURRENT}/Current Status (v${NEXT}/" "$ROOT_DIR/docs/12-roadmap/01-roadmap.md" 2>/dev/null || true
 
+# ── Dockerfile ────────────────────────────────────────────────────────────────
+echo "  • Updating Dockerfile..."
+sed -i "s/^ARG RUNTIME_VERSION=v$CURRENT$/ARG RUNTIME_VERSION=v$NEXT/" "$ROOT_DIR/Dockerfile"
+
 # ── Distribution files ───────────────────────────────────────────────────────
 DIST_FILES=(
     "bucket/3va.json"
@@ -139,3 +143,4 @@ echo "  1. Review changes: git diff"
 echo "  2. Update docs/CHANGELOG.md with release notes"
 echo "  3. Commit and tag: git add -A && git commit -m 'Bump version to $NEXT'"
 echo "  4. Create tag: git tag v$NEXT"
+echo "  5. Once the GitHub release has its binaries: ./scripts/docker-publish.sh"
