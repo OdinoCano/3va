@@ -89,7 +89,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-vet
+          # Pinned: supply-chain/imports.lock is written by 0.10.2, which 0.10.0 can't parse.
+          tool: cargo-vet@0.10.2
       - run: cargo vet --locked
 
   # ── Gate 5: fuzz build + short smoke run ─────────────────────────────────────

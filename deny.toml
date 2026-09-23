@@ -41,6 +41,11 @@ allow = [
     "CDDL-1.0",
 ]
 confidence-threshold = 0.8
+# The AWS-LC FIPS module (`fips` feature) keeps OpenSSL-derived code under the
+# original OpenSSL license (BSD-style, FSF-free). Allowed for this crate only.
+exceptions = [
+    { allow = ["OpenSSL"], crate = "aws-lc-fips-sys" },
+]
 
 [bans]
 multiple-versions = "warn"
