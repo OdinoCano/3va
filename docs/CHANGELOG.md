@@ -5,7 +5,7 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
-## [Unreleased]
+## [2.9.0] — 2026-09-23
 
 ### Security
 
