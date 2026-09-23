@@ -281,7 +281,9 @@ jobs:
       # with GitHub's generated PR list appended below it.
       - name: Extract changelog section
         run: |
-          awk -v t="[${RELEASE_TAG}]" 'index($0, "## " t) == 1 {f=1; next} /^## \[/ {f=0} f' \
+          # Headings are "## [2.9.0]" or "## [v2.9.0]"; accept both.
+          awk -v a="## [${RELEASE_TAG}]" -v b="## [${RELEASE_TAG#v}]" \
+            'index($0, a) == 1 || index($0, b) == 1 {f=1; next} /^## \[/ {f=0} f' \
             docs/CHANGELOG.md > release-notes.md
           [ -s release-notes.md ] || echo "See docs/CHANGELOG.md." > release-notes.md
 
