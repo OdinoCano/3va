@@ -5,6 +5,12 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **`3va status`/`list` could read a half-written process file**: the supervisor rewrote `~/.3va/processes/<name>.json` in place (truncate, then write), so a concurrent read saw empty or partial JSON. It now writes to a temporary file and renames it atomically. This also fixes the intermittent `permissions_preserved_on_autorestart` CI failure.
+
 ## [2.9.0] — 2026-09-23
 
 ### Security

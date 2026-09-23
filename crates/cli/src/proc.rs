@@ -143,7 +143,12 @@ fn save_process(info: &ProcessInfo) -> std::io::Result<()> {
     ensure_dir()?;
     let path = process_path(&info.name);
     let json = serde_json::to_string_pretty(info)?;
-    fs::write(&path, json)
+    // Write-then-rename: `fs::write` truncates first, so a concurrent
+    // `3va status` (or the supervisor's own reload) could read an empty or
+    // half-written file.
+    let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
+    fs::write(&tmp, json)?;
+    fs::rename(&tmp, &path)
 }
 
 fn load_process(name: &str) -> std::io::Result<ProcessInfo> {

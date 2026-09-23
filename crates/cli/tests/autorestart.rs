@@ -438,9 +438,15 @@ fn permissions_preserved_on_autorestart() {
                 .unwrap_or(false)
         },
     );
-    let st = h.status_json().unwrap();
-    assert!(st.restarts >= 1, "worker should have been restarted");
-    assert_eq!(st.status, "running");
+    h.wait_for_or(
+        Duration::from_secs(10),
+        "status to record the restart",
+        || {
+            h.status_json()
+                .map(|s| s.restarts >= 1 && s.status == "running")
+                .unwrap_or(false)
+        },
+    );
 }
 
 // ── 7. deny-by-default still applies (negative control for #6) ────────────
