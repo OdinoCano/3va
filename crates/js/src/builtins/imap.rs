@@ -4,8 +4,8 @@
 //!   - Connections held in pool: `Arc<Mutex<HashMap<u32, ImapConnection>>>`
 //!   - Streams for fetch operations: `Arc<Mutex<HashMap<u32, FetchStream>>>`
 
+use super::tls::TlsStream;
 use base64::Engine;
-use native_tls::TlsStream;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -108,7 +108,7 @@ fn establish_connection(
 
     let conn = if use_tls {
         let connector =
-            native_tls::TlsConnector::new().map_err(|e| format!("TLS init failed: {}", e))?;
+            super::tls::TlsConnector::new().map_err(|e| format!("TLS init failed: {}", e))?;
         let tls_stream = connector
             .connect(host, stream)
             .map_err(|e| format!("TLS handshake failed: {}", e))?;

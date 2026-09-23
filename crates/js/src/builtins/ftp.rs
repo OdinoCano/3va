@@ -11,7 +11,7 @@
 //! - `__ftpDataWrite(id, data)` -> throws on failure
 //! - `__ftpDataClose(id)`
 
-use native_tls::TlsStream;
+use super::tls::TlsStream;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -160,7 +160,7 @@ pub fn inject_ftp(
             match TcpStream::connect(format!("{}:{}", host, port)) {
                 Ok(tcp) => {
                     let conn = if use_tls {
-                        match native_tls::TlsConnector::new() {
+                        match super::tls::TlsConnector::new() {
                             Ok(connector) => {
                                 let fallback = tcp.try_clone().ok();
                                 match connector.connect(&host, tcp) {
@@ -323,7 +323,7 @@ pub fn inject_ftp(
                         .map(|s| s.use_tls)
                         .unwrap_or(false);
                     let conn = if use_tls {
-                        match native_tls::TlsConnector::new() {
+                        match super::tls::TlsConnector::new() {
                             Ok(connector) => {
                                 let fallback = tcp.try_clone().ok();
                                 match connector.connect(&host, tcp) {

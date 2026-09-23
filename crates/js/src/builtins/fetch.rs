@@ -96,7 +96,7 @@ fn do_request(
         serde_json::from_str(&hdrs_json).unwrap_or(serde_json::Value::Object(Default::default()));
     let cap = max_response_size.unwrap_or(MAX_RESPONSE_BODY_BYTES);
 
-    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let agent = super::tls::agent_builder().redirects(0).build();
     let mut req = agent.request(&method, &url);
 
     if let Some(obj) = extra_val.as_object() {

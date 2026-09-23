@@ -28,7 +28,7 @@ env:
 jobs:
   # ── Build precompiled binaries ────────────────────────────────────────────────
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.target }}${{ matrix.fips && ' (FIPS)' || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -52,6 +52,15 @@ jobs:
             xcode: '15.4'
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+          # FIPS 140-3 builds (AWS-LC FIPS module). Linux only: AWS-LC's static
+          # FIPS build is Linux-only. Native arm runner instead of `cross`, since
+          # aws-lc-fips-sys needs Go + CMake in the build environment.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            fips: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            fips: true
           # Android/Termux (aarch64-linux-android) is intentionally absent:
           # rusty_v8 ships no prebuilt Android binaries, and building V8 from
           # source for Android hits an upstream bug (the vendored config.gni
@@ -83,6 +92,12 @@ jobs:
         if: matrix.xcode
         run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
 
+      - name: Install Go (aws-lc-fips-sys build)
+        if: matrix.fips
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
       - name: Install cross
         if: matrix.cross
         uses: taiki-e/install-action@v2
@@ -96,7 +111,7 @@ jobs:
 
       - name: Build (native / macOS cross)
         if: ${{ !matrix.cross }}
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin 3va
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin 3va ${{ matrix.fips && '--features fips' || '' }}
 
       - name: Package binary (Unix)
         if: runner.os != 'Windows'
@@ -104,7 +119,7 @@ jobs:
         run: |
           VERSION="${{ env.RELEASE_TAG }}"
           TARGET="${{ matrix.target }}"
-          ARCHIVE="3va-${VERSION}-${TARGET}.tar.gz"
+          ARCHIVE="3va-${VERSION}-${TARGET}${{ matrix.fips && '-fips' || '' }}.tar.gz"
           cp "target/${TARGET}/release/3va" 3va
           tar czf "${ARCHIVE}" 3va
           shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
@@ -125,7 +140,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: binary-${{ matrix.target }}
+          name: binary-${{ matrix.target }}${{ matrix.fips && '-fips' || '' }}
           path: |
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.sha256
@@ -205,11 +220,39 @@ jobs:
           path: binaries/*.bundle
           retention-days: 5
 
+  # ── SBOM (CycloneDX 1.5) — required by EU CRA / US EO 14028 consumers ───────
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx
+      - uses: sigstore/cosign-installer@v3
+      # --target all: one SBOM covers every platform binary we ship.
+      - name: Generate and sign SBOM
+        run: |
+          cargo cyclonedx --manifest-path crates/cli/Cargo.toml -f json \
+            --spec-version 1.5 --target all --override-filename sbom
+          mv crates/cli/sbom.json "3va-${RELEASE_TAG}.cdx.json"
+          cosign sign-blob --yes "3va-${RELEASE_TAG}.cdx.json" \
+            --bundle "3va-${RELEASE_TAG}.cdx.json.bundle"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: 3va-*.cdx.json*
+          retention-days: 5
+
   # ── Create GitHub Release ─────────────────────────────────────────────────────
   github-release:
     name: GitHub Release
     if: github.event.inputs.test_only != 'true'
-    needs: [build, provenance, sign]
+    needs: [build, provenance, sign, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -234,9 +277,18 @@ jobs:
       # with "Contents: write") added as a repo secret for the auto-trigger
       # to work; falls back to GITHUB_TOKEN so the release itself still
       # succeeds if that secret isn't set (just without the auto-trigger).
+      # Release notes = this tag's section of docs/CHANGELOG.md (human-written),
+      # with GitHub's generated PR list appended below it.
+      - name: Extract changelog section
+        run: |
+          awk -v t="[${RELEASE_TAG}]" 'index($0, "## " t) == 1 {f=1; next} /^## \[/ {f=0} f' \
+            docs/CHANGELOG.md > release-notes.md
+          [ -s release-notes.md ] || echo "See docs/CHANGELOG.md." > release-notes.md
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           generate_release_notes: true
           files: release-assets/**
           tag_name: ${{ env.RELEASE_TAG }}

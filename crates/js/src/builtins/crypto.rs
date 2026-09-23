@@ -1,28 +1,11 @@
 use crate::builtins::v8_compat::{js_value_to_bytes, uint8array_from_bytes, uint8array_to_vec};
-use aes::cipher::{
-    BlockDecryptMut, BlockEncryptMut, KeyIvInit, StreamCipher, block_padding::Pkcs7,
-};
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce};
-use hmac::{Hmac, Mac};
-use md5::Md5;
-use pbkdf2::pbkdf2_hmac;
-use rand::RngCore;
-use rand::rngs::OsRng;
-use sha1::Sha1;
-use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 
-type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
-type Aes192CbcEnc = cbc::Encryptor<aes::Aes192>;
-type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
-type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
-type Aes192CbcDec = cbc::Decryptor<aes::Aes192>;
-type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
-type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
-type Aes192Ctr = ctr::Ctr128BE<aes::Aes192>;
-type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
+#[cfg(feature = "fips")]
+use super::crypto_fips::*;
+#[cfg(not(feature = "fips"))]
+use super::crypto_rc::*;
 
-fn to_pem(label: &str, der: &[u8]) -> String {
+pub(super) fn to_pem(label: &str, der: &[u8]) -> String {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let b64 = STANDARD.encode(der);
     let lines = b64
@@ -34,327 +17,8 @@ fn to_pem(label: &str, der: &[u8]) -> String {
     format!("-----BEGIN {label}-----\n{lines}\n-----END {label}-----\n")
 }
 
-async fn do_generate_keypair(key_type: String, options_json: String) -> anyhow::Result<String> {
-    tokio::task::spawn_blocking(move || do_generate_keypair_sync_inner(&key_type, &options_json))
-        .await?
-}
-
-fn do_generate_keypair_sync_inner(key_type: &str, options_json: &str) -> anyhow::Result<String> {
-    let opts: serde_json::Value =
-        serde_json::from_str(options_json).unwrap_or(serde_json::Value::Null);
-
-    match key_type.to_lowercase().as_str() {
-        "rsa" | "rsa-pss" => {
-            use rsa::{
-                RsaPrivateKey,
-                pkcs8::{EncodePrivateKey, EncodePublicKey},
-            };
-            let bits = opts
-                .get("modulusLength")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(2048) as usize;
-            // RSA keygen time grows steeply with modulus size — an
-            // attacker-controlled (or just careless) script requesting an
-            // absurd modulusLength would tie up a blocking-pool thread for
-            // an unbounded amount of time/memory. 512 matches the practical
-            // floor other runtimes accept; 16384 is far beyond any real
-            // use case but still generous.
-            if !(512..=16384).contains(&bits) {
-                anyhow::bail!("RSA modulusLength must be between 512 and 16384 bits, got {bits}");
-            }
-            let mut rng = OsRng;
-            let private_key = RsaPrivateKey::new(&mut rng, bits)
-                .map_err(|e| anyhow::anyhow!("RSA keygen failed: {e}"))?;
-            let public_key = private_key.to_public_key();
-            let priv_der = private_key
-                .to_pkcs8_der()
-                .map_err(|e| anyhow::anyhow!("RSA private key encode failed: {e}"))?;
-            let pub_der = public_key
-                .to_public_key_der()
-                .map_err(|e| anyhow::anyhow!("RSA public key encode failed: {e}"))?;
-            let priv_pem = to_pem("PRIVATE KEY", priv_der.as_bytes());
-            let pub_pem = to_pem("PUBLIC KEY", pub_der.as_bytes());
-            Ok(
-                serde_json::json!({ "privateKeyPem": priv_pem, "publicKeyPem": pub_pem })
-                    .to_string(),
-            )
-        }
-        "ec" => {
-            use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
-            let curve = opts
-                .get("namedCurve")
-                .and_then(|v| v.as_str())
-                .unwrap_or("P-256")
-                .to_string();
-            let mut rng = OsRng;
-            match curve.as_str() {
-                "P-256" | "prime256v1" | "secp256r1" => {
-                    let sk = p256::SecretKey::random(&mut rng);
-                    let pk = sk.public_key();
-                    let priv_der = sk
-                        .to_pkcs8_der()
-                        .map_err(|e| anyhow::anyhow!("EC P-256 private key encode failed: {e}"))?;
-                    let pub_der = pk
-                        .to_public_key_der()
-                        .map_err(|e| anyhow::anyhow!("EC P-256 public key encode failed: {e}"))?;
-                    let priv_pem = to_pem("PRIVATE KEY", priv_der.as_bytes());
-                    let pub_pem = to_pem("PUBLIC KEY", pub_der.as_bytes());
-                    Ok(
-                        serde_json::json!({ "privateKeyPem": priv_pem, "publicKeyPem": pub_pem })
-                            .to_string(),
-                    )
-                }
-                "P-384" | "secp384r1" => {
-                    use p384::pkcs8::{EncodePrivateKey, EncodePublicKey};
-                    let sk = p384::SecretKey::random(&mut rng);
-                    let pk = sk.public_key();
-                    let priv_der = sk
-                        .to_pkcs8_der()
-                        .map_err(|e| anyhow::anyhow!("EC P-384 private key encode failed: {e}"))?;
-                    let pub_der = pk
-                        .to_public_key_der()
-                        .map_err(|e| anyhow::anyhow!("EC P-384 public key encode failed: {e}"))?;
-                    let priv_pem = to_pem("PRIVATE KEY", priv_der.as_bytes());
-                    let pub_pem = to_pem("PUBLIC KEY", pub_der.as_bytes());
-                    Ok(
-                        serde_json::json!({ "privateKeyPem": priv_pem, "publicKeyPem": pub_pem })
-                            .to_string(),
-                    )
-                }
-                other => Err(anyhow::anyhow!("unsupported EC curve: {other}")),
-            }
-        }
-        "ed25519" => Err(anyhow::anyhow!(
-            "ed25519 generateKeyPair: use crypto.subtle.generateKey with {{name:'Ed25519'}} instead"
-        )),
-        other => Err(anyhow::anyhow!("unsupported key type: {other}")),
-    }
-}
-
-type HmacSha1 = Hmac<Sha1>;
-type HmacSha224 = Hmac<Sha224>;
-type HmacSha256 = Hmac<Sha256>;
-type HmacSha384 = Hmac<Sha384>;
-type HmacSha512 = Hmac<Sha512>;
-
-fn norm_alg(alg: &str) -> String {
+pub(super) fn norm_alg(alg: &str) -> String {
     alg.to_lowercase().replace(['-', '_', ' '], "")
-}
-
-fn do_hash(algorithm: String, data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    match norm_alg(&algorithm).as_str() {
-        "md5" | "md-5" => Ok(Md5::digest(&data).to_vec()),
-        "sha1" => Ok(Sha1::digest(&data).to_vec()),
-        "sha224" => Ok(Sha224::digest(&data).to_vec()),
-        "sha256" => Ok(Sha256::digest(&data).to_vec()),
-        "sha384" => Ok(Sha384::digest(&data).to_vec()),
-        "sha512" => Ok(Sha512::digest(&data).to_vec()),
-        other => Err(anyhow::anyhow!("unsupported hash algorithm: {other}")),
-    }
-}
-
-fn do_rsa_sign(digest_alg: &str, pem: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    use rsa::pkcs1v15::SigningKey;
-    use rsa::pkcs8::DecodePrivateKey;
-    use rsa::signature::{SignatureEncoding, Signer};
-
-    let priv_key = rsa::RsaPrivateKey::from_pkcs8_pem(pem)
-        .map_err(|e| anyhow::anyhow!("RSA private key parse error: {e}"))?;
-    let sig_bytes: Vec<u8> = match norm_alg(digest_alg).as_str() {
-        "sha1" => SigningKey::<Sha1>::new(priv_key).sign(data).to_vec(),
-        "sha224" => SigningKey::<Sha224>::new(priv_key).sign(data).to_vec(),
-        "sha384" => SigningKey::<Sha384>::new(priv_key).sign(data).to_vec(),
-        "sha512" => SigningKey::<Sha512>::new(priv_key).sign(data).to_vec(),
-        _ => SigningKey::<Sha256>::new(priv_key).sign(data).to_vec(),
-    };
-    Ok(sig_bytes)
-}
-
-fn do_rsa_verify(
-    digest_alg: &str,
-    pem: &str,
-    data: &[u8],
-    sig_bytes: &[u8],
-) -> anyhow::Result<bool> {
-    use rsa::pkcs1v15::{Signature, VerifyingKey};
-    use rsa::pkcs8::DecodePublicKey;
-    use rsa::signature::Verifier;
-
-    let pub_key = rsa::RsaPublicKey::from_public_key_pem(pem)
-        .map_err(|e| anyhow::anyhow!("RSA public key parse error: {e}"))?;
-    let sig = Signature::try_from(sig_bytes)
-        .map_err(|_| anyhow::anyhow!("RSA signature parse error: invalid bytes"))?;
-    let ok = match norm_alg(digest_alg).as_str() {
-        "sha1" => VerifyingKey::<Sha1>::new(pub_key).verify(data, &sig),
-        "sha224" => VerifyingKey::<Sha224>::new(pub_key).verify(data, &sig),
-        "sha384" => VerifyingKey::<Sha384>::new(pub_key).verify(data, &sig),
-        "sha512" => VerifyingKey::<Sha512>::new(pub_key).verify(data, &sig),
-        _ => VerifyingKey::<Sha256>::new(pub_key).verify(data, &sig),
-    };
-    Ok(ok.is_ok())
-}
-
-fn do_rsa_pss_sign(digest_alg: &str, pem: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    use rsa::pkcs8::DecodePrivateKey;
-    use rsa::pss::SigningKey;
-    use rsa::signature::{RandomizedSigner, SignatureEncoding};
-
-    let priv_key = rsa::RsaPrivateKey::from_pkcs8_pem(pem)
-        .map_err(|e| anyhow::anyhow!("RSA private key parse error: {e}"))?;
-    let mut rng = OsRng;
-    let sig_bytes: Vec<u8> = match norm_alg(digest_alg).as_str() {
-        "sha1" => SigningKey::<Sha1>::new(priv_key)
-            .sign_with_rng(&mut rng, data)
-            .to_vec(),
-        "sha224" => SigningKey::<Sha224>::new(priv_key)
-            .sign_with_rng(&mut rng, data)
-            .to_vec(),
-        "sha384" => SigningKey::<Sha384>::new(priv_key)
-            .sign_with_rng(&mut rng, data)
-            .to_vec(),
-        "sha512" => SigningKey::<Sha512>::new(priv_key)
-            .sign_with_rng(&mut rng, data)
-            .to_vec(),
-        _ => SigningKey::<Sha256>::new(priv_key)
-            .sign_with_rng(&mut rng, data)
-            .to_vec(),
-    };
-    Ok(sig_bytes)
-}
-
-fn do_rsa_pss_verify(
-    digest_alg: &str,
-    pem: &str,
-    data: &[u8],
-    sig_bytes: &[u8],
-) -> anyhow::Result<bool> {
-    use rsa::pkcs8::DecodePublicKey;
-    use rsa::pss::{Signature, VerifyingKey};
-    use rsa::signature::Verifier;
-
-    let pub_key = rsa::RsaPublicKey::from_public_key_pem(pem)
-        .map_err(|e| anyhow::anyhow!("RSA public key parse error: {e}"))?;
-    let sig = Signature::try_from(sig_bytes)
-        .map_err(|_| anyhow::anyhow!("RSA signature parse error: invalid bytes"))?;
-    let ok = match norm_alg(digest_alg).as_str() {
-        "sha1" => VerifyingKey::<Sha1>::new(pub_key).verify(data, &sig),
-        "sha224" => VerifyingKey::<Sha224>::new(pub_key).verify(data, &sig),
-        "sha384" => VerifyingKey::<Sha384>::new(pub_key).verify(data, &sig),
-        "sha512" => VerifyingKey::<Sha512>::new(pub_key).verify(data, &sig),
-        _ => VerifyingKey::<Sha256>::new(pub_key).verify(data, &sig),
-    };
-    Ok(ok.is_ok())
-}
-
-fn do_ec_sign(named_curve: &str, pem: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    match norm_alg(named_curve).as_str() {
-        "p256" | "prime256v1" | "secp256r1" => {
-            use p256::ecdsa::signature::Signer;
-            use p256::ecdsa::{Signature, SigningKey};
-            use p256::pkcs8::DecodePrivateKey;
-            let key = SigningKey::from_pkcs8_pem(pem)
-                .map_err(|e| anyhow::anyhow!("P-256 private key: {e}"))?;
-            let sig: Signature = key.sign(data);
-            Ok(sig.to_der().as_ref().to_vec())
-        }
-        "p384" | "secp384r1" => {
-            use p384::ecdsa::signature::Signer;
-            use p384::ecdsa::{Signature, SigningKey};
-            use p384::pkcs8::DecodePrivateKey;
-            let key = SigningKey::from_pkcs8_pem(pem)
-                .map_err(|e| anyhow::anyhow!("P-384 private key: {e}"))?;
-            let sig: Signature = key.sign(data);
-            Ok(sig.to_der().as_ref().to_vec())
-        }
-        other => Err(anyhow::anyhow!("unsupported EC curve for signing: {other}")),
-    }
-}
-
-/// Same as `do_ec_sign` but returns the WebCrypto/raw fixed-length r||s
-/// encoding instead of DER — `subtle.sign` requires this exact byte length
-/// (64 for P-256, 96 for P-384), unlike `crypto.createSign` which uses DER.
-fn do_ec_sign_raw(named_curve: &str, pem: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    match norm_alg(named_curve).as_str() {
-        "p256" | "prime256v1" | "secp256r1" => {
-            use p256::ecdsa::signature::Signer;
-            use p256::ecdsa::{Signature, SigningKey};
-            use p256::pkcs8::DecodePrivateKey;
-            let key = SigningKey::from_pkcs8_pem(pem)
-                .map_err(|e| anyhow::anyhow!("P-256 private key: {e}"))?;
-            let sig: Signature = key.sign(data);
-            Ok(sig.to_bytes().to_vec())
-        }
-        "p384" | "secp384r1" => {
-            use p384::ecdsa::signature::Signer;
-            use p384::ecdsa::{Signature, SigningKey};
-            use p384::pkcs8::DecodePrivateKey;
-            let key = SigningKey::from_pkcs8_pem(pem)
-                .map_err(|e| anyhow::anyhow!("P-384 private key: {e}"))?;
-            let sig: Signature = key.sign(data);
-            Ok(sig.to_bytes().to_vec())
-        }
-        other => Err(anyhow::anyhow!("unsupported EC curve for signing: {other}")),
-    }
-}
-
-fn do_ec_verify(
-    named_curve: &str,
-    pem: &str,
-    data: &[u8],
-    sig_bytes: &[u8],
-) -> anyhow::Result<bool> {
-    match norm_alg(named_curve).as_str() {
-        "p256" | "prime256v1" | "secp256r1" => {
-            use p256::ecdsa::signature::Verifier;
-            use p256::ecdsa::{Signature, VerifyingKey};
-            use p256::pkcs8::DecodePublicKey;
-            let pub_key = p256::PublicKey::from_public_key_pem(pem)
-                .map_err(|e| anyhow::anyhow!("P-256 public key: {e}"))?;
-            let vk = VerifyingKey::from(&pub_key);
-            let sig = Signature::from_der(sig_bytes)
-                .or_else(|_| Signature::try_from(sig_bytes))
-                .map_err(|e| anyhow::anyhow!("P-256 signature parse: {e}"))?;
-            Ok(vk.verify(data, &sig).is_ok())
-        }
-        "p384" | "secp384r1" => {
-            use p384::ecdsa::signature::Verifier;
-            use p384::ecdsa::{Signature, VerifyingKey};
-            use p384::pkcs8::DecodePublicKey;
-            let pub_key = p384::PublicKey::from_public_key_pem(pem)
-                .map_err(|e| anyhow::anyhow!("P-384 public key: {e}"))?;
-            let vk = VerifyingKey::from(&pub_key);
-            let sig = Signature::from_der(sig_bytes)
-                .or_else(|_| Signature::try_from(sig_bytes))
-                .map_err(|e| anyhow::anyhow!("P-384 signature parse: {e}"))?;
-            Ok(vk.verify(data, &sig).is_ok())
-        }
-        other => Err(anyhow::anyhow!("unsupported EC curve for verify: {other}")),
-    }
-}
-
-fn do_hmac(algorithm: String, key: Vec<u8>, data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    macro_rules! run_hmac {
-        ($T:ty) => {{
-            let mut mac = <$T as hmac::Mac>::new_from_slice(&key)
-                .map_err(|e| anyhow::anyhow!("invalid HMAC key: {e}"))?;
-            mac.update(&data);
-            Ok(mac.finalize().into_bytes().to_vec())
-        }};
-    }
-    match norm_alg(&algorithm).as_str() {
-        "sha1" => run_hmac!(HmacSha1),
-        "sha224" => run_hmac!(HmacSha224),
-        "sha256" => run_hmac!(HmacSha256),
-        "sha384" => run_hmac!(HmacSha384),
-        "sha512" => run_hmac!(HmacSha512),
-        other => Err(anyhow::anyhow!("unsupported HMAC algorithm: {other}")),
-    }
-}
-
-fn do_random_bytes(n: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; n];
-    OsRng.fill_bytes(&mut buf);
-    buf
 }
 
 fn do_timing_safe_equal(a: Vec<u8>, b: Vec<u8>) -> bool {
@@ -366,212 +30,6 @@ fn do_timing_safe_equal(a: Vec<u8>, b: Vec<u8>) -> bool {
         acc |= x ^ y;
     }
     std::hint::black_box(acc) == 0
-}
-
-async fn do_pbkdf2(
-    password: Vec<u8>,
-    salt: Vec<u8>,
-    iterations: u32,
-    keylen: usize,
-    digest: String,
-) -> anyhow::Result<Vec<u8>> {
-    let keylen = keylen.min(64 * 1024);
-    tokio::task::spawn_blocking(move || {
-        let mut out = vec![0u8; keylen];
-        match norm_alg(&digest).as_str() {
-            "sha1" => pbkdf2_hmac::<Sha1>(&password, &salt, iterations, &mut out),
-            "sha224" => pbkdf2_hmac::<Sha224>(&password, &salt, iterations, &mut out),
-            "sha256" => pbkdf2_hmac::<Sha256>(&password, &salt, iterations, &mut out),
-            "sha384" => pbkdf2_hmac::<Sha384>(&password, &salt, iterations, &mut out),
-            "sha512" => pbkdf2_hmac::<Sha512>(&password, &salt, iterations, &mut out),
-            other => return Err(anyhow::anyhow!("unsupported PBKDF2 digest: {other}")),
-        }
-        Ok(out)
-    })
-    .await?
-}
-
-fn do_pbkdf2_sync(
-    password: Vec<u8>,
-    salt: Vec<u8>,
-    iterations: u32,
-    keylen: usize,
-    digest: String,
-) -> anyhow::Result<Vec<u8>> {
-    let keylen = keylen.min(64 * 1024);
-    let mut out = vec![0u8; keylen];
-    match norm_alg(&digest).as_str() {
-        "sha1" => pbkdf2_hmac::<Sha1>(&password, &salt, iterations, &mut out),
-        "sha224" => pbkdf2_hmac::<Sha224>(&password, &salt, iterations, &mut out),
-        "sha256" => pbkdf2_hmac::<Sha256>(&password, &salt, iterations, &mut out),
-        "sha384" => pbkdf2_hmac::<Sha384>(&password, &salt, iterations, &mut out),
-        "sha512" => pbkdf2_hmac::<Sha512>(&password, &salt, iterations, &mut out),
-        other => return Err(anyhow::anyhow!("unsupported PBKDF2 digest: {other}")),
-    }
-    Ok(out)
-}
-
-fn do_cipher_one_shot(
-    alg: &str,
-    key: &[u8],
-    iv: &[u8],
-    data: &[u8],
-    encrypt: bool,
-) -> anyhow::Result<Vec<u8>> {
-    let alg_lower = alg.to_lowercase();
-    match alg_lower.as_str() {
-        "aes-128-cbc" | "aes128" if encrypt => {
-            let enc = Aes128CbcEnc::new_from_slices(key, iv)
-                .map_err(|e| anyhow::anyhow!("aes-128-cbc key/iv error: {e}"))?;
-            Ok(enc.encrypt_padded_vec_mut::<Pkcs7>(data))
-        }
-        "aes-192-cbc" if encrypt => {
-            let enc = Aes192CbcEnc::new_from_slices(key, iv)
-                .map_err(|e| anyhow::anyhow!("aes-192-cbc key/iv error: {e}"))?;
-            Ok(enc.encrypt_padded_vec_mut::<Pkcs7>(data))
-        }
-        "aes-256-cbc" | "aes256" if encrypt => {
-            let enc = Aes256CbcEnc::new_from_slices(key, iv)
-                .map_err(|e| anyhow::anyhow!("aes-256-cbc key/iv error: {e}"))?;
-            Ok(enc.encrypt_padded_vec_mut::<Pkcs7>(data))
-        }
-        "aes-128-cbc" | "aes128" => {
-            let dec = Aes128CbcDec::new_from_slices(key, iv)
-                .map_err(|e| anyhow::anyhow!("aes-128-cbc key/iv error: {e}"))?;
-            dec.decrypt_padded_vec_mut::<Pkcs7>(data)
-                .map_err(|e| anyhow::anyhow!("aes-128-cbc decrypt error: {e}"))
-        }
-        "aes-192-cbc" => {
-            let dec = Aes192CbcDec::new_from_slices(key, iv)
-                .map_err(|e| anyhow::anyhow!("aes-192-cbc key/iv error: {e}"))?;
-            dec.decrypt_padded_vec_mut::<Pkcs7>(data)
-                .map_err(|e| anyhow::anyhow!("aes-192-cbc decrypt error: {e}"))
-        }
-        "aes-256-cbc" | "aes256" => {
-            let dec = Aes256CbcDec::new_from_slices(key, iv)
-                .map_err(|e| anyhow::anyhow!("aes-256-cbc key/iv error: {e}"))?;
-            dec.decrypt_padded_vec_mut::<Pkcs7>(data)
-                .map_err(|e| anyhow::anyhow!("aes-256-cbc decrypt error: {e}"))
-        }
-        "aes-128-ctr" => {
-            let mut cipher = Aes128Ctr::new_from_slices(key, iv)
-                .map_err(|e| anyhow::anyhow!("aes-128-ctr key/iv error: {e}"))?;
-            let mut out = data.to_vec();
-            cipher.apply_keystream(&mut out);
-            Ok(out)
-        }
-        "aes-192-ctr" => {
-            let mut cipher = Aes192Ctr::new_from_slices(key, iv)
-                .map_err(|e| anyhow::anyhow!("aes-192-ctr key/iv error: {e}"))?;
-            let mut out = data.to_vec();
-            cipher.apply_keystream(&mut out);
-            Ok(out)
-        }
-        "aes-256-ctr" => {
-            let mut cipher = Aes256Ctr::new_from_slices(key, iv)
-                .map_err(|e| anyhow::anyhow!("aes-256-ctr key/iv error: {e}"))?;
-            let mut out = data.to_vec();
-            cipher.apply_keystream(&mut out);
-            Ok(out)
-        }
-        other => Err(anyhow::anyhow!("unsupported cipher algorithm: {other}")),
-    }
-}
-
-async fn do_scrypt(
-    password: Vec<u8>,
-    salt: Vec<u8>,
-    n: u64,
-    r: u32,
-    p: u32,
-    keylen: usize,
-) -> anyhow::Result<Vec<u8>> {
-    let keylen = keylen.min(64 * 1024);
-    tokio::task::spawn_blocking(move || {
-        if n == 0 || (n & (n - 1)) != 0 {
-            return Err(anyhow::anyhow!(
-                "scrypt N must be a power of 2 greater than 1"
-            ));
-        }
-        let log_n = n.ilog2() as u8;
-        let params = scrypt::Params::new(log_n, r, p, keylen)
-            .map_err(|e| anyhow::anyhow!("invalid scrypt params: {e}"))?;
-        let mut out = vec![0u8; keylen];
-        scrypt::scrypt(&password, &salt, &params, &mut out)
-            .map_err(|e| anyhow::anyhow!("scrypt error: {e}"))?;
-        Ok(out)
-    })
-    .await?
-}
-
-fn do_aes_gcm_encrypt(
-    key_len: usize,
-    key: Vec<u8>,
-    iv: Vec<u8>,
-    plaintext: Vec<u8>,
-    aad: Vec<u8>,
-) -> anyhow::Result<Vec<u8>> {
-    if key.len() != key_len {
-        anyhow::bail!("AES-GCM key must be {} bytes, got {}", key_len, key.len());
-    }
-    if iv.len() != 12 {
-        anyhow::bail!("AES-GCM IV must be 12 bytes, got {}", iv.len());
-    }
-    let nonce = Nonce::from_slice(&iv);
-    let payload = Payload {
-        msg: &plaintext,
-        aad: &aad,
-    };
-    match key_len {
-        16 => {
-            let cipher = Aes128Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("{e}"))?;
-            cipher
-                .encrypt(nonce, payload)
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        }
-        32 => {
-            let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("{e}"))?;
-            cipher
-                .encrypt(nonce, payload)
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        }
-        n => anyhow::bail!("unsupported AES key length: {}", n),
-    }
-}
-
-fn do_aes_gcm_decrypt(
-    key_len: usize,
-    key: Vec<u8>,
-    iv: Vec<u8>,
-    ciphertext_and_tag: Vec<u8>,
-    aad: Vec<u8>,
-) -> anyhow::Result<Vec<u8>> {
-    if key.len() != key_len {
-        anyhow::bail!("AES-GCM key must be {} bytes, got {}", key_len, key.len());
-    }
-    if iv.len() != 12 {
-        anyhow::bail!("AES-GCM IV must be 12 bytes, got {}", iv.len());
-    }
-    let nonce = Nonce::from_slice(&iv);
-    let payload = Payload {
-        msg: &ciphertext_and_tag,
-        aad: &aad,
-    };
-    match key_len {
-        16 => {
-            let cipher = Aes128Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("{e}"))?;
-            cipher
-                .decrypt(nonce, payload)
-                .map_err(|_| anyhow::anyhow!("decryption failed"))
-        }
-        32 => {
-            let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("{e}"))?;
-            cipher
-                .decrypt(nonce, payload)
-                .map_err(|_| anyhow::anyhow!("decryption failed"))
-        }
-        n => anyhow::bail!("unsupported AES key length: {}", n),
-    }
 }
 
 pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::Result<()> {
@@ -961,36 +419,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             let r = args.get(3).uint32_value(_scope).unwrap_or(0);
             let p = args.get(4).uint32_value(_scope).unwrap_or(0);
             let keylen = args.get(5).uint32_value(_scope).unwrap_or(0) as usize;
-            if n == 0 || (n & (n - 1)) != 0 {
-                rv.set(
-                    v8::String::new(_scope, "N must be a power of 2 greater than 1")
-                        .unwrap()
-                        .into(),
-                );
-                return;
+            match do_scrypt_sync(&password, &salt, n, r, p, keylen) {
+                Ok(out) => rv.set(uint8array_from_bytes(_scope, &out).into()),
+                Err(e) => rv.set(v8::String::new(_scope, &e).unwrap().into()),
             }
-            let log_n = n.ilog2() as u8;
-            let params = match scrypt::Params::new(log_n, r, p, keylen) {
-                Ok(p) => p,
-                Err(e) => {
-                    rv.set(
-                        v8::String::new(_scope, &format!("invalid scrypt params: {e}"))
-                            .unwrap()
-                            .into(),
-                    );
-                    return;
-                }
-            };
-            let mut out = vec![0u8; keylen];
-            if let Err(e) = scrypt::scrypt(&password, &salt, &params, &mut out) {
-                rv.set(
-                    v8::String::new(_scope, &format!("scrypt error: {e}"))
-                        .unwrap()
-                        .into(),
-                );
-                return;
-            }
-            rv.set(uint8array_from_bytes(_scope, &out).into());
         },
     );
     global.set(
@@ -1053,23 +485,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             let iterations = args.get(2).uint32_value(_scope).unwrap_or(0);
             let keylen = args.get(3).uint32_value(_scope).unwrap_or(0) as usize;
             let digest = args.get(4).to_rust_string_lossy(_scope);
-            let mut out = vec![0u8; keylen];
-            match norm_alg(&digest).as_str() {
-                "sha1" => pbkdf2_hmac::<Sha1>(&password, &salt, iterations, &mut out),
-                "sha224" => pbkdf2_hmac::<Sha224>(&password, &salt, iterations, &mut out),
-                "sha256" => pbkdf2_hmac::<Sha256>(&password, &salt, iterations, &mut out),
-                "sha384" => pbkdf2_hmac::<Sha384>(&password, &salt, iterations, &mut out),
-                "sha512" => pbkdf2_hmac::<Sha512>(&password, &salt, iterations, &mut out),
-                other => {
-                    rv.set(
-                        v8::String::new(_scope, &format!("unsupported digest: {other}"))
-                            .unwrap()
-                            .into(),
-                    );
-                    return;
-                }
+            match do_pbkdf2_sync(password, salt, iterations, keylen, digest) {
+                Ok(out) => rv.set(uint8array_from_bytes(_scope, &out).into()),
+                Err(e) => rv.set(v8::String::new(_scope, &e.to_string()).unwrap().into()),
             }
-            rv.set(uint8array_from_bytes(_scope, &out).into());
         },
     );
     global.set(
@@ -1087,74 +506,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             let priv_pem = args.get(1).to_rust_string_lossy(_scope);
             let other_pub = js_value_to_bytes(_scope, args.get(2));
 
-            let curve_lower = curve.to_lowercase();
-            let is_p384 = curve_lower.contains("384") || curve_lower.contains("secp384");
-
-            let result = if is_p384 {
-                use p384::PublicKey;
-                use p384::pkcs8::DecodePrivateKey;
-
-                let sk = match p384::SecretKey::from_pkcs8_pem(&priv_pem) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        rv.set(
-                            v8::String::new(_scope, &format!("ECDH: invalid private key: {e}"))
-                                .unwrap()
-                                .into(),
-                        );
-                        return;
-                    }
-                };
-
-                let other_pk = match PublicKey::from_sec1_bytes(&other_pub) {
-                    Ok(pk) => pk,
-                    Err(e) => {
-                        rv.set(
-                            v8::String::new(_scope, &format!("ECDH: invalid public key: {e}"))
-                                .unwrap()
-                                .into(),
-                        );
-                        return;
-                    }
-                };
-
-                let shared =
-                    p384::ecdh::diffie_hellman(sk.to_nonzero_scalar(), other_pk.as_affine());
-                shared.raw_secret_bytes().to_vec()
-            } else {
-                use p256::PublicKey;
-                use p256::ecdh::diffie_hellman;
-                use p256::pkcs8::DecodePrivateKey;
-
-                let sk = match p256::SecretKey::from_pkcs8_pem(&priv_pem) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        rv.set(
-                            v8::String::new(_scope, &format!("ECDH: invalid private key: {e}"))
-                                .unwrap()
-                                .into(),
-                        );
-                        return;
-                    }
-                };
-
-                let other_pk = match PublicKey::from_sec1_bytes(&other_pub) {
-                    Ok(pk) => pk,
-                    Err(e) => {
-                        rv.set(
-                            v8::String::new(_scope, &format!("ECDH: invalid public key: {e}"))
-                                .unwrap()
-                                .into(),
-                        );
-                        return;
-                    }
-                };
-
-                let shared = diffie_hellman(sk.to_nonzero_scalar(), other_pk.as_affine());
-                shared.raw_secret_bytes().to_vec()
-            };
-
-            rv.set(uint8array_from_bytes(_scope, &result).into());
+            match do_ecdh_compute(&curve, &priv_pem, &other_pub) {
+                Ok(result) => rv.set(uint8array_from_bytes(_scope, &result).into()),
+                Err(e) => rv.set(v8::String::new(_scope, &e).unwrap().into()),
+            }
         },
     );
     global.set(
@@ -1163,6 +518,12 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             .unwrap()
             .into(),
         crypto_ecdh_compute.unwrap().into(),
+    );
+
+    global.set(
+        scope,
+        v8::String::new(scope, "__cryptoFips").unwrap().into(),
+        v8::Boolean::new(scope, super::tls::FIPS).into(),
     );
 
     let js_code = r#"
@@ -1278,6 +639,8 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
     }
 
     function _makeDH(primeHex, generator) {
+        // Finite-field DH here is BigInt JavaScript, outside the FIPS module.
+        if (__cryptoFips) throw new Error('ERR_CRYPTO_FIPS_FORCED: DiffieHellman is not available in the FIPS build of 3va; use createECDH');
         var p = BigInt('0x' + primeHex.toUpperCase());
         var g = BigInt(generator);
         var privKeyBits = Math.min(256, Math.floor(primeHex.length * 4 / 2));
@@ -1361,7 +724,8 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         },
 
         getHashes: function() {
-            return ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512'];
+            var h = ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512'];
+            return __cryptoFips ? h.slice(1) : h;
         },
 
         hash: function(alg, data, outputEncoding) {
@@ -1539,7 +903,11 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         },
 
         pbkdf2Sync: function(password, salt, iterations, keylen, digest) {
-            return new Uint8Array(__cryptoPbkdf2Sync(toBytes(password), toBytes(salt), iterations, keylen, digest || 'sha1'));
+            var raw = __cryptoPbkdf2Sync(toBytes(password), toBytes(salt), iterations, keylen, digest || 'sha1');
+            // Errors come back as a string; wrapping one in Uint8Array would
+            // silently hand the caller an empty key.
+            if (typeof raw === 'string') throw new Error(raw);
+            return new Uint8Array(raw);
         },
 
         scrypt: function(password, salt, keylen, options, callback) {
@@ -1564,7 +932,9 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             var N = options.N || options.cost || 16384;
             var r = options.r || options.blockSize || 8;
             var p = options.p || options.parallelization || 1;
-            return new Uint8Array(__cryptoScryptSync(toBytes(password), toBytes(salt), N, r, p, keylen));
+            var raw = __cryptoScryptSync(toBytes(password), toBytes(salt), N, r, p, keylen);
+            if (typeof raw === 'string') throw new Error(raw);
+            return new Uint8Array(raw);
         },
 
         createCipheriv: function(algorithm, key, iv, options) {
@@ -1857,6 +1227,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                     var binPub = atob(b64Pub);
                     publicKey = new Uint8Array(binPub.length);
                     for (var i = 0; i < binPub.length; i++) publicKey[i] = binPub.charCodeAt(i);
+                    // Node returns the uncompressed SEC1 point (what computeSecret
+                    // takes), not SPKI; the point is the SPKI's trailing bytes.
+                    var ptLen = curveNorm.indexOf('384') >= 0 ? 97 : 65;
+                    publicKey = publicKey.subarray(publicKey.length - ptLen);
                     return encodeBytes(Array.from(publicKey), encoding || 'buffer');
                 },
                 getPrivateKey: function(encoding) {
@@ -1882,7 +1256,11 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
 
         setEngine: function() {},
         constants: {},
-        fips: false,
+        fips: __cryptoFips,
+        getFips: function() { return __cryptoFips ? 1 : 0; },
+        setFips: function(on) {
+            if (!!on !== __cryptoFips) throw new Error('ERR_CRYPTO_FIPS_FORCED: FIPS mode is fixed at build time (cargo build --features fips)');
+        },
         provider: 'default'
     };
 

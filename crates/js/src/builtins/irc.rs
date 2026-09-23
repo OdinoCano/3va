@@ -7,8 +7,8 @@
 //! - `__ircRead(id, maxBytes)` -> Vec<u8> | throws EAGAIN | throws EOF
 //! - `__ircClose(id)`
 
+use super::tls::TlsStream;
 use crate::builtins::v8_compat::uint8array_from_bytes;
-use native_tls::TlsStream;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -111,7 +111,7 @@ pub fn inject_irc(
             match TcpStream::connect(format!("{}:{}", host, port)) {
                 Ok(tcp) => {
                     let conn = if use_tls {
-                        match native_tls::TlsConnector::new() {
+                        match super::tls::TlsConnector::new() {
                             Ok(connector) => {
                                 let fallback = tcp.try_clone().ok();
                                 match connector.connect(&host, tcp) {

@@ -182,8 +182,15 @@ async fn pq_tls_falls_back_to_classical_against_non_pq_server() {
         eprintln!("skipping: openssl not found/too old on PATH");
         return;
     }
+    // Plain X25519 is not an approved group in the FIPS build (only inside the
+    // X25519MLKEM768 hybrid), so there the classical fallback is P-256.
+    let (server_group, expected) = if cfg!(feature = "fips") {
+        ("P-256", "secp256r1")
+    } else {
+        ("X25519", "X25519")
+    };
     let cert = gen_test_cert();
-    let server = spawn_s_server(&cert, "X25519");
+    let server = spawn_s_server(&cert, server_group);
     let mut e = engine_with_net().await;
 
     let script = format!(
@@ -198,7 +205,7 @@ async fn pq_tls_falls_back_to_classical_against_non_pq_server() {
     let result = e.eval_to_string(&script).await.unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
-    assert_eq!(parsed["group"], "X25519");
+    assert_eq!(parsed["group"], expected);
     assert_eq!(parsed["pq"], false);
 }
 

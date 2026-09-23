@@ -143,6 +143,8 @@ async fn hash_shorthand() {
     );
 }
 
+// The FIPS build rejects this algorithm; see fips_rejects_non_approved.
+#[cfg(not(feature = "fips"))]
 #[tokio::test]
 async fn hash_md5_now_supported() {
     // MD5 was unsupported before; it's now enabled for fingerprinting/compat use.
@@ -350,6 +352,8 @@ async fn pbkdf2_sha256_known_vector() {
 
 // ── scrypt ───────────────────────────────────────────────────────────────────
 
+// The FIPS build rejects this algorithm; see fips_rejects_non_approved.
+#[cfg(not(feature = "fips"))]
 #[tokio::test]
 async fn scrypt_produces_correct_length() {
     let mut e = engine().await;
@@ -367,6 +371,8 @@ async fn scrypt_produces_correct_length() {
     assert_eq!(r, "32");
 }
 
+// The FIPS build rejects this algorithm; see fips_rejects_non_approved.
+#[cfg(not(feature = "fips"))]
 #[tokio::test]
 async fn scrypt_known_vector() {
     let mut e = engine().await;
@@ -391,4 +397,54 @@ async fn scrypt_known_vector() {
         "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442\
          fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
     );
+}
+
+#[cfg(feature = "fips")]
+#[tokio::test]
+async fn fips_mode_reported() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string("var c = require('crypto'); c.getFips() + ',' + c.fips + ',' + c.getHashes().indexOf('md5')")
+        .await
+        .unwrap();
+    assert_eq!(r, "1,true,-1");
+}
+
+#[cfg(feature = "fips")]
+#[tokio::test]
+async fn fips_rejects_non_approved() {
+    let mut e = engine().await;
+    for expr in [
+        "c.createHash('md5').update('x').digest('hex')",
+        "c.scryptSync('pw', 'salt', 16)",
+        "c.getDiffieHellman('modp14').generateKeys()",
+        "c.generateKeyPairSync('rsa', { modulusLength: 1024 })",
+    ] {
+        let r = e
+            .eval_to_string(&format!(
+                "var c = require('crypto'); try {{ {expr}; 'no-throw' }} catch (err) {{ String(err.message) }}"
+            ))
+            .await
+            .unwrap();
+        assert!(r.starts_with("ERR_CRYPTO_FIPS_FORCED"), "{expr} -> {r}");
+    }
+}
+
+#[cfg(feature = "fips")]
+#[tokio::test]
+async fn fips_sign_verify_roundtrip() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"var c = require('crypto'), out = [];
+            [['rsa', { modulusLength: 2048 }, 'sha256'], ['ec', { namedCurve: 'P-256' }, 'sha256'], ['ec', { namedCurve: 'P-384' }, 'sha384']].forEach(function (t) {
+                var kp = c.generateKeyPairSync(t[0], t[1]);
+                var sig = c.sign(t[2], Buffer.from('m'), kp.privateKey);
+                out.push(c.verify(t[2], Buffer.from('m'), kp.publicKey, sig), c.verify(t[2], Buffer.from('x'), kp.publicKey, sig));
+            });
+            out.join(',')"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true,false,true,false,true,false");
 }

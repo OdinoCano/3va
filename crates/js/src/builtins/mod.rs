@@ -3,6 +3,10 @@ pub mod child_process;
 pub mod code_cache;
 pub mod console;
 pub mod crypto;
+#[cfg(feature = "fips")]
+mod crypto_fips;
+#[cfg(not(feature = "fips"))]
+mod crypto_rc;
 pub mod dgram;
 pub mod event_source;
 pub mod fetch;
@@ -25,6 +29,7 @@ pub mod sqlite;
 pub mod ssh;
 pub mod tcp;
 pub mod timers;
+pub mod tls;
 pub mod v8_compat;
 pub mod vm;
 pub mod web_globals;
@@ -86,6 +91,7 @@ pub fn inject_all(
         }};
     }
 
+    tls::init()?;
     t!("console", console::inject_console(scope))?;
     t!(
         "timers",
@@ -212,6 +218,16 @@ pub fn inject_all(
     t!("mqtt", mqtt::inject_mqtt(scope, permissions.clone()));
     t!("ssh", ssh::inject_ssh(scope, permissions.clone()));
     t!("webrtc", webrtc::inject_webrtc(scope, permissions.clone()));
+
+    // SSH (russh on ring, curve25519/chacha) and WebRTC (DTLS/SRTP in pure
+    // Rust) cannot run on the FIPS module, so the fips build refuses them.
+    if tls::FIPS {
+        let deny = "globalThis.__sshCreate = globalThis.__rtcCreatePeerConnection = function () { \
+            throw new Error('ERR_CRYPTO_FIPS_FORCED: SSH and WebRTC are unavailable in the FIPS build of 3va'); };";
+        let script = v8::Script::compile(scope, v8::String::new(scope, deny).unwrap(), None)
+            .ok_or_else(|| anyhow::anyhow!("compile error"))?;
+        let _ = script.run(scope);
+    }
 
     Ok(())
 }

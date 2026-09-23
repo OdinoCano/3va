@@ -1,7 +1,7 @@
 //! Raw TCP and TLS socket backend for the `net` and `tls` Node.js modules.
 
+use super::tls::TlsStream;
 use crate::builtins::v8_compat::{uint8array_from_bytes, uint8array_to_vec};
-use native_tls::TlsStream;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -77,7 +77,8 @@ fn js_code_err<'s>(
 /// still negotiates plain classical X25519 — no separate fallback code needed,
 /// that's the point of a *hybrid* group). See
 /// docs/10-security/06-pq-tls-hybrid-design.md for the full design rationale.
-fn pq_tls_client_config_native() -> std::result::Result<Arc<rustls::ClientConfig>, String> {
+pub(crate) fn pq_tls_client_config_native() -> std::result::Result<Arc<rustls::ClientConfig>, String>
+{
     static CONFIG: std::sync::OnceLock<std::result::Result<Arc<rustls::ClientConfig>, String>> =
         std::sync::OnceLock::new();
     CONFIG
@@ -118,7 +119,7 @@ fn pq_tls_client_config_with_ca(
 fn pq_tls_client_config_from_roots(
     roots: rustls::RootCertStore,
 ) -> std::result::Result<Arc<rustls::ClientConfig>, String> {
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let provider = super::tls::provider();
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| format!("PQ TLS: protocol versions: {e}"))?
@@ -321,7 +322,7 @@ pub fn inject_tcp(
                     return;
                 }
 
-                let connector = match native_tls::TlsConnector::new() {
+                let connector = match super::tls::TlsConnector::new() {
                     Ok(c) => c,
                     Err(e) => {
                         let err = js_err(_scope, &format!("TLS init failed: {}", e));

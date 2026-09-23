@@ -59,6 +59,36 @@ jobs:
         with:
           command: check advisories licenses bans sources
 
+  # FIPS 140-3 build: all crypto/TLS on the AWS-LC FIPS module (docs/10-security/10-fips.md).
+  fips:
+    name: FIPS build + crypto/TLS tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: cargo clippy -p vvva_js -p vvva_cli --all-targets --features fips -- -D warnings
+      - run: >
+          cargo test -p vvva_js --features fips
+          --test crypto_module --test pq_tls --test websocket_module --test fetch_response_cap
+          --test ftp_module --test imap_module --test irc_module --test mqtt_module --test pop3_module
+
+  # New or bumped crates must be audited or explicitly exempted (supply-chain/).
+  vet:
+    name: cargo-vet (supply-chain audits)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-vet
+      - run: cargo vet --locked
+
   # ── Gate 5: fuzz build + short smoke run ─────────────────────────────────────
   fuzz:
     name: Fuzz (build + 30s smoke)

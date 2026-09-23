@@ -7,8 +7,8 @@
 //! - `__mqttRead(id, maxBytes)` -> Vec<u8> | throws EAGAIN | throws EOF
 //! - `__mqttClose(id)`
 
+use super::tls::TlsStream;
 use crate::builtins::v8_compat::{uint8array_from_bytes, uint8array_to_vec};
-use native_tls::TlsStream;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -229,7 +229,7 @@ pub fn inject_mqtt(
             match connect_tcp_with_timeout(&host, port, connect_timeout, io_timeout) {
                 Ok(tcp) => {
                     let conn = if use_tls {
-                        match native_tls::TlsConnector::new() {
+                        match super::tls::TlsConnector::new() {
                             // Socket r/w timeouts are already set, so the
                             // handshake below is bounded by `io_timeout`
                             // instead of hanging forever on a silent peer.

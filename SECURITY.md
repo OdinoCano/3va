@@ -2,15 +2,13 @@
 
 ## Supported Versions
 
-3va does not have a formally documented version support policy outside of the roadmap.
-The current stable version is **2.5** (all workspace crates: `vvva_permissions`, `vvva_crypto`,
-`vvva_pm`, `vvva_js`, etc., all version 2.5.0).
+Only the latest minor release receives security fixes. Upgrading to the latest
+release is the supported remediation path.
 
 | Version | Status      | Notes |
 |---------|-------------|-------|
-| 2.5.x   | Current     | Stable release; receives security patches |
-| 2.1.x   | Historical  | Released 2026-06; no longer patched |
-| < 2.1   | Unsupported | |
+| 2.8.x   | Current     | Receives security patches |
+| < 2.8   | Unsupported | Upgrade to 2.8.x |
 
 ## Reporting a Vulnerability
 
@@ -25,7 +23,21 @@ When reporting, include:
 - Affected versions (if known)
 - Any mitigations already applied
 
-Response times are a future goal, not a committed SLA at this time.
+## Response Times (SLA)
+
+| Stage | Commitment |
+|-------|------------|
+| Acknowledge a report | 72 hours |
+| Initial severity assessment (CVSS v4.0) | 5 days |
+| Patched release for Critical/High severity, or a vulnerable dependency advisory | **8 days** |
+| Patched release for Medium/Low severity | Next scheduled release, at most 90 days |
+
+Clocks start when the report is received or when the dependency advisory is
+published (RustSec/GHSA/OSV), whichever applies. The 8-day patch window is
+derived from the project's measured history: 2.5 × the mean time-to-patch of
+all dependency advisories fixed so far (2.93 days, see
+[Patched Dependency Advisories](#patched-dependency-advisories)), rounded up.
+It is the largest of 2.5 × mean, 2.5 × median and 2.5 × mode.
 
 ## Scope
 
@@ -87,9 +99,50 @@ capability engine (`vvva_permissions`), the package manager with audit
 
 ## Responsible Disclosure
 
-3va follows coordinated disclosure. If you discover a vulnerability, please give
-maintainers reasonable time to address it before public disclosure. No fixed
-timeline has been committed to at this time.
+3va follows coordinated vulnerability disclosure (ISO/IEC 29147 and ISO/IEC 30111):
+
+1. The reporter submits privately via GitHub Security Advisories.
+2. Maintainers acknowledge, triage and develop a fix in a private fork.
+3. A CVE is requested through GitHub (CNA) for confirmed vulnerabilities.
+4. The fix is released, and the advisory is published at the same time, crediting the reporter unless they ask not to be named.
+5. Reporters are asked to keep the issue private for 90 days, or until the fix ships if that happens first.
+
+## EU Cyber Resilience Act
+
+For vulnerabilities in 3va that are actively exploited, the maintainer notifies
+ENISA and the relevant CSIRT through the CRA single reporting platform. The
+notification follows CRA Article 14: an early warning within 24 hours, a
+notification within 72 hours and a final report within 14 days of a fix being
+available. Downstream integrators should monitor the repository's security
+advisories and the release SBOMs.
+
+## Verifying Releases
+
+Every release asset ships with:
+
+- `*.sha256`: a SHA-256 checksum
+- `*.bundle`: a keyless cosign (Sigstore) signature
+- `*.intoto.jsonl`: SLSA build provenance
+- `3va-<tag>.cdx.json`: a CycloneDX 1.5 SBOM, also signed with cosign
+
+```sh
+cosign verify-blob 3va-v2.8.0-x86_64-unknown-linux-gnu.tar.gz \
+  --bundle 3va-v2.8.0-x86_64-unknown-linux-gnu.tar.gz.bundle \
+  --certificate-identity-regexp 'https://github.com/OdinoCano/3va/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+### FIPS 140-3
+
+Linux release assets ending in `-fips` are built with `--features fips`. They
+route all runtime cryptography and TLS through the AWS-LC FIPS module (AWS-LC
+FIPS 4.0, currently in the CMVP Modules In Process list) and reject
+non-approved algorithms with `ERR_CRYPTO_FIPS_FORCED`. Scope, limits and
+validation status are documented in
+[docs/10-security/10-fips.md](docs/10-security/10-fips.md).
+
+Secure-development practices are mapped to NIST SP 800-218 (SSDF) in
+[docs/10-security/09-nist-ssdf.md](docs/10-security/09-nist-ssdf.md).
 
 ## Advisory History
 
@@ -103,16 +156,30 @@ Past accepted risks documented in `docs/SECURITY.md` (internal security document
 | RUSTSEC-2023-0051, RUSTSEC-2024-0370 | `wasmtime` transitive | Accepted | No active exploitation path for 3va's WASM usage. |
 | RUSTSEC-2025-0057 | `fxhash` (transitive) | Accepted | No active CVE; dropped if `wasmtime` drops it. |
 
+### Patched Dependency Advisories
+
+Time-to-patch runs from advisory publication (or from when the dependency was
+adopted, if the advisory already existed) to the fix commit.
+
+| Advisory | Crate | Fixed in | Days |
+|----------|-------|----------|------|
+| RUSTSEC-2025-0057, -2025-0118, -2026-0006, -2026-0020, -2026-0085 | `wasmtime` / `fxhash` | eef255b | 0.29 each |
+| RUSTSEC-2026-0222 | `wasmtime` | fa910d0 | 18.10 |
+| RUSTSEC-2026-0258 | `h2` | fa910d0 | 0.44 |
+| RUSTSEC-2026-0285 (CVE-2025-61730) | `rustls` | 84a6394 | 3.41 |
+
+Mean 2.93 days · median 0.29 · mode 0.29.
+
 > Note: `docs/SECURITY.md` is internal developer documentation (Rust-specific security
 > hardening, fuzzing, accepted risk register). This file (`SECURITY.md` at repo root)
 > is the public-facing security policy.
 
 ---
 
-## Verification Pending Maintainer Input
+## Policy Confirmation
 
-All fields have been confirmed by Edgar Cano (2026-08-19):
-- Version support: latest only
+Confirmed by Edgar Cano (2026-09-23):
+- Version support: latest minor only
 - Reporting channel: GitHub Security Advisories
-- SLA: future goal, not committed
-- Disclosure timeline: "reasonable time", no fixed deadline
+- SLA: 8-day patch window for Critical/High (derived from measured history, see above)
+- Disclosure: coordinated, 90-day embargo maximum

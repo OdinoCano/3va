@@ -60,7 +60,9 @@ pub fn inject_event_source(scope: &mut v8::ContextScope<v8::HandleScope>) {
             let url2 = url.clone();
 
             std::thread::spawn(move || {
-                let resp = match ureq::get(&url2)
+                let resp = match super::tls::agent_builder()
+                    .build()
+                    .get(&url2)
                     .set("Accept", "text/event-stream")
                     .set("Cache-Control", "no-cache")
                     .call()

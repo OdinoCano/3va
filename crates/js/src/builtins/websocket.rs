@@ -2,11 +2,29 @@ use std::collections::HashMap;
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket as TungsteniteWs, connect};
+use tungstenite::{Message, WebSocket as TungsteniteWs};
 use v8::{Function, FunctionCallbackArguments, PinScope, ReturnValue, Script};
 use vvva_permissions::{Capability, PermissionState};
 
 type WsConn = TungsteniteWs<MaybeTlsStream<TcpStream>>;
+
+#[cfg(not(feature = "fips"))]
+fn ws_connect(url: &str) -> Result<(WsConn, tungstenite::handshake::client::Response), String> {
+    tungstenite::connect(url).map_err(|e| e.to_string())
+}
+
+/// `tungstenite::connect` would use native-tls (OpenSSL) for wss://; the fips
+/// build does the TCP connect itself and hands tungstenite the FIPS rustls config.
+#[cfg(feature = "fips")]
+fn ws_connect(url: &str) -> Result<(WsConn, tungstenite::handshake::client::Response), String> {
+    let u = url::Url::parse(url).map_err(|e| e.to_string())?;
+    let host = u.host_str().ok_or("URL has no host")?;
+    let port = u.port_or_known_default().ok_or("URL has no port")?;
+    let tcp = TcpStream::connect((host, port)).map_err(|e| e.to_string())?;
+    let cfg = super::tcp::pq_tls_client_config_native()?;
+    tungstenite::client_tls_with_config(url, tcp, None, Some(tungstenite::Connector::Rustls(cfg)))
+        .map_err(|e| e.to_string())
+}
 
 pub type WsPool = Arc<Mutex<HashMap<u32, WsConn>>>;
 
@@ -121,7 +139,7 @@ pub fn inject_websocket(
                     return;
                 }
 
-                let ws = match connect(&url) {
+                let ws = match ws_connect(&url) {
                     Ok((ws, _)) => ws,
                     Err(e) => {
                         throw_js_error(scope, format!("WebSocket connect failed: {}", e));

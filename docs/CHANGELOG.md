@@ -7,6 +7,24 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+### Security
+
+- **rustls bumped to 0.23.45** for RUSTSEC-2026-0285 / CVE-2025-61730 (GHSA-2mjx-qc3c-rqvc): TLS 1.3 handshake messages were accepted across encryption-level boundaries. This affects every rustls-backed connection (PQ-TLS client, `fetch`, gRPC).
+
+### Fixed
+
+- **`crypto.createECDH().computeSecret()` always failed** with "invalid public key": `getPublicKey()` returned SPKI DER instead of Node's uncompressed SEC1 point, which `computeSecret` expects.
+- **`crypto.pbkdf2Sync`/`scryptSync` returned an empty buffer instead of throwing** on invalid parameters: the native error string was wrapped in a `Uint8Array`.
+
+### Added
+
+- **FIPS 140-3 build** (`cargo build --features fips`, released as `*-fips` Linux assets): every runtime crypto op (`crypto`, `crypto.subtle`) and every TLS connection (`tls`, FTP/IMAP/POP3/IRC/MQTT, `fetch`, `EventSource`, `wss://`, gRPC, PQ-TLS) runs on the AWS-LC FIPS module. Non-approved algorithms (MD5, scrypt, finite-field DH, Ed25519, RSA < 2048) throw `ERR_CRYPTO_FIPS_FORCED`, and SSH/WebRTC are disabled. `crypto.getFips()` returns `1`. See [`docs/10-security/10-fips.md`](10-security/10-fips.md).
+- **Signed CycloneDX 1.5 SBOM** (`3va-<tag>.cdx.json` plus a cosign bundle) attached to every release.
+- **`cargo vet` CI gate**, with imported audits from Mozilla, Google and Bytecode Alliance. New or bumped crates must be audited or explicitly exempted.
+- **OpenSSF Scorecard** workflow (weekly and on every push to `main`).
+- **SECURITY.md**: committed response SLA (an 8-day patched release for Critical/High, derived from the measured time-to-patch), coordinated-disclosure process, EU CRA reporting and release-verification instructions.
+- **NIST SSDF (SP 800-218) mapping**: [`docs/10-security/09-nist-ssdf.md`](10-security/09-nist-ssdf.md).
+
 ## [v2.8.0] — 2026-09-09
 
 ### Added
