@@ -4857,6 +4857,7 @@ dependencies = [
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -4864,6 +4865,7 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
+ "tokio-rustls",
  "tower 0.5.3",
  "tower-http",
  "tower-service",
@@ -7116,6 +7118,7 @@ name = "vvva_pm"
 version = "2.9.0"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
  "base64 0.22.1",
  "ecdsa 0.16.9",
  "flate2",
@@ -7129,6 +7132,8 @@ dependencies = [
  "p384 0.13.1",
  "regex",
  "reqwest",
+ "rustls",
+ "rustls-native-certs 0.8.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",

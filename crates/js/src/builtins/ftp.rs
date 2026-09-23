@@ -585,6 +585,9 @@ pub fn inject_ftp(
                     }
                     self._pollTimer = null;
                     self._connected = false;
+                    if (self._pendingCallback) {
+                        self._resolvePending(Object.assign(new Error('FTP control connection closed'), { code: 'ECONNRESET' }));
+                    }
                     if (e && e.code === 'EOF') self.emit('close');
                     else self.emit('error', e);
                 }
@@ -618,7 +621,20 @@ pub fn inject_ftp(
             if (cb) cb(err, data);
         };
 
+        // Waits for the final reply of a data transfer (226/250 or an error),
+        // including one that already arrived while the data was still being read.
+        Client.prototype._awaitTransferEnd = function(callback) {
+            var early = this._earlyReply;
+            if (early) {
+                this._earlyReply = null;
+                setTimeout(function() { callback(early.err, early.reply); }, 0);
+                return;
+            }
+            this._awaitReply(false, callback);
+        };
+
         Client.prototype._sendAwait = function(cmd, multiline, callback) {
+            this._earlyReply = null;
             this._awaitReply(multiline, callback);
             try {
                 __ftpSend(this._id, cmd);
@@ -640,6 +656,12 @@ pub fn inject_ftp(
             var isError = code.charAt(0) === '4' || code.charAt(0) === '5';
 
             if (!this._pendingCmd) {
+                // The server can send the transfer's final reply (226, or a
+                // 4xx/5xx abort) before the data read finishes and
+                // _awaitTransferEnd() starts waiting; keep it for that call.
+                if (code === '226' || code === '250' || isError) {
+                    this._earlyReply = { err: isError ? new Error(code + ' ' + text) : null, reply: { code: code, text: text } };
+                }
                 if (code === '226') this.emit('dataend', line);
                 else if (code === '150' || code === '125') this.emit('data', line);
                 else if (isError) this.emit('error', new Error(line));
@@ -798,8 +820,8 @@ pub fn inject_ftp(
                                 }
                                 return { name: line, size: 0, isDirectory: false };
                             });
-                            self._awaitReply(false, function() {
-                                if (callback) callback(null, items);
+                            self._awaitTransferEnd(function(err3) {
+                                if (callback) callback(err3 || null, err3 ? null : items);
                             });
                         }
                     }
@@ -851,8 +873,8 @@ pub fn inject_ftp(
                             var off = 0;
                             for (var i = 0; i < chunks.length; i++) { buf.set(chunks[i], off); off += chunks[i].length; }
                             var result = typeof Buffer !== 'undefined' ? Buffer.from(buf) : buf;
-                            self._awaitReply(false, function() {
-                                if (callback) callback(null, result);
+                            self._awaitTransferEnd(function(err3) {
+                                if (callback) callback(err3 || null, err3 ? null : result);
                             });
                         }
                     }
@@ -901,8 +923,8 @@ pub fn inject_ftp(
                         return;
                     }
                     __ftpDataClose(self._id);
-                    self._awaitReply(false, function() {
-                        if (callback) callback();
+                    self._awaitTransferEnd(function(err3) {
+                        if (callback) callback(err3 || undefined);
                     });
                 });
             });

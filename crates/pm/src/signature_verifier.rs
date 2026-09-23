@@ -1,6 +1,6 @@
+use crate::fips::{Digest, Sha256, Sha512};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256, Sha512};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -63,7 +63,7 @@ impl SignatureVerifier {
                     }
                     hasher.update(&buffer[..bytes_read]);
                 }
-                Ok(format!("{:x}", hasher.finalize()))
+                Ok(hex::encode(hasher.finalize()))
             }
             HashAlgorithm::SHA512 => {
                 let mut hasher = Sha512::new();
@@ -75,7 +75,7 @@ impl SignatureVerifier {
                     }
                     hasher.update(&buffer[..bytes_read]);
                 }
-                Ok(format!("{:x}", hasher.finalize()))
+                Ok(hex::encode(hasher.finalize()))
             }
         }
     }
@@ -187,8 +187,8 @@ mod tests {
 
     #[test]
     fn verify_tarball_sha512_correct() {
+        use crate::fips::{Digest, Sha512};
         use base64::Engine;
-        use sha2::{Digest, Sha512};
         let data = b"fake tarball content for testing";
         let mut h = Sha512::new();
         h.update(data);
@@ -202,8 +202,8 @@ mod tests {
 
     #[test]
     fn verify_tarball_sha256_correct() {
+        use crate::fips::{Digest, Sha256};
         use base64::Engine;
-        use sha2::{Digest, Sha256};
         let data = b"fake tarball content for sha256";
         let mut h = Sha256::new();
         h.update(data);
@@ -241,8 +241,8 @@ mod tests {
 
     #[test]
     fn verify_from_registry_some_delegates_to_verify_tarball() {
+        use crate::fips::{Digest, Sha512};
         use base64::Engine;
-        use sha2::{Digest, Sha512};
         let data = b"tarball bytes";
         let mut h = Sha512::new();
         h.update(data);

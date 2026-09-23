@@ -9,6 +9,15 @@ homepage = "https://github.com/OdinoCano/3va"
 keywords = ["package-manager", "npm", "lockfile", "audit", "3va"]
 categories = ["development-tools"]
 
+[features]
+# Route package hashing, provenance signature checks and registry TLS through
+# the AWS-LC FIPS 140-3 module. See docs/10-security/10-fips.md.
+fips = [
+    "dep:aws-lc-rs", "aws-lc-rs/fips",
+    "dep:rustls", "rustls/fips", "dep:rustls-native-certs",
+    "reqwest/rustls-tls-manual-roots-no-provider",
+]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
@@ -26,6 +35,10 @@ base64.workspace = true
 p256.workspace = true
 p384.workspace = true
 ecdsa = "0.16"
+# `fips` feature only: AWS-LC FIPS module for hashing, signatures and TLS.
+aws-lc-rs = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
 hex = "0.4"
 regex = "1.12"
 flate2 = "1.0"

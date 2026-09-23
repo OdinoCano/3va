@@ -47,6 +47,8 @@ publican solo para `x86_64-unknown-linux-gnu` y `aarch64-unknown-linux-gnu`.
 | `fetch`, `EventSource` | ureq + rustls/ring | ureq + rustls + AWS-LC FIPS |
 | `WebSocket` (`wss://`) | tungstenite + native-tls | tungstenite + rustls + AWS-LC FIPS |
 | gRPC (tonic) | proveedor rustls por defecto del proceso | proveedor FIPS instalado como default del proceso |
+| Package manager (`3va install`/`audit`): HTTPS al registro, OSV y Sigstore | reqwest + native-tls | reqwest + rustls + AWS-LC FIPS ([pm/src/fips.rs](../../crates/pm/src/fips.rs)) |
+| Package manager: integridad SRI (SHA-256/512) y firmas de provenance (ECDSA P-256/P-384) | RustCrypto | AWS-LC FIPS |
 
 Al arrancar, un build FIPS ejecuta `aws_lc_rs::try_fips_mode()`, que corre los
 self-tests de encendido del módulo. Si fallan, el runtime no arranca.
@@ -66,7 +68,6 @@ Todo lo que no es un servicio aprobado del módulo lanza `ERR_CRYPTO_FIPS_FORCED
 
 ## Fuera de la frontera
 
-- **Package manager (`3va install`, `3va audit`)**: descarga por reqwest/native-tls y verifica firmas npm con RustCrypto. Es tooling de desarrollo, no crypto que protege datos de la aplicación en ejecución.
 - **`vvva_crypto`** (ML-KEM, ML-DSA y firmas Lamport en Rust puro): ningún builtin del runtime lo usa.
 - **Usos no criptográficos**, que FIPS no regula: SHA-1 en el handshake de WebSocket (`Sec-WebSocket-Accept`), hashes de caché e integridad de módulos.
 - El binario FIPS todavía **enlaza** OpenSSL (native-tls), ring y RustCrypto como dependencias transitivas, pero ninguna ruta del runtime los invoca para servicios criptográficos.

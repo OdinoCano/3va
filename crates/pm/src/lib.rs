@@ -2,6 +2,7 @@
 
 pub mod auditor;
 pub mod fetcher;
+pub mod fips;
 pub mod lockfile;
 pub mod malware_scanner;
 pub mod manifest;
@@ -405,7 +406,7 @@ async fn lookup_jsr_with_deps(
 }
 
 async fn lookup_registry(registry: &Registry, pkg_name: &str) -> anyhow::Result<RegistryInfo> {
-    let client = reqwest::Client::builder().gzip(true).build()?;
+    let client = crate::fips::http_client_builder().gzip(true).build()?;
     match registry {
         Registry::Jsr => lookup_jsr(&client, pkg_name).await,
         Registry::Npm | Registry::Yarn | Registry::Custom(_) => {
@@ -744,7 +745,7 @@ pub async fn dlx_fetch(
     let registry = Registry::from_allowed_host(&allowed_host);
     let reg_name = registry.display_name().to_string();
     let base_url = registry.base_url().to_string();
-    let client = reqwest::Client::builder().gzip(true).build()?;
+    let client = crate::fips::http_client_builder().gzip(true).build()?;
     let version_to_fetch = requested_ver.as_deref().unwrap_or("latest");
 
     let (info, _deps) = match &registry {
@@ -853,13 +854,13 @@ fn sorted_json_string(val: &serde_json::Value) -> String {
 /// SHA-256 (hex) of every dependency-related field in `package.json`.
 /// `None` if there's no parseable `package.json` at all.
 pub fn manifest_dep_hash(project_root: &Path) -> Option<String> {
-    use sha2::{Digest, Sha256};
+    use crate::fips::{Digest, Sha256};
     let content = std::fs::read_to_string(project_root.join("package.json")).ok()?;
     let val: serde_json::Value = serde_json::from_str(&content).ok()?;
     let canonical = sorted_json_string(&manifest_dep_fields(&val));
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
-    Some(format!("{:x}", hasher.finalize()))
+    Some(hex::encode(hasher.finalize()))
 }
 
 fn install_hash_marker(project_root: &Path) -> PathBuf {
@@ -1177,7 +1178,7 @@ impl Default for ExtractLimits {
 
 async fn download_tarball(url: &str) -> anyhow::Result<Vec<u8>> {
     validate_tarball_url(url)?;
-    let client = reqwest::Client::builder()
+    let client = crate::fips::http_client_builder()
         .timeout(std::time::Duration::from_secs(120))
         .gzip(false) // tarballs are already gzipped at file level — don't double-decompress
         .build()?;
@@ -1652,7 +1653,7 @@ pub async fn install_config_deps(
     let registry = Registry::from_allowed_host(&allowed_host);
     let reg_name = registry.display_name().to_string();
     let base_url = registry.base_url().to_string();
-    let client = reqwest::Client::builder().gzip(true).build()?;
+    let client = crate::fips::http_client_builder().gzip(true).build()?;
     let global_store = ContentStore::global();
     let verifier = SignatureVerifier::sha512();
     let config_deps_root = project_root.join(".3va").join("config-deps");
@@ -1753,12 +1754,12 @@ async fn install_with_transitive(
     // Two clients:
     // - meta_client: for JSON metadata requests (gzip on → server sends compressed JSON)
     // - dl_client: for tarball downloads (gzip off → tarballs are already .tgz, double-decompression breaks them)
-    let meta_client = reqwest::Client::builder()
+    let meta_client = crate::fips::http_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .pool_max_idle_per_host(16)
         .gzip(true)
         .build()?;
-    let dl_client = reqwest::Client::builder()
+    let dl_client = crate::fips::http_client_builder()
         .timeout(std::time::Duration::from_secs(120))
         .pool_max_idle_per_host(8)
         .gzip(false)
@@ -3644,8 +3645,8 @@ mod zero_install_cache_tests {
     use super::{read_zero_install_cache, write_zero_install_cache, zero_install_cache_enabled};
 
     fn sri_sha512(bytes: &[u8]) -> String {
+        use crate::fips::{Digest, Sha512};
         use base64::Engine;
-        use sha2::{Digest, Sha512};
         let mut h = Sha512::new();
         h.update(bytes);
         format!(

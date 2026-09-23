@@ -13,12 +13,17 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Fixed
 
+- **`3va install` could hang forever**: when a dependency's metadata fetch failed, or none of its versions matched the range, the resolver re-fetched and re-queued it endlessly. `3va install express` never finished. Each package is now fetched at most once, and an unsatisfiable dependency is skipped with a warning.
+- **Semver ranges with a space after the operator** (`>= 2.1.2 < 3.0.0`, used by `safer-buffer`) failed to parse, so such dependencies were left out of the lockfile.
+- **Malware scanner false positives blocked legitimate packages**: the `.env` rule matched every `process.env` and `.envelope…` identifier, and the "RCE reference" rule matched any word containing "rce" (`source`, `force`, `RETENTION_SOURCE`). `@sigstore/bundle` and `@sigstore/protobuf-specs` failed to install. Both rules now match only whole names.
+- **FTP `get`/`list`/`put` could hang for 30 s**: a `226 Transfer complete` that arrived before the data read finished was dropped, so the client waited for a reply it had already received. Transfer errors (4xx/5xx) are now passed to the callback instead of being ignored, and a closed control connection fails the pending command immediately.
 - **`crypto.createECDH().computeSecret()` always failed** with "invalid public key": `getPublicKey()` returned SPKI DER instead of Node's uncompressed SEC1 point, which `computeSecret` expects.
 - **`crypto.pbkdf2Sync`/`scryptSync` returned an empty buffer instead of throwing** on invalid parameters: the native error string was wrapped in a `Uint8Array`.
 
 ### Added
 
-- **FIPS 140-3 build** (`cargo build --features fips`, released as `*-fips` Linux assets): every runtime crypto op (`crypto`, `crypto.subtle`) and every TLS connection (`tls`, FTP/IMAP/POP3/IRC/MQTT, `fetch`, `EventSource`, `wss://`, gRPC, PQ-TLS) runs on the AWS-LC FIPS module. Non-approved algorithms (MD5, scrypt, finite-field DH, Ed25519, RSA < 2048) throw `ERR_CRYPTO_FIPS_FORCED`, and SSH/WebRTC are disabled. `crypto.getFips()` returns `1`. See [`docs/10-security/10-fips.md`](10-security/10-fips.md).
+- **Latency test suites** for crypto, fetch, FTP, HTTP, IRC, MQTT, POP3, TCP and TLS (`crates/js/tests/lat_*.rs`). They also run in the FIPS CI job.
+- **FIPS 140-3 build** (`cargo build --features fips`, released as `*-fips` Linux assets): every runtime crypto op (`crypto`, `crypto.subtle`) and every TLS connection (`tls`, FTP/IMAP/POP3/IRC/MQTT, `fetch`, `EventSource`, `wss://`, gRPC, PQ-TLS) runs on the AWS-LC FIPS module. The package manager's registry TLS, SRI integrity hashes and provenance signature checks also use the module. Non-approved algorithms (MD5, scrypt, finite-field DH, Ed25519, RSA < 2048) throw `ERR_CRYPTO_FIPS_FORCED`, and SSH/WebRTC are disabled. `crypto.getFips()` returns `1`. See [`docs/10-security/10-fips.md`](10-security/10-fips.md).
 - **Signed CycloneDX 1.5 SBOM** (`3va-<tag>.cdx.json` plus a cosign bundle) attached to every release.
 - **`cargo vet` CI gate**, with imported audits from Mozilla, Google and Bytecode Alliance. New or bumped crates must be audited or explicitly exempted.
 - **OpenSSF Scorecard** workflow (weekly and on every push to `main`).

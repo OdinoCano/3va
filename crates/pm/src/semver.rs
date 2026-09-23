@@ -120,6 +120,27 @@ impl SemverRange {
             return Some(SemverRange::Any);
         }
 
+        // npm allows whitespace after an operator (">= 2.1.2 < 3.0.0", used by
+        // safer-buffer); glue each bare operator token onto the next token.
+        let is_op = |t: &str| matches!(t, ">=" | "<=" | ">" | "<" | "=" | "^" | "~");
+        let glued;
+        let range = if range.split_whitespace().any(is_op) {
+            let mut parts: Vec<String> = Vec::new();
+            let mut op = String::new();
+            for t in range.split_whitespace() {
+                if is_op(t) {
+                    op.push_str(t);
+                } else {
+                    parts.push(format!("{op}{t}"));
+                    op.clear();
+                }
+            }
+            glued = parts.join(" ");
+            glued.as_str()
+        } else {
+            range
+        };
+
         // Compound ranges: ">=1.0.0 <2.0.0" — split on whitespace and AND them.
         if range.contains(' ') {
             return parse_compound(range);
@@ -277,6 +298,18 @@ fn parse_compound(range: &str) -> Option<SemverRange> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn operator_followed_by_space() {
+        let r = SemverRange::parse(">= 2.1.2 < 3.0.0").unwrap();
+        assert!(r.matches(&Semver::parse("2.1.2").unwrap()));
+        assert!(!r.matches(&Semver::parse("3.0.0").unwrap()));
+        assert!(
+            SemverRange::parse("^ 1.2.0")
+                .unwrap()
+                .matches(&Semver::parse("1.9.0").unwrap())
+        );
+    }
+
     use super::*;
 
     #[test]

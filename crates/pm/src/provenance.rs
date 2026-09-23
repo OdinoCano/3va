@@ -116,8 +116,15 @@ fn children(content: &[u8]) -> Vec<Tlv<'_>> {
 
 /// The ECDSA public key extracted from a certificate.
 pub enum EcPublicKey {
+    #[cfg(not(feature = "fips"))]
     P256(p256::ecdsa::VerifyingKey),
+    #[cfg(not(feature = "fips"))]
     P384(p384::ecdsa::VerifyingKey),
+    /// SEC1 point, already validated by AWS-LC in `extract_ec_public_key`.
+    #[cfg(feature = "fips")]
+    P256(Vec<u8>),
+    #[cfg(feature = "fips")]
+    P384(Vec<u8>),
 }
 
 const OID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01]; // 1.2.840.10045.2.1
@@ -159,21 +166,59 @@ pub fn extract_ec_public_key(cert_der: &[u8]) -> Result<EcPublicKey, String> {
         let point = &bitstring.content[1..];
         let is_p256 = curve_oid.is_some_and(|c| c.tag == 0x06 && c.content == OID_P256);
         let is_p384 = curve_oid.is_some_and(|c| c.tag == 0x06 && c.content == OID_P384);
-        if is_p256 {
-            return p256::ecdsa::VerifyingKey::from_sec1_bytes(point)
-                .map(EcPublicKey::P256)
-                .map_err(|e| format!("invalid P-256 point: {e}"));
+        #[cfg(not(feature = "fips"))]
+        {
+            if is_p256 {
+                return p256::ecdsa::VerifyingKey::from_sec1_bytes(point)
+                    .map(EcPublicKey::P256)
+                    .map_err(|e| format!("invalid P-256 point: {e}"));
+            }
+            if is_p384 {
+                return p384::ecdsa::VerifyingKey::from_sec1_bytes(point)
+                    .map(EcPublicKey::P384)
+                    .map_err(|e| format!("invalid P-384 point: {e}"));
+            }
         }
-        if is_p384 {
-            return p384::ecdsa::VerifyingKey::from_sec1_bytes(point)
-                .map(EcPublicKey::P384)
-                .map_err(|e| format!("invalid P-384 point: {e}"));
+        #[cfg(feature = "fips")]
+        {
+            use aws_lc_rs::signature::{
+                ECDSA_P256_SHA256_ASN1, ECDSA_P384_SHA384_ASN1, ParsedPublicKey,
+            };
+            if is_p256 {
+                return ParsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, point)
+                    .map(|_| EcPublicKey::P256(point.to_vec()))
+                    .map_err(|e| format!("invalid P-256 point: {e}"));
+            }
+            if is_p384 {
+                return ParsedPublicKey::new(&ECDSA_P384_SHA384_ASN1, point)
+                    .map(|_| EcPublicKey::P384(point.to_vec()))
+                    .map_err(|e| format!("invalid P-384 point: {e}"));
+            }
         }
         return Err("unsupported EC curve in certificate".into());
     }
     Err("no EC SubjectPublicKeyInfo found in certificate".into())
 }
 
+#[cfg(feature = "fips")]
+fn verify_dsse_signature(
+    key: &EcPublicKey,
+    payload_type: &str,
+    payload: &[u8],
+    sig_der: &[u8],
+) -> Result<(), String> {
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1, ECDSA_P384_SHA384_ASN1, UnparsedPublicKey};
+    let pae = dsse_pae(payload_type, payload);
+    let (alg, point) = match key {
+        EcPublicKey::P256(p) => (&ECDSA_P256_SHA256_ASN1, p),
+        EcPublicKey::P384(p) => (&ECDSA_P384_SHA384_ASN1, p),
+    };
+    UnparsedPublicKey::new(alg, point)
+        .verify(&pae, sig_der)
+        .map_err(|_| "DSSE signature mismatch".to_string())
+}
+
+#[cfg(not(feature = "fips"))]
 fn verify_dsse_signature(
     key: &EcPublicKey,
     payload_type: &str,

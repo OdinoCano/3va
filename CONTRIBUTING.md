@@ -19,6 +19,11 @@ cargo clippy        # check lints
 cargo deny check    # check dependencies for CVEs and license issues
 ```
 
+**Tests are required.** Every PR that adds functionality or fixes a bug must
+add automated tests covering it: unit tests next to the code, or integration
+tests under `crates/*/tests/`. A PR without tests for new behavior will not be
+merged.
+
 ## CI gates — every PR must pass
 
 | Check | Blocks merge |
@@ -29,6 +34,8 @@ cargo deny check    # check dependencies for CVEs and license issues
 | `cargo deny check` (advisories + licenses + bans) | Yes |
 | Secret scanning (gitleaks) | Yes |
 | Semgrep SAST (ERROR severity) | Yes |
+| `cargo vet` (supply-chain audits) | Yes |
+| FIPS build + crypto/TLS tests (`--features fips`) | Yes |
 
 **There is no way to bypass CI.** Branch protection on `main` and `develop` requires all status checks to pass and at least one maintainer approval before merge. Even maintainers cannot push directly to `main`.
 

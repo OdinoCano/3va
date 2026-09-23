@@ -573,7 +573,7 @@ pub async fn run_audit_in(force_refresh: bool, project_dir: &Path) -> anyhow::Re
     }
 
     if !to_fetch.is_empty() {
-        let client = reqwest::Client::builder()
+        let client = crate::fips::http_client_builder()
             .user_agent("3va-audit/0.1 (+https://github.com/OdinoCano/3va)")
             .build()?;
 

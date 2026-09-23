@@ -128,6 +128,42 @@ path = "tests/pq_tls.rs"
 name = "utf8_stream_integrity"
 path = "tests/utf8_stream_integrity.rs"
 
+[[test]]
+name = "lat_fetch"
+path = "tests/lat_fetch.rs"
+
+[[test]]
+name = "lat_http"
+path = "tests/lat_http.rs"
+
+[[test]]
+name = "lat_tcp"
+path = "tests/lat_tcp.rs"
+
+[[test]]
+name = "lat_tls"
+path = "tests/lat_tls.rs"
+
+[[test]]
+name = "lat_mqtt"
+path = "tests/lat_mqtt.rs"
+
+[[test]]
+name = "lat_ftp"
+path = "tests/lat_ftp.rs"
+
+[[test]]
+name = "lat_irc"
+path = "tests/lat_irc.rs"
+
+[[test]]
+name = "lat_pop3"
+path = "tests/lat_pop3.rs"
+
+[[test]]
+name = "lat_crypto"
+path = "tests/lat_crypto.rs"
+
 [features]
 # Route all runtime cryptography and TLS through the AWS-LC FIPS 140-3 module.
 # See docs/10-security/10-fips.md.

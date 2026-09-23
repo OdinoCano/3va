@@ -94,7 +94,9 @@ impl Resolver {
         Self {
             registry_url: registry_url.to_string(),
             cache: HashMap::new(),
-            client: reqwest::Client::new(),
+            client: crate::fips::http_client_builder()
+                .build()
+                .expect("HTTP client"),
         }
     }
 
@@ -111,6 +113,10 @@ impl Resolver {
     /// the first satisfying version wins.
     pub async fn resolve(&mut self, deps: &HashMap<String, String>) -> DependencyGraph {
         let mut graph = DependencyGraph::new();
+        // Every name is fetched at most once. Without this, a package whose
+        // metadata fetch failed, or which has no version matching the range,
+        // was re-fetched and re-queued forever (`3va install express` hung).
+        let mut fetched: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         // Sort initial entries so resolution order is deterministic across runs.
         let mut stack: Vec<(String, String)> = {
@@ -157,10 +163,21 @@ impl Resolver {
                 continue;
             }
 
+            if fetched.contains(&name) || self.cache.contains_key(&name) {
+                tracing::warn!(
+                    package = %name,
+                    required = %version,
+                    "no registry version satisfies this constraint; skipping"
+                );
+                continue;
+            }
+
             // Collect a batch of uncached packages to fetch in parallel.
             let mut batch = vec![(name, version)];
             while let Some(item) = stack.pop() {
-                if graph.resolved_versions.contains_key(&item.0) || self.cache.contains_key(&item.0)
+                if graph.resolved_versions.contains_key(&item.0)
+                    || self.cache.contains_key(&item.0)
+                    || fetched.contains(&item.0)
                 {
                     stack.push(item);
                     break;
@@ -237,6 +254,8 @@ impl Resolver {
                     self.cache.entry(name).or_default().extend(nodes);
                 }
             }
+
+            fetched.extend(batch.iter().map(|(n, _)| n.clone()));
 
             // Re-queue batch items for processing through the cache path.
             batch.reverse();
@@ -396,5 +415,50 @@ mod tests {
         nodes[0].version = "also-bad".to_string();
         let best = Resolver::find_best_match(&nodes, "^1.0.0");
         assert!(best.is_none());
+    }
+
+    /// Regression: an unsatisfiable range (or a failed fetch) used to make
+    /// `resolve` re-fetch and re-queue the same package forever.
+    #[tokio::test]
+    async fn resolve_terminates_on_unsatisfiable_range_and_fetch_failure() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                // "only-v1" exists with version 1.0.0; anything else is a 500.
+                let (status, body) = if req.starts_with("GET /only-v1 ") {
+                    ("200 OK", r#"{"versions":{"1.0.0":{"dist":{}}}}"#)
+                } else {
+                    ("500 Internal Server Error", "{}")
+                };
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let mut r = Resolver::new(&format!("http://127.0.0.1:{port}"));
+        let deps = HashMap::from([
+            ("only-v1".to_string(), "^2.0.0".to_string()),
+            ("broken".to_string(), "^1.0.0".to_string()),
+        ]);
+        let graph = tokio::time::timeout(std::time::Duration::from_secs(10), r.resolve(&deps))
+            .await
+            .expect("resolve must terminate");
+        assert!(graph.nodes().is_empty());
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "each name fetched once"
+        );
     }
 }

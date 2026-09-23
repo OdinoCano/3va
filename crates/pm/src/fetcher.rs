@@ -1,4 +1,4 @@
-use sha2::Digest;
+use crate::fips::Digest;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -15,7 +15,9 @@ impl PackageFetcher {
         Self {
             registry: registry.to_string(),
             _cache_dir: cache_dir,
-            client: reqwest::Client::new(),
+            client: crate::fips::http_client_builder()
+                .build()
+                .expect("HTTP client"),
         }
     }
 
@@ -164,7 +166,7 @@ impl PackageFetcher {
     }
 
     pub fn verify_hash(tarball: &[u8], expected: &str) -> bool {
-        let mut hasher = sha2::Sha256::new();
+        let mut hasher = crate::fips::Sha256::new();
         hasher.update(tarball);
         let result = hasher.finalize();
         let actual = hex::encode(result);
