@@ -1,8 +1,9 @@
 name: Release Distribution
 
 on:
-  release:
-    types: [published]
+  # Dispatched by release.yml once the GitHub Release exists (a release made
+  # with GITHUB_TOKEN never fires `release: published`). Keeping only this
+  # trigger means a release can't be distributed twice.
   workflow_dispatch:
     inputs:
       version:
