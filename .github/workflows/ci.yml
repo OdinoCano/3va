@@ -51,6 +51,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # rust-cache prunes target/debug/gn_out, where the v8 build script puts
+      # librusty_v8.a, but keeps that script's cached output. On a partial cache
+      # hit (any Cargo.toml/Cargo.lock change) the relink then fails with
+      # "could not find native static library rusty_v8". Re-run the script.
+      - run: test -f target/debug/gn_out/obj/librusty_v8.a || cargo clean -p v8
       - run: cargo test
 
   # ── Gate 4: dependency security & license audit ──────────────────────────────
@@ -176,6 +181,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      # Same rust-cache / librusty_v8.a issue as the test job, in llvm-cov's target dir.
+      - run: |
+          test -f target/llvm-cov-target/debug/gn_out/obj/librusty_v8.a \
+            || CARGO_TARGET_DIR=target/llvm-cov-target cargo clean -p v8
       - name: Measure line and branch coverage
         run: |
           cargo llvm-cov --workspace --summary-only | tee coverage.txt
