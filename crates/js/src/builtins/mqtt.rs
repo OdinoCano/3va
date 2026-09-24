@@ -225,6 +225,15 @@ pub fn inject_mqtt(
                 scope.throw_exception(v8::Exception::error(scope, msg));
                 return;
             }
+            if !use_tls && !vvva_permissions::plaintext_allowed(&host) {
+                let msg = v8::String::new(
+                    scope,
+                    &vvva_permissions::plaintext_denied_message("MQTT", &host),
+                )
+                .unwrap();
+                scope.throw_exception(v8::Exception::error(scope, msg));
+                return;
+            }
 
             match connect_tcp_with_timeout(&host, port, connect_timeout, io_timeout) {
                 Ok(tcp) => {

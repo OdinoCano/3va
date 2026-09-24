@@ -3027,6 +3027,11 @@ struct Cli {
     #[arg(global = true, long = "verbose", short = 'v')]
     verbose: bool,
 
+    /// Allow unencrypted protocols (http://, ws://, FTP, and IMAP/POP3/IRC/MQTT/gRPC
+    /// without TLS) to non-loopback hosts. Off by default; --allow-net is still required.
+    #[arg(global = true, long = "allow-insecure")]
+    allow_insecure: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -4016,6 +4021,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    vvva_permissions::set_allow_insecure(cli.allow_insecure);
     let is_accessible = accessibility::is_accessible_mode(cli.accessible);
 
     // Status messages (info!) only appear with --verbose; errors/warnings always show.

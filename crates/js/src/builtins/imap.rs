@@ -454,6 +454,9 @@ pub fn inject_imap(
                             host
                         ));
                     }
+                    if !use_tls && !vvva_permissions::plaintext_allowed(&host) {
+                        return Err(vvva_permissions::plaintext_denied_message("IMAP", &host));
+                    }
 
                     let imap_conn =
                         establish_connection(&host, port, use_tls, connect_timeout, io_timeout)?;

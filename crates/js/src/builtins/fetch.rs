@@ -182,6 +182,16 @@ pub fn inject_fetch(
                 scope.throw_exception(err.into());
                 return;
             }
+            if url
+                .get(..7)
+                .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+                && !vvva_permissions::plaintext_allowed(&host)
+            {
+                let msg = vvva_permissions::plaintext_denied_message("HTTP", &host);
+                let err = v8::String::new(scope, &msg).unwrap();
+                scope.throw_exception(err.into());
+                return;
+            }
 
             let result = tokio::task::block_in_place(|| {
                 do_request(url, method, hdrs_json, body_opt, max_response_size)

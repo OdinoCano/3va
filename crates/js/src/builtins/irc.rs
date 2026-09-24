@@ -107,6 +107,15 @@ pub fn inject_irc(
                 rv.set(err);
                 return;
             }
+            if !use_tls && !vvva_permissions::plaintext_allowed(&host) {
+                let msg = v8::String::new(
+                    scope,
+                    &vvva_permissions::plaintext_denied_message("IRC", &host),
+                )
+                .unwrap();
+                rv.set(v8::Exception::error(scope, msg));
+                return;
+            }
 
             match TcpStream::connect(format!("{}:{}", host, port)) {
                 Ok(tcp) => {

@@ -231,6 +231,15 @@ pub fn inject_grpc(
                 scope.throw_exception(err);
                 return;
             }
+            if !use_tls && !vvva_permissions::plaintext_allowed(&host) {
+                let err = js_err(
+                    scope,
+                    "EACCES",
+                    vvva_permissions::plaintext_denied_message("gRPC (h2c)", &host),
+                );
+                scope.throw_exception(err);
+                return;
+            }
 
             let result = create_channel_lazy(host, port, use_tls);
 

@@ -107,6 +107,15 @@ pub fn inject_pop3(
                 rv.set(err);
                 return;
             }
+            if !use_tls && !vvva_permissions::plaintext_allowed(&host) {
+                let msg = v8::String::new(
+                    scope,
+                    &vvva_permissions::plaintext_denied_message("POP3", &host),
+                )
+                .unwrap();
+                rv.set(v8::Exception::error(scope, msg));
+                return;
+            }
 
             match TcpStream::connect(format!("{}:{}", host, port)) {
                 Ok(tcp) => {

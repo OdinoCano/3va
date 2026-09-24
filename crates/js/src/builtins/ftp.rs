@@ -156,6 +156,16 @@ pub fn inject_ftp(
                 _scope.throw_exception(err);
                 return;
             }
+            if !use_tls && !vvva_permissions::plaintext_allowed(&host) {
+                let msg = v8::String::new(
+                    _scope,
+                    &vvva_permissions::plaintext_denied_message("FTP", &host),
+                )
+                .unwrap();
+                let err = v8::Exception::error(_scope, msg);
+                _scope.throw_exception(err);
+                return;
+            }
 
             match TcpStream::connect(format!("{}:{}", host, port)) {
                 Ok(tcp) => {

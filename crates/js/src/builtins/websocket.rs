@@ -8,22 +8,21 @@ use vvva_permissions::{Capability, PermissionState};
 
 type WsConn = TungsteniteWs<MaybeTlsStream<TcpStream>>;
 
-#[cfg(not(feature = "fips"))]
-fn ws_connect(url: &str) -> Result<(WsConn, tungstenite::handshake::client::Response), String> {
-    tungstenite::connect(url).map_err(|e| e.to_string())
-}
-
-/// `tungstenite::connect` would use native-tls (OpenSSL) for wss://; the fips
-/// build does the TCP connect itself and hands tungstenite the FIPS rustls config.
-#[cfg(feature = "fips")]
+/// Connects the TCP stream itself and hands tungstenite our TLS connector for
+/// wss://: `tungstenite::connect` would build a default native-tls connector
+/// (TLS 1.0 floor), and the fips build needs the FIPS rustls config instead.
 fn ws_connect(url: &str) -> Result<(WsConn, tungstenite::handshake::client::Response), String> {
     let u = url::Url::parse(url).map_err(|e| e.to_string())?;
     let host = u.host_str().ok_or("URL has no host")?;
     let port = u.port_or_known_default().ok_or("URL has no port")?;
     let tcp = TcpStream::connect((host, port)).map_err(|e| e.to_string())?;
-    let cfg = super::tcp::pq_tls_client_config_native()?;
-    tungstenite::client_tls_with_config(url, tcp, None, Some(tungstenite::Connector::Rustls(cfg)))
-        .map_err(|e| e.to_string())
+    #[cfg(feature = "fips")]
+    let connector = tungstenite::Connector::Rustls(super::tcp::pq_tls_client_config_native()?);
+    #[cfg(not(feature = "fips"))]
+    let connector = tungstenite::Connector::NativeTls(
+        super::tls::TlsConnector::new().map_err(|e| e.to_string())?,
+    );
+    tungstenite::client_tls_with_config(url, tcp, None, Some(connector)).map_err(|e| e.to_string())
 }
 
 pub type WsPool = Arc<Mutex<HashMap<u32, WsConn>>>;
@@ -135,6 +134,17 @@ pub fn inject_websocket(
                     throw_js_error(
                         scope,
                         format!("Network access denied. Run with --allow-net={}", host),
+                    );
+                    return;
+                }
+                if url
+                    .get(..5)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("ws://"))
+                    && !vvva_permissions::plaintext_allowed(&host)
+                {
+                    throw_js_error(
+                        scope,
+                        vvva_permissions::plaintext_denied_message("WebSocket (ws://)", &host),
                     );
                     return;
                 }
