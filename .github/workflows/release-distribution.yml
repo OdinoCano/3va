@@ -13,6 +13,10 @@ on:
         description: 'Run every generation/patch step but skip anything that actually publishes or commits (npm publish, choco push, wingetcreate submit, git push). Manifests are uploaded as a workflow artifact instead so you can inspect them.'
         type: boolean
         default: true
+      only_npm:
+        description: 'Publish to npm only (retry a failed npm publish without re-pushing Chocolatey/winget/Snap/Homebrew).'
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # commit Formula/ and bucket/ back to this repo
@@ -81,14 +85,19 @@ jobs:
     runs-on: ubuntu-latest
     environment: npm
     permissions:
-      id-token: write  # for provenance attestations
+      # npm Trusted Publishing (OIDC): no NPM_TOKEN, no 2FA prompt. Each
+      # @edge_166 package lists this repo + workflow as its trusted publisher.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: npm with Trusted Publishing support (>= 11.5.1)
+        run: npm install -g npm@latest && npm --version
 
       - name: Download release binaries
         env:
@@ -140,7 +149,6 @@ jobs:
       - name: Publish platform packages
         if: env.DRY_RUN != 'true'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VER: ${{ env.VERSION }}
         run: |
           VER_BARE="${VER#v}"
@@ -157,7 +165,6 @@ jobs:
       - name: Publish hub package
         if: env.DRY_RUN != 'true'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VER: ${{ env.VERSION }}
         run: |
           VER_BARE="${VER#v}"
@@ -183,6 +190,7 @@ jobs:
   # wiring this job up properly instead of leaving them stale by hand).
   update-homebrew-and-scoop:
     name: Update Formula, Scoop, Nix, and Chocolatey VERIFICATION manifests
+    if: github.event.inputs.only_npm != 'true'
     needs: collect-hashes
     runs-on: ubuntu-latest
     steps:
@@ -466,6 +474,7 @@ jobs:
   # ── Publish to Chocolatey ────────────────────────────────────────────────────
   publish-chocolatey:
     name: Publish to Chocolatey
+    if: github.event.inputs.only_npm != 'true'
     needs: collect-hashes
     runs-on: windows-latest
     environment: chocolate
@@ -531,6 +540,7 @@ jobs:
   # ── Submit winget PR ──────────────────────────────────────────────────────────
   submit-winget:
     name: Submit winget PR
+    if: github.event.inputs.only_npm != 'true'
     needs: collect-hashes
     runs-on: windows-latest
     environment: winget
@@ -599,6 +609,7 @@ jobs:
   # this workflow triggers on.
   publish-snap:
     name: Publish to Snap Store
+    if: github.event.inputs.only_npm != 'true'
     strategy:
       fail-fast: false
       matrix:
