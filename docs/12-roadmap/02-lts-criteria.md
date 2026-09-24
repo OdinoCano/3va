@@ -44,11 +44,10 @@ Long Term Support means extended support and guaranteed stability.
 
 ## 2.3 LTS Support
 
-| Version | Type | Support |
-|---------|------|---------|
-| 1.0.x LTS | LTS | 24 months |
-| 1.1.x | Current | 6 months |
-| 2.0.x | Beta | - |
+There is currently **no LTS release line**. Only the latest minor release is
+supported; see [SECURITY.md § Supported Versions](../../SECURITY.md#supported-versions)
+for the authoritative policy. The criteria in § 2.2 are what a future LTS line
+would have to meet before one is announced.
 
 ## 2.4 Quality Process
 

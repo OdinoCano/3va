@@ -5,17 +5,24 @@
 Only the latest minor release receives security fixes. Upgrading to the latest
 release is the supported remediation path.
 
+A minor release is supported (bug fixes and security patches, shipped as patch
+releases) from the day it is published until the next minor release comes
+out. From that day on it gets **no further security updates**. There is no
+LTS line; see [docs/12-roadmap/02-lts-criteria.md](docs/12-roadmap/02-lts-criteria.md).
+
 | Version | Status      | Notes |
 |---------|-------------|-------|
-| 2.8.x   | Current     | Receives security patches |
-| < 2.8   | Unsupported | Upgrade to 2.8.x |
+| 2.9.x   | Current     | Receives security patches until 2.10.0 is released |
+| < 2.9   | Unsupported | No security updates. Upgrade to 2.9.x |
 
 ## Reporting a Vulnerability
 
 **Do not open a public GitHub issue for security bugs.**
 
-The canonical reporting channel is [GitHub Security Advisories](https://github.com/OdinoCano/3va/security/advisories/new).
-This is the mechanism referenced in the README ([source](README.md#reporting-security-vulnerabilities)).
+The canonical reporting channel is [GitHub Security Advisories](https://github.com/OdinoCano/3va/security/advisories/new)
+(private vulnerability reporting). This is the mechanism referenced in the README ([source](README.md#reporting-security-vulnerabilities)).
+If you cannot use GitHub, email the maintainer at `edgarcano.166@gmail.com`
+as a fallback.
 
 When reporting, include:
 - Description of the vulnerability
@@ -47,6 +54,10 @@ It is the largest of 2.5 × mean, 2.5 × median and 2.5 × mode.
   capability enforcement (`vvva_permissions`). All capabilities (filesystem, network,
   environment variables, child processes, native addons) are blocked by default and must
   be explicitly declared at invocation.
+- **Encrypted network by default**: plaintext protocols (`http://`, `ws://`,
+  FTP, and IMAP/POP3/IRC/MQTT/gRPC without TLS) are refused for every
+  non-loopback host unless the user passes `--allow-insecure`, on top of the
+  `--allow-net` grant. TLS 1.2 is the minimum, and certificates are always verified.
 - **Package manager (`vvva_pm`)**: Post-install scripts (`preinstall`, `install`,
   `postinstall`, `prepare`, `prepublish`) are **never executed** — this is a
   enforced invariant, not a flag.
@@ -126,10 +137,25 @@ Every release asset ships with:
 - `3va-<tag>.cdx.json`: a CycloneDX 1.5 SBOM, also signed with cosign
 
 ```sh
-cosign verify-blob 3va-v2.8.0-x86_64-unknown-linux-gnu.tar.gz \
-  --bundle 3va-v2.8.0-x86_64-unknown-linux-gnu.tar.gz.bundle \
+sha256sum -c 3va-v2.9.0-x86_64-unknown-linux-gnu.tar.gz.sha256   # integrity
+
+cosign verify-blob 3va-v2.9.0-x86_64-unknown-linux-gnu.tar.gz \
+  --bundle 3va-v2.9.0-x86_64-unknown-linux-gnu.tar.gz.bundle \
   --certificate-identity-regexp 'https://github.com/OdinoCano/3va/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The certificate identity and OIDC issuer checks confirm **who** built the
+release: the signature must come from a GitHub Actions workflow in
+`github.com/OdinoCano/3va`, running on GitHub's OIDC issuer, not from any
+individual's key. The SLSA provenance (`multiple.intoto.jsonl`) also records
+the exact workflow and commit. It can be checked with
+[slsa-verifier](https://github.com/slsa-framework/slsa-verifier):
+
+```sh
+slsa-verifier verify-artifact 3va-v2.9.0-x86_64-unknown-linux-gnu.tar.gz \
+  --provenance-path multiple.intoto.jsonl \
+  --source-uri github.com/OdinoCano/3va --source-tag v2.9.0
 ```
 
 ### FIPS 140-3
@@ -143,6 +169,55 @@ validation status are documented in
 
 Secure-development practices are mapped to NIST SP 800-218 (SSDF) in
 [docs/10-security/09-nist-ssdf.md](docs/10-security/09-nist-ssdf.md).
+
+## Security findings policy
+
+These thresholds apply to software composition analysis (SCA: `cargo-deny`,
+`cargo-vet`, Dependabot, OSV) and static analysis (SAST: Semgrep, CodeQL,
+clippy). The CI gates in [CONTRIBUTING.md](CONTRIBUTING.md#ci-gates-every-pr-must-pass)
+enforce them automatically on every pull request, and the `main` ruleset
+blocks merging while any of them fails.
+
+| Finding | Threshold | Action |
+|---------|-----------|--------|
+| Known vulnerability in a dependency, CVSS Critical or High | Blocks merge and release | Fix within the 8-day SLA, or record it as not exploitable (below) |
+| Known vulnerability in a dependency, CVSS Medium or Low | Blocks merge (`cargo-deny`) | Fix by the next release, at most 90 days, or record it as not exploitable |
+| Unmaintained / yanked crate (RustSec informational) | Blocks merge | Replace it, or suppress it with a written rationale in `deny.toml` |
+| Malicious crate (RustSec) or unaudited new crate (`cargo-vet`) | Blocks merge | Remove it, or audit it |
+| License not on the `deny.toml` allowlist, or an unknown source | Blocks merge | Replace the dependency |
+| Semgrep ERROR, or CodeQL high/critical alert | Blocks merge | Fix it, or dismiss it as a false positive with a written justification |
+| Semgrep WARNING, or CodeQL medium/low alert | Doesn't block | Triaged before the next release |
+
+**Before every release**, no open SCA or SAST finding may be above these
+thresholds. The release tag is only cut from a `main` commit where every gate
+passed.
+
+**Suppressions.** A finding can only be suppressed if it has been confirmed not
+exploitable in 3va. The reason is written next to the `ignore` entry in
+`deny.toml`, and vulnerabilities (as opposed to maintenance notices) are also
+published in the VEX document
+[`vex.openvex.json`](vex.openvex.json) (OpenVEX). Suppressions are reviewed at
+every minor release.
+
+## Secrets and credentials policy
+
+- **Where secrets live.** Only in GitHub Actions encrypted secrets, scoped
+  to deployment environments (`crates-io`, `npm`, …) wherever possible. Never
+  in the repository, in logs, or in local config that gets committed.
+  `gitleaks` (a pre-commit hook and CI) and GitHub secret scanning with push
+  protection enforce this.
+- **Prefer no secret at all.** Release signing is keyless (Sigstore OIDC), and npm
+  publishing uses Trusted Publishing (OIDC). Long-lived tokens are used only
+  where a registry offers nothing else (crates.io, Chocolatey, Snapcraft,
+  winget).
+- **Who can access them.** Only the maintainers listed in
+  [GOVERNANCE.md](GOVERNANCE.md#access-to-sensitive-resources). Workflows
+  receive a secret only in the job that needs it, with a read-only
+  `GITHUB_TOKEN` by default.
+- **Rotation.** Every long-lived token is scoped to the smallest set of
+  permissions it needs and has an expiry of at most one year. Tokens are
+  rotated at least once a year, and immediately if a leak is suspected or
+  when a maintainer with access leaves.
 
 ## Advisory History
 
@@ -180,6 +255,6 @@ Mean 2.93 days · median 0.29 · mode 0.29.
 
 Confirmed by Edgar Cano (2026-09-23):
 - Version support: latest minor only
-- Reporting channel: GitHub Security Advisories
+- Reporting channel: GitHub Security Advisories (email fallback: edgarcano.166@gmail.com)
 - SLA: 8-day patch window for Critical/High (derived from measured history, see above)
 - Disclosure: coordinated, 90-day embargo maximum

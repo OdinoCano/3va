@@ -1,0 +1,31 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/OdinoCano/3va/blob/main/vex.openvex.json",
+  "author": "Edgar Cano <edgarcano.166@gmail.com>",
+  "role": "Project maintainer",
+  "timestamp": "2026-09-24T00:00:00Z",
+  "version": 1,
+  "tooling": "Maintained by hand alongside the [advisories] ignore list in deny.toml",
+  "statements": [
+    {
+      "vulnerability": {
+        "@id": "https://rustsec.org/advisories/RUSTSEC-2023-0071",
+        "name": "RUSTSEC-2023-0071",
+        "aliases": ["CVE-2023-49092", "GHSA-c38w-74pg-36hr", "GHSA-4grx-2x9w-596c"],
+        "description": "Marvin Attack: potential key recovery through timing side channels in RSA PKCS#1 v1.5 decryption"
+      },
+      "products": [
+        {
+          "@id": "pkg:github/OdinoCano/3va",
+          "subcomponents": [
+            { "@id": "pkg:cargo/rsa@0.9.10" },
+            { "@id": "pkg:cargo/rsa@0.10.0-rc.18" }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "3va uses the rsa crate only to sign and verify (crypto.createSign/createVerify) and, through russh, for SSH signatures. RSA private-key decryption (RsaPrivateKey::decrypt), the only code path affected by the timing side channel, is never called."
+    }
+  ]
+}
