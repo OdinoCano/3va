@@ -15,6 +15,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: jobs get a read-only token unless they ask for more.
+permissions:
+  contents: read
+
 jobs:
   # ── Gate 1: formatting ───────────────────────────────────────────────────────
   fmt:
@@ -133,3 +137,46 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Gate 7: DCO sign-off ─────────────────────────────────────────────────────
+  # Every commit in a PR must carry "Signed-off-by:" (git commit -s), the
+  # contributor's assertion of the Developer Certificate of Origin
+  # (https://developercertificate.org). See CONTRIBUTING.md.
+  dco:
+    name: DCO sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Signed-off-by on every commit
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            git log -1 --format=%B "$c" | grep -q '^Signed-off-by: ' \
+              || { echo "::error::commit $c has no Signed-off-by (use git commit -s)"; missing=1; }
+          done
+          exit $missing
+
+  # ── Coverage (report only, does not block) ───────────────────────────────────
+  coverage:
+    name: Coverage (cargo-llvm-cov)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Measure line and branch coverage
+        run: |
+          cargo llvm-cov --workspace --summary-only | tee coverage.txt
+          { echo '```'; cat coverage.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

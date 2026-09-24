@@ -14,9 +14,10 @@ on:
         type: boolean
         default: false
 
+# Least privilege: read-only by default; jobs that sign or publish request
+# write scopes individually below.
 permissions:
-  contents: write   # create GitHub releases and upload assets
-  id-token: write   # needed for OIDC/keyless signing and SLSA provenance
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,8 +27,22 @@ env:
   TEST_ONLY: ${{ github.event.inputs.test_only }}
 
 jobs:
+  # ── Validate the release tag before anything uses it ─────────────────────────
+  # workflow_dispatch lets a collaborator type any tag; reject anything that is
+  # not a plain SemVer tag so it can't inject shell or path components.
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check RELEASE_TAG is SemVer
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
+            || { echo "::error::invalid release tag: $RELEASE_TAG"; exit 1; }
+
   # ── Build precompiled binaries ────────────────────────────────────────────────
   build:
+    needs: validate
     name: Build ${{ matrix.target }}${{ matrix.fips && ' (FIPS)' || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -117,7 +132,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          VERSION="${{ env.RELEASE_TAG }}"
+          VERSION="$RELEASE_TAG"
           TARGET="${{ matrix.target }}"
           ARCHIVE="3va-${VERSION}-${TARGET}${{ matrix.fips && '-fips' || '' }}.tar.gz"
           cp "target/${TARGET}/release/3va" 3va
@@ -129,7 +144,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $VERSION = "${{ env.RELEASE_TAG }}"
+          $VERSION = $Env:RELEASE_TAG
           $TARGET  = "${{ matrix.target }}"
           $ARCHIVE = "3va-${VERSION}-${TARGET}.zip"
           Copy-Item "target\${TARGET}\release\3va.exe" 3va.exe
@@ -190,8 +205,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      id-token: write
+      contents: read
+      id-token: write   # keyless cosign signing
 
     steps:
       - name: Download all binaries
@@ -223,6 +238,7 @@ jobs:
   # ── SBOM (CycloneDX 1.5) — required by EU CRA / US EO 14028 consumers ───────
   sbom:
     name: SBOM
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: read
