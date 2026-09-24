@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Aggregate test262 pass rate across `language/` + `built-ins/` + `intl402/`
 //! — the same three trees `crates/test/tests/test262.rs` gates, aggregated
 //! here into one number — printed as a `bench/run.sh`-style markdown section

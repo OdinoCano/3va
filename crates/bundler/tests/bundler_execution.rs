@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 /// Execution-level tests for the bundler: bundle JS/TS → run in JsEngine → verify result.
 ///
 /// These tests are the critical complement to bundler_integration.rs:

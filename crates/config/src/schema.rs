@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Serde-compatible schema for `3va.config.*`.
 
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for the IRC builtin.
 // Run: cargo test -p vvva_js --test irc_module
 

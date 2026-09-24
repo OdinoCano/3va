@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Pruebas de integración para TestRunner: verifica el pipeline completo
 // desde archivos .test.js/.test.ts hasta resultados Parseados.
 //

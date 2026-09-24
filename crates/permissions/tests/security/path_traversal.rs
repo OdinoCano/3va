@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests de path traversal contra VirtualFs::resolve.
 // VirtualFs normaliza internamente los segmentos .. y . antes de buscar
 // el mount point, por lo que un path como /app/../etc/passwd se resuelve

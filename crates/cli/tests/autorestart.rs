@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // End-to-end tests for the supervised process manager's automatic restart on
 // crash. These drive the real `3va` binary and kill real processes:
 //

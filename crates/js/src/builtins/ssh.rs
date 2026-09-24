@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! SSH/SFTP client built-in module
 //!
 //! Provides: `require('ssh2')` with `Client` class, backed by real SSH via

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Default (non-FIPS) native `crypto` ops on RustCrypto. The `fips` build
 //! swaps this module for `crypto_fips.rs`, which has the same signatures.
 

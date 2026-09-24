@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for the FTP builtin.
 // Run: cargo test -p vvva_js --test ftp_module
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use libffi::middle::{Cif, CodePtr, Type, arg};
 use libloading::Library;
 use std::cell::RefCell;

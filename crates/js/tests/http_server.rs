@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for http.createServer() — real HTTP/1.1 listener.
 //
 // The port is bound synchronously (__httpListen) so it is ready immediately after

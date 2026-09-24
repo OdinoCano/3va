@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! MQTT (Message Queuing Telemetry Transport) client built-in module
 //!
 //! Native functions:

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Permission model — capability-based sandbox for network, filesystem, env, and process access.
 //!
 //! # Examples

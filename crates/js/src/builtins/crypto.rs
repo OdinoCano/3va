@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use crate::builtins::v8_compat::{js_value_to_bytes, uint8array_from_bytes, uint8array_to_vec};
 
 #[cfg(feature = "fips")]

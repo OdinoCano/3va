@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Framework compatibility tests — import.meta.url/env/hot and related APIs.
 //
 // These are the foundation required for meta-frameworks (Astro, SvelteKit,

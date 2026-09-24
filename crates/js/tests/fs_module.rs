@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for the fs builtin: stat, symlink, rename, copyFile, appendFile,
 // realpath, access, createReadStream, readdirSync with withFileTypes, fs.promises.
 // Run: cargo test -p vvva_js --test fs_module

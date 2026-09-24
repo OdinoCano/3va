@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use v8::{

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Hashing and HTTPS for the package manager, in one place so the `fips` build
 //! can route both through the AWS-LC FIPS 140-3 module (see
 //! docs/10-security/10-fips.md). Default build: RustCrypto `sha2` plus reqwest's

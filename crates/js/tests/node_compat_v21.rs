@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for v2.1.0 Node.js compat additions:
 // timers/promises, dns (real lookup), readline, and --heap-snapshot.
 // Run: cargo test -p vvva_js --test node_compat_v21

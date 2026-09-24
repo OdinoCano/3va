@@ -2,7 +2,7 @@
 name = "vvva_firewall"
 version = "2.9.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 description = "HTTP firewall for the 3va runtime — rate limiting, token bucket, Slowloris/RUDY protection, IP auto-blocking"
 repository = "https://github.com/OdinoCano/3va"
 homepage = "https://github.com/OdinoCano/3va"

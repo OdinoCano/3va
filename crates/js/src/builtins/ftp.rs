@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! FTP (File Transfer Protocol) client built-in module
 //!
 //! Native functions:

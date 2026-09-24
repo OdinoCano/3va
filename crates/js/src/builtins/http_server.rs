@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! HTTP/1.1 server backend for `http.createServer()`.
 
 use crate::builtins::NativeCtxRegistry;

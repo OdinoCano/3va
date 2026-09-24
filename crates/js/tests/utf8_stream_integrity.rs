@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Regression tests for multi-byte UTF-8 integrity through streamed/chunked
 // data paths. Pins the exact defect class behind the "Metro under 3va serves
 // bundles with emoji/accented characters replaced by U+FFFD" bug:

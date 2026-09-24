@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Node-API (NAPI) compatibility layer for V8.
 //!
 //! Native `.node` addons expose a C ABI whose symbols we implement here as

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! tc39/test262 conformance run. Requires `scripts/setup-test262.sh` first
 //! (~70k tests, so this is `#[ignore]`d — opt in with `cargo test --ignored test262`).
 //! Run a narrower slice while a feature is unsupported, e.g.:

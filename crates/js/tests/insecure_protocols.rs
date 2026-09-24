@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Plaintext protocols to non-loopback hosts are refused unless the user opts
 // in with --allow-insecure, even when --allow-net grants the host.
 // Own test binary: `set_allow_insecure` is process-wide.

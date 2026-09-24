@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for WinterCG web platform globals: Headers, Request, Response, structuredClone,
 // navigator, self.
 //

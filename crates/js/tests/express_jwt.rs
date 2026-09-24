@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;

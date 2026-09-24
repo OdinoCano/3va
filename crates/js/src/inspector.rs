@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Chrome DevTools Protocol (CDP) inspector over WebSocket (port 9229 by default).
 //!
 //! When `--inspect[=host:port]` is passed, a WebSocket server is started before

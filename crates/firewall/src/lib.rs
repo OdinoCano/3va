@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! # vvva_firewall
 //!
 //! HTTP firewall for the 3va runtime's built-in HTTP server.

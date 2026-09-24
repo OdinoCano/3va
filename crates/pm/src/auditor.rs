@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! OSV-based vulnerability auditor for 3va dependencies.
 //!
 //! Queries <https://api.osv.dev/v1/querybatch> in batches and caches results

@@ -2,7 +2,7 @@
 name = "vvva_pm"
 version = "2.9.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 description = "Content-addressable package manager for the 3va runtime — npm-compatible resolver, virtual store, lockfile, OSV audit"
 repository = "https://github.com/OdinoCano/3va"
 homepage = "https://github.com/OdinoCano/3va"

@@ -2,7 +2,7 @@
 name = "vvva_bundler"
 version = "2.9.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 description = "TypeScript/JavaScript bundler and hot-module-reload dev server for the 3va runtime (oxc-based)"
 repository = "https://github.com/OdinoCano/3va"
 homepage = "https://github.com/OdinoCano/3va"

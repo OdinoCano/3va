@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! IRC (Internet Relay Chat) client built-in module
 //!
 //! Native functions:

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! POP3 (Post Office Protocol v3) client built-in module
 //!
 //! Native functions:

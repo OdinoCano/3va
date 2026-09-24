@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Package manager — install, update, audit, and lockfile management for 3va projects.
 
 pub mod auditor;

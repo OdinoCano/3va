@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! UDP datagram socket backend for the `dgram` Node.js module.
 
 use base64::Engine;

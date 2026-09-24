@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use v8::{ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue};
 
 fn set_fn(

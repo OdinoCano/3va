@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for Web compat globals: sessionStorage, localStorage, URLPattern, EventSource.
 // Run: cargo test -p vvva_js --test web_compat
 

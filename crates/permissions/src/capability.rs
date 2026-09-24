@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use crate::audit::{AuditEvent, AuditLog};
 use crate::scope::{self, ROOT_SCOPE};
 use chrono::Utc;

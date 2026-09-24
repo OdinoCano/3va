@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Loads a `3va.config.*` file from disk and parses it into a [`ProjectConfig`].
 //!
 //! `.json` files are parsed directly with `serde_json`.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::path::Path;
 use vvva_test::test262::run_suite;
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use base64::Engine as _;
 use std::io::Read;
 use std::sync::Arc;

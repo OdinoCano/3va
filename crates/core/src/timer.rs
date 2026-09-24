@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 

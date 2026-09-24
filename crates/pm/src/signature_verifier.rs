@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use crate::fips::{Digest, Sha256, Sha512};
 use base64::Engine;
 use serde::{Deserialize, Serialize};

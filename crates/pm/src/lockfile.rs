@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use crate::resolver::DependencyGraph;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

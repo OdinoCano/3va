@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Plaintext network protocols (`http://`, `ws://`, FTP, and IMAP/POP3/IRC/MQTT/gRPC
 //! without TLS) are disabled by default for every host except loopback. The
 //! user opts in with `--allow-insecure`; granting `--allow-net` alone is not

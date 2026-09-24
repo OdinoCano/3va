@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for Node.js-style streams and WHATWG Streams API.
 // Run: cargo test -p vvva_js --test stream_module
 

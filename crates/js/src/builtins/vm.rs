@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::collections::HashMap;
 use v8::{
     ContextScope, FunctionCallbackArguments, GetPropertyNamesArgs, HandleScope, PinScope,

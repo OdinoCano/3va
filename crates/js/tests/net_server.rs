@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for net.createServer() — raw TCP server backed by __netListen/__netAcceptAsync.
 //
 // Run: cargo test -p vvva_js --test net_server

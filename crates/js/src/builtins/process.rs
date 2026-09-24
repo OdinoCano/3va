@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::sync::Arc;
 use v8::{ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue};
 use vvva_permissions::{Capability, PermissionState};

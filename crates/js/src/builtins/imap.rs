@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! IMAP4rev1 client backend.
 //!
 //! Architecture:

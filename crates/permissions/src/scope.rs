@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Tracks "which package's code is currently executing" so `PermissionState`
 //! can apply a grant declared for one dependency (`package.json["3va"].permissions.axios`)
 //! without applying it to every other dependency too.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Integration tests for PM CLI commands: pack, init, link/unlink, why
 // Run: cargo test -p vvva_cli --test pm_commands
 

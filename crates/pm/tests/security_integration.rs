@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Pruebas de integración para el pipeline de seguridad del PM:
 // malware scanner, secrets scanner, y auditor (sin red).
 //

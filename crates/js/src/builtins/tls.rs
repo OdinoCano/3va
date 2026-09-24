@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Single source of TLS for the runtime's client builtins.
 //!
 //! Default build: tcp/ftp/imap/irc/mqtt/pop3 use OS-native TLS (native-tls),

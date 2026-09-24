@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use serde::{Deserialize, Serialize};
 
 pub type TestFn = Box<dyn Fn() + Send + Sync>;

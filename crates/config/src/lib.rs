@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! `3va.config.ts` / `3va.config.js` / `3va.config.json` loader.
 //!
 //! Searches the current directory and parents for a config file, deserialises

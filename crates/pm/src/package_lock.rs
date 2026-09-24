@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use crate::lockfile::{Lockfile, LockfileDep, LockfilePackage};
 use serde::Deserialize;
 use std::collections::HashMap;

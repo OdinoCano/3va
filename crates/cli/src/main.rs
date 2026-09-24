@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use clap::{Parser, Subcommand};
 
 // glibc's default malloc rarely returns freed pages to the OS — it keeps

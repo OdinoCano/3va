@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::path::PathBuf;
 use tempfile::TempDir;
 use vvva_bundler::{Bundler, BundlerOptions, OutputFormat, bundle_file};

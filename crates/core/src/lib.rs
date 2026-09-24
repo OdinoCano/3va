@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Core runtime primitives — async task queue and timer management shared across crates.
 //!
 //! # Examples

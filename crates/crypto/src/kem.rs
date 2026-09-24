@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! ML-KEM-768 Key Encapsulation Mechanism (FIPS 203).
 //!
 //! ML-KEM (formerly Kyber) is the NIST-standardised post-quantum KEM.  The

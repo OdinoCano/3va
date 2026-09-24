@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests del modelo de capacidades contra bypass de permisos.
 // Cubre el algoritmo deny-by-default documentado en docs/06-permissions/01-capability-model.md
 // y los enforcers de docs/06-permissions/02-enforcement.md.

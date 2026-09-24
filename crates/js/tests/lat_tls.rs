@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Latency baseline for the TLS transport (tls.pqConnect, gated on OpenSSL >=
 // 3.5), measured end-to-end against a real `openssl s_server` on loopback.
 // Kept as its own test binary so each transport's engine runs in isolation.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Integration tests for the module-resolution fixes:
 //
 //   Bug 1 — __fallbackModules unreachable: stubs for packages not in

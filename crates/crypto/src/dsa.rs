@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! ML-DSA-65 Digital Signature Algorithm (FIPS 204).
 //!
 //! ML-DSA (formerly Dilithium) is the NIST-standardised post-quantum signature

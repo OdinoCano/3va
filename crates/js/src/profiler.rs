@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! CPU sampling profiler for the JS engine.
 //!
 //! Sampling is performed inside JS via `setInterval` + `new Error().stack`, so it is accurate

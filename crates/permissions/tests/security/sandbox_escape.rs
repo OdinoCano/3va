@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests de aislamiento del sandbox contra intentos de escape.
 // Cubre VirtualFs (aislamiento de archivos) y VirtualNetwork (aislamiento de red)
 // documentados en docs/06-permissions/03-sandboxing.md §3.4 y §3.5.

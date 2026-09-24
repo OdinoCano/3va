@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Secret and credential detection in source files.
 //!
 //! Scans source code for hardcoded credentials using regex patterns.
