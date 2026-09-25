@@ -207,7 +207,11 @@ pub fn create_workspace_symlinks(root: &Path, packages: &[WorkspacePackage]) -> 
                         Some(v) => v,
                         None => continue,
                     };
-                    if !ver.starts_with("workspace:") {
+                    // `workspace:` refs, and any dep named after a member (e.g.
+                    // "b": "*"), resolve to the local package.
+                    if !ver.starts_with("workspace:")
+                        && !name_to_path.contains_key(dep_name.as_str())
+                    {
                         continue;
                     }
 
@@ -426,6 +430,37 @@ mod tests {
             "workspace: refs must be skipped"
         );
         assert!(pkg.all_deps.contains_key("axios"));
+    }
+
+    #[test]
+    fn dependency_named_after_a_member_links_locally_even_with_star_range() {
+        let root = tempfile::tempdir().unwrap();
+        let a_dir = root.path().join("packages/a");
+        let b_dir = root.path().join("packages/b");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+        std::fs::write(
+            a_dir.join("package.json"),
+            r#"{"name":"a","dependencies":{"b":"*"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            b_dir.join("package.json"),
+            r#"{"name":"b","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let pkg = |name: &str, path: &Path| WorkspacePackage {
+            name: name.into(),
+            version: "1.0.0".into(),
+            path: path.to_path_buf(),
+            all_deps: HashMap::new(),
+        };
+
+        create_workspace_symlinks(root.path(), &[pkg("a", &a_dir), pkg("b", &b_dir)]).unwrap();
+
+        let link = a_dir.join("node_modules/b");
+        assert!(link.is_symlink(), "b must be linked to the local member");
+        assert_eq!(std::fs::read_link(&link).unwrap(), b_dir);
     }
 
     #[test]

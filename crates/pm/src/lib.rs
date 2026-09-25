@@ -2894,12 +2894,27 @@ async fn install_with_transitive(
     }
 
     // Delegate manifest update to a lightweight helper using the same logic as before
-    install_package_impl(root_spec, force, allow_net, project_root, true, false)
-        .await
-        .or_else(|_| {
-            // If impl fails (package already there), update manifest manually
-            update_manifest_only(root_spec, project_root)
-        })
+    // install_package_impl refuses a package that is already present; only in
+    // that case record it directly. Any other failure (not in the registry, no
+    // matching version, ...) must surface: swallowing it wrote the package into
+    // package.json as "*" and exited 0.
+    let result = install_package_impl(root_spec, force, allow_net, project_root, true, false).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let (pkg_name, _) = parse_package_spec(root_spec)?;
+            let installed = project_root
+                .join("node_modules")
+                .join(&pkg_name)
+                .join("package.json")
+                .exists();
+            if installed {
+                update_manifest_only(root_spec, project_root)
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 /// `3va ci`: install exactly what `3va-lock.json` records.
@@ -2988,8 +3003,11 @@ fn update_manifest_only(root_spec: &str, project_root: &Path) -> anyhow::Result<
     let installed_ver = std::fs::read_to_string(node_modules.join(&pkg_name).join("package.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v["version"].as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "*".to_string());
+        .and_then(|v| v["version"].as_str().map(|s| s.to_string()));
+
+    let Some(installed_ver) = installed_ver else {
+        anyhow::bail!("'{pkg_name}' is not installed in node_modules");
+    };
 
     // Rewrite the manifest in place, changing only the one dependency.
     //
@@ -3941,7 +3959,15 @@ pub async fn install_workspace(
     // ── Step 1: install merged deps into the workspace root node_modules/ ─────
     // Deps are deduplicated across all packages; the highest version wins.
     // All packages are installed concurrently into the root node_modules/.
-    let merged = workspace::merged_deps(&packages);
+    // A dependency named after a workspace member is that member (npm/yarn
+    // link it locally), whatever its range, e.g. "*". It must never be
+    // fetched from the registry: that pulled an unrelated public package with
+    // the same name (dependency confusion) and rewrote the member's manifest.
+    // Step 3 symlinks these instead.
+    let members: std::collections::HashSet<&str> =
+        packages.iter().map(|p| p.name.as_str()).collect();
+    let mut merged = workspace::merged_deps(&packages);
+    merged.retain(|name, _| !members.contains(name.as_str()));
     if !merged.is_empty() {
         println!(
             "Installing {} unique dep(s) into workspace root...",
@@ -3996,6 +4022,9 @@ pub async fn install_workspace(
         );
 
         for (dep_name, dep_version) in &pkg.all_deps {
+            if members.contains(dep_name.as_str()) {
+                continue;
+            }
             let spec = format!("{}@{}", dep_name, normalize_version(dep_version));
             // update_manifest=true so each package's package.json + lockfile is updated.
             install_with_transitive(&spec, false, allow_net, &pkg.path, true).await?;
