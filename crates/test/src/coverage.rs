@@ -161,6 +161,60 @@ pub fn instrument_source(source: &str, file_id: &str) -> (String, Vec<StmtInfo>)
     (output, stmt_infos)
 }
 
+/// Every project source file instrumented for `3va test --coverage`.
+pub struct InstrumentedProject {
+    /// `{ "<canonical path>": "<instrumented source>" }`, installed as
+    /// `globalThis.__3va_covSources` so `require()` loads these instead of the
+    /// files on disk.
+    pub sources_json: String,
+    /// Statement table per file id (the canonical path).
+    pub stmts: HashMap<String, Vec<StmtInfo>>,
+}
+
+/// Instrument every source file under `root` (same selection as the report:
+/// `.js`/`.ts`, no tests, no `node_modules`/`dist`/`target`/dot-dirs).
+pub fn instrument_project(root: &Path) -> InstrumentedProject {
+    let mut sources = serde_json::Map::new();
+    let mut stmts = HashMap::new();
+    for file in collect_source_files(root) {
+        let Ok(src) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let id = file
+            .canonicalize()
+            .unwrap_or(file)
+            .to_string_lossy()
+            .into_owned();
+        let (code, infos) = instrument_source(&src, &id);
+        // Served in place of what `__readFile` returns, so transpile the same way.
+        let code = if vvva_js::esm::source_is_esm(&src, &id) {
+            vvva_js::transpiler::transpile_to_cjs(&code, false)
+        } else if id.ends_with(".ts") {
+            vvva_js::transpiler::transpile(&code)
+        } else {
+            vvva_js::transpiler::transpile_js(&code)
+        };
+        sources.insert(id.clone(), serde_json::Value::String(code));
+        stmts.insert(id, infos);
+    }
+    InstrumentedProject {
+        sources_json: serde_json::Value::Object(sources).to_string(),
+        stmts,
+    }
+}
+
+/// Add the counters from `JSON.stringify(globalThis.__cov)` (all files) into `into`.
+pub fn merge_hit_counts(json: &str, into: &mut HashMap<String, HashMap<usize, u64>>) {
+    if let Ok(serde_json::Value::Object(files)) = serde_json::from_str(json) {
+        for (id, counts) in files {
+            let entry = into.entry(id).or_default();
+            for (idx, hits) in parse_hit_counts(&counts.to_string()) {
+                *entry.entry(idx).or_default() += hits;
+            }
+        }
+    }
+}
+
 /// Parse the JSON produced by
 /// `JSON.stringify(globalThis.__cov["file_id"] || {})`.
 ///
@@ -230,12 +284,18 @@ pub struct CoverageReport {
     pub passed_tests: usize,
 }
 
-pub fn generate_coverage_report(test_results: &[TestResult], root: &Path) -> CoverageReport {
+/// `statements` holds per-file statement coverage keyed by canonical path; pass
+/// an empty map when coverage wasn't instrumented.
+pub fn generate_coverage_report(
+    test_results: &[TestResult],
+    root: &Path,
+    statements: &HashMap<PathBuf, CoverageResult>,
+) -> CoverageReport {
     let source_files = collect_source_files(root);
 
     let mut results_by_file: HashMap<String, Vec<&TestResult>> = HashMap::new();
     for result in test_results {
-        let key = PathBuf::from(&result.name)
+        let key = PathBuf::from(&result.file)
             .canonicalize()
             .unwrap_or_else(|_| PathBuf::from(&result.name))
             .to_string_lossy()
@@ -283,7 +343,9 @@ pub fn generate_coverage_report(test_results: &[TestResult], root: &Path) -> Cov
             tests_total,
             tests_passed,
             tests_failed,
-            statement_coverage: None,
+            statement_coverage: statements
+                .get(&source.canonicalize().unwrap_or_else(|_| source.clone()))
+                .cloned(),
         });
     }
 

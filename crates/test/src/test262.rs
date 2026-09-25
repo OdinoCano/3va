@@ -292,6 +292,7 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
     let Ok(source) = std::fs::read_to_string(path) else {
         return vec![TestResult {
             name: display,
+            file: String::new(),
             status: TestStatus::Failed,
             duration_ms: 0,
             error: Some("could not read file".into()),
@@ -305,6 +306,7 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
         Err(e) => {
             return vec![TestResult {
                 name: display,
+                file: String::new(),
                 status: TestStatus::Failed,
                 duration_ms: 0,
                 error: Some(format!("could not create temp dir: {e}")),
@@ -319,6 +321,7 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
     if let Err(e) = std::fs::write(&module_path, &source) {
         return vec![TestResult {
             name: display,
+            file: String::new(),
             status: TestStatus::Failed,
             duration_ms: start.elapsed().as_millis() as u64,
             error: Some(format!("could not write temp module: {e}")),
@@ -342,6 +345,7 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
         Err(e) => {
             return vec![TestResult {
                 name: display,
+                file: String::new(),
                 status: TestStatus::Failed,
                 duration_ms: start.elapsed().as_millis() as u64,
                 error: Some(e.to_string()),
@@ -352,6 +356,7 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
     if let Err(e) = engine.install_test262_realm_support().await {
         return vec![TestResult {
             name: display,
+            file: String::new(),
             status: TestStatus::Failed,
             duration_ms: start.elapsed().as_millis() as u64,
             error: Some(format!("failed to install $262 realm support: {e}")),
@@ -360,6 +365,7 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
     if let Err(e) = engine.install_test262_agent_support().await {
         return vec![TestResult {
             name: display,
+            file: String::new(),
             status: TestStatus::Failed,
             duration_ms: start.elapsed().as_millis() as u64,
             error: Some(format!("failed to install $262 agent support: {e}")),
@@ -370,6 +376,7 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
     if let Err(e) = engine.eval(&harness).await {
         return vec![TestResult {
             name: display,
+            file: String::new(),
             status: TestStatus::Failed,
             duration_ms: start.elapsed().as_millis() as u64,
             error: Some(format!("harness eval failed: {e}")),
@@ -466,6 +473,7 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
     let duration_ms = start.elapsed().as_millis() as u64;
     vec![TestResult {
         name: display,
+        file: String::new(),
         status,
         duration_ms,
         error,
@@ -483,6 +491,7 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
     let Ok(source) = std::fs::read_to_string(path) else {
         return vec![TestResult {
             name: display,
+            file: String::new(),
             status: TestStatus::Failed,
             duration_ms: 0,
             error: Some("could not read file".into()),
@@ -505,6 +514,7 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
     {
         return vec![TestResult {
             name: display,
+            file: String::new(),
             status: TestStatus::Skipped,
             duration_ms: 0,
             error: Some(format!("unsupported feature(s): {:?}", meta.features)),
@@ -538,6 +548,7 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
             Ok(engine) => engine,
             Err(e) => {
                 results.push(TestResult {
+                    file: String::new(),
                     name,
                     status: TestStatus::Failed,
                     duration_ms: start.elapsed().as_millis() as u64,
@@ -548,6 +559,7 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
         };
         if let Err(e) = engine.install_test262_realm_support().await {
             results.push(TestResult {
+                file: String::new(),
                 name,
                 status: TestStatus::Failed,
                 duration_ms: start.elapsed().as_millis() as u64,
@@ -557,6 +569,7 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
         }
         if let Err(e) = engine.install_test262_agent_support().await {
             results.push(TestResult {
+                file: String::new(),
                 name,
                 status: TestStatus::Failed,
                 duration_ms: start.elapsed().as_millis() as u64,
@@ -633,6 +646,7 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
         let duration_ms = start.elapsed().as_millis() as u64;
 
         results.push(TestResult {
+            file: String::new(),
             name,
             status,
             duration_ms,

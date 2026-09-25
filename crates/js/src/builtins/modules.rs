@@ -4732,7 +4732,8 @@ pub fn inject_require(
             // localRequire, not the entry script's, same as require() above.
             var localImportAsync = __makeImportAsync(localRequire);
 
-            var source = __readFile(resolved);
+            // `3va test --coverage` installs instrumented copies of the project's sources.
+            var source = (globalThis.__3va_covSources && globalThis.__3va_covSources[resolved]) || __readFile(resolved);
             // Rewrite bare import() calls so they use our runtime's __importAsync.
             // V8's new Function() doesn't support native dynamic import(), so any
             // import( that wasn't already rewritten by the Rust transpiler (e.g. raw

@@ -64,6 +64,16 @@ fn collect_test_files(paths: &[PathBuf]) -> Vec<PathBuf> {
     files
 }
 
+/// Directory whose sources `--coverage` instruments and reports on: the first
+/// path given (its parent when it is a file), or the current directory.
+fn coverage_root(paths: &[PathBuf]) -> PathBuf {
+    match paths.first() {
+        Some(p) if p.is_file() => p.parent().map(|d| d.to_path_buf()).unwrap_or_default(),
+        Some(p) => p.clone(),
+        None => PathBuf::from("."),
+    }
+}
+
 async fn run_tests_and_report(paths: &[PathBuf], coverage: bool) -> anyhow::Result<(usize, usize)> {
     let files = collect_test_files(paths);
     if files.is_empty() {
@@ -71,7 +81,12 @@ async fn run_tests_and_report(paths: &[PathBuf], coverage: bool) -> anyhow::Resu
         return Ok((0, 0));
     }
 
-    let results = vvva_test::run_tests(paths.to_vec(), None).await?;
+    let cfg = vvva_test::TestConfig {
+        coverage_root: coverage.then(|| coverage_root(paths)),
+        ..Default::default()
+    };
+    let (results, statements) =
+        vvva_test::run_tests_with_coverage(paths.to_vec(), Some(cfg)).await?;
     let passed = results
         .iter()
         .filter(|r| r.status == vvva_test::TestStatus::Passed)
@@ -87,11 +102,8 @@ async fn run_tests_and_report(paths: &[PathBuf], coverage: bool) -> anyhow::Resu
     println!();
 
     if coverage {
-        let root = paths
-            .first()
-            .map(|p| p.as_path())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let report = vvva_test::generate_coverage_report(&results, root);
+        let report =
+            vvva_test::generate_coverage_report(&results, &coverage_root(paths), &statements);
         vvva_test::print_coverage_report(&report);
     }
 
@@ -3386,13 +3398,13 @@ enum Commands {
         /// The output file path
         #[arg(short, long, default_value = "dist/bundle.js")]
         output: String,
-        /// Enable code splitting (creates separate chunks)
+        /// Code splitting (not supported yet: the command fails if it is set)
         #[arg(long = "split")]
         split: bool,
         /// Minify the output
         #[arg(long = "minify")]
         minify: bool,
-        /// Generate a source map alongside the bundle
+        /// Source map output (not supported yet: the command fails if it is set)
         #[arg(long = "source-map")]
         source_map: bool,
     },
@@ -3962,6 +3974,26 @@ fn split_version(spec: &str) -> (&str, Option<&str>) {
 /// `3va create-<pkg>[@version]` (npx-style single-token invocation) is sugar
 /// for `3va create <pkg>[@version]` — rewrite before clap sees it so both
 /// spellings hit the same `Commands::Create` handler.
+/// `3va ./script.js` → `3va run ./script.js`. This is what a
+/// `#!/usr/bin/env 3va` shebang executes: the kernel appends the script path
+/// right after the interpreter. Only an existing file that looks like a path
+/// (has a `/` or a script extension) qualifies, so a file named `test` in the
+/// current directory can't shadow `3va test`.
+fn rewrite_script_path_as_run(mut args: Vec<String>) -> Vec<String> {
+    let is_script = args.get(1).is_some_and(|a| {
+        let p = std::path::Path::new(a);
+        let script_ext = matches!(
+            p.extension().and_then(|e| e.to_str()),
+            Some("js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx")
+        );
+        !a.starts_with('-') && (a.contains('/') || script_ext) && p.is_file()
+    });
+    if is_script {
+        args.insert(1, "run".to_string());
+    }
+    args
+}
+
 fn rewrite_create_dash_alias(mut args: Vec<String>) -> Vec<String> {
     if let Some(pkg) = args.get(1).and_then(|a| a.strip_prefix("create-")) {
         if !pkg.is_empty() {
@@ -4034,7 +4066,8 @@ fn print_version_with_hash() {
 async fn main() -> anyhow::Result<()> {
     let __trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
     let __t_main = std::time::Instant::now();
-    let raw_args = rewrite_create_dash_alias(std::env::args().collect());
+    let raw_args =
+        rewrite_script_path_as_run(rewrite_create_dash_alias(std::env::args().collect()));
 
     if raw_args
         .get(1)
@@ -4151,6 +4184,13 @@ async fn main() -> anyhow::Result<()> {
                 std::io::stderr().is_terminal() && !*no_prompt && !pkg_permissions.no_prompt,
                 &pkg_permissions,
             );
+            // An explicit port (`--port`, which `3va start --port` passes on,
+            // or the config file) only reaches the script as process.env.PORT.
+            // Without this grant deny-by-default hid it and the flag was
+            // silently ignored; grant exactly that one variable.
+            if effective_port.is_some() {
+                permissions.grant(vvva_permissions::Capability::EnvVar("PORT".to_string()));
+            }
 
             permissions.trace_denials = *trace_denials;
 
@@ -4624,6 +4664,20 @@ async fn main() -> anyhow::Result<()> {
             minify,
             source_map,
         } => {
+            // Neither flag is implemented by the module-graph bundler: --source-map
+            // used to report a .map file it never wrote, and --split fell back to
+            // an old path that emitted unresolved `import` statements. Fail
+            // loudly instead of producing something that looks right but isn't.
+            if *source_map || *split {
+                anyhow::bail!(
+                    "{} is not supported yet by `3va bundle`; run it without that flag",
+                    if *source_map {
+                        "--source-map"
+                    } else {
+                        "--split"
+                    }
+                );
+            }
             info!("Bundling application from {} to {}...", input, output);
             let options = vvva_bundler::BundlerOptions {
                 format: vvva_bundler::OutputFormat::Iife,
@@ -4635,13 +4689,6 @@ async fn main() -> anyhow::Result<()> {
             vvva_bundler::bundle_file(input, output, Some(options))?;
             println!();
             println!("✓ Bundle created: {}", output);
-            if *source_map {
-                let map_path = format!("{}.map", output);
-                println!("✓ Source map:     {}", map_path);
-            }
-            if *split {
-                println!("  Note: Code splitting enabled");
-            }
             println!("  Run: 3va run {} --allow-net=<trusted-hosts>", output);
         }
         Commands::Test {
@@ -4669,9 +4716,11 @@ async fn main() -> anyhow::Result<()> {
                 let cfg = vvva_test::TestConfig {
                     update_snapshots: *update_snapshots,
                     concurrency: *concurrency,
+                    coverage_root: coverage.then(|| coverage_root(&target_paths)),
                     ..Default::default()
                 };
-                let results = vvva_test::run_tests(target_paths.clone(), Some(cfg)).await?;
+                let (results, statements) =
+                    vvva_test::run_tests_with_coverage(target_paths.clone(), Some(cfg)).await?;
 
                 let fmt = match reporter.as_str() {
                     "terminal" => None,
@@ -4702,11 +4751,11 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 if *coverage {
-                    let root = target_paths
-                        .first()
-                        .map(|p| p.as_path())
-                        .unwrap_or_else(|| std::path::Path::new("."));
-                    let report = vvva_test::generate_coverage_report(&results, root);
+                    let report = vvva_test::generate_coverage_report(
+                        &results,
+                        &coverage_root(&target_paths),
+                        &statements,
+                    );
                     vvva_test::print_coverage_report(&report);
                 }
 
@@ -6767,6 +6816,24 @@ mod tests {
 
         let run_args = vec!["3va".to_string(), "run".to_string(), "app.js".to_string()];
         assert_eq!(rewrite_create_dash_alias(run_args.clone()), run_args);
+    }
+
+    #[test]
+    fn script_path_is_run_like_a_shebang_invocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("demo.js");
+        std::fs::write(&script, "").unwrap();
+        let path = script.to_string_lossy().into_owned();
+        let args: Vec<String> = vec!["3va".into(), path.clone(), "--allow-net".into()];
+        assert_eq!(
+            rewrite_script_path_as_run(args),
+            vec!["3va".to_string(), "run".into(), path, "--allow-net".into()]
+        );
+        // Subcommands and paths that don't exist are left alone.
+        let test_args: Vec<String> = vec!["3va".into(), "test".into()];
+        assert_eq!(rewrite_script_path_as_run(test_args.clone()), test_args);
+        let missing: Vec<String> = vec!["3va".into(), "./nope.js".into()];
+        assert_eq!(rewrite_script_path_as_run(missing.clone()), missing);
     }
 
     #[test]
