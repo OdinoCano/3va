@@ -4036,6 +4036,12 @@ fn rewrite_script_path_as_run(mut args: Vec<String>) -> Vec<String> {
     });
     if is_script {
         args.insert(1, "run".to_string());
+        // Like `node script.js a b`: everything after the script belongs to
+        // the script (`./tool.js build --watch`), so separate it from 3va's
+        // own flags. Grants for shebang scripts come from package.json.
+        if args.len() > 3 && args[3] != "--" {
+            args.insert(3, "--".to_string());
+        }
     }
     args
 }
@@ -6874,10 +6880,22 @@ mod tests {
         let script = dir.path().join("demo.js");
         std::fs::write(&script, "").unwrap();
         let path = script.to_string_lossy().into_owned();
-        let args: Vec<String> = vec!["3va".into(), path.clone(), "--allow-net".into()];
+        let args: Vec<String> = vec!["3va".into(), path.clone(), "build".into(), "--watch".into()];
         assert_eq!(
             rewrite_script_path_as_run(args),
-            vec!["3va".to_string(), "run".into(), path, "--allow-net".into()]
+            vec![
+                "3va".to_string(),
+                "run".into(),
+                path.clone(),
+                "--".into(),
+                "build".into(),
+                "--watch".into()
+            ]
+        );
+        let bare: Vec<String> = vec!["3va".into(), path.clone()];
+        assert_eq!(
+            rewrite_script_path_as_run(bare),
+            vec!["3va".to_string(), "run".into(), path]
         );
         // Subcommands and paths that don't exist are left alone.
         let test_args: Vec<String> = vec!["3va".into(), "test".into()];
