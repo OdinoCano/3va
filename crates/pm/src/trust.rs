@@ -201,22 +201,36 @@ impl TrustPolicy {
     /// `allowNet`, so opting into a lifecycle script does not silently hand it
     /// the machine.
     pub fn sandbox_argv(&self, package_dir: &Path) -> Vec<String> {
-        let mut argv = Vec::new();
+        // Every lifecycle script may read its own package (its package.json,
+        // its files) and the node_modules tree it sits in (e.g. esbuild's
+        // install.js locating @esbuild/<platform>), and write inside its own
+        // directory. Without these the script could not even read its own
+        // package.json. Everything else must be declared by the package.
+        let own = package_dir
+            .canonicalize()
+            .unwrap_or_else(|_| package_dir.to_path_buf());
+        let tree = own
+            .ancestors()
+            .find(|p| p.file_name().is_some_and(|n| n == "node_modules"))
+            .unwrap_or(&own)
+            .to_path_buf();
+        let mut argv = vec![
+            "--no-prompt".to_string(),
+            format!("--allow-read={}", tree.display()),
+            format!("--allow-write={}", own.display()),
+        ];
         let manifest: Value = std::fs::read_to_string(package_dir.join("package.json"))
             .ok()
             .and_then(|c| serde_json::from_str(&c).ok())
             .unwrap_or(Value::Null);
         let perms = &manifest["3va"]["permissions"];
-        if let Some(list) = perms["allowNet"].as_array() {
-            for v in list.iter().filter_map(|v| v.as_str()) {
-                argv.push(format!("--allow-net={v}"));
-            }
-        }
+        // Names of real `3va run` flags: `--allow-fs-write` did not exist, so a
+        // package declaring allowFsWrite made its own script fail to start.
         for (flag, key) in [
-            ("--allow-fs-write", "allowFsWrite"),
+            ("--allow-net", "allowNet"),
+            ("--allow-write", "allowFsWrite"),
             ("--allow-env", "allowEnv"),
             ("--allow-ffi", "allowFfi"),
-            ("--allow-child-process", "allowChildProcess"),
         ] {
             if let Some(list) = perms[key].as_array() {
                 for v in list.iter().filter_map(|v| v.as_str()) {
@@ -225,6 +239,14 @@ impl TrustPolicy {
             } else if perms[key].as_bool() == Some(true) {
                 argv.push(flag.to_string());
             }
+        }
+        // A boolean flag: `--allow-child-process=<x>` is rejected by the CLI.
+        if perms["allowChildProcess"].as_bool() == Some(true)
+            || perms["allowChildProcess"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        {
+            argv.push("--allow-child-process".to_string());
         }
         argv
     }
@@ -416,16 +438,28 @@ mod tests {
         let policy = TrustPolicy::empty();
         let argv = policy.sandbox_argv(dir.path());
         assert!(argv.contains(&"--allow-net=api.example.com".to_string()));
-        assert!(argv.contains(&"--allow-fs-write=./build".to_string()));
+        // `--allow-write` is the real `3va run` flag (`--allow-fs-write` isn't).
+        assert!(argv.contains(&"--allow-write=./build".to_string()));
         assert!(argv.contains(&"--allow-env=NODE_ENV".to_string()));
         assert!(argv.contains(&"--allow-ffi".to_string()));
     }
 
     #[test]
-    fn a_script_with_no_declared_permissions_gets_no_flags() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("package.json"), r#"{"name":"x"}"#).unwrap();
-        assert!(TrustPolicy::empty().sandbox_argv(dir.path()).is_empty());
+    fn a_script_with_no_declared_permissions_gets_only_its_own_package() {
+        let root = tempfile::tempdir().unwrap();
+        let pkg = root.path().join("node_modules/x");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("package.json"), r#"{"name":"x"}"#).unwrap();
+        let pkg = pkg.canonicalize().unwrap();
+        let tree = pkg.parent().unwrap();
+        assert_eq!(
+            TrustPolicy::empty().sandbox_argv(&pkg),
+            vec![
+                "--no-prompt".to_string(),
+                format!("--allow-read={}", tree.display()),
+                format!("--allow-write={}", pkg.display()),
+            ]
+        );
     }
 
     #[test]

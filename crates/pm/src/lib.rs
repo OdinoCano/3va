@@ -456,6 +456,27 @@ async fn fetch_packument(
     Ok(resp.json().await?)
 }
 
+/// Full manifest of one published version (`GET /<name>/<version>`), which,
+/// unlike the abbreviated packument, includes fields such as `libc`.
+async fn fetch_version_manifest(
+    client: &reqwest::Client,
+    base_url: &str,
+    pkg_name: &str,
+    version: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let url = format!("{base_url}/{pkg_name}/{version}");
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Registry returned HTTP {} for {url}", resp.status());
+    }
+    Ok(resp.json().await?)
+}
+
 fn registry_info_from_packument(
     data: &serde_json::Value,
     base_url: &str,
@@ -2164,7 +2185,20 @@ async fn resolve_optional_dep(
         return Ok(None);
     }
     let version = select_best_version(&info.versions, range, info.latest.as_deref());
-    let version_meta = &data["versions"][&version];
+    let mut version_meta = data["versions"][&version].clone();
+    // The abbreviated packument (install-v1) carries `os` and `cpu` but not
+    // `libc`, so every `-gnu`/`-musl` prebuilt looked applicable and both were
+    // installed. On Linux, read `libc` from the full manifest of this version.
+    let needs_libc = platform.os == "linux"
+        && version_meta.get("libc").is_none()
+        && version_meta.get("os").is_some();
+    if needs_libc
+        && let Ok(full) = fetch_version_manifest(client, base_url, pkg_name, &version).await
+        && let Some(libc) = full.get("libc")
+    {
+        version_meta["libc"] = libc.clone();
+    }
+    let version_meta = &version_meta;
     if !crate::platform::optional_dep_applies(version_meta, platform) {
         tracing::debug!(
             "skipping optional dependency {}@{}: not applicable to {}/{}/{}",
@@ -2661,8 +2695,26 @@ async fn install_with_transitive(
                         // package becomes active anywhere. Aborting here
                         // keeps it out of the global store and node_modules.
                         if let Err(report) = scan_tarball_before_install(&pkg_name, &ver, &bytes) {
-                            errors.push(format!("{}@{} — {}", pkg_name, ver, report));
-                            continue;
+                            // `"3va".trusted` is the project's reviewed decision for
+                            // exactly this artifact (see trust.rs); it used to be
+                            // ignored here, so trusting a package changed nothing.
+                            // The findings are still printed, just not fatal.
+                            let trust = crate::trust::TrustPolicy::from_manifest_or_empty(
+                                manifest_val.as_ref(),
+                            );
+                            match trust.status(&pkg_name, &ver, integrity.as_deref()) {
+                                crate::trust::TrustStatus::Trusted
+                                | crate::trust::TrustStatus::Unversioned => {
+                                    println!(
+                                        "  ⚠  {pkg_name}@{ver} is trusted by \"3va\".\"trusted\" — \
+                                         installing despite the security scan:\n  {report}"
+                                    );
+                                }
+                                _ => {
+                                    errors.push(format!("{}@{} — {}", pkg_name, ver, report));
+                                    continue;
+                                }
+                            }
                         }
                         // Provenance verification (npm attestations /
                         // Sigstore bundles) — already fetched concurrently
@@ -2838,8 +2890,11 @@ async fn install_with_transitive(
                                      project has reviewed it."
                                 ),
                                 crate::lifecycle::Outcome::Refused(msg) => eprintln!("  ⚠  {msg}"),
+                                // The project explicitly allowlisted this script, so
+                                // its failure is the install's failure, not a note:
+                                // it used to be printed and the install exited 0.
                                 crate::lifecycle::Outcome::Failed(msg) => {
-                                    eprintln!("  ✗  {msg}")
+                                    errors.push(msg);
                                 }
                                 crate::lifecycle::Outcome::Unavailable(msg) => {
                                     eprintln!("  ⚠  {msg}")
