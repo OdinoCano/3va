@@ -64,6 +64,16 @@ fn collect_test_files(paths: &[PathBuf]) -> Vec<PathBuf> {
     files
 }
 
+/// Directory whose sources `--coverage` instruments and reports on: the first
+/// path given (its parent when it is a file), or the current directory.
+fn coverage_root(paths: &[PathBuf]) -> PathBuf {
+    match paths.first() {
+        Some(p) if p.is_file() => p.parent().map(|d| d.to_path_buf()).unwrap_or_default(),
+        Some(p) => p.clone(),
+        None => PathBuf::from("."),
+    }
+}
+
 async fn run_tests_and_report(paths: &[PathBuf], coverage: bool) -> anyhow::Result<(usize, usize)> {
     let files = collect_test_files(paths);
     if files.is_empty() {
@@ -71,7 +81,12 @@ async fn run_tests_and_report(paths: &[PathBuf], coverage: bool) -> anyhow::Resu
         return Ok((0, 0));
     }
 
-    let results = vvva_test::run_tests(paths.to_vec(), None).await?;
+    let cfg = vvva_test::TestConfig {
+        coverage_root: coverage.then(|| coverage_root(paths)),
+        ..Default::default()
+    };
+    let (results, statements) =
+        vvva_test::run_tests_with_coverage(paths.to_vec(), Some(cfg)).await?;
     let passed = results
         .iter()
         .filter(|r| r.status == vvva_test::TestStatus::Passed)
@@ -87,11 +102,8 @@ async fn run_tests_and_report(paths: &[PathBuf], coverage: bool) -> anyhow::Resu
     println!();
 
     if coverage {
-        let root = paths
-            .first()
-            .map(|p| p.as_path())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let report = vvva_test::generate_coverage_report(&results, root);
+        let report =
+            vvva_test::generate_coverage_report(&results, &coverage_root(paths), &statements);
         vvva_test::print_coverage_report(&report);
     }
 
@@ -3099,6 +3111,14 @@ enum PermissionsAction {
     Learn {
         /// The script to observe
         file: PathBuf,
+        /// Write the observed permissions into the project's package.json
+        /// under "3va"."permissions" instead of only printing them.
+        ///
+        /// Existing grants are kept and merged, never replaced, so learning
+        /// after a refactor cannot silently drop a permission another entry
+        /// point still needs.
+        #[arg(long)]
+        write: bool,
         /// Arguments to pass to the script (after --)
         #[arg(last = true)]
         script_args: Vec<String>,
@@ -3154,6 +3174,12 @@ enum Commands {
         /// package.json grants honored and everything else denied without asking.
         #[arg(long = "no-prompt")]
         no_prompt: bool,
+
+        /// Print each denied permission the moment it is refused, showing what
+        /// the script was trying to do and the flag that would allow it.
+        /// Without this, denials are collected and reported once at the end.
+        #[arg(long = "trace-denials")]
+        trace_denials: bool,
 
         /// Activate the Chrome DevTools Protocol (CDP) inspector.
         /// Optional value: host:port (default 127.0.0.1:9229).
@@ -3241,6 +3267,34 @@ enum Commands {
         /// newly downloaded package; abort otherwise.
         #[arg(long = "require-provenance")]
         require_provenance: bool,
+    },
+    /// Convert an existing lockfile (package-lock.json, yarn.lock, pnpm-lock.yaml,
+    /// bun.lock) to 3va's native 3va-lock.json.
+    ///
+    /// The conversion is faithful: every version, resolved URL and integrity hash
+    /// is carried over. Formats that cannot be converted without losing meaning
+    /// (Yarn Berry's cache checksums are not SRI hashes; bun.lockb is binary) are
+    /// reported as unsupported instead of being written out as an empty lockfile.
+    Migrate {
+        /// Show what would be written without touching the filesystem.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Registry hosts to allow network access to, for a lockfile whose
+        /// entries need re-resolution (e.g. a partially parsed pnpm v9 file).
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_net: Option<Vec<String>>,
+    },
+    /// Install exactly what 3va-lock.json records, and fail if it cannot.
+    ///
+    /// `3va install` resolves ranges and may move within them; `3va ci` is the
+    /// reproducible counterpart: the lockfile is authoritative, integrity hashes
+    /// are verified, and a lockfile that disagrees with package.json is an error
+    /// rather than something to silently re-resolve.
+    Ci {
+        /// Registry hosts to allow network access to.
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_net: Option<Vec<String>>,
     },
     /// Remove an installed package
     #[command(aliases = ["rm", "uninstall"])]
@@ -3344,13 +3398,13 @@ enum Commands {
         /// The output file path
         #[arg(short, long, default_value = "dist/bundle.js")]
         output: String,
-        /// Enable code splitting (creates separate chunks)
+        /// Code splitting (not supported yet: the command fails if it is set)
         #[arg(long = "split")]
         split: bool,
         /// Minify the output
         #[arg(long = "minify")]
         minify: bool,
-        /// Generate a source map alongside the bundle
+        /// Source map output (not supported yet: the command fails if it is set)
         #[arg(long = "source-map")]
         source_map: bool,
     },
@@ -3567,7 +3621,13 @@ enum Commands {
         out: Option<PathBuf>,
     },
     /// Check runtime health
-    Doctor,
+    Doctor {
+        /// List installed packages that ship install-time scripts
+        /// (preinstall/install/postinstall), which 3va does not run unless
+        /// the project allowlists them in "3va".onlyBuiltDependencies
+        #[arg(long)]
+        compat: bool,
+    },
     /// Enter an isolated interactive sandbox (REPL)
     #[command(aliases = ["sh", "shell"])]
     Sandbox {
@@ -3920,6 +3980,72 @@ fn split_version(spec: &str) -> (&str, Option<&str>) {
 /// `3va create-<pkg>[@version]` (npx-style single-token invocation) is sugar
 /// for `3va create <pkg>[@version]` — rewrite before clap sees it so both
 /// spellings hit the same `Commands::Create` handler.
+/// `3va ./script.js` → `3va run ./script.js`. This is what a
+/// `#!/usr/bin/env 3va` shebang executes: the kernel appends the script path
+/// right after the interpreter. Only an existing file that looks like a path
+/// (has a `/` or a script extension) qualifies, so a file named `test` in the
+/// `3va doctor --compat`: which installed packages depend on install-time
+/// scripts, and whether the project lets them run.
+fn print_install_script_report(project_root: &std::path::Path) {
+    let report = vvva_pm::lifecycle::packages_with_install_scripts(project_root);
+    if report.is_empty() {
+        println!("No installed package declares preinstall/install/postinstall scripts.");
+        return;
+    }
+    println!(
+        "{} installed package(s) ship install-time scripts. 3va never runs them unless \
+         the project lists the package in \"3va\".\"onlyBuiltDependencies\":\n",
+        report.len()
+    );
+    for p in &report {
+        let status = if p.allowlisted {
+            "allowlisted: runs sandboxed"
+        } else {
+            "not run"
+        };
+        println!(
+            "  {}@{}  {}  ({status})",
+            p.name,
+            p.version,
+            p.phases.join(", ")
+        );
+    }
+    let blocked: Vec<&str> = report
+        .iter()
+        .filter(|p| !p.allowlisted)
+        .map(|p| p.name.as_str())
+        .collect();
+    if !blocked.is_empty() {
+        println!(
+            "\nIf one of these needs its script to work (native builds, binary downloads), \
+             review it and add it to package.json:\n  \"3va\": {{ \"onlyBuiltDependencies\": {:?} }}",
+            blocked
+        );
+    }
+}
+
+/// current directory can't shadow `3va test`.
+fn rewrite_script_path_as_run(mut args: Vec<String>) -> Vec<String> {
+    let is_script = args.get(1).is_some_and(|a| {
+        let p = std::path::Path::new(a);
+        let script_ext = matches!(
+            p.extension().and_then(|e| e.to_str()),
+            Some("js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx")
+        );
+        !a.starts_with('-') && (a.contains('/') || script_ext) && p.is_file()
+    });
+    if is_script {
+        args.insert(1, "run".to_string());
+        // Like `node script.js a b`: everything after the script belongs to
+        // the script (`./tool.js build --watch`), so separate it from 3va's
+        // own flags. Grants for shebang scripts come from package.json.
+        if args.len() > 3 && args[3] != "--" {
+            args.insert(3, "--".to_string());
+        }
+    }
+    args
+}
+
 fn rewrite_create_dash_alias(mut args: Vec<String>) -> Vec<String> {
     if let Some(pkg) = args.get(1).and_then(|a| a.strip_prefix("create-")) {
         if !pkg.is_empty() {
@@ -3992,7 +4118,8 @@ fn print_version_with_hash() {
 async fn main() -> anyhow::Result<()> {
     let __trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
     let __t_main = std::time::Instant::now();
-    let raw_args = rewrite_create_dash_alias(std::env::args().collect());
+    let raw_args =
+        rewrite_script_path_as_run(rewrite_create_dash_alias(std::env::args().collect()));
 
     if raw_args
         .get(1)
@@ -4054,6 +4181,7 @@ async fn main() -> anyhow::Result<()> {
             allow_child_process,
             allow_ffi,
             no_prompt,
+            trace_denials,
             inspect,
             audit_log,
             audit_level,
@@ -4108,6 +4236,15 @@ async fn main() -> anyhow::Result<()> {
                 std::io::stderr().is_terminal() && !*no_prompt && !pkg_permissions.no_prompt,
                 &pkg_permissions,
             );
+            // An explicit port (`--port`, which `3va start --port` passes on,
+            // or the config file) only reaches the script as process.env.PORT.
+            // Without this grant deny-by-default hid it and the flag was
+            // silently ignored; grant exactly that one variable.
+            if effective_port.is_some() {
+                permissions.grant(vvva_permissions::Capability::EnvVar("PORT".to_string()));
+            }
+
+            permissions.trace_denials = *trace_denials;
 
             // Wire in audit logging if --audit-log was specified
             let audit_log_data = if let Some(log_path) = audit_log {
@@ -4172,7 +4309,11 @@ async fn main() -> anyhow::Result<()> {
             if ext == "wasm" || ext == "wat" {
                 info!("Executing WebAssembly module...");
                 let engine = vvva_wasm::WasmEngine::new(permissions.clone())?;
-                engine.eval_file_with_args(file, script_args).await?;
+                let result = engine.eval_file_with_args(file, script_args).await;
+                // Summarize before `?`: a run that failed *because* of a denial
+                // is exactly the run whose denials the user needs to see.
+                report_denials(&permissions);
+                result?;
             } else if *prof {
                 if inspect_addr.is_some() {
                     anyhow::bail!("--prof and --inspect cannot be used together");
@@ -4180,7 +4321,9 @@ async fn main() -> anyhow::Result<()> {
                 let mut engine =
                     vvva_js::JsEngine::new_with_profiler(permissions.clone(), *prof_interval)
                         .await?;
-                engine.eval_file_with_args(file, script_args).await?;
+                let result = engine.eval_file_with_args(file, script_args).await;
+                report_denials(&permissions);
+                result?;
                 // Stop sampling and collect results
                 if let Some(profiler) = engine.take_profiler().await {
                     let cpu_json = profiler.to_cpuprofile();
@@ -4224,18 +4367,21 @@ async fn main() -> anyhow::Result<()> {
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
                 let __t = std::time::Instant::now();
+                let mut run_result = Ok(());
                 #[cfg(unix)]
                 tokio::select! {
-                    result = engine.eval_file_with_args(file, script_args) => { result?; }
+                    result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
                     _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
                     _ = sigterm.recv() => { engine.drain_ws_connections().await; }
                 }
 
                 #[cfg(not(unix))]
                 tokio::select! {
-                    result = engine.eval_file_with_args(file, script_args) => { result?; }
+                    result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
                     _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
                 }
+                report_denials(&permissions);
+                run_result?;
                 if __trace {
                     eprintln!("[startup] eval_file_with_args: {:?}", __t.elapsed());
                     eprintln!("[startup] total main() time: {:?}", __t_main.elapsed());
@@ -4327,6 +4473,52 @@ async fn main() -> anyhow::Result<()> {
                     vvva_pm::install_package(pkg, allow_net.as_deref()).await?;
                 }
             }
+        }
+        Commands::Migrate {
+            dry_run,
+            allow_net: _,
+        } => {
+            let cwd = std::env::current_dir()?;
+            let (_, unsupported) = vvva_pm::inspect_lockfiles(&cwd);
+            for u in unsupported.advice() {
+                eprintln!("! {u}");
+            }
+            if *dry_run {
+                // Inspection only. Reporting the plan must not perform it — a
+                // dry run that wrote the lockfile was worse than no flag.
+                match vvva_pm::inspect_lockfiles(&cwd).0 {
+                    Some(detected) => {
+                        println!(
+                            "Would migrate {} → 3va-lock.json ({} package(s))",
+                            detected.flavor.file_name(),
+                            detected.lockfile.dependencies.len()
+                        );
+                        for w in &detected.warnings {
+                            println!("  ! {w}");
+                        }
+                    }
+                    None => println!("No supported lockfile found; nothing to migrate."),
+                }
+                return Ok(());
+            }
+            let report = vvva_pm::migrate_lockfile_reporting(&cwd)?;
+            for w in &report.warnings {
+                eprintln!("! {w}");
+            }
+            if report.migrated {
+                println!("  {} package(s) recorded", report.package_count);
+            } else if cwd.join("3va-lock.json").exists() {
+                println!("Nothing to migrate — 3va-lock.json is already authoritative.");
+            } else if unsupported.advice().is_empty() {
+                println!(
+                    "No supported lockfile found in {}. Nothing to migrate.",
+                    cwd.display()
+                );
+            }
+        }
+        Commands::Ci { allow_net } => {
+            let cwd = std::env::current_dir()?;
+            vvva_pm::ci(&cwd, allow_net.as_deref()).await?;
         }
         Commands::Workspace { action } => {
             let cwd = std::env::current_dir()?;
@@ -4524,6 +4716,20 @@ async fn main() -> anyhow::Result<()> {
             minify,
             source_map,
         } => {
+            // Neither flag is implemented by the module-graph bundler: --source-map
+            // used to report a .map file it never wrote, and --split fell back to
+            // an old path that emitted unresolved `import` statements. Fail
+            // loudly instead of producing something that looks right but isn't.
+            if *source_map || *split {
+                anyhow::bail!(
+                    "{} is not supported yet by `3va bundle`; run it without that flag",
+                    if *source_map {
+                        "--source-map"
+                    } else {
+                        "--split"
+                    }
+                );
+            }
             info!("Bundling application from {} to {}...", input, output);
             let options = vvva_bundler::BundlerOptions {
                 format: vvva_bundler::OutputFormat::Iife,
@@ -4535,13 +4741,6 @@ async fn main() -> anyhow::Result<()> {
             vvva_bundler::bundle_file(input, output, Some(options))?;
             println!();
             println!("✓ Bundle created: {}", output);
-            if *source_map {
-                let map_path = format!("{}.map", output);
-                println!("✓ Source map:     {}", map_path);
-            }
-            if *split {
-                println!("  Note: Code splitting enabled");
-            }
             println!("  Run: 3va run {} --allow-net=<trusted-hosts>", output);
         }
         Commands::Test {
@@ -4569,9 +4768,11 @@ async fn main() -> anyhow::Result<()> {
                 let cfg = vvva_test::TestConfig {
                     update_snapshots: *update_snapshots,
                     concurrency: *concurrency,
+                    coverage_root: coverage.then(|| coverage_root(&target_paths)),
                     ..Default::default()
                 };
-                let results = vvva_test::run_tests(target_paths.clone(), Some(cfg)).await?;
+                let (results, statements) =
+                    vvva_test::run_tests_with_coverage(target_paths.clone(), Some(cfg)).await?;
 
                 let fmt = match reporter.as_str() {
                     "terminal" => None,
@@ -4602,11 +4803,11 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 if *coverage {
-                    let root = target_paths
-                        .first()
-                        .map(|p| p.as_path())
-                        .unwrap_or_else(|| std::path::Path::new("."));
-                    let report = vvva_test::generate_coverage_report(&results, root);
+                    let report = vvva_test::generate_coverage_report(
+                        &results,
+                        &coverage_root(&target_paths),
+                        &statements,
+                    );
                     vvva_test::print_coverage_report(&report);
                 }
 
@@ -4706,8 +4907,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Doctor => {
-            check_system_info()?;
+        Commands::Doctor { compat } => {
+            if *compat {
+                print_install_script_report(&std::env::current_dir()?);
+            } else {
+                check_system_info()?;
+            }
         }
         Commands::Sandbox { plugins } => {
             run_sandbox_shell_with_plugins(plugins).await?;
@@ -4763,8 +4968,12 @@ async fn main() -> anyhow::Result<()> {
             PermissionsAction::Suggest { paths, flags } => {
                 permissions_suggest(paths, *flags)?;
             }
-            PermissionsAction::Learn { file, script_args } => {
-                permissions_learn(file, script_args).await?;
+            PermissionsAction::Learn {
+                file,
+                write,
+                script_args,
+            } => {
+                permissions_learn(file, *write, script_args).await?;
             }
         },
         Commands::Start {
@@ -6185,9 +6394,56 @@ fn permissions_suggest(paths: &[PathBuf], flags: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Report what the sandbox refused during a run, and the flag that would allow
+/// it.
+///
+/// Without this a denial surfaces as whatever error the built-in happened to
+/// raise — `EACCES`, `ECONNREFUSED`, a missing file — and the user has to guess
+/// which permission produced it. The point of `report_denials` is that the
+/// answer is the flag, printed in a form that can be pasted or committed.
+fn report_denials(permissions: &vvva_permissions::PermissionState) {
+    use vvva_permissions::{describe_capability, grant_flag};
+
+    let denials = permissions.denial_counts();
+    let binds = permissions.denied_bind_hosts();
+    if denials.is_empty() && binds.is_empty() {
+        return;
+    }
+
+    let count = denials.len() + binds.len();
+    let plural = if count == 1 {
+        "permission was"
+    } else {
+        "permissions were"
+    };
+    eprintln!();
+    eprintln!("[!] {count} {plural} denied during this run:");
+    for (cap, hits) in &denials {
+        let times = if *hits == 1 {
+            String::new()
+        } else {
+            format!(" (denied {hits}x)")
+        };
+        eprintln!("    {}{}", describe_capability(cap), times);
+        eprintln!("      grant with: {}", grant_flag(cap));
+    }
+    for host in &binds {
+        // Deliberately not `grant_flag`: the fix is any allow-net grant, since
+        // running your own server is implied by having network permission at
+        // all (vvva_permissions::check_bind).
+        eprintln!("    bind a local server on {host}");
+        eprintln!("      needs any --allow-net grant (e.g. --allow-net=127.0.0.1)");
+    }
+    eprintln!();
+    eprintln!(
+        "Run `3va permissions learn` to record the script's real requirements \
+         in package.json instead of passing flags each time."
+    );
+}
+
 // ── permissions learn ─────────────────────────────────────────────────────────
 
-async fn permissions_learn(file: &Path, script_args: &[String]) -> anyhow::Result<()> {
+async fn permissions_learn(file: &Path, write: bool, script_args: &[String]) -> anyhow::Result<()> {
     use std::collections::BTreeSet;
     use vvva_permissions::AuditEvent;
 
@@ -6400,7 +6656,144 @@ async fn permissions_learn(file: &Path, script_args: &[String]) -> anyhow::Resul
     }
     println!("3va run {} {}", file.display(), cli_flags.join(" "));
 
+    if write {
+        write_learned_permissions(
+            &cwd,
+            &net_hosts,
+            &read_paths,
+            &write_paths,
+            &env_vars,
+            need_env_all,
+            need_child_process,
+            &ffi_paths,
+        )?;
+    }
+
     Ok(())
+}
+
+/// Merge observed permissions into `<root>/package.json`'s `3va.permissions`.
+///
+/// The point of `--write` is that a permission decision should be reviewable in
+/// version control, not re-derived from a flag someone remembers. Two rules
+/// keep that from being destructive:
+///
+/// * existing entries are merged, never replaced — learning again after a
+///   refactor must not drop a grant another entry point still needs,
+/// * nothing is granted that was not observed; this is a record of what the
+///   script did, not a generalisation of what it might do.
+#[allow(clippy::too_many_arguments)]
+fn write_learned_permissions(
+    root: &Path,
+    net: &std::collections::BTreeSet<String>,
+    reads: &std::collections::BTreeSet<PathBuf>,
+    writes: &std::collections::BTreeSet<PathBuf>,
+    env_vars: &std::collections::BTreeSet<String>,
+    need_env_all: bool,
+    need_child_process: bool,
+    ffis: &std::collections::BTreeSet<PathBuf>,
+) -> anyhow::Result<()> {
+    let manifest_path = root.join("package.json");
+    let mut manifest: serde_json::Value = if manifest_path.exists() {
+        match serde_json::from_str(&std::fs::read_to_string(&manifest_path)?) {
+            Ok(v) => v,
+            Err(e) => anyhow::bail!("{} is not valid JSON: {e}", manifest_path.display()),
+        }
+    } else {
+        serde_json::json!({ "name": "project", "version": "0.0.0", "private": true })
+    };
+
+    let shorten = |p: &PathBuf| -> String {
+        p.strip_prefix(root)
+            .map(|rel| format!("./{}", rel.display()))
+            .unwrap_or_else(|_| p.display().to_string())
+    };
+
+    {
+        let obj = manifest.as_object_mut().expect("object");
+        let block = obj.entry("3va").or_insert_with(|| serde_json::json!({}));
+        let block = block
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("package.json: \"3va\" must be an object"))?;
+        let scopes = block
+            .entry("permissions")
+            .or_insert_with(|| serde_json::json!({}));
+        let scopes = scopes.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!("package.json: \"3va.permissions\" must be an object")
+        })?;
+
+        // Grants go under the root scope ("."), not flat under `permissions`.
+        // Every key in `permissions` is read as a *scope*: a key named
+        // "allow-net" holding an array is parsed as a scope with no grants, so
+        // a flat write is silently discarded at load time.
+        let perms = scopes
+            .entry(vvva_permissions::ROOT_SCOPE)
+            .or_insert_with(|| serde_json::json!({}));
+        let perms = perms.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!("package.json: \"3va.permissions.\" must be an object")
+        })?;
+
+        // Keys mirror the CLI flags exactly (see vvva_permissions::manifest_key):
+        // `"allow-net"`, not `"allowNet"`. A differently-spelled key is dropped
+        // at load time, so a written grant that never loads is worse than none.
+        merge_string_array(perms, "allow-net", net.iter().cloned());
+        merge_string_array(perms, "allow-read", reads.iter().map(&shorten));
+        merge_string_array(perms, "allow-write", writes.iter().map(&shorten));
+        merge_string_array(perms, "allow-env", env_vars.iter().cloned());
+        merge_string_array(perms, "allow-ffi", ffis.iter().map(&shorten));
+        if need_child_process {
+            perms.insert(
+                "allow-child-process".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        if need_env_all {
+            // The script read the whole environment, so record every variable.
+            //
+            // This has to be `[""]`, not `[]`: an empty array is
+            // indistinguishable from "no grants" once merged, and silently
+            // records nothing. The empty string is the manifest spelling of a
+            // bare `--allow-env` — the same convention `--allow-read=`,
+            // `--allow-net=` and `--allow-ffi=` already use.
+            perms.insert("allow-env".to_string(), serde_json::json!([""]));
+        }
+    }
+
+    // Write through a temp file and rename so an interrupted learn cannot
+    // leave a truncated package.json behind.
+    let mut json = serde_json::to_string_pretty(&manifest)?;
+    json.push('\n');
+    let tmp = manifest_path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &manifest_path)?;
+    println!(
+        "\nWrote the observed permissions to {}. Review the diff before committing it.",
+        manifest_path.display()
+    );
+    Ok(())
+}
+
+/// Union the observed values into `key`, preserving what is already there.
+fn merge_string_array(
+    perms: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    observed: impl IntoIterator<Item = String>,
+) {
+    let mut set: std::collections::BTreeSet<String> = match perms.get(key) {
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => Default::default(),
+    };
+    set.extend(observed);
+    if set.is_empty() {
+        return;
+    }
+    perms.insert(
+        key.to_string(),
+        serde_json::Value::Array(set.into_iter().map(serde_json::Value::String).collect()),
+    );
 }
 
 #[cfg(test)]
@@ -6479,6 +6872,36 @@ mod tests {
 
         let run_args = vec!["3va".to_string(), "run".to_string(), "app.js".to_string()];
         assert_eq!(rewrite_create_dash_alias(run_args.clone()), run_args);
+    }
+
+    #[test]
+    fn script_path_is_run_like_a_shebang_invocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("demo.js");
+        std::fs::write(&script, "").unwrap();
+        let path = script.to_string_lossy().into_owned();
+        let args: Vec<String> = vec!["3va".into(), path.clone(), "build".into(), "--watch".into()];
+        assert_eq!(
+            rewrite_script_path_as_run(args),
+            vec![
+                "3va".to_string(),
+                "run".into(),
+                path.clone(),
+                "--".into(),
+                "build".into(),
+                "--watch".into()
+            ]
+        );
+        let bare: Vec<String> = vec!["3va".into(), path.clone()];
+        assert_eq!(
+            rewrite_script_path_as_run(bare),
+            vec!["3va".to_string(), "run".into(), path]
+        );
+        // Subcommands and paths that don't exist are left alone.
+        let test_args: Vec<String> = vec!["3va".into(), "test".into()];
+        assert_eq!(rewrite_script_path_as_run(test_args.clone()), test_args);
+        let missing: Vec<String> = vec!["3va".into(), "./nope.js".into()];
+        assert_eq!(rewrite_script_path_as_run(missing.clone()), missing);
     }
 
     #[test]
@@ -6885,6 +7308,158 @@ mod tests {
         assert!(state.check(&Capability::EnvVar("SESSION_MANAGER".to_string())));
         assert!(!state.check(&Capability::EnvVar("AWS_SECRET_KEY".to_string())));
         assert!(!state.check(&Capability::SpawnProcess));
+    }
+
+    #[test]
+    fn learn_write_output_is_actually_loaded_at_run_time() {
+        // The failure this guards: writing grants the loader ignores. A grant
+        // under a key the reader does not recognize, or outside the root
+        // scope, parses to nothing and the run is denied anyway — the feature
+        // looks like it worked and grants nothing.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{ "name": "demo", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        let root = dir.path();
+        let target = root.join("out.txt");
+
+        write_learned_permissions(
+            root,
+            &std::collections::BTreeSet::from(["api.example.com:8443".to_string()]),
+            &std::collections::BTreeSet::from([target.clone()]),
+            &std::collections::BTreeSet::from([target.clone()]),
+            &std::collections::BTreeSet::from(["NODE_ENV".to_string()]),
+            false,
+            true,
+            &Default::default(),
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(root);
+        let state = build_permissions(None, None, None, None, false, None, false, &pkg_permissions);
+
+        assert!(
+            state.check(&Capability::FileWrite(target.clone())),
+            "write grant lost"
+        );
+        assert!(
+            state.check(&Capability::FileRead(target)),
+            "read grant lost"
+        );
+        assert!(
+            state.check(&Capability::Network("api.example.com:8443".into())),
+            "net grant lost"
+        );
+        assert!(
+            state.check(&Capability::EnvVar("NODE_ENV".into())),
+            "env grant lost"
+        );
+        assert!(
+            state.check(&Capability::SpawnProcess),
+            "child process grant lost"
+        );
+        // Nothing wider was granted: learn records what the script did.
+        assert!(!state.check(&Capability::Network("other.example.com".into())));
+        assert!(!state.check(&Capability::EnvVar("AWS_SECRET_ACCESS_KEY".into())));
+    }
+
+    #[test]
+    fn learn_write_merges_instead_of_replacing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "demo",
+                "3va": { "permissions": {
+                    ".": { "allow-net": ["existing.example.com"] },
+                    "express": { "allow-net": ["*"] }
+                } }
+            }"#,
+        )
+        .unwrap();
+        let root = dir.path();
+
+        write_learned_permissions(
+            root,
+            &std::collections::BTreeSet::from(["new.example.com".to_string()]),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            false,
+            false,
+            &Default::default(),
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(root);
+        // The pre-existing grant survives: learning again after a refactor must
+        // not silently drop a permission another entry point still needs.
+        assert!(pkg_permissions
+            .allow_net
+            .contains(&"existing.example.com".to_string()));
+        assert!(pkg_permissions
+            .allow_net
+            .contains(&"new.example.com".to_string()));
+
+        // Another package's scope is left exactly as it was.
+        let express = &pkg_permissions.scoped["express"];
+        assert!(express.allow_net.contains(&"*".to_string()));
+        // And the root-scope write is genuinely global, not scoped away.
+        let state = build_permissions(None, None, None, None, false, None, false, &pkg_permissions);
+        assert!(state.check(&Capability::Network("new.example.com".into())));
+    }
+
+    #[test]
+    fn learn_write_records_a_script_that_reads_all_env() {
+        // `[""]` is the manifest spelling of "every variable" (the same as a
+        // bare `--allow-env`); `[]` would record nothing at all.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{ "name": "demo" }"#).unwrap();
+        let root = dir.path();
+
+        write_learned_permissions(
+            root,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            true,
+            false,
+            &Default::default(),
+        )
+        .unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            json["3va"]["permissions"]["."]["allow-env"],
+            serde_json::json!([""])
+        );
+
+        let pkg_permissions = read_package_json_permissions(root);
+        let state = build_permissions(None, None, None, None, false, None, false, &pkg_permissions);
+        assert!(state.check(&Capability::EnvAccess));
+    }
+
+    #[test]
+    fn learn_write_rejects_a_manifest_that_is_not_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{ not json").unwrap();
+        let err = write_learned_permissions(
+            dir.path(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            false,
+            false,
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
     }
 
     #[test]

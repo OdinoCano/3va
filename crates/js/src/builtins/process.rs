@@ -967,6 +967,20 @@ pub fn inject_process(
         },
     );
 
+    // __envRequest(key): a read of a variable missing from process.env.
+    // Returns the value if it is (now) granted, else undefined.
+    set_fn(
+        scope,
+        globals,
+        "__envRequest",
+        |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let key = args.get(0).to_rust_string_lossy(scope);
+            if let Some(value) = env_perms().request_env_var(&key) {
+                rv.set(v8::String::new(scope, &value).unwrap().into());
+            }
+        },
+    );
+
     // memoryUsage(): real RSS on Linux
     set_fn(
         scope,

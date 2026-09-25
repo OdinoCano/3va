@@ -32,6 +32,11 @@ pub struct NpmrcConfig {
     pub always_auth: HashMap<String, bool>,
     /// Raw key-value pairs not categorized above
     pub raw: HashMap<String, String>,
+    /// `save-prefix` — how new dependency ranges are written to package.json.
+    /// npm defaults to `^`.
+    pub save_prefix: Option<String>,
+    /// `save-exact=true` — write exact versions instead of prefixed ranges.
+    pub save_exact: bool,
 }
 
 /// Parse an .npmrc string into a config.
@@ -77,6 +82,10 @@ pub fn parse_npmrc(content: &str) -> NpmrcConfig {
             config
                 .always_auth
                 .insert(normalize_registry_host(host), value == "true");
+        } else if key == "save-prefix" {
+            config.save_prefix = Some(value);
+        } else if key == "save-exact" {
+            config.save_exact = value == "true";
         } else {
             config.raw.insert(key.to_string(), value);
         }
@@ -201,6 +210,17 @@ pub fn pinned_scope_registry(config: &NpmrcConfig, package_name: &str) -> Option
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn save_prefix_and_save_exact_are_read() {
+        let c = parse_npmrc("save-exact=true\nsave-prefix=~\n");
+        assert!(c.save_exact);
+        assert_eq!(c.save_prefix.as_deref(), Some("~"));
+
+        let d = parse_npmrc("registry=https://registry.npmjs.org/\n");
+        assert!(!d.save_exact);
+        assert!(d.save_prefix.is_none());
+    }
 
     #[test]
     fn parse_registry() {

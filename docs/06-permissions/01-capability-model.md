@@ -179,25 +179,54 @@ impl Capability {
 
 ### 1.5.2 Network Patterns
 
+A network grant is `HOST` or `HOST:PORT`, and the port is optional. Callers
+resolve the URL (or socket address) into a `(host, port)` pair — the port from
+the URL, or the scheme's default — and check the two parts separately, so a
+grant can be about one service rather than about a whole host.
+
 ```rust
-// Network pattern support
-impl Capability {
-    pub fn matches_host(&self, host: &str) -> bool {
-        match self {
-            Capability::Network(allowed) => {
-                // Exact match
-                host == allowed ||
-                // Wildcard: *.example.com
-                allowed.starts_with("*.") &&
-                    host.ends_with(&allowed[1..]) ||
-                // CIDR: 192.168.0.0/16 (future)
-                matches_cidr(host, allowed)
-            }
-            _ => false
-        }
+// crates/permissions/src/capability.rs
+pub fn split_host_port(spec: &str) -> (&str, Option<u16>) {
+    // `[::1]:443` — colons inside the brackets are part of the address.
+    // A bare `::1` has more than one colon, so none of them is a port.
+    // Otherwise the last colon separates host from port.
+}
+
+pub fn host_matches(allowed: &str, target: &str) -> bool {
+    let (a_host, a_port) = split_host_port(allowed);
+    let (t_host, t_port) = split_host_port(target);
+    if a_port.is_some() && a_port != t_port {
+        return false; // port-scoped grant: the port is part of the promise
     }
+    a_host == "*"
+        || a_host == t_host
+        || (a_host.starts_with("*.") && t_host.ends_with(&a_host[1..]))
 }
 ```
+
+**Port semantics, in order of safety:**
+
+| Grant | `:443` | `:8443` | any other port |
+|---|---|---|---|
+| `api.example.com:443` | allowed | denied | denied |
+| `api.example.com` | allowed | allowed | allowed |
+| `*:443` | allowed | denied | denied |
+| `*` | allowed | allowed | allowed |
+
+A portless grant keeps its previous meaning (any port on that host), so
+existing `allow-net` declarations are unchanged. Adding a port is what narrows
+it — a grant about `api.example.com:443` no longer authorizes an
+administrative port on the same box, which is the same SSRF-adjacent concern
+as the host itself.
+
+An unparseable port (`api.example.com:https`, `api.example.com:99999`) is a typo
+in a grant, and a typo **matches nothing**. Treating it as portless would
+silently widen a narrow promise into "every port on this host" — the one
+outcome the user did not ask for.
+
+Both sides of a comparison are spelled the same way: `vvva_permissions::authority(host, port)`
+brackets an IPv6 literal (`[::1]:443`), because a bare `::1:443` cannot be split
+back into an address and a port.
 
 ### 1.5.3 Matching Examples
 
@@ -207,6 +236,7 @@ impl Capability {
 | `/app/**` | `/app/file.js`, `/app/sub/file.js` | `/other/file.js` |
 | `*.example.com` | `api.example.com` | `example.com`, `evil.com` |
 | `api.example.com` | `api.example.com` | `other.example.com` |
+| `api.example.com:443` | `api.example.com:443` | `api.example.com:8443` |
 
 > The matching above (`PermissionState::check()`) is for **outbound**
 > connections. Binding your **own** local server (`http`/`net`

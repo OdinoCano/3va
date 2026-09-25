@@ -18,6 +18,25 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Fixed
 
+- **Security — workspace dependency confusion**: in a workspace, a dependency named after a member with a plain range (`"b": "*"`) was fetched from the public registry, installing an unrelated package with the same name and rewriting the member's `package.json`. Members are now always symlinked to the local package.
+- **Denied environment variables were silent**: reading an ungranted variable returned `undefined` without an audit event, a prompt, or an entry in the denial summary. It now goes through the normal permission check (prompt on a TTY, audit log, summary with the `--allow-env` flag).
+- **`fetch()` rejected with a bare string** (no `.message`); it now rejects with `Error` (permission) or `TypeError` (network/URL), like undici.
+- **A failed package in `3va install a b` was saved to `package.json` as `"*"`** and the command exited 0; the error now surfaces (exit 1) and the manifest is untouched.
+- **Allowlisted build scripts could not run**: the sandbox did not let a script read its own `package.json`, used a non-existent `--allow-fs-write` flag, and a script failure still exited 0. `"3va".trusted` was also ignored by the pre-install scan, so esbuild could not be installed.
+- **Both `-gnu` and `-musl` prebuilts were installed** on glibc: the abbreviated registry metadata has no `libc`, so the filter never saw it; the full version manifest is now consulted.
+- **Workspace installs pinned the lowest version** of each range (`^2.1.0` → `2.1.0`).
+- **Shebang scripts with arguments** (`./tool.js build`) failed with "unexpected argument".
+- **`3va doctor --compat`** was referenced but did not exist; it now lists packages that ship install scripts and whether they are allowlisted.
+
+- **`3va test --coverage` measured nothing**: it only paired source files with test files and always said "0 tests registered". It now instruments the project's sources, reports statement and line coverage per file (uncovered lines included), and attributes each test result to its file.
+- **`3va bundle --source-map` / `--split` pretended to work**: `--source-map` printed "✓ Source map" without writing the file, and `--split` fell back to an old path that emitted unresolved `import` statements. Neither is implemented, so both now exit with a clear error.
+- **Bundles embedded the build machine's absolute paths** as module ids; ids are now relative to the working directory (`./src/utils.js`).
+- **`child_process` without `--allow-child-process`** failed with `Unexpected token 'P', "Process sp"... is not valid JSON` instead of `Process spawn denied. Run with --allow-child-process`. `exec`/`execFile` now deliver it to the callback.
+- **`#!/usr/bin/env 3va` shebangs failed** with `unrecognized subcommand './script.js'`: `3va <existing script path>` now runs it.
+- **`3va start --port N` / `3va run --port N` were silently ignored** when the script had no `allow-env` grant for `PORT`; an explicit port now grants reading exactly `PORT`.
+- **A throw inside a timer callback, or a server that failed to `listen` (e.g. no `--allow-net`), exited 0** and the server case printed nothing. Both are now uncaught exceptions: exit code 1 with the error, unless `process.on('uncaughtException')` handles it.
+- **False "Unhandled promise rejection" reports** when a handler was attached after the rejection: the tracker compared V8 handle addresses instead of the promise's identity.
+
 - **`3va status`/`list` could read a half-written process file**: the supervisor rewrote `~/.3va/processes/<name>.json` in place (truncate, then write), so a concurrent read saw empty or partial JSON. It now writes to a temporary file and renames it atomically. This also fixes the intermittent `permissions_preserved_on_autorestart` CI failure.
 
 ## [2.9.0] — 2026-09-23

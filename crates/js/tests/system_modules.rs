@@ -115,14 +115,16 @@ async fn child_process_exec_denied_without_permission() {
             try {
                 cp.execSync('echo hello');
             } catch (e) {
-                threw = e !== null && e !== undefined;
+                threw = e.message;
             }
             String(threw)
             "#,
         )
         .await
         .unwrap();
-    assert_eq!(r, "true");
+    // The native denial used to be returned as a plain string and fed to
+    // JSON.parse, surfacing as "Unexpected token 'P'".
+    assert_eq!(r, "Process spawn denied. Run with --allow-child-process");
 }
 
 #[tokio::test]
@@ -1173,5 +1175,34 @@ async fn source_maps_apply_returns_null_for_unknown() {
     assert_eq!(
         r, "null",
         "applySourceMap must return null for unknown path"
+    );
+}
+
+// A timer callback that throws with no process.on('uncaughtException')
+// listener must fail the run (it used to be printed and ignored, exit 0).
+#[tokio::test]
+async fn uncaught_exception_in_timer_fails_the_event_loop() {
+    let mut e = engine().await;
+    e.eval("setTimeout(function() { throw new Error('boom'); }, 0);")
+        .await
+        .unwrap();
+    let err = e.run_event_loop().await.unwrap_err().to_string();
+    assert!(err.contains("boom"), "got {err}");
+}
+
+// fetch() used to reject with a bare string, so `err.message` was undefined.
+#[tokio::test]
+async fn fetch_rejects_with_an_error_object() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            "(function() { try { __fetchAsync('https://example.com/', 'GET', '{}', null, undefined); } \
+             catch (err) { return String(err instanceof Error) + '|' + err.message; } })()",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        r,
+        "true|Network access denied. Run with --allow-net=example.com:443"
     );
 }

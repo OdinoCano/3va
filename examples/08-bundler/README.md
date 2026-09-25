@@ -28,7 +28,7 @@ Or serve it in the browser via the dev server:
 
 - Walks the real import graph (project files + `node_modules`, both ESM and CommonJS)
 - Inlines `.json` and `.css` imports (`.css` injected as a `<style>` tag in the browser)
-- `--minify` strips whitespace and shortens names
+- `--minify` strips whitespace and comments (identifiers are not renamed)
 - Output runs standalone via `3va run` or as a browser `<script>`
 
-> **Note:** `--source-map` and `--split` are not yet implemented for this path.
+> **Note:** `--source-map` and `--split` are not implemented yet; `3va bundle` exits with an error if you pass them.

@@ -2,6 +2,7 @@
 // Copyright (c) 3va contributors
 
 use crate::framework::{TestResult, TestStatus};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use vvva_permissions::PermissionState;
@@ -314,9 +315,16 @@ const TEST_FRAMEWORK_JS: &str = r#"
 })();
 "#;
 
+/// Statement hit counts: file id → statement index → hits.
+type Hits = HashMap<String, HashMap<usize, u64>>;
+
 pub struct TestRunner {
     results: Vec<TestResult>,
     config: TestConfig,
+    /// Instrumented project sources, when `config.coverage_root` is set.
+    coverage: Option<std::sync::Arc<crate::coverage::InstrumentedProject>>,
+    /// Statement hit counts per file id, summed over every test file run.
+    hits: Hits,
 }
 
 #[derive(Debug, Clone)]
@@ -327,6 +335,9 @@ pub struct TestConfig {
     /// Maximum number of test files to run concurrently.
     /// 0 = number of logical CPUs (default).
     pub concurrency: usize,
+    /// `3va test --coverage`: instrument the sources under this directory and
+    /// measure statement coverage.
+    pub coverage_root: Option<std::path::PathBuf>,
 }
 
 impl Default for TestConfig {
@@ -336,6 +347,7 @@ impl Default for TestConfig {
             test_timeout_ms: 5000,
             update_snapshots: false,
             concurrency: 0,
+            coverage_root: None,
         }
     }
 }
@@ -350,10 +362,37 @@ struct RawResult {
 
 impl TestRunner {
     pub fn new(config: TestConfig) -> Self {
+        let coverage = config
+            .coverage_root
+            .as_deref()
+            .map(|root| std::sync::Arc::new(crate::coverage::instrument_project(root)));
         Self {
             results: Vec::new(),
             config,
+            coverage,
+            hits: HashMap::new(),
         }
+    }
+
+    /// Statement coverage per source file (canonical path), from the hits
+    /// collected so far. Empty unless coverage was enabled.
+    pub fn statement_coverage(
+        &self,
+    ) -> HashMap<std::path::PathBuf, crate::coverage::CoverageResult> {
+        let Some(cov) = &self.coverage else {
+            return HashMap::new();
+        };
+        let empty = HashMap::new();
+        cov.stmts
+            .iter()
+            .map(|(id, stmts)| {
+                let hits = self.hits.get(id).unwrap_or(&empty);
+                (
+                    std::path::PathBuf::from(id),
+                    crate::coverage::CoverageResult::from_hits(stmts, hits),
+                )
+            })
+            .collect()
     }
 
     pub async fn run_file(&mut self, path: &Path) -> anyhow::Result<()> {
@@ -407,11 +446,23 @@ impl TestRunner {
             .await
             .ok();
 
+        if let Some(cov) = &self.coverage {
+            // require() serves these instead of the files on disk (see modules.rs).
+            engine
+                .eval(&format!(
+                    "globalThis.__3va_covSources = {};",
+                    cov.sources_json
+                ))
+                .await
+                .ok();
+        }
+
         if let Err(e) = engine.eval_file(path).await {
             // File-level syntax/runtime error — report as a single failed test
             eprintln!("  ✗ {} — {}", display, e);
             self.results.push(TestResult {
-                name: display,
+                name: display.clone(),
+                file: display,
                 status: TestStatus::Failed,
                 duration_ms: 0,
                 error: Some(e.to_string()),
@@ -423,6 +474,15 @@ impl TestRunner {
             .eval_to_string("globalThis.__3va_run_tests()")
             .await
             .map_err(|e| anyhow::anyhow!("__3va_run_tests() failed: {}", e))?;
+
+        if self.coverage.is_some() {
+            if let Ok(cov_json) = engine
+                .eval_to_string("JSON.stringify(globalThis.__cov || {})")
+                .await
+            {
+                crate::coverage::merge_hit_counts(&cov_json, &mut self.hits);
+            }
+        }
 
         let raw: Vec<RawResult> = serde_json::from_str(&json)
             .map_err(|e| anyhow::anyhow!("Could not parse test results JSON: {}", e))?;
@@ -451,6 +511,7 @@ impl TestRunner {
 
             self.results.push(TestResult {
                 name: r.name,
+                file: display.clone(),
                 status,
                 duration_ms: r.duration_ms,
                 error: r.error,
@@ -499,6 +560,7 @@ impl TestRunner {
         use std::sync::{Arc, Mutex};
         let config = self.config.clone();
         let all_results: Arc<Mutex<Vec<TestResult>>> = Arc::new(Mutex::new(Vec::new()));
+        let all_hits: Arc<Mutex<Vec<Hits>>> = Arc::new(Mutex::new(Vec::new()));
 
         // Use a semaphore-like approach: chunk files and join.
         let chunks: Vec<_> = files
@@ -510,6 +572,8 @@ impl TestRunner {
             for file in chunk {
                 let cfg = config.clone();
                 let results_ref = all_results.clone();
+                let hits_ref = all_hits.clone();
+                let coverage = self.coverage.clone();
                 // vvva_js::JsEngine wraps a v8::Isolate, which is not Send, so each
                 // test file's engine must live and run entirely on its own OS thread
                 // rather than as a task on the shared tokio runtime.
@@ -517,11 +581,18 @@ impl TestRunner {
                     let rt =
                         tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                     rt.block_on(async move {
-                        let mut runner = TestRunner::new(cfg);
+                        // Reuse the parent's instrumentation instead of redoing it per file.
+                        let mut runner = TestRunner {
+                            results: Vec::new(),
+                            config: cfg,
+                            coverage,
+                            hits: HashMap::new(),
+                        };
                         if let Err(e) = runner.run_file(&file).await {
                             eprintln!("[test runner] error in {}: {e}", file.display());
                         }
                         results_ref.lock().unwrap().extend(runner.results);
+                        hits_ref.lock().unwrap().push(runner.hits);
                     });
                 });
                 tasks.push(handle);
@@ -536,6 +607,14 @@ impl TestRunner {
             .into_inner()
             .unwrap_or_default();
         self.results.extend(collected);
+        for file_hits in all_hits.lock().unwrap().drain(..) {
+            for (id, counts) in file_hits {
+                let entry = self.hits.entry(id).or_default();
+                for (idx, n) in counts {
+                    *entry.entry(idx).or_default() += n;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -787,18 +866,21 @@ mod tests {
         vec![
             TestResult {
                 name: "passes".into(),
+                file: String::new(),
                 status: TestStatus::Passed,
                 duration_ms: 5,
                 error: None,
             },
             TestResult {
                 name: "fails".into(),
+                file: String::new(),
                 status: TestStatus::Failed,
                 duration_ms: 2,
                 error: Some("oops".into()),
             },
             TestResult {
                 name: "skips".into(),
+                file: String::new(),
                 status: TestStatus::Skipped,
                 duration_ms: 0,
                 error: None,

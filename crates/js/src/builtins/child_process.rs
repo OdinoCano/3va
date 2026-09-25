@@ -40,6 +40,19 @@ fn child_is_done(c: &StreamChild) -> bool {
     c.eof.load(Ordering::SeqCst) && c.exited.load(Ordering::SeqCst)
 }
 
+/// Throws the JS `Error` every spawn entry point raises when the script lacks
+/// `--allow-child-process`. (Returning the message as a plain string made the
+/// JS wrappers `JSON.parse` it, which surfaced as "Unexpected token 'P'".)
+fn throw_spawn_denied(scope: &mut PinScope<'_, '_>) {
+    let msg = V8String::new(
+        scope,
+        "Process spawn denied. Run with --allow-child-process",
+    )
+    .unwrap();
+    let err = v8::Exception::error(scope, msg);
+    scope.throw_exception(err);
+}
+
 pub fn has_active_children() -> bool {
     child_table()
         .lock()
@@ -97,12 +110,7 @@ pub fn inject_child_process(
             let _timeout_ms: u64 = timeout_ms_arg.uint32_value(_scope).unwrap_or(0) as u64;
 
             if !perms.check(&Capability::SpawnProcess) {
-                let err_str = V8String::new(
-                    _scope,
-                    "Process spawn denied. Run with --allow-child-process",
-                )
-                .unwrap();
-                rv.set(err_str.into());
+                throw_spawn_denied(_scope);
                 return;
             }
 
@@ -157,12 +165,7 @@ pub fn inject_child_process(
             let command = cmd_arg.to_rust_string_lossy(_scope);
 
             if !perms.check(&Capability::SpawnProcess) {
-                let err_str = V8String::new(
-                    _scope,
-                    "Process spawn denied. Run with --allow-child-process",
-                )
-                .unwrap();
-                rv.set(err_str.into());
+                throw_spawn_denied(_scope);
                 return;
             }
 
@@ -225,12 +228,7 @@ pub fn inject_child_process(
             };
 
             if !perms.check(&Capability::SpawnProcess) {
-                let err_str = V8String::new(
-                    _scope,
-                    "Process spawn denied. Run with --allow-child-process",
-                )
-                .unwrap();
-                rv.set(err_str.into());
+                throw_spawn_denied(_scope);
                 return;
             }
 
@@ -274,12 +272,7 @@ pub fn inject_child_process(
                 .unwrap_or_default();
 
             if !perms.check(&Capability::SpawnProcess) {
-                let err_str = V8String::new(
-                    _scope,
-                    "Process spawn denied. Run with --allow-child-process",
-                )
-                .unwrap();
-                rv.set(err_str.into());
+                throw_spawn_denied(_scope);
                 return;
             }
 
@@ -443,12 +436,7 @@ pub fn inject_child_process(
                 .unwrap_or_default();
 
             if !perms.check(&Capability::SpawnProcess) {
-                let err_str = V8String::new(
-                    _scope,
-                    "Process spawn denied. Run with --allow-child-process",
-                )
-                .unwrap();
-                rv.set(err_str.into());
+                throw_spawn_denied(_scope);
                 return;
             }
 
@@ -510,8 +498,7 @@ pub fn inject_child_process(
                 &*(ptr as *const Arc<PermissionState>)
             };
             if !perms.check(&Capability::SpawnProcess) {
-                let e = V8String::new(scope, "Process spawn denied").unwrap();
-                scope.throw_exception(e.into());
+                throw_spawn_denied(scope);
                 return;
             }
             let cmd = args.get(0).to_rust_string_lossy(scope);
@@ -1069,7 +1056,7 @@ pub fn inject_child_process(
             var child_process = {
                 exec: function(command, opts, cb) {
                     var p = parseOpts(command, opts, cb);
-                    Promise.resolve(__execShellAsync(command)).then(function(raw) {
+                    new Promise(function(resolve) { resolve(__execShellAsync(command)); }).then(function(raw) {
                         var r = JSON.parse(raw);
                         if (p.cb) {
                             if (r.code !== 0) {
@@ -1092,7 +1079,7 @@ pub fn inject_child_process(
                     if (typeof args === 'function') { cb = args; args = []; opts = {}; }
                     else if (typeof opts === 'function') { cb = opts; opts = {}; }
                     args = args || [];
-                    Promise.resolve(__execAsync(file, args, 0)).then(function(raw) {
+                    new Promise(function(resolve) { resolve(__execAsync(file, args, 0)); }).then(function(raw) {
                         var r = JSON.parse(raw);
                         if (cb) {
                             if (r.code !== 0) {

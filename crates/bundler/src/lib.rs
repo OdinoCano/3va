@@ -352,7 +352,25 @@ fn bundle_graph(entry: &Path, minify: bool) -> anyhow::Result<String> {
         anyhow::bail!("Entry file not found: {}", entry.display());
     }
 
-    let mut registry: HashMap<PathBuf, String> = HashMap::new();
+    // Registry keys are relative to the working directory ("./src/a.js"), or an
+    // opaque "#n" outside it, so the bundle never embeds the build machine's
+    // absolute paths.
+    let cwd = std::env::current_dir()
+        .and_then(|d| d.canonicalize())
+        .unwrap_or_default();
+    let mut ids: HashMap<PathBuf, String> = HashMap::new();
+    let mut id_of = move |p: &Path| -> String {
+        let next = ids.len();
+        ids.entry(p.to_path_buf())
+            .or_insert_with(|| match p.strip_prefix(&cwd) {
+                Ok(rel) => format!("./{}", rel.to_string_lossy().replace('\\', "/")),
+                Err(_) => format!("#{next}"),
+            })
+            .clone()
+    };
+    let entry_id = id_of(&entry);
+
+    let mut registry: HashMap<String, String> = HashMap::new();
     let mut queue: Vec<PathBuf> = vec![entry.clone()];
     let mut queued: HashSet<PathBuf> = HashSet::from([entry.clone()]);
 
@@ -361,7 +379,8 @@ fn bundle_graph(entry: &Path, minify: bool) -> anyhow::Result<String> {
             .map_err(|e| anyhow::anyhow!("Reading {}: {e}", path.display()))?;
         let base = path.to_string_lossy().into_owned();
 
-        let body = bundle_module_body(&path, &source, &base);
+        let id = id_of(&path);
+        let body = bundle_module_body(&path, &id, &source, &base);
 
         // Rewrite every `require("spec")` call to the target's resolved
         // absolute-path registry key, discovering new modules to queue.
@@ -379,17 +398,16 @@ fn bundle_graph(entry: &Path, minify: bool) -> anyhow::Result<String> {
             if queued.insert(resolved.clone()) {
                 queue.push(resolved.clone());
             }
-            resolved.to_string_lossy().into_owned()
+            id_of(&resolved)
         });
 
-        registry.insert(path, rewritten);
+        registry.insert(id, rewritten);
     }
 
     let mut modules_src = String::new();
-    for (path, body) in &registry {
+    for (id, body) in &registry {
         modules_src.push_str(&format!(
-            "  {:?}: function(module, exports, require) {{\n{body}\n  }},\n",
-            path.to_string_lossy()
+            "  {id:?}: function(module, exports, require) {{\n{body}\n  }},\n"
         ));
     }
 
@@ -411,7 +429,7 @@ fn bundle_graph(entry: &Path, minify: bool) -> anyhow::Result<String> {
          }}\n\
          require({:?});\n\
          }})();",
-        entry.to_string_lossy()
+        entry_id
     );
 
     Ok(if minify {
@@ -433,7 +451,7 @@ fn bundle_graph(entry: &Path, minify: bool) -> anyhow::Result<String> {
 /// `.js`/`.jsx`/`.ts`/`.tsx`/`.mjs`, transpiled via
 /// `vvva_js::transpiler::transpile_to_cjs` if it's ESM, left as-is (already
 /// CommonJS — real npm packages routinely are) otherwise.
-fn bundle_module_body(path: &Path, source: &str, base: &str) -> String {
+fn bundle_module_body(path: &Path, id: &str, source: &str, base: &str) -> String {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "json" => format!("module.exports = {source};"),
@@ -459,7 +477,7 @@ fn bundle_module_body(path: &Path, source: &str, base: &str) -> String {
             )
         }
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "ico" | "woff" | "woff2" | "ttf" => {
-            format!("module.exports = {:?};", path.display().to_string())
+            format!("module.exports = {id:?};")
         }
         _ if vvva_js::esm::source_is_esm(source, base) => {
             vvva_js::transpiler::transpile_to_cjs(source, matches!(ext, "jsx" | "tsx"))

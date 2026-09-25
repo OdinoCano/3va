@@ -23,12 +23,12 @@ Install packages with `3va install` and use them in your code.
 
 ## Real-world note: 3va's malware scanner
 
-Some popular packages (e.g. `dayjs`, `uuid`) trigger 3va's built-in malware scanner because their `package.json` or source contain words like "RCE" or "environment variable" in security documentation or test scripts. This is a **false positive**, but it demonstrates that 3va's supply-chain security is active and aggressive — when in doubt, it blocks. To override a false positive for a trusted package:
+`3va install` scans every package with a built-in malware scanner before it lands in `node_modules`. The scanner errs on the side of blocking, so a legitimate package can occasionally be flagged (a false positive). To override one for a package you trust:
 
 ```bash
 # Audit first to see the findings
 3va audit
 
 # Then install with a yes override (only for trusted packages)
-3va install dayjs --allow-net=registry.npmjs.org --yes
+3va install <package> --allow-net=registry.npmjs.org --yes
 ```

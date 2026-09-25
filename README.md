@@ -246,9 +246,34 @@ Equivalent CLI flags:
 
 Copy the last line. Done — that's the minimum permission set your script actually needs, not a guess.
 
+To skip the copy-paste, add `--write` and the observed grants go straight into `package.json` under `3va.permissions`, ready to commit and review:
+
+```bash
+3va permissions learn --write app.ts
+```
+
+Existing grants are **merged, never replaced** — running `learn` again after a refactor cannot drop a permission some other entry point still needs, and per-package scopes (`"express": { ... }`) are left untouched. Only what the script actually did is recorded; nothing is widened on its behalf.
+
 If you'd rather not execute anything yet (e.g. reviewing an unfamiliar script before running it), `3va permissions suggest app.ts` does the same job by reading the source instead of running it — faster and safer to run blind, but a starting point rather than the final word, since it can't see what a conditional branch or dynamic `require()` would touch at runtime.
 
 The `package.json` section further down is for teams who want the grants checked into version control instead of typed on the command line every time — worth doing once a project stabilizes, not something you need on day one.
+
+### When something is denied
+
+A denied capability no longer only surfaces as whatever error the built-in happened to raise. Every run ends by reporting what was refused and the flag that would allow it:
+
+```
+$ 3va run app.ts
+[!] 2 permissions were denied during this run:
+    read /etc/hosts (denied 2x)
+      grant with: --allow-read=/etc/hosts
+    connect to api.example.com:8443
+      grant with: --allow-net=api.example.com:8443
+
+Run `3va permissions learn` to record the script's real requirements in package.json instead of passing flags each time.
+```
+
+`--trace-denials` prints each refusal the moment it happens instead, which is what you want when the summary can't tell you *which* call was refused — a retry loop hitting the same wall 400 times looks identical to one incidental read. A host grant may name a port: `--allow-net=api.example.com:443` allows that service and nothing else on the host, while a portless `--allow-net=api.example.com` still covers every port.
 
 ### Package-level permission declarations
 
@@ -390,7 +415,7 @@ Supports `describe`, `test`, `expect`, all standard matchers, `toMatchSnapshot`,
 
 Walks the real import graph from the entry — project files, `node_modules` (both ESM and CommonJS packages), `.json`, and `.css` — and inlines everything into one self-contained file, runnable standalone via `3va run dist/bundle.js` or in a browser `<script>` tag. `.css` imports inject a `<style>` tag when a DOM is present (browser) and no-op otherwise (CLI/server); asset imports (images, fonts) embed the original path as a string, not a copied/hashed file — there's no production asset pipeline yet. The output directory is created automatically if it doesn't exist.
 
-`--minify` works. `--source-map` and `--split` are not yet implemented for this path — see [Known Limitations](#known-limitations--roadmap). For automatic rebuilds on change, use `3va dev` (watches and rebuilds with a 300 ms debounce) — it also serves the project directly via on-demand transpilation without needing a full bundle at all.
+`--minify` strips whitespace and comments (identifiers are not renamed). `--source-map` and `--split` are not implemented yet: `3va bundle` exits with an error if you pass them — see [Known Limitations](#known-limitations--roadmap). For automatic rebuilds on change, use `3va dev` (watches and rebuilds with a 300 ms debounce) — it also serves the project directly via on-demand transpilation without needing a full bundle at all.
 
 ### Dev server with HMR
 
@@ -563,7 +588,7 @@ for the full design, prior-art comparison, and real third-party interop test res
 - **Malware/secrets scanning is not automatic on `3va install`** — despite `docs/10-security/01-static-analysis.md` previously implying otherwise, the scanner only runs when you explicitly call `3va audit` / `3va audit --secrets`. Run it yourself after installing new dependencies.
 - **MQTT / IMAP clients**: sockets are bounded (`MQTT_CONNECT_TIMEOUT`/`MQTT_IO_TIMEOUT` and `IMAP_CONNECT_TIMEOUT`/`IMAP_IO_TIMEOUT`, defaults 10 s / 30 s; per-client `connectTimeout` option overrides for tests or slow links) so an unresponsive broker/server can no longer hang a connection indefinitely. Residual caveat: `mqtt`'s connect still runs synchronously on the JS engine thread (up to that same bound) before the async poll loop takes over; IMAP connects already run on a worker thread.
 - **Supply-chain detection gaps**: npm provenance verification checks the Sigstore DSSE signature and in-toto subject of registry attestations during `install` (opt-in strict mode: `--require-provenance`), but does not yet validate the Fulcio certificate chain to its root or Rekor inclusion proofs. Dependency-confusion protection (`.npmrc`-pinned scopes resolve only against their private registry — public fallback is refused), typosquatting detection (edit-distance against an embedded popular-packages list, warned during `install`), tarball integrity (SHA-256/512) and lifecycle-script blocking are implemented.
-- **Bundler**: `--source-map` and `--split` are not implemented for the real multi-file bundling path (only for a legacy single-file path reachable via the library API, not the CLI). Tree shaking is not yet applied to the multi-file graph.
+- **Bundler**: `--source-map` and `--split` are not implemented; the CLI rejects them with an error. `--minify` does not rename identifiers. Tree shaking is not yet applied to the multi-file graph.
 - **Dev server HMR**: full-page reload only, not granular per-module hot replacement.
 - **`package.json` permissions section**: `3va permissions suggest`/`learn` don't yet write directly into `package.json` — that's planned but manual editing is required today.
 - **Post-quantum TLS**: real in-handshake hybrid PQ-TLS (RFC 10024) is client-only, one code path (`tls.pqConnect()`); no PQ-TLS server, and `wss://`/gRPC TLS remain classical. See [Post-Quantum Cryptography](#post-quantum-cryptography).

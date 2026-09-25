@@ -2657,8 +2657,16 @@ pub fn inject_require(
                         // the permitted variables, so this re-check changes
                         // nothing about what callers can see — it only makes
                         // the capability check visible to the audit log.
-                        if (typeof prop === 'string' && typeof __envAudit === 'function') {
-                            __envAudit(prop);
+                        if (typeof prop === 'string') {
+                            if (prop in target) {
+                                if (typeof __envAudit === 'function') __envAudit(prop);
+                            } else if (typeof __envRequest === 'function') {
+                                // Not granted (or not set): ask the permission layer,
+                                // which may prompt, audits the denial, and lets
+                                // `3va run` report the hidden read at exit.
+                                var granted = __envRequest(prop);
+                                if (granted !== undefined) { target[prop] = granted; return granted; }
+                            }
                         }
                         return target[prop];
                     },
@@ -3711,7 +3719,13 @@ pub fn inject_require(
 
                 var result = __httpListen(port, hostname);
                 if (typeof result !== 'number') {
-                    setTimeout(function() { self.emit('error', result); }, 0);
+                    // Node semantics: with no 'error' listener a failed listen
+                    // (e.g. EACCES without --allow-net) is an uncaught exception,
+                    // not a silent exit 0.
+                    setTimeout(function() {
+                        if (self.listenerCount('error') > 0) self.emit('error', result);
+                        else throw result;
+                    }, 0);
                     return self;
                 }
                 self._id = result;
@@ -4726,7 +4740,8 @@ pub fn inject_require(
             // localRequire, not the entry script's, same as require() above.
             var localImportAsync = __makeImportAsync(localRequire);
 
-            var source = __readFile(resolved);
+            // `3va test --coverage` installs instrumented copies of the project's sources.
+            var source = (globalThis.__3va_covSources && globalThis.__3va_covSources[resolved]) || __readFile(resolved);
             // Rewrite bare import() calls so they use our runtime's __importAsync.
             // V8's new Function() doesn't support native dynamic import(), so any
             // import( that wasn't already rewritten by the Rust transpiler (e.g. raw

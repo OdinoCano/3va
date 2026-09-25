@@ -1116,8 +1116,8 @@ unsafe extern "C" fn napi_get_cb_info(
     if !argc.is_null() {
         let count = (*argc).min(ci.argc);
         if !argv.is_null() {
-            for i in 0..count {
-                *argv.add(i) = ci.argv[i];
+            for (i, arg) in ci.argv.iter().take(count).enumerate() {
+                *argv.add(i) = *arg;
             }
         }
         if trace_enabled() {
