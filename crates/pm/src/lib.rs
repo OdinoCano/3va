@@ -4034,7 +4034,7 @@ pub async fn install_workspace(
         let mut set = tokio::task::JoinSet::new();
 
         for (dep_name, dep_version) in &merged {
-            let spec = format!("{}@{}", dep_name, normalize_version(dep_version));
+            let spec = manifest_spec(dep_name, dep_version);
             let an = allow_net_owned.clone();
             let r = root.to_path_buf();
             // update_manifest=false for root-level shared deps (each package
@@ -4080,7 +4080,7 @@ pub async fn install_workspace(
             if members.contains(dep_name.as_str()) {
                 continue;
             }
-            let spec = format!("{}@{}", dep_name, normalize_version(dep_version));
+            let spec = manifest_spec(dep_name, dep_version);
             // update_manifest=true so each package's package.json + lockfile is updated.
             install_with_transitive(&spec, false, allow_net, &pkg.path, true).await?;
         }
