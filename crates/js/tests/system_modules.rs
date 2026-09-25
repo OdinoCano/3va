@@ -1203,6 +1203,6 @@ async fn fetch_rejects_with_an_error_object() {
         .unwrap();
     assert_eq!(
         r,
-        "true|Network access denied. Run with --allow-net=example.com"
+        "true|Network access denied. Run with --allow-net=example.com:443"
     );
 }
