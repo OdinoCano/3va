@@ -5,3 +5,4 @@ node_modules/
 dist/
 coverage/
 *.cpuprofile
+13-tauri/web/bundle.js

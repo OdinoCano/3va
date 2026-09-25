@@ -13,7 +13,8 @@ normal haría Vite + jest, sin instalar nada más.
 mi-app/
 ├─ src-tauri/          ← Rust (shell, #[tauri::command])
 │   └─ tauri.conf.json ← beforeDevCommand / beforeBuildCommand apuntan a 3va
-├─ index.html
+├─ index.html         ← página de desarrollo (`3va dev`)
+├─ web/index.html     ← página de producción (frontendDist), carga bundle.js
 └─ src/
     └─ main.ts         ← frontend TS que 3va sirve y bundlea
 ```
@@ -24,12 +25,16 @@ En `src-tauri/tauri.conf.json`:
 {
   "build": {
     "beforeDevCommand": "3va dev --port 3000",
-    "beforeBuildCommand": "3va bundle src/main.ts -o dist/bundle.js --minify",
+    "beforeBuildCommand": "3va bundle src/main.ts -o web/bundle.js --minify",
     "devUrl": "http://localhost:3000",
-    "frontendDist": "../dist"
+    "frontendDist": "../web"
   }
 }
 ```
+
+`web/index.html` es la página de producción: carga `./bundle.js`, que genera
+`beforeBuildCommand`. El `index.html` de la raíz es solo para `3va dev` (carga
+`/src/main.ts` directamente).
 
 `cargo tauri dev` arranca 3va, apunta la webview al dev server, y HMR se encarga
 del resto.

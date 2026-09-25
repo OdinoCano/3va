@@ -18,6 +18,15 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ### Fixed
 
+- **`3va test --coverage` measured nothing**: it only paired source files with test files and always said "0 tests registered". It now instruments the project's sources, reports statement and line coverage per file (uncovered lines included), and attributes each test result to its file.
+- **`3va bundle --source-map` / `--split` pretended to work**: `--source-map` printed "✓ Source map" without writing the file, and `--split` fell back to an old path that emitted unresolved `import` statements. Neither is implemented, so both now exit with a clear error.
+- **Bundles embedded the build machine's absolute paths** as module ids; ids are now relative to the working directory (`./src/utils.js`).
+- **`child_process` without `--allow-child-process`** failed with `Unexpected token 'P', "Process sp"... is not valid JSON` instead of `Process spawn denied. Run with --allow-child-process`. `exec`/`execFile` now deliver it to the callback.
+- **`#!/usr/bin/env 3va` shebangs failed** with `unrecognized subcommand './script.js'`: `3va <existing script path>` now runs it.
+- **`3va start --port N` / `3va run --port N` were silently ignored** when the script had no `allow-env` grant for `PORT`; an explicit port now grants reading exactly `PORT`.
+- **A throw inside a timer callback, or a server that failed to `listen` (e.g. no `--allow-net`), exited 0** and the server case printed nothing. Both are now uncaught exceptions: exit code 1 with the error, unless `process.on('uncaughtException')` handles it.
+- **False "Unhandled promise rejection" reports** when a handler was attached after the rejection: the tracker compared V8 handle addresses instead of the promise's identity.
+
 - **`3va status`/`list` could read a half-written process file**: the supervisor rewrote `~/.3va/processes/<name>.json` in place (truncate, then write), so a concurrent read saw empty or partial JSON. It now writes to a temporary file and renames it atomically. This also fixes the intermittent `permissions_preserved_on_autorestart` CI failure.
 
 ## [2.9.0] — 2026-09-23

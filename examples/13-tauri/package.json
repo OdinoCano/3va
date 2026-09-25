@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "3va dev --port 3000",
-    "build": "3va bundle src/main.ts -o dist/bundle.js --minify",
+    "build": "3va bundle src/main.ts -o web/bundle.js --minify",
     "test": "3va test",
     "tauri": "cargo tauri dev"
   },

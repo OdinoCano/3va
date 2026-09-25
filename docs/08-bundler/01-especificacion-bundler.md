@@ -1,5 +1,7 @@
 # 01 - BUNDLER SPECIFICATION
 
+> **Status (v2.9):** `--split` and `--source-map` are specified here but **not implemented**. `3va bundle` exits with an error if either flag is passed. `--minify` strips whitespace and comments but does not rename identifiers.
+
 ## 1.1 Overview
 
 3va's bundler transpiles and packages TypeScript, JavaScript, and JSX code into a single file ready for distribution. It performs dead code elimination (tree shaking) via AST analysis with OXC.
