@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! `fips` build of the native `crypto` ops: same signatures as the RustCrypto
 //! versions in `crypto.rs`, backed by the AWS-LC FIPS 140-3 module. Algorithms
 //! the module does not offer as approved services (MD5, scrypt, SHA-1/SHA-224

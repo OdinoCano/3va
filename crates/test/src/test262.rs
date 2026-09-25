@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Runner for the tc39/test262 conformance suite (see scripts/setup-test262.sh).
 //!
 //! Parses each test's YAML-ish frontmatter by hand rather than pulling in a

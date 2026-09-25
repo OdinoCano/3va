@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for Web API globals injected in crates/js/src/builtins/modules.rs:
 // AbortController/AbortSignal, Blob/File, FormData, ReadableStream/WritableStream/TransformStream,
 // sessionStorage, localStorage, URLPattern, EventSource.

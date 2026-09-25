@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Latency baseline for the crypto transport (FIPS-relevant), measured in JS on
 // the main thread. Kept as its own test binary so each transport's engine runs
 // in isolation.

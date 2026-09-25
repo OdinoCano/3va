@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for child_process, zlib, http/https, cluster, and worker_threads modules.
 // Run: cargo test -p vvva_js --test system_modules
 

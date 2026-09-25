@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Workspace v2.0.0 — topological script execution, affected-only mode,
 //! graph visualization, and per-package permission scopes.
 //!

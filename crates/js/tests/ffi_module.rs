@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::sync::Arc;
 use vvva_js::JsEngine;
 use vvva_permissions::{Capability, PermissionState};

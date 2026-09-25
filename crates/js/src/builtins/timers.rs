@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use crate::builtins::NativeCtxRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use base64::Engine;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! npm provenance / Sigstore attestation verification.
 //!
 //! Downloads a package's attestations from the registry provenance endpoint

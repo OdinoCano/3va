@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! JavaScript engine crate — wraps V8 via the `v8` crate, exposes `JsEngine` and all built-in modules.
 
 pub mod async_context;

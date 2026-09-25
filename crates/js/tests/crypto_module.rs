@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for the native crypto builtin.
 // Run: cargo test -p vvva_js --test crypto_module
 

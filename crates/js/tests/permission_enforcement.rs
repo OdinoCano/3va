@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Prueba que el motor JS aplica el modelo de permisos en tiempo de ejecución.
 // Esto cubre el path crítico documentado en docs/06-permissions/02-enforcement.md §2.3.2:
 // "En el polyfill de fs → 1. Verificar permisos → 2. Si está permitido, ejecutar operación"

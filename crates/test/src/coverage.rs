@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Statement-level JS/TS coverage via Oxc AST instrumentation.
 //!
 //! Design (Istanbul/nyc approach, implemented in Rust):

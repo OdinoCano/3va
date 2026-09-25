@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! MQTT (Message Queuing Telemetry Transport) client built-in module
 //!
 //! Native functions:
@@ -220,6 +223,15 @@ pub fn inject_mqtt(
                 let msg = v8::String::new(
                     scope,
                     &format!("Network access denied. Run with --allow-net={}", host),
+                )
+                .unwrap();
+                scope.throw_exception(v8::Exception::error(scope, msg));
+                return;
+            }
+            if !use_tls && !vvva_permissions::plaintext_allowed(&host) {
+                let msg = v8::String::new(
+                    scope,
+                    &vvva_permissions::plaintext_denied_message("MQTT", &host),
                 )
                 .unwrap();
                 scope.throw_exception(v8::Exception::error(scope, msg));

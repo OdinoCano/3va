@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use crate::capability::{Capability, PermissionState};
 use std::path::PathBuf;
 

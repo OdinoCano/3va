@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for the Node.js compatibility fixes introduced in this batch:
 //   - Buffer.isBuffer() accepting raw Uint8Array
 //   - crypto.webcrypto wrapper

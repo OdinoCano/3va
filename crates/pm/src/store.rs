@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::path::{Path, PathBuf};
 
 /// Global content-addressable store at `~/.3va/store/`.

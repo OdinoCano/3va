@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Reports unhandled promise rejections to stderr.
 //!
 //! V8's PromiseRejectWithNoHandler fires immediately when reject() is called —

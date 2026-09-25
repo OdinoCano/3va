@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use crate::framework::{TestResult, TestStatus};
 use std::path::Path;
 use std::sync::Arc;

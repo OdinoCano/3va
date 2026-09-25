@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for the zlib module: gzip/gunzip, deflate/inflate, deflateRaw/inflateRaw.
 // Run: cargo test -p vvva_js --test zlib_module
 

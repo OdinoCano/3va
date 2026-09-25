@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for the POP3 builtin.
 // Run: cargo test -p vvva_js --test pop3_module
 

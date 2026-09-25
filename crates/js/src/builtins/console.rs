@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::io::Write;
 use v8::{Function, FunctionCallbackArguments, PinScope, ReturnValue};
 

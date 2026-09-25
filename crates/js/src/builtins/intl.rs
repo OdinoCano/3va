@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! `Intl.*` conformance patches (ECMA-402 / test262 `intl402/`).
 //!
 //! V8 150 ships a near-complete `Intl` (ICU 76): `Intl.NumberFormat`,

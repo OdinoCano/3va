@@ -11,6 +11,7 @@
 - [ ] New functionality has tests
 - [ ] Changes to the permission/capability model are documented
 - [ ] No secrets, credentials, or tokens committed
+- [ ] Every commit is signed off (`git commit -s`, DCO)
 
 ## Security impact
 

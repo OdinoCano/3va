@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 /// Async context propagation — runtime-level implementation for V8.
 ///
 /// Backed directly by V8's `ContinuationPreservedEmbedderData`: a per-isolate

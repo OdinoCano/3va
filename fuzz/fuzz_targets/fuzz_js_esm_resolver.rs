@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{CallExpression, Argument, Expression, StringLiteral};
 fn foo<'a>(arg: &'a Argument<'a>) {

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! FTP (File Transfer Protocol) client built-in module
 //!
 //! Native functions:
@@ -150,6 +153,16 @@ pub fn inject_ftp(
                 let msg = v8::String::new(
                     _scope,
                     &format!("Network access denied. Run with --allow-net={}", host),
+                )
+                .unwrap();
+                let err = v8::Exception::error(_scope, msg);
+                _scope.throw_exception(err);
+                return;
+            }
+            if !use_tls && !vvva_permissions::plaintext_allowed(&host) {
+                let msg = v8::String::new(
+                    _scope,
+                    &vvva_permissions::plaintext_denied_message("FTP", &host),
                 )
                 .unwrap();
                 let err = v8::Exception::error(_scope, msg);

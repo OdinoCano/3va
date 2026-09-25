@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! HKDF-SHA256 key derivation.
 //!
 //! HKDF (RFC 5869) is a hash-based key derivation function.  Because it relies

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Real interop tests for hybrid PQ-TLS (RFC 10024 X25519MLKEM768) against a
 // genuine third-party TLS implementation — a local `openssl s_server` process,
 // not 3va talking to itself. See docs/10-security/06-pq-tls-hybrid-design.md.

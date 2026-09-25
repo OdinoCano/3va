@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Module bundler — resolves imports, tree-shakes, and code-generates single-file JS/TS bundles.
 
 pub mod generator;

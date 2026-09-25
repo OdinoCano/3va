@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Latency baseline for the IRC transport, measured end-to-end against a
 // minimal local daemon on loopback. Kept as its own test binary so each
 // transport's engine runs in isolation.

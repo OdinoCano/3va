@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for the MQTT builtin.
 // Run: cargo test -p vvva_js --test mqtt_module
 
@@ -400,6 +403,9 @@ async fn mqtt_connect_times_out_against_blackholed_host() {
     // silently dropped, so a plain TcpStream::connect would hang (and stall
     // the whole JS engine thread with it) until the OS gives up. The injected
     // 500 ms `connectTimeout` must abort far earlier.
+    // Plain MQTT to a non-loopback host needs --allow-insecure; every other
+    // test in this binary talks to loopback, so flipping the global is safe.
+    vvva_permissions::set_allow_insecure(true);
     let mut e = engine_with_net("192.0.2.1").await;
     e.eval(
         r#"

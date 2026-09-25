@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::BufRead;

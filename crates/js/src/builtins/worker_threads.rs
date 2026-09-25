@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Real OS-thread `worker_threads` implementation.
 //!
 //! Each `new Worker(file, { workerData })` spawns an independent OS thread.

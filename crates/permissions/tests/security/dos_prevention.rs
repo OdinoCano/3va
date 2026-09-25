@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests de enforcement en los límites de acceso a recursos.
 // El crate de permisos previene el acceso no autorizado a recursos del sistema,
 // que es la principal defensa contra scripts maliciosos o mal configurados.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for high-priority Node.js compatibility items.
 // Run: cargo test -p vvva_js --test compat_priority
 

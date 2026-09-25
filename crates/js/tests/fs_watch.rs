@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for fs.watch (inotify-backed real file watching).
 // Run: cargo test -p vvva_js --test fs_watch
 

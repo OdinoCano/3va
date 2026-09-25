@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 pub mod buffer;
 pub mod child_process;
 pub mod code_cache;

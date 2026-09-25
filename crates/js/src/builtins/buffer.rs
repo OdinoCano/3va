@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use v8::{ContextScope, HandleScope};
 
 pub fn inject_buffer(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> {

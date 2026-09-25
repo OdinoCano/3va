@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Typosquatting detection for npm package names.
 //!
 //! Maintains a static list of the most-installed / most-impersonated npm

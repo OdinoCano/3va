@@ -8,6 +8,10 @@ on:
   schedule:
     - cron: '0 6 * * 1'
 
+# Least privilege: jobs get a read-only token unless they ask for more.
+permissions:
+  contents: read
+
 jobs:
   analyze:
     name: Analyze

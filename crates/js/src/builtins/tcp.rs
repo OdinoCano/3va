@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Raw TCP and TLS socket backend for the `net` and `tls` Node.js modules.
 
 use super::tls::TlsStream;

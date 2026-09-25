@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for URL, URLSearchParams, and FileReader globals.
 // Run: cargo test -p vvva_js --test url_globals
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Sprint 1 compatibility tests:
 //   - Buffer as real Uint8Array subclass
 //   - crypto.createHash MD5

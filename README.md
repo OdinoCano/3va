@@ -7,6 +7,7 @@
 [![CI](https://github.com/OdinoCano/3va/actions/workflows/ci.yml/badge.svg)](https://github.com/OdinoCano/3va/actions/workflows/ci.yml)
 [![Security](https://github.com/OdinoCano/3va/actions/workflows/security.yml/badge.svg)](https://github.com/OdinoCano/3va/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14776/badge)](https://www.bestpractices.dev/projects/14776)
 [![Rust Edition 2024](https://img.shields.io/badge/Rust-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/)
 [![Docs](https://img.shields.io/badge/docs-3va--docs-blue.svg)](https://3va-docs-n48j.vercel.app/)
 [![Audio Overview](https://img.shields.io/badge/%F0%9F%8E%A7_Audio_Overview-Espa%C3%B1ol-orange.svg)](https://notebooklm.google.com/notebook/040c3292-f15b-45e0-91ae-aab027c54b12/artifact/ea4b59f6-61fc-41df-9b76-d265ff543e3c?utm_source=nlmm_share)
@@ -167,6 +168,8 @@ nix run "github:OdinoCano/3va?dir=dist/nix"
 
 ### Build from source
 
+Requires Rust 1.85+ (stable, via [rustup](https://rustup.rs)), a C/C++ toolchain, and network access on the first build to download the prebuilt V8 library. FIPS builds also need Go and CMake. See [CONTRIBUTING.md § Prerequisites](CONTRIBUTING.md#prerequisites).
+
 ```bash
 git clone https://github.com/OdinoCano/3va.git
 cd 3va
@@ -205,6 +208,8 @@ Every capability is blocked by default. Permissions are granted per-invocation v
 ```
 
 Omitting a flag means the capability is blocked and cannot be enabled from inside the script. In an attended terminal (stderr is a TTY), the runtime asks interactively at the point of first access; in CI, pipes, or redirected output, ungranted capabilities are denied silently.
+
+Unencrypted protocols (`http://`, `ws://`, and FTP/IMAP/POP3/IRC/MQTT/gRPC without TLS) are refused for any non-loopback host, even one granted with `--allow-net`, unless you also pass `--allow-insecure`. TLS connections require TLS 1.2 or newer and always verify certificates.
 
 Permission scopes can be widened to cover all values:
 

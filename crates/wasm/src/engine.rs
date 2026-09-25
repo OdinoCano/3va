@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::path::Path;
 use std::sync::Arc;
 use vvva_permissions::{Capability, PermissionState};

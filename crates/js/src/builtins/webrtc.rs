@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! WebRTC (Web Real-Time Communication) built-in module
 //!
 //! Native functions:

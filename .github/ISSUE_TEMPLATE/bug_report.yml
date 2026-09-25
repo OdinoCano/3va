@@ -1,0 +1,38 @@
+name: Bug report
+description: Something in 3va doesn't work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security vulnerabilities must not be reported here.** Use a private
+        [security advisory](https://github.com/OdinoCano/3va/security/advisories/new) instead (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: 3va version
+      description: Output of `3va --version`
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and architecture
+      placeholder: Ubuntu 24.04 x86_64
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest script that shows the problem, and the exact command you ran, including any `--allow-*` flags.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. actual behavior
+      description: What you expected to happen, what happened instead, and any error output.
+    validations:
+      required: true

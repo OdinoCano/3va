@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for the Blob, File, and related Web APIs.
 // Run: cargo test -p vvva_js --test blob_file_module
 

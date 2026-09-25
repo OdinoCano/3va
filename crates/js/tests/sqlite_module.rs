@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for the node:sqlite builtin: DatabaseSync, StatementSync.
 // Run: cargo test -p vvva_js --test sqlite_module
 

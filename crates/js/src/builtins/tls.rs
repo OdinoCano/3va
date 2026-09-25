@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Single source of TLS for the runtime's client builtins.
 //!
 //! Default build: tcp/ftp/imap/irc/mqtt/pop3 use OS-native TLS (native-tls),
@@ -8,7 +11,22 @@
 use std::sync::Arc;
 
 #[cfg(not(feature = "fips"))]
-pub use native_tls::{TlsConnector, TlsStream};
+pub use native_tls::TlsStream;
+
+/// native-tls lets the OS negotiate down to TLS 1.0 by default; every client
+/// builtin goes through here so the floor is TLS 1.2 everywhere.
+#[cfg(not(feature = "fips"))]
+pub struct TlsConnector;
+
+#[cfg(not(feature = "fips"))]
+impl TlsConnector {
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new() -> native_tls::Result<native_tls::TlsConnector> {
+        native_tls::TlsConnector::builder()
+            .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
+            .build()
+    }
+}
 
 #[cfg(feature = "fips")]
 pub use fips::{TlsConnector, TlsStream};

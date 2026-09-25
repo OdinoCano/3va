@@ -193,6 +193,15 @@ Enables accessible mode: disables colors, animations, and special characters. Co
 3va --accessible audit --deny
 ```
 
+### `--allow-insecure`
+
+Allows unencrypted protocols to non-loopback hosts: `http://` (fetch), `ws://`, and FTP, IMAP, POP3, IRC, MQTT and gRPC without TLS. They are refused by default, even for hosts granted with `--allow-net`. Loopback hosts (`localhost`, `127.0.0.0/8`, `::1`) never need it. `--allow-net` is still required.
+
+```bash
+3va run app.ts --allow-net=legacy.internal                     # http://legacy.internal → refused
+3va --allow-insecure run app.ts --allow-net=legacy.internal    # allowed
+```
+
 ## 3.8 Short flag reference
 
 All flags that have a single-letter alias, grouped by command:

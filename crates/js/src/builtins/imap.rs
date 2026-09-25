@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! IMAP4rev1 client backend.
 //!
 //! Architecture:
@@ -453,6 +456,9 @@ pub fn inject_imap(
                             "Network access denied. Run with --allow-net={}",
                             host
                         ));
+                    }
+                    if !use_tls && !vvva_permissions::plaintext_allowed(&host) {
+                        return Err(vvva_permissions::plaintext_denied_message("IMAP", &host));
                     }
 
                     let imap_conn =

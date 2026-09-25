@@ -2,7 +2,7 @@
 name = "vvva_config"
 version = "2.9.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 description = "Project configuration schema and loader for the 3va JavaScript runtime (3va.config.toml / .json)"
 repository = "https://github.com/OdinoCano/3va"
 homepage = "https://github.com/OdinoCano/3va"

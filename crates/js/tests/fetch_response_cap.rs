@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for fetch() response-body size cap.
 //
 // fetch() buffers the whole response body in memory before handing it to JS,

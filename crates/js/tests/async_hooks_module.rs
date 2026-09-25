@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Tests for AsyncLocalStorage backed by the patched QuickJS job hook.
 // Run: cargo test -p vvva_js --test async_hooks_module
 

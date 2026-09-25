@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::path::{Component, Path, PathBuf};
 
 use crate::builtins::modules;

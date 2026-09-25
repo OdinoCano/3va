@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! On-disk V8 code cache for the (large, unchanging) JS bootstrap strings
 //! injected on every engine start. Compiling e.g. `modules::inject_require`'s
 //! multi-thousand-line `require()`/`vm`/`cluster` polyfill from source costs

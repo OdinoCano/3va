@@ -7,6 +7,15 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **Plaintext protocols are off by default.** `fetch('http://…')`, `ws://` WebSockets, and FTP, IMAP, POP3, IRC, MQTT and gRPC connections without TLS to any **non-loopback** host now throw `Insecure protocol … is disabled by default`, even when `--allow-net` grants the host. Pass `--allow-insecure` to allow them. Loopback (`localhost`, `127.0.0.0/8`, `::1`) is unaffected.
+
+### Security
+
+- **TLS 1.2 minimum everywhere**: the default (non-FIPS) build's native-tls connections (TCP/TLS, FTP, IMAP, POP3, IRC, MQTT, `wss://`) previously accepted whatever minimum version the OS allowed, which could be TLS 1.0. They now refuse anything older than TLS 1.2.
+- **Release workflows validate `workflow_dispatch` tags** before using them in shell steps, and every workflow now runs with a read-only token unless a job asks for more.
+
 ### Fixed
 
 - **`3va status`/`list` could read a half-written process file**: the supervisor rewrote `~/.3va/processes/<name>.json` in place (truncate, then write), so a concurrent read saw empty or partial JSON. It now writes to a temporary file and renames it atomically. This also fixes the intermittent `permissions_preserved_on_autorestart` CI failure.

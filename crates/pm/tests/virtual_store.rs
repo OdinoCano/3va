@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Integration tests for the pnpm-style virtual store topology.
 // Run: cargo test -p vvva_pm --test virtual_store
 

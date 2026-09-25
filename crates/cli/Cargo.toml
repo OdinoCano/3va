@@ -2,7 +2,7 @@
 name = "vvva_cli"
 version = "2.9.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 description = "3va — secure-by-default JavaScript/TypeScript runtime built on V8 with post-quantum crypto and capability-based sandboxing"
 repository = "https://github.com/OdinoCano/3va"
 homepage = "https://github.com/OdinoCano/3va"

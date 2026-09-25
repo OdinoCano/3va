@@ -1,0 +1,8 @@
+#!/bin/sh
+# commit-msg hook — installed by cargo-husky
+# Rejects commits without a DCO "Signed-off-by:" trailer.
+# Use `git commit -s` (see CONTRIBUTING.md § Developer Certificate of Origin).
+if ! grep -q '^Signed-off-by: ' "$1"; then
+  echo "[commit-msg] Missing Signed-off-by. Commit with: git commit -s" >&2
+  exit 1
+fi

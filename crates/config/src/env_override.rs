@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Apply `3VA_<SECTION>_<KEY>` environment-variable overrides to a loaded config.
 //!
 //! Priority: CLI flags > env vars > config file > built-in defaults.

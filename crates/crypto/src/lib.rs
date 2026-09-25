@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Post-quantum cryptography — ML-KEM-768, ML-DSA-65, Lamport one-time signatures, and HKDF.
 //!
 //! # Examples

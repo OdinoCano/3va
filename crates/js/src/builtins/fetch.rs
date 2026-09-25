@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use base64::Engine as _;
 use std::io::Read;
 use std::sync::Arc;
@@ -178,6 +181,16 @@ pub fn inject_fetch(
 
             if !permissions().check(&Capability::Network(host.clone())) {
                 let msg = format!("Network access denied. Run with --allow-net={}", host);
+                let err = v8::String::new(scope, &msg).unwrap();
+                scope.throw_exception(err.into());
+                return;
+            }
+            if url
+                .get(..7)
+                .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+                && !vvva_permissions::plaintext_allowed(&host)
+            {
+                let msg = vvva_permissions::plaintext_denied_message("HTTP", &host);
                 let err = v8::String::new(scope, &msg).unwrap();
                 scope.throw_exception(err.into());
                 return;

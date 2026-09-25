@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Test framework for 3va — runner, matchers, coverage, and security test utilities.
 
 pub mod coverage;

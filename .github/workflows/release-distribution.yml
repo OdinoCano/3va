@@ -18,8 +18,10 @@ on:
         type: boolean
         default: false
 
+# Least privilege: read-only by default. Only update-homebrew-and-scoop
+# (commits Formula/ and bucket/) and publish-npm (OIDC) ask for more.
 permissions:
-  contents: write   # commit Formula/ and bucket/ back to this repo
+  contents: read
 
 env:
   VERSION: ${{ github.event.inputs.version || github.event.release.tag_name }}
@@ -43,11 +45,17 @@ jobs:
       darwin_arm64: ${{ steps.hashes.outputs.darwin_arm64 }}
       windows_x64:  ${{ steps.hashes.outputs.windows_x64 }}
     steps:
+      # workflow_dispatch input: only a plain SemVer tag may reach the shell.
+      - name: Validate version
+        shell: bash
+        run: |
+          [[ "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
+            || { echo "::error::invalid version: $VERSION"; exit 1; }
       - name: Download .sha256 files via GitHub API
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VER="${{ env.VERSION }}"
+          VER="$VERSION"
           [[ "$VER" != v* ]] && VER="v${VER}"
           # gh release download uses the API — no CDN propagation delay.
           # Retry up to 5 times (30 s apart) in case the release was just created.
@@ -190,6 +198,8 @@ jobs:
   # wiring this job up properly instead of leaving them stale by hand).
   update-homebrew-and-scoop:
     name: Update Formula, Scoop, Nix, and Chocolatey VERIFICATION manifests
+    permissions:
+      contents: write   # commit the updated manifests back to main
     if: github.event.inputs.only_npm != 'true'
     needs: collect-hashes
     runs-on: ubuntu-latest
@@ -468,7 +478,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/3va.rb bucket/3va.json dist/homebrew/Formula/3va.rb dist/nix/default.nix dist/chocolatey/VERIFICATION.txt
           git diff --cached --quiet && exit 0
-          git commit -m "chore: update Formula, Scoop, Nix, and Chocolatey VERIFICATION manifests for ${{ env.VERSION }}"
+          git commit -s -m "chore: update Formula, Scoop, Nix, and Chocolatey VERIFICATION manifests for $VERSION"
           git push origin HEAD:main
 
   # ── Publish to Chocolatey ────────────────────────────────────────────────────

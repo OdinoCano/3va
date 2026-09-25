@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! gRPC client backend using tonic and prost.
 //!
 //! Architecture:
@@ -227,6 +230,15 @@ pub fn inject_grpc(
                     scope,
                     "EACCES",
                     format!("Network access denied. Run with --allow-net={}", host),
+                );
+                scope.throw_exception(err);
+                return;
+            }
+            if !use_tls && !vvva_permissions::plaintext_allowed(&host) {
+                let err = js_err(
+                    scope,
+                    "EACCES",
+                    vvva_permissions::plaintext_denied_message("gRPC (h2c)", &host),
                 );
                 scope.throw_exception(err);
                 return;

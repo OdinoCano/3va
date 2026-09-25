@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use v8::{Array, ArrayBuffer, Local, PinScope, Uint8Array, Value};
 
 pub fn uint8array_to_vec(_scope: &mut PinScope, arr: Local<Uint8Array>) -> Vec<u8> {

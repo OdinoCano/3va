@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Permission model — capability-based sandbox for network, filesystem, env, and process access.
 //!
 //! # Examples
@@ -24,6 +27,7 @@
 pub mod audit;
 pub mod capability;
 pub mod enforcement;
+pub mod insecure;
 pub mod preset;
 pub mod sandbox;
 pub mod scope;
@@ -31,6 +35,7 @@ pub mod scope;
 pub use audit::{AuditEvent, AuditLog, AuditLogger};
 pub use capability::{Capability, PermissionState};
 pub use enforcement::{EnvEnforcer, FsEnforcer, NetEnforcer, PermissionError, ProcessEnforcer};
+pub use insecure::{plaintext_allowed, plaintext_denied_message, set_allow_insecure};
 pub use preset::PermissionPreset;
 pub use sandbox::{VirtualFs, VirtualNetwork};
 pub use scope::{ROOT_SCOPE, ScopeGuard, current_scope, set_current_scope};

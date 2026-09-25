@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 //! Lamport One-Time Signature Scheme using SHA-256.
 //!
 //! Security model: quantum-resistant, reducing to the preimage resistance of

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Prueba el pipeline completo: archivo → transpilación → evaluación.
 // Cubre docs/05-js-engine/01-quickjs-integration.md y
 // docs/05-js-engine/02-modulo-loader.md.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use std::env;
 
 /// Determina si el entorno o el usuario han solicitado desactivar

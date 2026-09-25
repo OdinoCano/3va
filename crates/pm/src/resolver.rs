@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 use crate::semver::{Semver, SemverRange};
 use std::collections::HashMap;
 

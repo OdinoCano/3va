@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 3va contributors
+
 // Latency baseline for the fetch() (HTTP/1.1 client) transport, measured
 // end-to-end against a local server on loopback. Kept as its own test binary
 // so each transport's engine runs in isolation (a single consolidated binary
