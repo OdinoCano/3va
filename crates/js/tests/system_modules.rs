@@ -1189,3 +1189,20 @@ async fn uncaught_exception_in_timer_fails_the_event_loop() {
     let err = e.run_event_loop().await.unwrap_err().to_string();
     assert!(err.contains("boom"), "got {err}");
 }
+
+// fetch() used to reject with a bare string, so `err.message` was undefined.
+#[tokio::test]
+async fn fetch_rejects_with_an_error_object() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            "(function() { try { __fetchAsync('https://example.com/', 'GET', '{}', null, undefined); } \
+             catch (err) { return String(err instanceof Error) + '|' + err.message; } })()",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        r,
+        "true|Network access denied. Run with --allow-net=example.com"
+    );
+}

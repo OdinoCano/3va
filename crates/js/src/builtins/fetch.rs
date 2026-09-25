@@ -210,8 +210,9 @@ pub fn inject_fetch(
             let host = match host_from_url(&url) {
                 Some(h) => h,
                 None => {
-                    let err = v8::String::new(scope, "Invalid URL").unwrap();
-                    scope.throw_exception(err.into());
+                    let msg = v8::String::new(scope, "Invalid URL").unwrap();
+                    let err = v8::Exception::type_error(scope, msg);
+                    scope.throw_exception(err);
                     return;
                 }
             };
@@ -228,8 +229,9 @@ pub fn inject_fetch(
                     "Network access denied. Run with --allow-net={}",
                     destination.as_deref().unwrap_or(&host)
                 );
-                let err = v8::String::new(scope, &msg).unwrap();
-                scope.throw_exception(err.into());
+                let msg = v8::String::new(scope, &msg).unwrap();
+                let err = v8::Exception::error(scope, msg);
+                scope.throw_exception(err);
                 return;
             }
             if url
@@ -238,8 +240,9 @@ pub fn inject_fetch(
                 && !vvva_permissions::plaintext_allowed(&host)
             {
                 let msg = vvva_permissions::plaintext_denied_message("HTTP", &host);
-                let err = v8::String::new(scope, &msg).unwrap();
-                scope.throw_exception(err.into());
+                let msg = v8::String::new(scope, &msg).unwrap();
+                let err = v8::Exception::error(scope, msg);
+                scope.throw_exception(err);
                 return;
             }
 
@@ -251,9 +254,11 @@ pub fn inject_fetch(
                 Ok(json) => {
                     rv.set(v8::String::new(scope, &json).unwrap().into());
                 }
+                // Like undici: a network failure rejects with a TypeError.
                 Err(e) => {
-                    let err = v8::String::new(scope, &e.to_string()).unwrap();
-                    scope.throw_exception(err.into());
+                    let msg = v8::String::new(scope, &e.to_string()).unwrap();
+                    let err = v8::Exception::type_error(scope, msg);
+                    scope.throw_exception(err);
                 }
             }
         },
