@@ -2902,6 +2902,82 @@ async fn install_with_transitive(
         })
 }
 
+/// `3va ci`: install exactly what `3va-lock.json` records.
+///
+/// The difference from `install` is that the lockfile is authoritative rather
+/// than advisory:
+///
+/// * a manifest range that the lockfile does not satisfy is an **error** — the
+///   usual CI failure this exists to catch — instead of a re-resolve that
+///   produces a tree nobody reviewed,
+/// * a pin that disagrees with the manifest is reported before anything is
+///   downloaded, not after,
+/// * a missing lockfile is an error, never an implicit fresh resolve.
+pub async fn ci(project_root: &Path, allow_net: Option<&[String]>) -> anyhow::Result<()> {
+    let lock_path = project_root.join("3va-lock.json");
+    if !lock_path.exists() {
+        anyhow::bail!(
+            "No 3va-lock.json in {}. `3va ci` installs a recorded tree and cannot \
+             resolve one for you — run `3va install` first and commit the lockfile.",
+            project_root.display()
+        );
+    }
+    let lock = Lockfile::load(&lock_path)
+        .map_err(|e| anyhow::anyhow!("{} could not be read: {}", lock_path.display(), e))?;
+
+    if lock.dependencies.is_empty() {
+        anyhow::bail!(
+            "{} records no packages. An empty lockfile cannot be installed from, and \
+             treating it as a satisfied install is how a tree silently goes missing — \
+             regenerate it with `3va install`.",
+            lock_path.display()
+        );
+    }
+
+    // The lockfile must be a superset of what the manifest asks for.
+    let manifest: Option<serde_json::Value> =
+        std::fs::read_to_string(project_root.join("package.json"))
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok());
+    if let Some(manifest) = &manifest {
+        let mut drift = Vec::new();
+        for key in ["dependencies", "devDependencies"] {
+            let Some(deps) = manifest[key].as_object() else {
+                continue;
+            };
+            for (name, range) in deps {
+                let requested = range.as_str().unwrap_or("*");
+                match lock.pin(name) {
+                    None => drift.push(format!(
+                        "{name}@{requested} is in package.json but not in the lockfile"
+                    )),
+                    Some(pin) if !installed_version_satisfies(&pin.version, Some(requested)) => {
+                        drift.push(format!(
+                            "{name}: package.json asks for {requested}, lockfile pins {}",
+                            pin.version
+                        ))
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        if !drift.is_empty() {
+            anyhow::bail!(
+                "3va-lock.json does not match package.json:\n  {}\n\
+                 Run `3va install` and commit the updated lockfile.",
+                drift.join("\n  ")
+            );
+        }
+    }
+
+    println!();
+    println!(
+        "Installing {} package(s) from 3va-lock.json...",
+        lock.dependencies.len()
+    );
+    install_from_manifest(project_root, allow_net).await
+}
+
 /// Update only the package.json and lockfile without re-downloading anything.
 fn update_manifest_only(root_spec: &str, project_root: &Path) -> anyhow::Result<()> {
     let (pkg_name, _) = parse_package_spec(root_spec)?;
@@ -4512,6 +4588,82 @@ mod overrides_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_project(dir: &std::path::Path, manifest: &str, lock: Option<&str>) {
+        std::fs::write(dir.join("package.json"), manifest).unwrap();
+        if let Some(lock) = lock {
+            std::fs::write(dir.join("3va-lock.json"), lock).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn ci_refuses_to_guess_when_there_is_no_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        write_project(
+            dir.path(),
+            r#"{"name":"x","dependencies":{"express":"^4.18.2"}}"#,
+            None,
+        );
+        let err = ci(dir.path(), None).await.unwrap_err().to_string();
+        assert!(
+            err.contains("No 3va-lock.json"),
+            "ci must not resolve for you: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ci_refuses_an_empty_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        write_project(
+            dir.path(),
+            r#"{"name":"x","dependencies":{"express":"^4.18.2"}}"#,
+            Some(
+                r#"{"lockfileVersion":3,"name":"x","version":"1.0.0","packages":{},"dependencies":{}}"#,
+            ),
+        );
+        let err = ci(dir.path(), None).await.unwrap_err().to_string();
+        assert!(err.contains("records no packages"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn ci_reports_drift_before_downloading_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        write_project(
+            dir.path(),
+            r#"{"name":"x","dependencies":{"express":"^5.0.0"}}"#,
+            Some(
+                r#"{"lockfileVersion":3,"name":"x","version":"1.0.0","packages":{},
+                     "dependencies":{"express":{"version":"4.19.2"}}}"#,
+            ),
+        );
+        let err = ci(dir.path(), None).await.unwrap_err().to_string();
+        assert!(
+            err.contains("express: package.json asks for ^5.0.0"),
+            "{err}"
+        );
+        assert!(
+            err.contains("lockfile pins 4.19.2"),
+            "the message must name both sides: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ci_reports_a_manifest_dependency_missing_from_the_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        write_project(
+            dir.path(),
+            r#"{"name":"x","dependencies":{"express":"^4.18.2","ms":"^2.1.3"}}"#,
+            Some(
+                r#"{"lockfileVersion":3,"name":"x","version":"1.0.0","packages":{},
+                     "dependencies":{"express":{"version":"4.19.2"}}}"#,
+            ),
+        );
+        let err = ci(dir.path(), None).await.unwrap_err().to_string();
+        assert!(
+            err.contains("ms@^2.1.3 is in package.json but not in the lockfile"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn a_caret_range_reaches_the_resolver_intact() {

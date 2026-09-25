@@ -18,8 +18,11 @@ pub struct Lockfile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LockfilePackage {
     pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub integrity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dev: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<String>,
@@ -28,9 +31,13 @@ pub struct LockfilePackage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LockfileDep {
     pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub integrity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dev: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<String>,

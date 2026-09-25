@@ -3242,6 +3242,34 @@ enum Commands {
         #[arg(long = "require-provenance")]
         require_provenance: bool,
     },
+    /// Convert an existing lockfile (package-lock.json, yarn.lock, pnpm-lock.yaml,
+    /// bun.lock) to 3va's native 3va-lock.json.
+    ///
+    /// The conversion is faithful: every version, resolved URL and integrity hash
+    /// is carried over. Formats that cannot be converted without losing meaning
+    /// (Yarn Berry's cache checksums are not SRI hashes; bun.lockb is binary) are
+    /// reported as unsupported instead of being written out as an empty lockfile.
+    Migrate {
+        /// Show what would be written without touching the filesystem.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Registry hosts to allow network access to, for a lockfile whose
+        /// entries need re-resolution (e.g. a partially parsed pnpm v9 file).
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_net: Option<Vec<String>>,
+    },
+    /// Install exactly what 3va-lock.json records, and fail if it cannot.
+    ///
+    /// `3va install` resolves ranges and may move within them; `3va ci` is the
+    /// reproducible counterpart: the lockfile is authoritative, integrity hashes
+    /// are verified, and a lockfile that disagrees with package.json is an error
+    /// rather than something to silently re-resolve.
+    Ci {
+        /// Registry hosts to allow network access to.
+        #[arg(long = "allow-net", num_args = 0.., require_equals = true, value_delimiter = ',')]
+        allow_net: Option<Vec<String>>,
+    },
     /// Remove an installed package
     #[command(aliases = ["rm", "uninstall"])]
     Remove {
@@ -4327,6 +4355,52 @@ async fn main() -> anyhow::Result<()> {
                     vvva_pm::install_package(pkg, allow_net.as_deref()).await?;
                 }
             }
+        }
+        Commands::Migrate {
+            dry_run,
+            allow_net: _,
+        } => {
+            let cwd = std::env::current_dir()?;
+            let (_, unsupported) = vvva_pm::inspect_lockfiles(&cwd);
+            for u in unsupported.advice() {
+                eprintln!("! {u}");
+            }
+            if *dry_run {
+                // Inspection only. Reporting the plan must not perform it — a
+                // dry run that wrote the lockfile was worse than no flag.
+                match vvva_pm::inspect_lockfiles(&cwd).0 {
+                    Some(detected) => {
+                        println!(
+                            "Would migrate {} → 3va-lock.json ({} package(s))",
+                            detected.flavor.file_name(),
+                            detected.lockfile.dependencies.len()
+                        );
+                        for w in &detected.warnings {
+                            println!("  ! {w}");
+                        }
+                    }
+                    None => println!("No supported lockfile found; nothing to migrate."),
+                }
+                return Ok(());
+            }
+            let report = vvva_pm::migrate_lockfile_reporting(&cwd)?;
+            for w in &report.warnings {
+                eprintln!("! {w}");
+            }
+            if report.migrated {
+                println!("  {} package(s) recorded", report.package_count);
+            } else if cwd.join("3va-lock.json").exists() {
+                println!("Nothing to migrate — 3va-lock.json is already authoritative.");
+            } else if unsupported.advice().is_empty() {
+                println!(
+                    "No supported lockfile found in {}. Nothing to migrate.",
+                    cwd.display()
+                );
+            }
+        }
+        Commands::Ci { allow_net } => {
+            let cwd = std::env::current_dir()?;
+            vvva_pm::ci(&cwd, allow_net.as_deref()).await?;
         }
         Commands::Workspace { action } => {
             let cwd = std::env::current_dir()?;
