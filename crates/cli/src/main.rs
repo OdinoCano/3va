@@ -3621,7 +3621,13 @@ enum Commands {
         out: Option<PathBuf>,
     },
     /// Check runtime health
-    Doctor,
+    Doctor {
+        /// List installed packages that ship install-time scripts
+        /// (preinstall/install/postinstall), which 3va does not run unless
+        /// the project allowlists them in "3va".onlyBuiltDependencies
+        #[arg(long)]
+        compat: bool,
+    },
     /// Enter an isolated interactive sandbox (REPL)
     #[command(aliases = ["sh", "shell"])]
     Sandbox {
@@ -3978,6 +3984,46 @@ fn split_version(spec: &str) -> (&str, Option<&str>) {
 /// `#!/usr/bin/env 3va` shebang executes: the kernel appends the script path
 /// right after the interpreter. Only an existing file that looks like a path
 /// (has a `/` or a script extension) qualifies, so a file named `test` in the
+/// `3va doctor --compat`: which installed packages depend on install-time
+/// scripts, and whether the project lets them run.
+fn print_install_script_report(project_root: &std::path::Path) {
+    let report = vvva_pm::lifecycle::packages_with_install_scripts(project_root);
+    if report.is_empty() {
+        println!("No installed package declares preinstall/install/postinstall scripts.");
+        return;
+    }
+    println!(
+        "{} installed package(s) ship install-time scripts. 3va never runs them unless \
+         the project lists the package in \"3va\".\"onlyBuiltDependencies\":\n",
+        report.len()
+    );
+    for p in &report {
+        let status = if p.allowlisted {
+            "allowlisted: runs sandboxed"
+        } else {
+            "not run"
+        };
+        println!(
+            "  {}@{}  {}  ({status})",
+            p.name,
+            p.version,
+            p.phases.join(", ")
+        );
+    }
+    let blocked: Vec<&str> = report
+        .iter()
+        .filter(|p| !p.allowlisted)
+        .map(|p| p.name.as_str())
+        .collect();
+    if !blocked.is_empty() {
+        println!(
+            "\nIf one of these needs its script to work (native builds, binary downloads), \
+             review it and add it to package.json:\n  \"3va\": {{ \"onlyBuiltDependencies\": {:?} }}",
+            blocked
+        );
+    }
+}
+
 /// current directory can't shadow `3va test`.
 fn rewrite_script_path_as_run(mut args: Vec<String>) -> Vec<String> {
     let is_script = args.get(1).is_some_and(|a| {
@@ -4855,8 +4901,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Doctor => {
-            check_system_info()?;
+        Commands::Doctor { compat } => {
+            if *compat {
+                print_install_script_report(&std::env::current_dir()?);
+            } else {
+                check_system_info()?;
+            }
         }
         Commands::Sandbox { plugins } => {
             run_sandbox_shell_with_plugins(plugins).await?;

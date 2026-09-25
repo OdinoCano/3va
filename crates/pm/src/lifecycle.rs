@@ -408,3 +408,122 @@ mod tests {
         }
     }
 }
+
+/// One installed package that ships install-time scripts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptPackage {
+    pub name: String,
+    pub version: String,
+    /// `preinstall` / `install` / `postinstall`, in that order.
+    pub phases: Vec<&'static str>,
+    /// Named in the project's `"3va".onlyBuiltDependencies`.
+    pub allowlisted: bool,
+}
+
+/// Every package directly under `project_root/node_modules` (scoped ones
+/// included) that declares an install-time script — what `3va doctor
+/// --compat` reports. 3va never runs these unless allowlisted.
+pub fn packages_with_install_scripts(project_root: &Path) -> Vec<ScriptPackage> {
+    let manifest: Option<serde_json::Value> =
+        std::fs::read_to_string(project_root.join("package.json"))
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok());
+    let trust = crate::trust::TrustPolicy::from_manifest_or_empty(manifest.as_ref());
+
+    let node_modules = project_root.join("node_modules");
+    let mut dirs = Vec::new();
+    for entry in std::fs::read_dir(&node_modules)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        if name.starts_with('@') {
+            for inner in std::fs::read_dir(entry.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                dirs.push(inner.path());
+            }
+        } else {
+            dirs.push(entry.path());
+        }
+    }
+
+    let mut out: Vec<ScriptPackage> = dirs
+        .iter()
+        .filter_map(|dir| {
+            let m: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).ok()?)
+                    .ok()?;
+            let phases: Vec<&'static str> = declared_scripts(&m)
+                .into_iter()
+                .filter(|(_, s)| !s.trim().is_empty())
+                .map(|(p, _)| p)
+                .collect();
+            if phases.is_empty() {
+                return None;
+            }
+            let name = m["name"].as_str()?.to_string();
+            Some(ScriptPackage {
+                allowlisted: trust.allows_lifecycle(&name),
+                version: m["version"].as_str().unwrap_or("?").to_string(),
+                name,
+                phases,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+#[cfg(test)]
+mod install_scripts_report_tests {
+    use super::*;
+
+    #[test]
+    fn lists_packages_with_install_scripts_and_their_allowlist_status() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |rel: &str, json: &str| {
+            let dir = root.path().join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("package.json"), json).unwrap();
+        };
+        write("", r#"{"3va":{"onlyBuiltDependencies":["esbuild"]}}"#);
+        write(
+            "node_modules/esbuild",
+            r#"{"name":"esbuild","version":"0.28.2","scripts":{"postinstall":"node install.js"}}"#,
+        );
+        write(
+            "node_modules/@scope/native",
+            r#"{"name":"@scope/native","version":"1.0.0","scripts":{"install":"node-gyp rebuild"}}"#,
+        );
+        write(
+            "node_modules/plain",
+            r#"{"name":"plain","version":"1.0.0","scripts":{"test":"x"}}"#,
+        );
+
+        let report = packages_with_install_scripts(root.path());
+        assert_eq!(
+            report,
+            vec![
+                ScriptPackage {
+                    name: "@scope/native".into(),
+                    version: "1.0.0".into(),
+                    phases: vec!["install"],
+                    allowlisted: false,
+                },
+                ScriptPackage {
+                    name: "esbuild".into(),
+                    version: "0.28.2".into(),
+                    phases: vec!["postinstall"],
+                    allowlisted: true,
+                },
+            ]
+        );
+    }
+}
