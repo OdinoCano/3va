@@ -2657,8 +2657,16 @@ pub fn inject_require(
                         // the permitted variables, so this re-check changes
                         // nothing about what callers can see — it only makes
                         // the capability check visible to the audit log.
-                        if (typeof prop === 'string' && typeof __envAudit === 'function') {
-                            __envAudit(prop);
+                        if (typeof prop === 'string') {
+                            if (prop in target) {
+                                if (typeof __envAudit === 'function') __envAudit(prop);
+                            } else if (typeof __envRequest === 'function') {
+                                // Not granted (or not set): ask the permission layer,
+                                // which may prompt, audits the denial, and lets
+                                // `3va run` report the hidden read at exit.
+                                var granted = __envRequest(prop);
+                                if (granted !== undefined) { target[prop] = granted; return granted; }
+                            }
                         }
                         return target[prop];
                     },

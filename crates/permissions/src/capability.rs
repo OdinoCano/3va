@@ -212,6 +212,18 @@ impl PermissionState {
         self.record_audit(&cap, allowed);
     }
 
+    /// A script read `process.env[variable]` and the variable isn't in the
+    /// pre-filtered env object. Returns its value if the read is allowed now
+    /// (e.g. just granted at the interactive prompt). Otherwise it goes
+    /// through [`Self::check`] like any other refusal: audited, tallied in
+    /// the run's denial summary, and remembered by the prompt. Variables the
+    /// host doesn't define hide nothing, so they are not checked at all.
+    pub fn request_env_var(&self, variable: &str) -> Option<String> {
+        let value = std::env::var(variable).ok()?;
+        self.check(&Capability::EnvVar(variable.to_string()))
+            .then_some(value)
+    }
+
     fn check_inner(&self, required: &Capability) -> bool {
         // Paso 1: deny_all global por categoría
         match required {
@@ -977,6 +989,27 @@ mod tests {
         state.grant(Capability::Network("api.example.com".to_string()));
         assert!(!state.check(&Capability::Network("127.0.0.1".to_string())));
         assert!(!state.check(&Capability::Network("0.0.0.0".to_string())));
+    }
+
+    #[test]
+    fn denied_env_reads_are_tallied_and_granted_reads_return_the_value() {
+        // PATH is defined in every test environment.
+        let state = PermissionState::new();
+        assert_eq!(state.request_env_var("PATH"), None);
+        assert_eq!(
+            state.denials(),
+            vec![Capability::EnvVar("PATH".to_string())]
+        );
+        // Variables the host doesn't define hide nothing.
+        assert_eq!(state.request_env_var("__3VA_SURELY_UNSET__"), None);
+        assert_eq!(
+            state.denials(),
+            vec![Capability::EnvVar("PATH".to_string())]
+        );
+
+        let granted = PermissionState::new();
+        granted.grant(Capability::EnvVar("PATH".to_string()));
+        assert!(granted.request_env_var("PATH").is_some());
     }
 
     #[test]
