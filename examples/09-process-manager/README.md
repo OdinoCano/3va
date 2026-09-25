@@ -17,7 +17,7 @@ Permissions for a managed process come from `package.json` (there are no `--allo
 3va status demo-api        # one process
 3va logs demo-api          # tail logs
 3va restart demo-api
-3va stop demo-api          # SIGTERM → SIGKILL after 1.5s
+3va stop demo-api          # SIGTERM, then SIGKILL if still running after 30 s
 3va delete demo-api        # stop + remove logs
 ```
 
