@@ -586,3 +586,43 @@ async fn hooks_beforeeach_failure_fails_only_that_test() {
     );
     assert_eq!(results[2].status, TestStatus::Passed, "test 3 debe pasar");
 }
+
+// `3va test --coverage` must measure which statements the tests executed,
+// and attribute each test result to its file.
+#[tokio::test(flavor = "multi_thread")]
+async fn coverage_reports_statements_and_tests_per_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("lib.js"),
+        "export function f(x) {\n  if (x > 0) {\n    return 'pos';\n  }\n  return 'neg';\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("lib.test.js"),
+        "import { f } from './lib.js';\ntest('pos', () => { expect(f(1)).toBe('pos'); });\n",
+    )
+    .unwrap();
+
+    let cfg = vvva_test::TestConfig {
+        coverage_root: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    };
+    let (results, statements) =
+        vvva_test::run_tests_with_coverage(vec![dir.path().to_path_buf()], Some(cfg))
+            .await
+            .unwrap();
+    assert!(results
+        .iter()
+        .all(|r| r.status == vvva_test::TestStatus::Passed));
+
+    let lib = dir.path().join("lib.js").canonicalize().unwrap();
+    let cov = &statements[&lib];
+    assert_eq!((cov.covered_statements, cov.total_statements), (3, 4));
+    assert_eq!(cov.uncovered_lines(), vec![5]);
+
+    let report = vvva_test::generate_coverage_report(&results, dir.path(), &statements);
+    assert_eq!(
+        report.files[0].tests_total, 1,
+        "test result not matched to its file"
+    );
+}

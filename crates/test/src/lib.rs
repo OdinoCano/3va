@@ -37,6 +37,28 @@ pub async fn run_tests(
     Ok(runner.get_results().clone())
 }
 
+/// Like [`run_tests`], but also returns statement coverage per source file
+/// (canonical path) when `config.coverage_root` is set.
+pub async fn run_tests_with_coverage(
+    paths: Vec<PathBuf>,
+    config: Option<TestConfig>,
+) -> anyhow::Result<(
+    Vec<TestResult>,
+    std::collections::HashMap<PathBuf, coverage::CoverageResult>,
+)> {
+    let cfg = config.unwrap_or_default();
+    let mut runner = TestRunner::new(cfg);
+    for path in &paths {
+        if path.is_file() {
+            runner.run_file(path).await?;
+        } else if path.is_dir() {
+            runner.run_directory(path).await?;
+        }
+    }
+    runner.print_summary();
+    Ok((runner.get_results().clone(), runner.statement_coverage()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

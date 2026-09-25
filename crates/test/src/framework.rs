@@ -24,6 +24,9 @@ impl TestCase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
     pub name: String,
+    /// Test file the result came from (empty when not file-based, e.g. test262).
+    #[serde(default)]
+    pub file: String,
     pub status: TestStatus,
     pub duration_ms: u64,
     pub error: Option<String>,
@@ -88,6 +91,7 @@ impl TestState {
 
             self.results.push(TestResult {
                 name: test.name.clone(),
+                file: String::new(),
                 status,
                 duration_ms: duration,
                 error: None,
