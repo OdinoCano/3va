@@ -246,9 +246,34 @@ Equivalent CLI flags:
 
 Copy the last line. Done — that's the minimum permission set your script actually needs, not a guess.
 
+To skip the copy-paste, add `--write` and the observed grants go straight into `package.json` under `3va.permissions`, ready to commit and review:
+
+```bash
+3va permissions learn --write app.ts
+```
+
+Existing grants are **merged, never replaced** — running `learn` again after a refactor cannot drop a permission some other entry point still needs, and per-package scopes (`"express": { ... }`) are left untouched. Only what the script actually did is recorded; nothing is widened on its behalf.
+
 If you'd rather not execute anything yet (e.g. reviewing an unfamiliar script before running it), `3va permissions suggest app.ts` does the same job by reading the source instead of running it — faster and safer to run blind, but a starting point rather than the final word, since it can't see what a conditional branch or dynamic `require()` would touch at runtime.
 
 The `package.json` section further down is for teams who want the grants checked into version control instead of typed on the command line every time — worth doing once a project stabilizes, not something you need on day one.
+
+### When something is denied
+
+A denied capability no longer only surfaces as whatever error the built-in happened to raise. Every run ends by reporting what was refused and the flag that would allow it:
+
+```
+$ 3va run app.ts
+[!] 2 permissions were denied during this run:
+    read /etc/hosts (denied 2x)
+      grant with: --allow-read=/etc/hosts
+    connect to api.example.com:8443
+      grant with: --allow-net=api.example.com:8443
+
+Run `3va permissions learn` to record the script's real requirements in package.json instead of passing flags each time.
+```
+
+`--trace-denials` prints each refusal the moment it happens instead, which is what you want when the summary can't tell you *which* call was refused — a retry loop hitting the same wall 400 times looks identical to one incidental read. A host grant may name a port: `--allow-net=api.example.com:443` allows that service and nothing else on the host, while a portless `--allow-net=api.example.com` still covers every port.
 
 ### Package-level permission declarations
 

@@ -70,6 +70,20 @@ pub struct PermissionState {
     pub audit_log: Option<Arc<Mutex<AuditLog>>>,
     /// When true, only denied checks are logged; when false, all checks are logged.
     pub audit_denied_only: bool,
+
+    /// Every capability that was refused, with how often.
+    ///
+    /// A denial is the most useful thing a sandbox produces and the one it was
+    /// worst at surfacing: the script throws, the run fails, and the user is
+    /// left to work backwards from a stack trace to the flag they needed. This
+    /// makes the run able to end with "you needed these three grants".
+    tally: Mutex<DenialTally>,
+    /// Local bind hosts that were refused, kept apart from outbound denials:
+    /// "connect to 0.0.0.0" is not what went wrong, and
+    /// `--allow-net=0.0.0.0` is not the fix (see [`Self::check_bind`]).
+    denied_binds: Mutex<Vec<String>>,
+    /// Print each denial as it happens, for when the summary is not enough.
+    pub trace_denials: bool,
 }
 
 impl PermissionState {
@@ -160,6 +174,9 @@ impl PermissionState {
     /// no por igualdad exacta, reflejando el comportamiento documentado.
     pub fn check(&self, required: &Capability) -> bool {
         let result = self.check_inner(required);
+        if !result {
+            self.record_denial(required);
+        }
         self.record_audit(required, result);
         result
     }
@@ -279,6 +296,7 @@ impl PermissionState {
         let required = Capability::Network(host.to_string());
 
         if self.deny_all_net {
+            self.record_bind_denial(host);
             self.record_audit(&required, false);
             return false;
         }
@@ -286,6 +304,7 @@ impl PermissionState {
             let denied = self.denied.read().unwrap();
             if denied.iter().any(|d| caps_match(d, &required)) {
                 drop(denied);
+                self.record_bind_denial(host);
                 self.record_audit(&required, false);
                 return false;
             }
@@ -298,7 +317,70 @@ impl PermissionState {
                 return true;
             }
         }
-        self.check(&required)
+        // Not `self.check()`: a refused bind is not an outbound refusal, and
+        // reporting it as one would tell the user to grant a destination the
+        // script never connects to.
+        let allowed = self.check_inner(&required);
+        if !allowed {
+            self.record_bind_denial(host);
+        }
+        self.record_audit(&required, allowed);
+        allowed
+    }
+
+    /// Local bind hosts that were refused during this run, deduplicated.
+    pub fn denied_bind_hosts(&self) -> Vec<String> {
+        self.denied_binds.lock().unwrap().clone()
+    }
+
+    fn record_bind_denial(&self, host: &str) {
+        let mut binds = self.denied_binds.lock().unwrap();
+        if binds.iter().any(|h| h == host) {
+            return;
+        }
+        let first = binds.is_empty();
+        binds.push(host.to_string());
+        drop(binds);
+        if first && self.trace_denials {
+            eprintln!("  [denied] bind a local server on {host}");
+        }
+    }
+
+    /// Every capability refused during this run, deduplicated and in the order
+    /// first refused.
+    pub fn denials(&self) -> Vec<Capability> {
+        self.tally.lock().unwrap().order.clone()
+    }
+
+    /// Every capability refused during this run with its hit count, in the
+    /// order first refused. The count separates "touched one file it was not
+    /// allowed to read" from "polled a file it was never allowed to read,
+    /// four hundred times while retrying" — the second is a bug in the script.
+    pub fn denial_counts(&self) -> Vec<(Capability, usize)> {
+        let tally = self.tally.lock().unwrap();
+        tally
+            .order
+            .iter()
+            .map(|c| (c.clone(), tally.counts[c]))
+            .collect()
+    }
+
+    fn record_denial(&self, cap: &Capability) {
+        let first = {
+            let mut tally = self.tally.lock().unwrap();
+            let hits = tally.counts.entry(cap.clone()).or_insert(0);
+            let first = *hits == 0;
+            *hits += 1;
+            if first {
+                tally.order.push(cap.clone());
+            }
+            first
+        };
+        // Repeats are counted but not printed: a retry loop would otherwise
+        // bury every other line in the run.
+        if first && self.trace_denials {
+            eprintln!("  [denied] {}", describe_capability(cap));
+        }
     }
 
     fn record_audit(&self, cap: &Capability, allowed: bool) {
@@ -415,6 +497,11 @@ impl Clone for PermissionState {
             deny_all_process: self.deny_all_process,
             audit_log: self.audit_log.clone(),
             audit_denied_only: self.audit_denied_only,
+            // A clone reports only its own denials: the summary describes the
+            // run that is finishing, not every check made since process start.
+            tally: Mutex::new(DenialTally::default()),
+            denied_binds: Mutex::new(Vec::new()),
+            trace_denials: self.trace_denials,
         }
     }
 }
@@ -507,18 +594,167 @@ fn caps_match(granted: &Capability, required: &Capability) -> bool {
     }
 }
 
-/// Matching de host/wildcard: `*.example.com` cubre `api.example.com`.
-fn host_matches(pattern: &str, host: &str) -> bool {
+/// Refused capabilities for one run: which, in what order, and how often.
+#[derive(Debug, Default)]
+struct DenialTally {
+    order: Vec<Capability>,
+    counts: HashMap<Capability, usize>,
+}
+
+/// The CLI flag that would grant this capability, as the user should write it.
+///
+/// A denial is only actionable if the answer says what to do, so this returns
+/// the flag rather than a description: `--allow-net=api.example.com:8080` is
+/// something you can paste, "network access to api.example.com:8080" is not.
+pub fn grant_flag(cap: &Capability) -> String {
+    match cap {
+        Capability::FileRead(p) => format!("--allow-read={}", p.display()),
+        Capability::FileWrite(p) => format!("--allow-write={}", p.display()),
+        Capability::Network(h) => format!("--allow-net={h}"),
+        Capability::EnvVar(v) => format!("--allow-env={v}"),
+        Capability::EnvAccess => "--allow-env".to_string(),
+        Capability::SpawnProcess => "--allow-child-process".to_string(),
+        Capability::FFI(p) => format!("--allow-ffi={}", p.display()),
+    }
+}
+
+/// A one-line description of a denied capability, for `--trace-denials`.
+pub fn describe_capability(cap: &Capability) -> String {
+    match cap {
+        Capability::FileRead(p) => format!("read {}", p.display()),
+        Capability::FileWrite(p) => format!("write {}", p.display()),
+        Capability::Network(h) => format!("connect to {h}"),
+        Capability::EnvVar(v) => format!("read environment variable {v}"),
+        Capability::EnvAccess => "read environment variables".to_string(),
+        Capability::SpawnProcess => "spawn a child process".to_string(),
+        Capability::FFI(p) => format!("load native library {}", p.display()),
+    }
+}
+
+/// The `package.json` `3va.permissions` key a capability belongs under.
+///
+/// The manifest deliberately uses the same kebab-case spelling as the CLI
+/// flags (`--allow-net` -> `"allow-net"`), so a grant can be moved between the
+/// two without translation. `learn --write` and this table must agree with
+/// `read_package_json_permissions`; a key spelled differently is silently
+/// ignored, which would make a written grant useless.
+pub fn manifest_key(cap: &Capability) -> &'static str {
+    match cap {
+        Capability::FileRead(_) => "allow-read",
+        Capability::FileWrite(_) => "allow-write",
+        Capability::Network(_) => "allow-net",
+        Capability::EnvVar(_) | Capability::EnvAccess => "allow-env",
+        Capability::SpawnProcess => "allow-child-process",
+        Capability::FFI(_) => "allow-ffi",
+    }
+}
+
+/// Format a host and port the way a grant must spell them.
+///
+/// An IPv6 literal is bracketed, because `::1:443` cannot be split back into
+/// an address and a port — a bare `::1` would read as host `:` on port `1`.
+/// Callers building a check request must use this rather than `format!` so
+/// the two sides of a comparison are always spelled the same way.
+pub fn authority(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// The port a spec *writes*, as text, without validating it — `None` when the
+/// spec names no port. `Some("99999")` means the spec does name a port, just
+/// not a valid one, which callers need to tell apart from "no port at all".
+fn written_port(spec: &str) -> Option<&str> {
+    if let Some(rest) = spec.strip_prefix('[') {
+        return rest
+            .find(']')
+            .and_then(|close| rest[close + 1..].strip_prefix(':'));
+    }
+    if spec.matches(':').count() > 1 {
+        // Bare IPv6 literal: every colon belongs to the address.
+        return None;
+    }
+    spec.rsplit_once(':')
+        .map(|(_, port)| port)
+        .filter(|port| !port.is_empty())
+}
+
+/// Split `host`, `host:port` or `[::1]:port` into its parts.
+///
+/// The port is optional and its presence is what makes a grant meaningful:
+/// `allow-net: ["api.example.com:443"]` is a promise about one service, not
+/// about the whole host.
+pub fn split_host_port(spec: &str) -> (&str, Option<u16>) {
+    // Bracketed IPv6: `[::1]:443` — the last colon after the bracket is the
+    // port separator, colons inside the brackets are part of the address.
+    if let Some(rest) = spec.strip_prefix('[')
+        && let Some(close) = rest.find(']')
+    {
+        let host = &rest[..close];
+        return match rest[close + 1..].strip_prefix(':') {
+            Some(p) => (host, p.parse().ok()),
+            None => (host, None),
+        };
+    }
+
+    // An unbracketed value with more than one colon is a bare IPv6 literal, so
+    // any colon in it belongs to the address, not to a port.
+    if spec.matches(':').count() > 1 {
+        return (spec, None);
+    }
+    match spec.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => (host, port.parse().ok()),
+        _ => (spec, None),
+    }
+}
+
+/// Do the two host specs describe the same host, and does the grant cover the
+/// destination's port?
+///
+/// Rules, in the order they matter for safety:
+///
+/// * `*` covers everything, as it always has.
+/// * A grant **with** a port covers only that port. `api.example.com:443` does
+///   not authorise a connection to `api.example.com:8080` — an app server
+///   listening on an admin port is exactly what a scoped grant should not
+///   reach.
+/// * A grant **without** a port covers any port on that host, which is what
+///   `allow-net: ["api.example.com"]` has always meant.
+/// * When the grant names a port but the destination reports none, the grant
+///   does not apply: a port we cannot see is a port we did not authorise.
+pub fn host_matches(pattern: &str, host: &str) -> bool {
     if pattern == "*" {
         return true;
     }
-    if pattern == host {
+    // A pattern that names a port it cannot spell (`api.example.com:https`,
+    // `api.example.com:99999`) is a typo in a grant. Treating it as portless
+    // would silently widen a narrow promise to every port on that host, which
+    // is the one outcome the user did not ask for — so it matches nothing.
+    if let Some(written) = written_port(pattern)
+        && written.parse::<u16>().is_err()
+    {
+        return false;
+    }
+    let (pattern_host, pattern_port) = split_host_port(pattern);
+    let (target_host, target_port) = split_host_port(host);
+
+    if let Some(wanted) = pattern_port {
+        // A pattern that names a port must be answered by a destination that
+        // names the same one.
+        if target_port != Some(wanted) {
+            return false;
+        }
+    }
+
+    if pattern_host == target_host {
         return true;
     }
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        return host.ends_with(suffix)
-            && host.len() > suffix.len()
-            && host.as_bytes()[host.len() - suffix.len() - 1] == b'.';
+    if let Some(suffix) = pattern_host.strip_prefix("*.") {
+        return target_host.ends_with(suffix)
+            && target_host.len() > suffix.len()
+            && target_host.as_bytes()[target_host.len() - suffix.len() - 1] == b'.';
     }
     false
 }
@@ -526,6 +762,184 @@ fn host_matches(pattern: &str, host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn denials_are_recorded_once_per_shape() {
+        let state = PermissionState::new();
+        state.grant(Capability::Network("api.example.com:443".into()));
+        assert!(state.check(&Capability::Network("api.example.com:443".into())));
+        // Same shape, different value: reported once, not four times.
+        for _ in 0..4 {
+            assert!(!state.check(&Capability::Network("other.example.com:8443".into())));
+        }
+        assert!(!state.check(&Capability::FileRead(PathBuf::from("/etc/shadow"))));
+        let denials = state.denials();
+        assert_eq!(denials.len(), 2, "{denials:?}");
+        // Repeated refusals are counted, not re-listed, and order is stable.
+        let counts = state.denial_counts();
+        assert_eq!(
+            counts[0],
+            (Capability::Network("other.example.com:8443".into()), 4)
+        );
+        assert_eq!(
+            counts[1],
+            (Capability::FileRead(PathBuf::from("/etc/shadow")), 1)
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_denials_reports_none() {
+        let state = PermissionState::new();
+        state.grant(Capability::EnvVar("NODE_ENV".into()));
+        assert!(state.check(&Capability::EnvVar("NODE_ENV".into())));
+        assert!(state.denials().is_empty());
+        assert!(state.denial_counts().is_empty());
+    }
+
+    #[test]
+    fn every_denial_carries_the_flag_that_would_grant_it() {
+        // A denial is only useful if it says what to do.
+        assert_eq!(
+            grant_flag(&Capability::Network("api.example.com:8080".into())),
+            "--allow-net=api.example.com:8080"
+        );
+        assert_eq!(
+            grant_flag(&Capability::FileRead(PathBuf::from("/etc/hosts"))),
+            "--allow-read=/etc/hosts"
+        );
+        assert_eq!(
+            grant_flag(&Capability::EnvVar("SECRET".into())),
+            "--allow-env=SECRET"
+        );
+        assert_eq!(
+            grant_flag(&Capability::SpawnProcess),
+            "--allow-child-process"
+        );
+        assert_eq!(
+            describe_capability(&Capability::Network("a.b:1".into())),
+            "connect to a.b:1"
+        );
+        // The manifest mirrors the CLI flag spelling; a key spelled
+        // differently would be written and then ignored at load time.
+        assert_eq!(
+            manifest_key(&Capability::FileWrite(PathBuf::from("/tmp"))),
+            "allow-write"
+        );
+        assert_eq!(manifest_key(&Capability::Network("*".into())), "allow-net");
+    }
+
+    #[test]
+    fn a_refused_bind_is_reported_as_a_bind_not_a_destination() {
+        // `server.listen(8080)` binds 0.0.0.0. Suggesting `--allow-net=0.0.0.0`
+        // would send the user after a destination they never connect to; the
+        // actual cause is that no network grant exists at all.
+        let state = PermissionState::new();
+        assert!(!state.check_bind("0.0.0.0"));
+        assert!(
+            state.denials().is_empty(),
+            "a bind is not an outbound denial"
+        );
+        assert_eq!(state.denied_bind_hosts(), vec!["0.0.0.0".to_string()]);
+
+        // Any network grant authorizes a local bind, and then there is nothing
+        // to report at all.
+        let state = PermissionState::new();
+        state.grant(Capability::Network("api.example.com".into()));
+        assert!(state.check_bind("0.0.0.0"));
+        assert!(state.denied_bind_hosts().is_empty());
+        assert!(state.denials().is_empty());
+    }
+
+    #[test]
+    fn an_unspellable_port_matches_nothing() {
+        // Fail closed: a typo must not widen a narrow grant into "any port".
+        assert!(!host_matches(
+            "api.example.com:https",
+            "api.example.com:443"
+        ));
+        assert!(!host_matches("api.example.com:https", "api.example.com"));
+        assert!(!host_matches(
+            "api.example.com:99999",
+            "api.example.com:99999"
+        ));
+        // A bracketed literal with a bad port behaves the same way.
+        assert!(!host_matches("[::1]:https", "[::1]:443"));
+        // ...and a host with no port in it is unaffected.
+        assert!(host_matches("api.example.com", "api.example.com:443"));
+        // Bare IPv6 is not mistaken for host:port.
+        assert!(host_matches("::1", "::1"));
+        // ...and a port-scoped IPv6 grant needs the bracketed spelling, which
+        // is what `authority` produces for every request it builds.
+        assert_eq!(authority("::1", 443), "[::1]:443");
+        assert_eq!(authority("example.com", 443), "example.com:443");
+        assert!(host_matches("[::1]:443", &authority("::1", 443)));
+        assert!(!host_matches("[::1]:443", &authority("::1", 8443)));
+    }
+
+    #[test]
+    fn a_port_scoped_grant_covers_only_that_port() {
+        // The point of `host:port`: allowing the HTTPS API must not also allow
+        // an admin server on the same machine.
+        assert!(host_matches("api.example.com:443", "api.example.com:443"));
+        assert!(!host_matches("api.example.com:443", "api.example.com:8080"));
+        assert!(!host_matches("api.example.com:443", "api.example.com"));
+        assert!(!host_matches(
+            "api.example.com:443",
+            "other.example.com:443"
+        ));
+    }
+
+    #[test]
+    fn a_portless_grant_still_covers_every_port() {
+        // This is what `allow-net: ["api.example.com"]` has always meant, and
+        // existing manifests depend on it.
+        assert!(host_matches("api.example.com", "api.example.com:443"));
+        assert!(host_matches("api.example.com", "api.example.com:8080"));
+        assert!(host_matches("api.example.com", "api.example.com"));
+    }
+
+    #[test]
+    fn the_wildcard_forms_keep_working() {
+        assert!(host_matches("*", "anything.example.com:443"));
+        assert!(host_matches("*.example.com", "api.example.com:443"));
+        assert!(!host_matches("*.example.com", "example.com:443"));
+        assert!(!host_matches("*.example.com", "evil.com:443"));
+    }
+
+    #[test]
+    fn a_scoped_wildcard_with_a_port_matches_only_that_port() {
+        assert!(host_matches("*.example.com:443", "api.example.com:443"));
+        assert!(!host_matches("*.example.com:443", "api.example.com:80"));
+    }
+
+    #[test]
+    fn ipv6_literals_split_correctly() {
+        assert_eq!(split_host_port("[::1]:443"), ("::1", Some(443)));
+        assert_eq!(split_host_port("[::1]"), ("::1", None));
+        // A bare IPv6 address has several colons and no port.
+        assert_eq!(split_host_port("::1"), ("::1", None));
+        assert_eq!(split_host_port("fe80::1"), ("fe80::1", None));
+        assert_eq!(
+            split_host_port("api.example.com:8080"),
+            ("api.example.com", Some(8080))
+        );
+        assert_eq!(
+            split_host_port("api.example.com"),
+            ("api.example.com", None)
+        );
+    }
+
+    #[test]
+    fn a_check_against_a_port_scoped_grant_accepts_only_the_named_port() {
+        let state = PermissionState::new();
+        state.grant(Capability::Network("api.example.com:443".to_string()));
+        assert!(state.check(&Capability::Network("api.example.com:443".into())));
+        assert!(!state.check(&Capability::Network("api.example.com:8080".into())));
+        // A grant with no port remains a whole-host grant.
+        let whole = PermissionState::new();
+        whole.grant(Capability::Network("api.example.com".to_string()));
+        assert!(whole.check(&Capability::Network("api.example.com:8080".into())));
+    }
 
     #[test]
     fn check_bind_allows_wildcard_bind_host_when_any_net_grant_exists() {

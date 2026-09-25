@@ -17,15 +17,52 @@ use vvva_permissions::{Capability, PermissionState};
 const MAX_RESPONSE_BODY_BYTES: u64 = 512 * 1024 * 1024;
 
 fn host_from_url(url: &str) -> Option<String> {
-    let after_scheme = url.find("://")?;
-    let rest = &url[after_scheme + 3..];
-    let host_part = rest.split('/').next().unwrap_or(rest);
-    let host = host_part.split(':').next().unwrap_or(host_part);
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_lowercase())
+    destination_from_url(url).map(|(host, _)| host)
+}
+
+/// The destination a URL names, as `host` and an effective port.
+///
+/// The port matters to permission checks: the request is authorised as
+/// `host:port` so that a grant of `api.example.com:443` covers exactly the
+/// HTTPS service and not an admin port on the same host. The scheme's default
+/// port is filled in when the URL omits it, so `https://api.example.com/` and
+/// `https://api.example.com:443/` ask the same question.
+fn destination_from_url(url: &str) -> Option<(String, u16)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    let host_part = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if host_part.is_empty() {
+        return None;
     }
+    // Credentials in the authority (`user:pass@host`) are not part of the
+    // destination.
+    let host_part = match host_part.rsplit_once('@') {
+        Some((_, after)) => after,
+        None => host_part,
+    };
+    let (host, port) = if let Some(rest) = host_part.strip_prefix('[') {
+        // Bracketed IPv6 literal.
+        let close = rest.find(']')?;
+        let host = &rest[..close];
+        let port = rest[close + 1..]
+            .strip_prefix(':')
+            .and_then(|p| p.parse::<u16>().ok());
+        (host.to_string(), port)
+    } else {
+        match host_part.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()),
+            None => (host_part.to_string(), None),
+        }
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port = port.or(match scheme.as_str() {
+        "https" | "wss" => Some(443),
+        "http" | "ws" => Some(80),
+        _ => None,
+    })?;
+    Some((host.to_lowercase(), port))
 }
 
 /// Streams `reader` into memory enforcing `cap` after every chunk read, so an
@@ -179,8 +216,18 @@ pub fn inject_fetch(
                 }
             };
 
-            if !permissions().check(&Capability::Network(host.clone())) {
-                let msg = format!("Network access denied. Run with --allow-net={}", host);
+            // `authority` brackets IPv6 literals: an unbracketed `::1:443`
+            // cannot be split back into an address and a port, so a
+            // port-scoped grant would never match it.
+            let destination =
+                destination_from_url(&url).map(|(h, p)| vvva_permissions::authority(&h, p));
+            if !permissions().check(&Capability::Network(
+                destination.clone().unwrap_or_else(|| host.clone()),
+            )) {
+                let msg = format!(
+                    "Network access denied. Run with --allow-net={}",
+                    destination.as_deref().unwrap_or(&host)
+                );
                 let err = v8::String::new(scope, &msg).unwrap();
                 scope.throw_exception(err.into());
                 return;

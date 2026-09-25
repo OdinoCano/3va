@@ -33,7 +33,9 @@ pub mod sandbox;
 pub mod scope;
 
 pub use audit::{AuditEvent, AuditLog, AuditLogger};
-pub use capability::{Capability, PermissionState};
+pub use capability::{
+    Capability, PermissionState, authority, describe_capability, grant_flag, manifest_key,
+};
 pub use enforcement::{EnvEnforcer, FsEnforcer, NetEnforcer, PermissionError, ProcessEnforcer};
 pub use insecure::{plaintext_allowed, plaintext_denied_message, set_allow_insecure};
 pub use preset::PermissionPreset;

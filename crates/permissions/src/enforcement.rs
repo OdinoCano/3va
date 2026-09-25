@@ -124,7 +124,15 @@ impl NetEnforcer {
     }
 
     pub fn check_connect(&self, host: &str, port: u16) -> Result<(), PermissionError> {
-        let cap = Capability::Network(host.to_string());
+        // Ask for the destination as `host:port`, not the bare host: a grant of
+        // `api.example.com:443` has to be able to refuse port 8080 on the same
+        // host, and a grant without a port still covers every port.
+        let cap = Capability::Network(if port == 0 {
+            host.to_string()
+        } else {
+            // Bracket IPv6 literals so `::1` on port 443 is checkable.
+            crate::capability::authority(host, port)
+        });
         if self.permission_state.check(&cap) {
             Ok(())
         } else {

@@ -3099,6 +3099,14 @@ enum PermissionsAction {
     Learn {
         /// The script to observe
         file: PathBuf,
+        /// Write the observed permissions into the project's package.json
+        /// under "3va"."permissions" instead of only printing them.
+        ///
+        /// Existing grants are kept and merged, never replaced, so learning
+        /// after a refactor cannot silently drop a permission another entry
+        /// point still needs.
+        #[arg(long)]
+        write: bool,
         /// Arguments to pass to the script (after --)
         #[arg(last = true)]
         script_args: Vec<String>,
@@ -3154,6 +3162,12 @@ enum Commands {
         /// package.json grants honored and everything else denied without asking.
         #[arg(long = "no-prompt")]
         no_prompt: bool,
+
+        /// Print each denied permission the moment it is refused, showing what
+        /// the script was trying to do and the flag that would allow it.
+        /// Without this, denials are collected and reported once at the end.
+        #[arg(long = "trace-denials")]
+        trace_denials: bool,
 
         /// Activate the Chrome DevTools Protocol (CDP) inspector.
         /// Optional value: host:port (default 127.0.0.1:9229).
@@ -4082,6 +4096,7 @@ async fn main() -> anyhow::Result<()> {
             allow_child_process,
             allow_ffi,
             no_prompt,
+            trace_denials,
             inspect,
             audit_log,
             audit_level,
@@ -4136,6 +4151,8 @@ async fn main() -> anyhow::Result<()> {
                 std::io::stderr().is_terminal() && !*no_prompt && !pkg_permissions.no_prompt,
                 &pkg_permissions,
             );
+
+            permissions.trace_denials = *trace_denials;
 
             // Wire in audit logging if --audit-log was specified
             let audit_log_data = if let Some(log_path) = audit_log {
@@ -4200,7 +4217,11 @@ async fn main() -> anyhow::Result<()> {
             if ext == "wasm" || ext == "wat" {
                 info!("Executing WebAssembly module...");
                 let engine = vvva_wasm::WasmEngine::new(permissions.clone())?;
-                engine.eval_file_with_args(file, script_args).await?;
+                let result = engine.eval_file_with_args(file, script_args).await;
+                // Summarize before `?`: a run that failed *because* of a denial
+                // is exactly the run whose denials the user needs to see.
+                report_denials(&permissions);
+                result?;
             } else if *prof {
                 if inspect_addr.is_some() {
                     anyhow::bail!("--prof and --inspect cannot be used together");
@@ -4208,7 +4229,9 @@ async fn main() -> anyhow::Result<()> {
                 let mut engine =
                     vvva_js::JsEngine::new_with_profiler(permissions.clone(), *prof_interval)
                         .await?;
-                engine.eval_file_with_args(file, script_args).await?;
+                let result = engine.eval_file_with_args(file, script_args).await;
+                report_denials(&permissions);
+                result?;
                 // Stop sampling and collect results
                 if let Some(profiler) = engine.take_profiler().await {
                     let cpu_json = profiler.to_cpuprofile();
@@ -4252,18 +4275,21 @@ async fn main() -> anyhow::Result<()> {
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
                 let __t = std::time::Instant::now();
+                let mut run_result = Ok(());
                 #[cfg(unix)]
                 tokio::select! {
-                    result = engine.eval_file_with_args(file, script_args) => { result?; }
+                    result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
                     _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
                     _ = sigterm.recv() => { engine.drain_ws_connections().await; }
                 }
 
                 #[cfg(not(unix))]
                 tokio::select! {
-                    result = engine.eval_file_with_args(file, script_args) => { result?; }
+                    result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
                     _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
                 }
+                report_denials(&permissions);
+                run_result?;
                 if __trace {
                     eprintln!("[startup] eval_file_with_args: {:?}", __t.elapsed());
                     eprintln!("[startup] total main() time: {:?}", __t_main.elapsed());
@@ -4837,8 +4863,12 @@ async fn main() -> anyhow::Result<()> {
             PermissionsAction::Suggest { paths, flags } => {
                 permissions_suggest(paths, *flags)?;
             }
-            PermissionsAction::Learn { file, script_args } => {
-                permissions_learn(file, script_args).await?;
+            PermissionsAction::Learn {
+                file,
+                write,
+                script_args,
+            } => {
+                permissions_learn(file, *write, script_args).await?;
             }
         },
         Commands::Start {
@@ -6259,9 +6289,56 @@ fn permissions_suggest(paths: &[PathBuf], flags: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Report what the sandbox refused during a run, and the flag that would allow
+/// it.
+///
+/// Without this a denial surfaces as whatever error the built-in happened to
+/// raise — `EACCES`, `ECONNREFUSED`, a missing file — and the user has to guess
+/// which permission produced it. The point of `report_denials` is that the
+/// answer is the flag, printed in a form that can be pasted or committed.
+fn report_denials(permissions: &vvva_permissions::PermissionState) {
+    use vvva_permissions::{describe_capability, grant_flag};
+
+    let denials = permissions.denial_counts();
+    let binds = permissions.denied_bind_hosts();
+    if denials.is_empty() && binds.is_empty() {
+        return;
+    }
+
+    let count = denials.len() + binds.len();
+    let plural = if count == 1 {
+        "permission was"
+    } else {
+        "permissions were"
+    };
+    eprintln!();
+    eprintln!("[!] {count} {plural} denied during this run:");
+    for (cap, hits) in &denials {
+        let times = if *hits == 1 {
+            String::new()
+        } else {
+            format!(" (denied {hits}x)")
+        };
+        eprintln!("    {}{}", describe_capability(cap), times);
+        eprintln!("      grant with: {}", grant_flag(cap));
+    }
+    for host in &binds {
+        // Deliberately not `grant_flag`: the fix is any allow-net grant, since
+        // running your own server is implied by having network permission at
+        // all (vvva_permissions::check_bind).
+        eprintln!("    bind a local server on {host}");
+        eprintln!("      needs any --allow-net grant (e.g. --allow-net=127.0.0.1)");
+    }
+    eprintln!();
+    eprintln!(
+        "Run `3va permissions learn` to record the script's real requirements \
+         in package.json instead of passing flags each time."
+    );
+}
+
 // ── permissions learn ─────────────────────────────────────────────────────────
 
-async fn permissions_learn(file: &Path, script_args: &[String]) -> anyhow::Result<()> {
+async fn permissions_learn(file: &Path, write: bool, script_args: &[String]) -> anyhow::Result<()> {
     use std::collections::BTreeSet;
     use vvva_permissions::AuditEvent;
 
@@ -6474,7 +6551,144 @@ async fn permissions_learn(file: &Path, script_args: &[String]) -> anyhow::Resul
     }
     println!("3va run {} {}", file.display(), cli_flags.join(" "));
 
+    if write {
+        write_learned_permissions(
+            &cwd,
+            &net_hosts,
+            &read_paths,
+            &write_paths,
+            &env_vars,
+            need_env_all,
+            need_child_process,
+            &ffi_paths,
+        )?;
+    }
+
     Ok(())
+}
+
+/// Merge observed permissions into `<root>/package.json`'s `3va.permissions`.
+///
+/// The point of `--write` is that a permission decision should be reviewable in
+/// version control, not re-derived from a flag someone remembers. Two rules
+/// keep that from being destructive:
+///
+/// * existing entries are merged, never replaced — learning again after a
+///   refactor must not drop a grant another entry point still needs,
+/// * nothing is granted that was not observed; this is a record of what the
+///   script did, not a generalisation of what it might do.
+#[allow(clippy::too_many_arguments)]
+fn write_learned_permissions(
+    root: &Path,
+    net: &std::collections::BTreeSet<String>,
+    reads: &std::collections::BTreeSet<PathBuf>,
+    writes: &std::collections::BTreeSet<PathBuf>,
+    env_vars: &std::collections::BTreeSet<String>,
+    need_env_all: bool,
+    need_child_process: bool,
+    ffis: &std::collections::BTreeSet<PathBuf>,
+) -> anyhow::Result<()> {
+    let manifest_path = root.join("package.json");
+    let mut manifest: serde_json::Value = if manifest_path.exists() {
+        match serde_json::from_str(&std::fs::read_to_string(&manifest_path)?) {
+            Ok(v) => v,
+            Err(e) => anyhow::bail!("{} is not valid JSON: {e}", manifest_path.display()),
+        }
+    } else {
+        serde_json::json!({ "name": "project", "version": "0.0.0", "private": true })
+    };
+
+    let shorten = |p: &PathBuf| -> String {
+        p.strip_prefix(root)
+            .map(|rel| format!("./{}", rel.display()))
+            .unwrap_or_else(|_| p.display().to_string())
+    };
+
+    {
+        let obj = manifest.as_object_mut().expect("object");
+        let block = obj.entry("3va").or_insert_with(|| serde_json::json!({}));
+        let block = block
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("package.json: \"3va\" must be an object"))?;
+        let scopes = block
+            .entry("permissions")
+            .or_insert_with(|| serde_json::json!({}));
+        let scopes = scopes.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!("package.json: \"3va.permissions\" must be an object")
+        })?;
+
+        // Grants go under the root scope ("."), not flat under `permissions`.
+        // Every key in `permissions` is read as a *scope*: a key named
+        // "allow-net" holding an array is parsed as a scope with no grants, so
+        // a flat write is silently discarded at load time.
+        let perms = scopes
+            .entry(vvva_permissions::ROOT_SCOPE)
+            .or_insert_with(|| serde_json::json!({}));
+        let perms = perms.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!("package.json: \"3va.permissions.\" must be an object")
+        })?;
+
+        // Keys mirror the CLI flags exactly (see vvva_permissions::manifest_key):
+        // `"allow-net"`, not `"allowNet"`. A differently-spelled key is dropped
+        // at load time, so a written grant that never loads is worse than none.
+        merge_string_array(perms, "allow-net", net.iter().cloned());
+        merge_string_array(perms, "allow-read", reads.iter().map(&shorten));
+        merge_string_array(perms, "allow-write", writes.iter().map(&shorten));
+        merge_string_array(perms, "allow-env", env_vars.iter().cloned());
+        merge_string_array(perms, "allow-ffi", ffis.iter().map(&shorten));
+        if need_child_process {
+            perms.insert(
+                "allow-child-process".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        if need_env_all {
+            // The script read the whole environment, so record every variable.
+            //
+            // This has to be `[""]`, not `[]`: an empty array is
+            // indistinguishable from "no grants" once merged, and silently
+            // records nothing. The empty string is the manifest spelling of a
+            // bare `--allow-env` — the same convention `--allow-read=`,
+            // `--allow-net=` and `--allow-ffi=` already use.
+            perms.insert("allow-env".to_string(), serde_json::json!([""]));
+        }
+    }
+
+    // Write through a temp file and rename so an interrupted learn cannot
+    // leave a truncated package.json behind.
+    let mut json = serde_json::to_string_pretty(&manifest)?;
+    json.push('\n');
+    let tmp = manifest_path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &manifest_path)?;
+    println!(
+        "\nWrote the observed permissions to {}. Review the diff before committing it.",
+        manifest_path.display()
+    );
+    Ok(())
+}
+
+/// Union the observed values into `key`, preserving what is already there.
+fn merge_string_array(
+    perms: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    observed: impl IntoIterator<Item = String>,
+) {
+    let mut set: std::collections::BTreeSet<String> = match perms.get(key) {
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => Default::default(),
+    };
+    set.extend(observed);
+    if set.is_empty() {
+        return;
+    }
+    perms.insert(
+        key.to_string(),
+        serde_json::Value::Array(set.into_iter().map(serde_json::Value::String).collect()),
+    );
 }
 
 #[cfg(test)]
@@ -6959,6 +7173,158 @@ mod tests {
         assert!(state.check(&Capability::EnvVar("SESSION_MANAGER".to_string())));
         assert!(!state.check(&Capability::EnvVar("AWS_SECRET_KEY".to_string())));
         assert!(!state.check(&Capability::SpawnProcess));
+    }
+
+    #[test]
+    fn learn_write_output_is_actually_loaded_at_run_time() {
+        // The failure this guards: writing grants the loader ignores. A grant
+        // under a key the reader does not recognize, or outside the root
+        // scope, parses to nothing and the run is denied anyway — the feature
+        // looks like it worked and grants nothing.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{ "name": "demo", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        let root = dir.path();
+        let target = root.join("out.txt");
+
+        write_learned_permissions(
+            root,
+            &std::collections::BTreeSet::from(["api.example.com:8443".to_string()]),
+            &std::collections::BTreeSet::from([target.clone()]),
+            &std::collections::BTreeSet::from([target.clone()]),
+            &std::collections::BTreeSet::from(["NODE_ENV".to_string()]),
+            false,
+            true,
+            &Default::default(),
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(root);
+        let state = build_permissions(None, None, None, None, false, None, false, &pkg_permissions);
+
+        assert!(
+            state.check(&Capability::FileWrite(target.clone())),
+            "write grant lost"
+        );
+        assert!(
+            state.check(&Capability::FileRead(target)),
+            "read grant lost"
+        );
+        assert!(
+            state.check(&Capability::Network("api.example.com:8443".into())),
+            "net grant lost"
+        );
+        assert!(
+            state.check(&Capability::EnvVar("NODE_ENV".into())),
+            "env grant lost"
+        );
+        assert!(
+            state.check(&Capability::SpawnProcess),
+            "child process grant lost"
+        );
+        // Nothing wider was granted: learn records what the script did.
+        assert!(!state.check(&Capability::Network("other.example.com".into())));
+        assert!(!state.check(&Capability::EnvVar("AWS_SECRET_ACCESS_KEY".into())));
+    }
+
+    #[test]
+    fn learn_write_merges_instead_of_replacing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "demo",
+                "3va": { "permissions": {
+                    ".": { "allow-net": ["existing.example.com"] },
+                    "express": { "allow-net": ["*"] }
+                } }
+            }"#,
+        )
+        .unwrap();
+        let root = dir.path();
+
+        write_learned_permissions(
+            root,
+            &std::collections::BTreeSet::from(["new.example.com".to_string()]),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            false,
+            false,
+            &Default::default(),
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(root);
+        // The pre-existing grant survives: learning again after a refactor must
+        // not silently drop a permission another entry point still needs.
+        assert!(pkg_permissions
+            .allow_net
+            .contains(&"existing.example.com".to_string()));
+        assert!(pkg_permissions
+            .allow_net
+            .contains(&"new.example.com".to_string()));
+
+        // Another package's scope is left exactly as it was.
+        let express = &pkg_permissions.scoped["express"];
+        assert!(express.allow_net.contains(&"*".to_string()));
+        // And the root-scope write is genuinely global, not scoped away.
+        let state = build_permissions(None, None, None, None, false, None, false, &pkg_permissions);
+        assert!(state.check(&Capability::Network("new.example.com".into())));
+    }
+
+    #[test]
+    fn learn_write_records_a_script_that_reads_all_env() {
+        // `[""]` is the manifest spelling of "every variable" (the same as a
+        // bare `--allow-env`); `[]` would record nothing at all.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{ "name": "demo" }"#).unwrap();
+        let root = dir.path();
+
+        write_learned_permissions(
+            root,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            true,
+            false,
+            &Default::default(),
+        )
+        .unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            json["3va"]["permissions"]["."]["allow-env"],
+            serde_json::json!([""])
+        );
+
+        let pkg_permissions = read_package_json_permissions(root);
+        let state = build_permissions(None, None, None, None, false, None, false, &pkg_permissions);
+        assert!(state.check(&Capability::EnvAccess));
+    }
+
+    #[test]
+    fn learn_write_rejects_a_manifest_that_is_not_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{ not json").unwrap();
+        let err = write_learned_permissions(
+            dir.path(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            false,
+            false,
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
     }
 
     #[test]

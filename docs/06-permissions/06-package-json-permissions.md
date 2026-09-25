@@ -48,7 +48,7 @@ Per-scope fields, one per capability category, mirroring the CLI flags:
 |---|---|---|
 | `allow-read` | `string[]` (paths) | `--allow-read` |
 | `allow-write` | `string[]` (paths) | `--allow-write` |
-| `allow-net` | `string[]` (hosts, `*` wildcard) | `--allow-net` |
+| `allow-net` | `string[]` (hosts, `*` wildcard, optional `:PORT`) | `--allow-net` |
 | `allow-env` | `string[]` (var names) | `--allow-env` |
 | `allow-ffi` | `string[]` (paths) | `--allow-ffi` |
 | `allow-child-process` | `bool` | `--allow-child-process` |
@@ -281,3 +281,53 @@ For a single capability check:
 *See also: `docs/06-permissions/01-capability-model.md` (Capability enum,
 prefix matching), `docs/06-permissions/05-interactive-prompts.md` (prompt
 mechanics and `--no-prompt`).*
+
+---
+
+## 6.9 Recording Grants With `3va permissions learn --write`
+
+`3va permissions learn` runs the script with everything open, watches what it
+touches, and prints the flags. `--write` takes the last step and merges the
+observed set into `package.json`:
+
+```bash
+$ 3va permissions learn --write app.ts
+Running 'app.ts' with all permissions to observe usage...
+...
+Wrote the observed permissions to /app/package.json. Review the diff before committing it.
+```
+
+```json
+{
+  "name": "my-app",
+  "3va": {
+    "permissions": {
+      ".": {
+        "allow-read": ["./app.ts"],
+        "allow-write": ["./output.txt"],
+        "allow-net": ["api.example.com"],
+        "allow-env": ["NODE_ENV"]
+      }
+    }
+  }
+}
+```
+
+Three things this gets right, each of which is a way the naive version
+silently fails:
+
+- **Grants go under the root scope `"."`.** Every key inside `permissions` is
+  read as a *scope* (§ 6.2). A key literally named `allow-net` holding an array
+  parses as a scope with no fields, so a flat write loads as nothing at all.
+- **Existing grants are merged, not replaced.** Re-running `learn` after a
+  refactor cannot drop a permission another entry point still needs, and
+  per-package scopes (`"express": { ... }`) are left untouched.
+- **"Read the whole environment" is `[""]`, not `[]`.** An empty array is
+  indistinguishable from "no grants" once merged. `[""]` is the manifest
+  spelling of a bare `--allow-env`, the same convention `--allow-read=`,
+  `--allow-net=` and `--allow-ffi=` already use.
+
+Only what the script actually did is recorded — no widening, and no capability
+it did not touch. The write is a temp-file-plus-rename, so an interrupted
+`learn` cannot truncate `package.json`, and a non-JSON `package.json` is
+reported as an error instead of being overwritten.

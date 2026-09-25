@@ -126,6 +126,50 @@ impl AuditLogger {
 
 The log is written as JSON to the specified path after execution completes.
 
+## 4.5 Denial Summary (no flag required)
+
+An audit log is opt-in and answers "what happened"; a *denial summary* answers
+"what do I have to grant to make this work", which is the question a user
+actually has when a run fails. Every `check()` that returns false records the
+capability in a `DenialTally` (first-refused order + hit count), and `3va run`
+prints it before propagating the run's own error — a run that failed *because*
+of a denial is exactly the run whose denials you need to see.
+
+```
+[!] 2 permissions were denied during this run:
+    read /etc/hosts (denied 2x)
+      grant with: --allow-read=/etc/hosts
+    connect to api.example.com:8443
+      grant with: --allow-net=api.example.com:8443
+```
+
+Notes:
+
+- **Deduped, counted.** Repeats of the same capability are counted but not
+  re-listed. `(denied 2x)` separates one incidental read from a retry loop
+  hammering the same wall 400 times — the latter is a bug in the script, and
+  the count is what makes that visible.
+- **The flag, not a description.** `vvva_permissions::grant_flag()` returns the
+  exact flag to add. "network access to api.example.com:8443" is something you
+  read; `--allow-net=api.example.com:8443` is something you paste.
+- **Wasm and `--prof` runs report too**, so the summary is not a JS-only
+  feature.
+- **Binds are reported separately.** A refused `server.listen()` says
+  `bind a local server on 0.0.0.0` and that it needs *any* `--allow-net` grant —
+  not `grant with: --allow-net=0.0.0.0`, which would point at a destination the
+  script never connects to. `0.0.0.0` is where a local server binds, not a host
+  anyone reaches out to.
+- **Nothing is granted.** The summary is a report; it never widens permissions
+  on its own. Use `3va permissions learn --write` to record the requirements.
+
+`--trace-denials` switches to reporting each refusal the moment it happens
+(`  [denied] write ./out.txt`) instead of one block at the end, deduplicated
+the same way. Use it when the summary can't tell you *which* call was refused
+— e.g. a library that reads an optional config file at several layers.
+
+The tally is per-`PermissionState`, and `Clone` starts a fresh one: the summary
+describes the run that is finishing, not every check made since process start.
+
 ### Enabling from Rust
 
 ```rust
