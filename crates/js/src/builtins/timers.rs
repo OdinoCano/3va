@@ -143,6 +143,10 @@ impl TimerManager {
         manager: Arc<Self>,
     ) -> anyhow::Result<()> {
         let expired = manager.poll_expired_ids();
+        // poll_expired_ids() already dequeued every id, so keep firing the rest
+        // after a throw (dropping them would silently kill unrelated timers,
+        // e.g. a socket's poll loop) and report the first error at the end.
+        let mut first_error: Option<String> = None;
         for id in expired {
             // Like Node: a throw from a timer callback goes to
             // process.on('uncaughtException') if anyone listens, otherwise it
@@ -165,10 +169,13 @@ impl TimerManager {
                     .or_else(|| try_catch.exception())
                     .map(|e| e.to_rust_string_lossy(try_catch))
                     .unwrap_or_else(|| "unknown error".to_string());
-                anyhow::bail!("Uncaught exception: {text}");
+                first_error.get_or_insert(text);
             }
         }
-        Ok(())
+        match first_error {
+            Some(text) => anyhow::bail!("Uncaught exception: {text}"),
+            None => Ok(()),
+        }
     }
 }
 

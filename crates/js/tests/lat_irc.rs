@@ -31,7 +31,10 @@ async fn pump_until(e: &mut JsEngine, done_js: &str, deadline: std::time::Durati
                 _ = e.idle() => {},
                 _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {},
             }
-            let _ = e.run_event_loop().await;
+            // Surface uncaught exceptions in CI logs instead of hiding them.
+            if let Err(err) = e.run_event_loop().await {
+                eprintln!("event loop error: {err}");
+            }
             tokio::task::yield_now().await;
             if e.eval_to_string(done_js).await.unwrap_or_default() == "true" {
                 return true;
