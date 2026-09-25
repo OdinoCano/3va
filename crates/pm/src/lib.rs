@@ -4,13 +4,17 @@
 //! Package manager — install, update, audit, and lockfile management for 3va projects.
 
 pub mod auditor;
+pub mod bins;
+pub mod bun_lock;
 pub mod fetcher;
 pub mod fips;
+pub mod lifecycle;
 pub mod lockfile;
 pub mod malware_scanner;
 pub mod manifest;
 pub mod npmrc;
 pub mod package_lock;
+pub mod platform;
 pub mod pnpm_lock;
 pub mod provenance;
 pub mod resolver;
@@ -18,6 +22,7 @@ pub mod secrets;
 pub mod semver;
 pub mod signature_verifier;
 pub mod store;
+pub mod trust;
 pub mod typosquat;
 pub mod workspace;
 pub mod workspace_v2;
@@ -34,6 +39,7 @@ pub use workspace_v2::{
 pub use auditor::{
     AuditReport, VulnFinding, VulnSeverity, Vulnerability, print_audit_report, run_audit,
 };
+pub use bun_lock::load_from_bun_lock;
 pub use lockfile::Lockfile;
 pub use malware_scanner::{MalwareScanner, ScanResult, Threat, ThreatLevel};
 pub use manifest::{PackageInfo, PackageManifest, PackagePermissions};
@@ -44,6 +50,10 @@ pub use resolver::{DependencyGraph, DependencyNode, Resolver};
 pub use semver::{Semver, SemverRange};
 pub use signature_verifier::{HashAlgorithm, SignatureInfo, SignatureVerifier, VerificationStatus};
 pub use yarn_lock::load_from_yarn_lock;
+
+pub use bins::{BinLink, BinSummary, find_bin, resolve_bin_entry_file};
+pub use platform::Platform;
+pub use trust::{TrustPolicy, TrustStatus};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -111,49 +121,251 @@ impl Registry {
 
 // ── Lockfile auto-detection ────────────────────────────────────────────────────
 
-/// Try to detect and load any supported lockfile format from the given project
-/// directory.  Checks in order: `3va-lock.json`, `package-lock.json`,
-/// `yarn.lock`, `pnpm-lock.yaml`.
-pub fn detect_lockfile(project_root: &std::path::Path) -> anyhow::Result<Option<Lockfile>> {
-    // 1. Native format
-    let native = project_root.join("3va-lock.json");
-    if native.exists() {
-        return Lockfile::load(&native).map(Some);
+/// Which lockfile format a project arrived with, and what we can faithfully
+/// convert from it.
+///
+/// The distinction matters: a converted lockfile that silently loses versions
+/// is worse than no lockfile, because `3va install` then reports "everything
+/// already installed" against a tree it never described. pnpm v9 and Bun's text
+/// `bun.lock` used to parse into entries with every version at `0.0.0`, which
+/// is exactly that failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockfileFlavor {
+    /// 3va's own format — every field available.
+    Native,
+    /// npm's `package-lock.json` v2/v3 — full fidelity.
+    Npm,
+    /// Yarn v1 `yarn.lock` — full fidelity.
+    Yarn1,
+    /// pnpm `pnpm-lock.yaml` — full fidelity for the versions it records.
+    Pnpm,
+    /// Bun's `bun.lock` (text, v1) — full fidelity.
+    Bun,
+}
+
+impl LockfileFlavor {
+    pub fn file_name(self) -> &'static str {
+        match self {
+            LockfileFlavor::Native => "3va-lock.json",
+            LockfileFlavor::Npm => "package-lock.json",
+            LockfileFlavor::Yarn1 => "yarn.lock",
+            LockfileFlavor::Pnpm => "pnpm-lock.yaml",
+            LockfileFlavor::Bun => "bun.lock",
+        }
     }
-    // 2. npm package-lock.json
+}
+
+#[derive(Debug, Clone)]
+pub struct DetectedLockfile {
+    pub flavor: LockfileFlavor,
+    pub lockfile: Lockfile,
+    /// Reasons the conversion is lossy, empty if it is not.
+    pub warnings: Vec<String>,
+}
+
+/// Lockfiles present in the project, in detection order, that 3va cannot
+/// convert and the user needs to know about.
+#[derive(Debug, Clone, Default)]
+pub struct UnsupportedLockfiles {
+    pub yarn_berry: Option<String>,
+    pub bun_binary: Option<String>,
+    pub notes: Vec<String>,
+}
+
+impl UnsupportedLockfiles {
+    pub fn is_empty(&self) -> bool {
+        self.yarn_berry.is_none() && self.bun_binary.is_none()
+    }
+
+    /// What the user should actually do about it.
+    pub fn advice(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.yarn_berry.is_some() {
+            out.push(
+                "yarn.lock is a Yarn Berry (v2+) lockfile: it records resolutions, not a flat \
+                 node_modules tree, so it cannot be converted. Either set \
+                 `nodeLinker: node-modules` in .yarnrc.yml and run `yarn install`, or let \
+                 `3va install` resolve the manifest and write its own 3va-lock.json."
+                    .to_string(),
+            );
+        }
+        if self.bun_binary.is_some() {
+            out.push(
+                "bun.lockb is Bun's binary lockfile. Run `bun install --save-text-lockfile` to \
+                 produce the readable bun.lock that 3va can convert, or let `3va install` \
+                 resolve the manifest."
+                    .to_string(),
+            );
+        }
+        out
+    }
+}
+
+/// Inspect every lockfile in the project: which one 3va can convert, which it
+/// cannot, and whether the conversion would lose anything.
+pub fn inspect_lockfiles(
+    project_root: &std::path::Path,
+) -> (Option<DetectedLockfile>, UnsupportedLockfiles) {
+    let mut unsupported = UnsupportedLockfiles::default();
+
+    let yarn = project_root.join("yarn.lock");
+    if yarn.exists()
+        && let Ok(content) = std::fs::read_to_string(&yarn)
+    {
+        match yarn_lock::classify(&content) {
+            yarn_lock::YarnGeneration::Berry => {
+                unsupported.yarn_berry = Some(content.lines().next().unwrap_or("").to_string());
+            }
+            yarn_lock::YarnGeneration::Classic => {}
+        }
+    }
+
+    let bun_binary = project_root.join("bun.lockb");
+    if bun_binary.exists() {
+        unsupported.bun_binary = Some(bun_binary.display().to_string());
+    }
+
+    let native = project_root.join("3va-lock.json");
+    if let Ok(lockfile) = Lockfile::load(&native) {
+        return (
+            Some(DetectedLockfile {
+                flavor: LockfileFlavor::Native,
+                lockfile,
+                warnings: Vec::new(),
+            }),
+            unsupported,
+        );
+    }
     let npm = project_root.join("package-lock.json");
     if npm.exists() {
-        return package_lock::load_from_package_lock(&npm);
+        return (
+            package_lock::load_from_package_lock(&npm)
+                .ok()
+                .flatten()
+                .map(|lockfile| DetectedLockfile {
+                    flavor: LockfileFlavor::Npm,
+                    lockfile,
+                    warnings: Vec::new(),
+                }),
+            unsupported,
+        );
     }
-    // 3. yarn.lock
-    let yarn = project_root.join("yarn.lock");
-    if yarn.exists() {
-        return yarn_lock::load_from_yarn_lock(&yarn);
+    let yarn_is_classic = if yarn.exists() {
+        std::fs::read_to_string(&yarn)
+            .map(|c| yarn_lock::classify(&c) == yarn_lock::YarnGeneration::Classic)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    if yarn_is_classic && let Ok(Some(lockfile)) = yarn_lock::load_from_yarn_lock(&yarn) {
+        return (
+            Some(DetectedLockfile {
+                flavor: LockfileFlavor::Yarn1,
+                lockfile,
+                warnings: Vec::new(),
+            }),
+            unsupported,
+        );
     }
-    // 4. pnpm-lock.yaml
     let pnpm = project_root.join("pnpm-lock.yaml");
     if pnpm.exists() {
-        return pnpm_lock::load_from_pnpm_lock(&pnpm);
+        return (
+            pnpm_lock::load_from_pnpm_lock(&pnpm).ok().flatten().map(|lockfile| {
+                let warnings = if lockfile.dependencies.is_empty() {
+                    vec![format!(
+                        "{} recorded no resolvable packages (lockfileVersion 9 keeps them under \
+                         `importers`/`snapshots`; run `3va install` to resolve them).",
+                        pnpm.display()
+                    )]
+                } else {
+                    Vec::new()
+                };
+                DetectedLockfile {
+                    flavor: LockfileFlavor::Pnpm,
+                    lockfile,
+                    warnings,
+                }
+            }),
+            unsupported,
+        );
     }
-    Ok(None)
+    let bun = project_root.join("bun.lock");
+    if bun.exists() {
+        return (
+            bun_lock::load_from_bun_lock(&bun)
+                .ok()
+                .flatten()
+                .map(|lockfile| DetectedLockfile {
+                    flavor: LockfileFlavor::Bun,
+                    lockfile,
+                    warnings: Vec::new(),
+                }),
+            unsupported,
+        );
+    }
+    (None, unsupported)
+}
+
+/// Try to detect and load any supported lockfile format from the given project
+/// directory.  Checks in order: `3va-lock.json`, `package-lock.json`,
+/// `yarn.lock` (classic), `pnpm-lock.yaml`, `bun.lock`.
+pub fn detect_lockfile(project_root: &std::path::Path) -> anyhow::Result<Option<Lockfile>> {
+    Ok(inspect_lockfiles(project_root).0.map(|d| d.lockfile))
 }
 
 /// Migrate an external lockfile to the native `3va-lock.json` format.
 ///
-/// Reads any supported lockfile and writes it as `3va-lock.json` in the same
-/// directory.  Returns `true` if a migration happened.
+/// Refuses to write a lockfile it had to guess at: a conversion that drops
+/// versions is a silent "already installed" on the next run, which is the bug
+/// this replaced.  Returns `true` if a migration happened.
 pub fn migrate_lockfile(project_root: &std::path::Path) -> anyhow::Result<bool> {
-    if project_root.join("3va-lock.json").exists() {
-        return Ok(false); // Already migrated
-    }
-    let lockfile = match detect_lockfile(project_root)? {
-        Some(l) => l,
-        None => return Ok(false),
+    migrate_lockfile_reporting(project_root).map(|r| r.migrated)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MigrationReport {
+    pub migrated: bool,
+    pub from: Option<LockfileFlavor>,
+    pub warnings: Vec<String>,
+    pub unsupported: Vec<String>,
+    pub package_count: usize,
+}
+
+/// [`migrate_lockfile`], with the reasoning attached.
+pub fn migrate_lockfile_reporting(
+    project_root: &std::path::Path,
+) -> anyhow::Result<MigrationReport> {
+    let mut report = MigrationReport {
+        unsupported: inspect_lockfiles(project_root).1.advice(),
+        ..Default::default()
     };
+    if project_root.join("3va-lock.json").exists() {
+        return Ok(report);
+    }
+    let Some(detected) = inspect_lockfiles(project_root).0 else {
+        return Ok(report);
+    };
+    if detected.flavor != LockfileFlavor::Native
+        && detected.lockfile.dependencies.is_empty()
+        && !detected.warnings.is_empty()
+    {
+        // Writing an empty lockfile here would be worse than writing none: the
+        // next `3va install` would treat "in the lockfile" as "installed".
+        report.warnings = detected.warnings.clone();
+        return Ok(report);
+    }
     let out = project_root.join("3va-lock.json");
-    lockfile.save(&out)?;
-    println!("✓ Migrated lockfile → {}", out.display());
-    Ok(true)
+    detected.lockfile.save(&out)?;
+    println!(
+        "✓ Migrated {} → {}",
+        detected.flavor.file_name(),
+        out.display()
+    );
+    report.migrated = true;
+    report.from = Some(detected.flavor);
+    report.warnings = detected.warnings;
+    report.package_count = detected.lockfile.dependencies.len();
+    Ok(report)
 }
 
 // ── PackageManager ────────────────────────────────────────────────────────────
@@ -197,6 +409,10 @@ impl PackageManager {
 struct VersionMeta {
     tarball: String,
     integrity: Option<String>,
+    /// The version's own `optionalDependencies`, carried alongside the tarball
+    /// so the resolver can queue the per-platform prebuilts without fetching
+    /// the packument a second time.
+    optional_deps: Vec<(String, String)>,
 }
 
 struct RegistryInfo {
@@ -258,7 +474,14 @@ fn registry_info_from_packument(
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}/{}/-/{}-{}.tgz", base_url, pkg_name, pkg_name, ver));
             let integrity = meta["dist"]["integrity"].as_str().map(|s| s.to_string());
-            version_meta.insert(ver.clone(), VersionMeta { tarball, integrity });
+            version_meta.insert(
+                ver.clone(),
+                VersionMeta {
+                    tarball,
+                    integrity,
+                    optional_deps: collect_optional_dep_specs(meta),
+                },
+            );
         }
     }
 
@@ -303,8 +526,16 @@ async fn lookup_npm_version(
             )
         });
     let integrity = meta["dist"]["integrity"].as_str().map(|s| s.to_string());
+    let optional_deps = collect_optional_dep_specs(&meta);
     let mut version_meta = HashMap::new();
-    version_meta.insert(resolved_ver.clone(), VersionMeta { tarball, integrity });
+    version_meta.insert(
+        resolved_ver.clone(),
+        VersionMeta {
+            tarball,
+            integrity,
+            optional_deps,
+        },
+    );
 
     // Collect transitive dep specs (name + version range) from the registry response.
     // Peers are installed the same way regular deps are — same BFS, same
@@ -328,6 +559,23 @@ async fn lookup_npm_version(
 /// drizzle-orm's ~28 mostly-optional peers: React Native, Prisma, several
 /// native SQLite bindings — none needed unless the app actually uses that
 /// backend).
+/// The `optionalDependencies` of a version object, as (name, range) pairs.
+///
+/// These are kept separate from [`collect_dep_specs`] so the BFS can mark them
+/// optional: a per-platform prebuilt that is unavailable must not fail the
+/// install, and must not be treated as a required dependency either.
+fn collect_optional_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)> {
+    let mut specs = Vec::new();
+    if let Some(deps) = meta["optionalDependencies"].as_object() {
+        for (name, range) in deps {
+            if let Some(r) = range.as_str() {
+                specs.push((name.clone(), r.to_string()));
+            }
+        }
+    }
+    specs
+}
+
 fn collect_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)> {
     let mut dep_specs = Vec::new();
     for key in ["dependencies", "peerDependencies"] {
@@ -503,6 +751,110 @@ fn normalize_version(version: &str) -> String {
         .trim_start_matches('*')
         .to_string();
     if v.is_empty() { "*".to_string() } else { v }
+}
+
+/// Is this a range/dist-tag the registry API can resolve, as opposed to a
+/// protocol specifier (`file:`, `git+…`, `github:…`) that needs a different
+/// transport?
+fn is_registry_range(range: &str) -> bool {
+    let r = range.trim();
+    if r.is_empty() || r == "*" || r == "latest" {
+        return true;
+    }
+    if r.contains("://") || r.contains(':') {
+        return false;
+    }
+    true
+}
+
+/// The range to record in `package.json` for a freshly resolved version.
+///
+/// npm's default `save-prefix` is `^`; `save-exact=true` pins the exact
+/// version, and a custom `save-prefix` (e.g. `~`) is honoured.
+pub fn saved_range(resolved: &str, save_prefix: Option<&str>, save_exact: bool) -> String {
+    if save_exact {
+        return resolved.to_string();
+    }
+    let prefix = save_prefix.unwrap_or("^");
+    if prefix.is_empty() {
+        return resolved.to_string();
+    }
+    // A prerelease resolved version must stay exact: `^1.0.0-beta.1` is not a
+    // meaningful range for the release that follows.
+    if resolved.contains('-') {
+        return resolved.to_string();
+    }
+    format!("{prefix}{resolved}")
+}
+
+/// Write JSON to `path` atomically: temp file + rename.
+///
+/// `package.json` and the lockfile are both read by other tools and by the next
+/// install, so a truncated write must never be observable.
+pub fn write_json_atomic(path: &std::path::Path, value: &serde_json::Value) -> anyhow::Result<()> {
+    let content = serde_json::to_string_pretty(value)?;
+    let tmp = path.with_extension(format!(
+        "{}tmp",
+        path.extension()
+            .map(|e| format!("{}.", e.to_string_lossy()))
+            .unwrap_or_default()
+    ));
+    std::fs::write(&tmp, content.as_bytes())?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e.into())
+        }
+    }
+}
+
+/// Build the resolution spec for a dependency declared in a manifest.
+///
+/// The range is passed through **unchanged**, and that is the whole point:
+/// collapsing `^4.18.2` down to `4.18.2` turns "any 4.x with 4.18.2 or newer"
+/// into an exact pin on the *lowest* version that satisfies it, so a project
+/// that asked for `express@^4.18.2` received the first 4.18.x ever published.
+/// The range must reach [`select_best_version`], which picks the highest
+/// satisfying version.
+fn manifest_spec(name: &str, range: &str) -> String {
+    let r = range.trim();
+    if r.is_empty() || r == "*" {
+        return name.to_string();
+    }
+    if is_registry_range(r) {
+        return format!("{name}@{r}");
+    }
+    // A protocol specifier is not resolvable through the registry API; keep the
+    // previous behaviour rather than inventing a version for it.
+    format!("{name}@{}", normalize_version(r))
+}
+
+/// Does an already-installed version satisfy the range the manifest asks for?
+///
+/// Used to decide whether an existing `node_modules` entry still counts. A
+/// stale-but-present directory used to be treated as "already installed", so a
+/// project could declare `^4.18.2` and keep running 4.17.0 forever.
+fn installed_version_satisfies(installed: &str, requested: Option<&str>) -> bool {
+    let Some(requested) = requested else {
+        return true;
+    };
+    let requested = requested.trim();
+    if requested.is_empty() || requested == "*" || requested == "latest" {
+        return true;
+    }
+    if is_registry_range(requested) {
+        let Some(range) = SemverRange::parse(requested) else {
+            // An unparseable range cannot be checked; leave the tree alone
+            // rather than reinstalling on every run.
+            return true;
+        };
+        let Some(sv) = Semver::parse(installed) else {
+            return false;
+        };
+        return range.matches(&sv);
+    }
+    true
 }
 
 fn parse_package_spec(input: &str) -> anyhow::Result<(String, Option<String>)> {
@@ -1545,10 +1897,37 @@ pub async fn install_from_manifest(
         );
     }
 
-    // Auto-migrate existing lockfile
-    if let Ok(true) = migrate_lockfile(project_root) {
-        // Already migrated above
+    // Auto-migrate an existing lockfile, then actually use it. Migrating without
+    // reading the result back is what made installs ignore their own pins: the
+    // converted `3va-lock.json` was written and then never consulted, so every
+    // run re-resolved from ranges and drifted.
+    if let Ok(report) = migrate_lockfile_reporting(project_root) {
+        for warning in &report.warnings {
+            eprintln!("! {warning}");
+        }
+        for unsupported in &report.unsupported {
+            eprintln!("! {unsupported}");
+        }
     }
+
+    let lock_path = project_root.join("3va-lock.json");
+    let lock = match Lockfile::load(&lock_path) {
+        Ok(l) => Some(l),
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            None
+        }
+        Err(e) => {
+            eprintln!(
+                "! {} exists but could not be read ({}).                  Ignoring it and resolving from ranges; delete it if that is wrong.",
+                lock_path.display(),
+                e
+            );
+            None
+        }
+    };
 
     // Detect .npmrc for private registry support
     let npmrc = npmrc::discover_npmrc(Some(project_root));
@@ -1596,7 +1975,25 @@ pub async fn install_from_manifest(
     let root = project_root.to_path_buf();
 
     for (name, version) in all_deps {
-        let spec = format!("{}@{}", name, normalize_version(&version));
+        // A lockfile pin wins over the manifest range, but only when it still
+        // satisfies it: an out-of-date lock must not silently hold a project
+        // back from a range it no longer meets, and the mismatch is reported
+        // instead of being hidden.
+        let spec = match lock.as_ref().and_then(|l| l.pin(&name)) {
+            Some(pin) if !pin.version.is_empty() => {
+                if installed_version_satisfies(&pin.version, Some(&version)) {
+                    format!("{name}@{}", pin.version)
+                } else {
+                    eprintln!(
+                        "! 3va-lock.json pins {}@{} but package.json asks for {} — \
+                         resolving from the manifest instead.",
+                        name, pin.version, version
+                    );
+                    manifest_spec(&name, &version)
+                }
+            }
+            _ => manifest_spec(&name, &version),
+        };
         let an = allow_net_owned.clone();
         let r = root.clone();
         set.spawn(
@@ -1707,7 +2104,81 @@ pub async fn install_config_deps(
 ///
 /// `update_manifest`: when true the package.json and lockfile in
 /// `project_root` are updated.  Pass false for transitive deps.
-type PackageFetchResult = anyhow::Result<(String, String, RegistryInfo, Vec<(String, String)>)>;
+/// `Ok(None)` means the package was resolved away: an optional dependency that
+/// does not apply to this platform and so has nothing to install.
+type PackageFetchResult =
+    anyhow::Result<Option<(String, String, RegistryInfo, Vec<(String, String)>)>>;
+
+/// One node of the BFS: a package to resolve, how it was asked for, and
+/// whether failing to resolve it is fatal.
+///
+/// The distinction matters: an `optionalDependencies` entry that is unavailable
+/// (404, or simply not published for this platform) is *supposed* to be
+/// skipped. Treating that as an error is what made installs of packages with
+/// a long list of per-platform prebuilts fail outright, while treating every
+/// missing package as optional would hide real breakage.
+#[derive(Debug, Clone)]
+struct WaveNode {
+    name: String,
+    requested: Option<String>,
+    optional: bool,
+}
+
+impl WaveNode {
+    fn required(name: &str, requested: Option<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            requested,
+            optional: false,
+        }
+    }
+
+    fn optional(name: &str, requested: String) -> Self {
+        Self {
+            name: name.to_string(),
+            requested: Some(requested),
+            optional: true,
+        }
+    }
+}
+
+/// Resolve an `optionalDependencies` entry, or report that it does not apply.
+///
+/// Returns `Ok(None)` when the candidate is not published, or when its own
+/// `os` / `cpu` / `libc` fields exclude this machine — the case where fetching
+/// it would put a Darwin binary into a Linux tree, or an arm64 build on x64.
+async fn resolve_optional_dep(
+    client: &reqwest::Client,
+    base_url: &str,
+    pkg_name: &str,
+    range: &str,
+    platform: &crate::platform::Platform,
+) -> anyhow::Result<Option<(RegistryInfo, Vec<(String, String)>)>> {
+    let data = match fetch_packument(client, base_url, pkg_name).await {
+        Ok(d) => d,
+        // Not published at all: an optional dep that does not exist is fine.
+        Err(_) => return Ok(None),
+    };
+    let info = registry_info_from_packument(&data, base_url, pkg_name);
+    if info.versions.is_empty() {
+        return Ok(None);
+    }
+    let version = select_best_version(&info.versions, range, info.latest.as_deref());
+    let version_meta = &data["versions"][&version];
+    if !crate::platform::optional_dep_applies(version_meta, platform) {
+        tracing::debug!(
+            "skipping optional dependency {}@{}: not applicable to {}/{}/{}",
+            pkg_name,
+            version,
+            platform.os,
+            platform.cpu,
+            platform.libc
+        );
+        return Ok(None);
+    }
+    let deps = collect_dep_specs(version_meta);
+    Ok(Some((info, deps)))
+}
 
 async fn install_with_transitive(
     root_spec: &str,
@@ -1777,6 +2248,7 @@ async fn install_with_transitive(
     // must never be demoted to a log line.
     let mut guard_errors: Vec<String> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
+    let platform = crate::platform::Platform::current();
 
     let manifest_val: Option<serde_json::Value> =
         std::fs::read_to_string(project_root.join("package.json"))
@@ -1813,46 +2285,83 @@ async fn install_with_transitive(
 
     // Start with the root package
     let (root_name, root_requested_ver) = parse_package_spec(root_spec)?;
-    let mut current_wave: Vec<(String, Option<String>)> =
-        vec![(root_name.clone(), root_requested_ver)];
+    let mut current_wave: Vec<WaveNode> = vec![WaveNode::required(&root_name, root_requested_ver)];
 
     println!();
     println!("  Resolving dependency graph...");
 
     while !current_wave.is_empty() {
         // Deduplicate wave and skip already-resolved packages
-        let wave: Vec<(String, Option<String>)> = current_wave
+        // A name first seen as optional may still be required by something
+        // else in the tree, so a later required sighting wins and the node is
+        // re-queued rather than dropped.
+        let mut required_names: HashSet<String> = HashSet::new();
+        for node in &current_wave {
+            if !node.optional {
+                required_names.insert(node.name.clone());
+            }
+        }
+        let wave: Vec<WaveNode> = current_wave
             .drain(..)
-            .filter(|(name, _)| !visited.contains(name.as_str()))
-            .map(|(name, ver)| {
-                let ver = apply_override(&overrides, &name, ver);
-                (name, ver)
+            .filter(|n| !(visited.contains(n.name.as_str()) && !required_names.contains(&n.name)))
+            .map(|mut n| {
+                n.requested = apply_override(&overrides, &n.name, n.requested);
+                n
             })
             .collect();
 
         if wave.is_empty() {
             break;
         }
-        for (name, _) in &wave {
-            visited.insert(name.clone());
+        for node in &wave {
+            visited.insert(node.name.clone());
         }
 
-        // Check which packages are already installed at the right version
-        let needs_fetch: Vec<(String, Option<String>)> = wave
+        // Check which packages are already installed at the right version.
+        //
+        // Presence alone is not enough: a tree left behind by another package
+        // manager satisfies "does the directory exist" while carrying a version
+        // the manifest has moved past. Reinstalling in that case is what makes
+        // `3va install` converge on what package.json actually asks for.
+        let needs_fetch: Vec<WaveNode> = wave
             .iter()
-            .filter(|(name, _)| {
+            .filter(|node| {
+                let (name, requested) = (&node.name, node.requested.as_deref());
                 if force {
                     return true;
                 }
                 let dest = project_root.join("node_modules").join(name);
-                !dest.join("package.json").exists()
+                let manifest_path = dest.join("package.json");
+                let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+                    return true;
+                };
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
+                    return true;
+                };
+                let Some(installed) = val["version"].as_str() else {
+                    return true;
+                };
+                let Some(range) = requested else {
+                    return false;
+                };
+                if installed_version_satisfies(installed, Some(range)) {
+                    return false;
+                }
+                tracing::debug!(
+                    "{}@{} is installed but the manifest asks for {}",
+                    name,
+                    installed,
+                    range
+                );
+                true
             })
             .cloned()
             .collect();
 
         if needs_fetch.is_empty() {
             // All in this wave are already installed; still need to read their deps
-            for (name, _) in &wave {
+            for node in &wave {
+                let name = &node.name;
                 let dest = project_root.join("node_modules").join(name);
                 if let Ok(content) = std::fs::read_to_string(dest.join("package.json"))
                     && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
@@ -1865,7 +2374,12 @@ async fn install_with_transitive(
                     }
                     for (dep_name, dep_range) in collect_dep_specs(&val) {
                         if !visited.contains(dep_name.as_str()) {
-                            current_wave.push((dep_name, Some(dep_range)));
+                            current_wave.push(WaveNode::required(&dep_name, Some(dep_range)));
+                        }
+                    }
+                    for (dep_name, dep_range) in collect_optional_dep_specs(&val) {
+                        if !visited.contains(dep_name.as_str()) {
+                            current_wave.push(WaveNode::optional(&dep_name, dep_range));
                         }
                     }
                 }
@@ -1875,48 +2389,69 @@ async fn install_with_transitive(
 
         // Fetch metadata for this wave concurrently
         let mut set: JoinSet<PackageFetchResult> = JoinSet::new();
-        for (pkg_name, requested_ver) in needs_fetch {
+        for node in needs_fetch {
             let client = client.clone();
             // Dependency-confusion guard: a scope pinned via .npmrc resolves
             // only against its private registry — never the public one.
-            let pinned = npmrc::pinned_scope_registry(&npmrc_cfg, &pkg_name);
+            let pinned = npmrc::pinned_scope_registry(&npmrc_cfg, &node.name);
             let base = pinned.clone().unwrap_or_else(|| base_url.clone());
             let registry = registry.clone();
+            let platform = platform.clone();
             set.spawn(async move {
-                let version_to_fetch = requested_ver.as_deref().unwrap_or("latest");
+                let version_to_fetch = node.requested.as_deref().unwrap_or("latest");
                 let (info, deps) = match &registry {
                     Registry::Jsr => {
-                        lookup_jsr_with_deps(&client, &pkg_name, version_to_fetch).await?
+                        lookup_jsr_with_deps(&client, &node.name, version_to_fetch).await?
                     }
                     Registry::Npm | Registry::Yarn | Registry::Custom(_) => {
-                        match lookup_npm_version(&client, &base, &pkg_name, version_to_fetch).await
-                        {
-                            Ok(v) => v,
-                            Err(e) => {
-                                if let Some(pin) = &pinned {
-                                    return Err(anyhow::anyhow!(
-                                        "dependency-confusion guard: '{}' is pinned to private \
+                        if node.optional {
+                            // Not applicable here → nothing to install, and
+                            // nothing is an error.
+                            match resolve_optional_dep(
+                                &client,
+                                &base,
+                                &node.name,
+                                version_to_fetch,
+                                &platform,
+                            )
+                            .await?
+                            {
+                                Some(v) => v,
+                                None => return Ok(None),
+                            }
+                        } else {
+                            match lookup_npm_version(&client, &base, &node.name, version_to_fetch)
+                                .await
+                            {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    if let Some(pin) = &pinned {
+                                        return Err(anyhow::anyhow!(
+                                            "dependency-confusion guard: '{}' is pinned to private \
                                          registry {} via .npmrc, which failed ({}). Refusing to \
                                          fall back to the public registry.",
-                                        pkg_name,
-                                        pin,
-                                        e
-                                    ));
+                                            node.name,
+                                            pin,
+                                            e
+                                        ));
+                                    }
+                                    return Err(e);
                                 }
-                                return Err(e);
                             }
                         }
                     }
                 };
-                Ok((pkg_name, version_to_fetch.to_string(), info, deps))
+                Ok(Some((node.name, version_to_fetch.to_string(), info, deps)))
             });
         }
 
-        // name → version_range: dedup within wave while preserving the requested range.
-        let mut next_wave_deps: HashMap<String, String> = HashMap::new();
+        // name → (version_range, optional): dedup within the wave while
+        // preserving the requested range. A name already required stays
+        // required.
+        let mut next_wave_deps: HashMap<String, (String, bool)> = HashMap::new();
         while let Some(result) = set.join_next().await {
             match result {
-                Ok(Ok((pkg_name, version_to_fetch, info, dep_specs))) => {
+                Ok(Ok(Some((pkg_name, version_to_fetch, info, dep_specs)))) => {
                     // Pick the highest version satisfying the requested range.
                     let ver = select_best_version(
                         &info.versions,
@@ -1935,7 +2470,15 @@ async fn install_with_transitive(
                     // Propagate transitive dep specs (name + version range).
                     for (dep_name, dep_range) in dep_specs {
                         if !visited.contains(dep_name.as_str()) {
-                            next_wave_deps.entry(dep_name).or_insert(dep_range);
+                            next_wave_deps.entry(dep_name).or_insert((dep_range, false));
+                        }
+                    }
+                    // Per-platform prebuilts declared by this package.
+                    if let Some(meta) = info.version_meta.get(&ver) {
+                        for (dep_name, dep_range) in meta.optional_deps.clone() {
+                            if !visited.contains(dep_name.as_str()) {
+                                next_wave_deps.entry(dep_name).or_insert((dep_range, true));
+                            }
                         }
                     }
                     // Also check disk in case the package was already extracted
@@ -1947,10 +2490,14 @@ async fn install_with_transitive(
                     {
                         for (dep_name, dep_range) in collect_dep_specs(&val) {
                             if !visited.contains(dep_name.as_str()) {
-                                next_wave_deps.entry(dep_name).or_insert(dep_range);
+                                next_wave_deps.entry(dep_name).or_insert((dep_range, false));
                             }
                         }
                     }
+                }
+                Ok(Ok(None)) => {
+                    // An optional dependency that does not apply here. Not an
+                    // error, and not worth a line of output per platform.
                 }
                 Ok(Err(e)) => {
                     let msg = e.to_string();
@@ -1965,8 +2512,12 @@ async fn install_with_transitive(
                 }
             }
         }
-        for (dep, range) in next_wave_deps {
-            current_wave.push((dep, Some(range)));
+        for (dep, (range, optional)) in next_wave_deps {
+            if optional {
+                current_wave.push(WaveNode::optional(&dep, range));
+            } else {
+                current_wave.push(WaveNode::required(&dep, Some(range)));
+            }
         }
     }
 
@@ -2243,67 +2794,60 @@ async fn install_with_transitive(
 
                     apply_patch_if_present(project_root, &node_modules, &pkg_name, &ver);
 
-                    // ── Lifecycle scripts (postinstall / install) ─────────────────
-                    // Security: blocked by default; opt-in via 3VA_ALLOW_SCRIPTS=1
-                    // or --allow-scripts flag (future).
-                    if std::env::var("3VA_ALLOW_SCRIPTS").as_deref() == Ok("1") {
-                        let pkg_dir = node_modules.join(&pkg_name);
-                        let scripts_path = pkg_dir.join("package.json");
-                        if let Ok(scripts_content) = std::fs::read_to_string(&scripts_path)
-                            && let Ok(scripts_val) =
-                                serde_json::from_str::<serde_json::Value>(&scripts_content)
-                        {
-                            let lifecycle_scripts = ["preinstall", "install", "postinstall"];
-                            for lifecycle in &lifecycle_scripts {
-                                if let Some(script) = scripts_val["scripts"]
-                                    .get(*lifecycle)
-                                    .and_then(|v| v.as_str())
-                                {
-                                    println!(
-                                        "  ⚙  Running {lifecycle} script for {pkg_name}@{ver}"
-                                    );
-                                    let shell = if cfg!(windows) { "cmd" } else { "sh" };
-                                    let flag = if cfg!(windows) { "/C" } else { "-c" };
-                                    match std::process::Command::new(shell)
-                                        .args([flag, script])
-                                        .current_dir(&pkg_dir)
-                                        .output()
-                                    {
-                                        Ok(output) => {
-                                            if !output.status.success() {
-                                                let stderr =
-                                                    String::from_utf8_lossy(&output.stderr);
-                                                eprintln!(
-                                                    "  ⚠  {lifecycle} script failed for \
-                                                         {pkg_name}@{ver}: {stderr}"
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            eprintln!(
-                                                "  ⚠  Could not run {lifecycle} for \
-                                                     {pkg_name}@{ver}: {e}"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else if let Ok(scripts_content) =
-                        std::fs::read_to_string(node_modules.join(&pkg_name).join("package.json"))
+                    // ── Lifecycle scripts (preinstall / install / postinstall) ──
+                    // Denied unless the project's `"3va".onlyBuiltDependencies`
+                    // names this package. `3VA_ALLOW_SCRIPTS=1` no longer runs
+                    // anything on its own: a process-wide env var is not a
+                    // reviewable decision, and `sh -c` on a string authored by a
+                    // third party is the hole the philosophy exists to close.
+                    let pkg_dir = node_modules.join(&pkg_name);
+                    let trust =
+                        crate::trust::TrustPolicy::from_manifest_or_empty(manifest_val.as_ref());
+                    // A bare name in `onlyBuiltDependencies` is the pnpm/Bun
+                    // convention and authorises the package, not a pin; the
+                    // `trusted` list is where a specific version is required.
+                    let allowlisted = trust.allows_lifecycle(&pkg_name);
+                    let sandbox_argv = trust.sandbox_argv(&pkg_dir);
+
+                    if let Ok(scripts_content) =
+                        std::fs::read_to_string(pkg_dir.join("package.json"))
                         && let Ok(scripts_val) =
                             serde_json::from_str::<serde_json::Value>(&scripts_content)
                     {
-                        let has_lifecycle = ["preinstall", "install", "postinstall"]
-                            .iter()
-                            .any(|s| scripts_val["scripts"].get(*s).is_some());
-                        if has_lifecycle {
-                            println!(
-                                "  ⚠  {pkg_name}@{ver} has lifecycle scripts. \
-                                 Set 3VA_ALLOW_SCRIPTS=1 to enable."
+                        for (phase, script) in crate::lifecycle::declared_scripts(&scripts_val) {
+                            if script.trim().is_empty() {
+                                continue;
+                            }
+                            let outcome = crate::lifecycle::run(
+                                &pkg_dir,
+                                &pkg_name,
+                                &ver,
+                                phase,
+                                &script,
+                                allowlisted,
+                                &sandbox_argv,
                             );
+                            match outcome {
+                                crate::lifecycle::Outcome::None => {}
+                                crate::lifecycle::Outcome::Ran => println!(
+                                    "  ⚙  {phase} script ran sandboxed for {pkg_name}@{ver}"
+                                ),
+                                crate::lifecycle::Outcome::NotAllowed => println!(
+                                    "  ⚠  {pkg_name}@{ver} has a {phase} script, which 3va did \
+                                     not run. Add it to \"3va\".\"onlyBuiltDependencies\" if the \
+                                     project has reviewed it."
+                                ),
+                                crate::lifecycle::Outcome::Refused(msg) => eprintln!("  ⚠  {msg}"),
+                                crate::lifecycle::Outcome::Failed(msg) => {
+                                    eprintln!("  ✗  {msg}")
+                                }
+                                crate::lifecycle::Outcome::Unavailable(msg) => {
+                                    eprintln!("  ⚠  {msg}")
+                                }
+                            }
                         }
                     }
+
                     println!("  ✓ {}@{}", pkg_name, ver);
                 }
                 Ok((pkg_name, ver, Err(e), _)) => {
@@ -2334,6 +2878,16 @@ async fn install_with_transitive(
         println!("  ✓ {} package(s) installed.", to_install.len());
     }
 
+    // ── node_modules/.bin ────────────────────────────────────────────────────
+    // Every install leaves the bin shims in place, whether or not the manifest
+    // is being updated: without them `node_modules/.bin/vite` does not exist
+    // and every toolchain that shells out to its own bin (Vite, tsc, jest,
+    // eslint) breaks even though the package itself installed fine.
+    if let Err(e) = crate::bins::link_bins(&project_root.join("node_modules")) {
+        // A missing shim is degraded, not fatal: the packages are installed.
+        tracing::warn!("could not create node_modules/.bin entries: {}", e);
+    }
+
     // ── Update package.json + lockfile (root package only) ────────────────────
     if !update_manifest {
         return Ok(());
@@ -2361,43 +2915,39 @@ fn update_manifest_only(root_spec: &str, project_root: &Path) -> anyhow::Result<
         .and_then(|v| v["version"].as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "*".to_string());
 
-    // Update package.json
-    let (project_name, project_version, mut deps) = if pkg_json_path.exists() {
-        let content = std::fs::read_to_string(&pkg_json_path)?;
-        let val: serde_json::Value =
-            serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
-        let pname = val["name"].as_str().unwrap_or("project").to_string();
-        let pver = val["version"].as_str().unwrap_or("0.0.0").to_string();
-        let mut dep_map: HashMap<String, String> = HashMap::new();
-        if let Some(deps_obj) = val["dependencies"].as_object() {
-            for (k, v) in deps_obj {
-                if let Some(ver) = v.as_str() {
-                    dep_map.insert(k.clone(), ver.to_string());
-                }
-            }
-        }
-        (pname, pver, dep_map)
+    // Rewrite the manifest in place, changing only the one dependency.
+    //
+    // Rebuilding it from name/version/dependencies — which is what this used to
+    // do — silently deleted every other field: scripts, devDependencies,
+    // "type": "module", exports, workspaces. A project could install a package
+    // and come back to a package.json missing its entire configuration.
+    let npmrc_cfg = npmrc::discover_npmrc(Some(project_root));
+    let mut manifest: serde_json::Value = if pkg_json_path.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&pkg_json_path)?)?
     } else {
-        ("project".to_string(), "0.0.0".to_string(), HashMap::new())
+        serde_json::json!({ "name": "project", "version": "0.0.0" })
     };
-
-    deps.insert(pkg_name.clone(), installed_ver.clone());
-
-    let deps_json: serde_json::Value = deps
-        .iter()
-        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-        .collect::<serde_json::Map<_, _>>()
-        .into();
-
-    let manifest = serde_json::json!({
-        "name": project_name,
-        "version": project_version,
-        "dependencies": deps_json
-    });
-    std::fs::write(
-        &pkg_json_path,
-        serde_json::to_string_pretty(&manifest)? + "\n",
-    )?;
+    let obj = manifest
+        .as_object_mut()
+        .expect("package.json is always a JSON object");
+    let deps_obj = obj
+        .entry("dependencies")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(map) = deps_obj.as_object_mut() {
+        let previous = map.get(&pkg_name).and_then(|v| v.as_str()).unwrap_or("*");
+        // Keep the range the user had; only default a new entry to `^version`.
+        let entry = if previous == "*" {
+            saved_range(
+                &installed_ver,
+                npmrc_cfg.save_prefix.as_deref(),
+                npmrc_cfg.save_exact,
+            )
+        } else {
+            previous.to_string()
+        };
+        map.insert(pkg_name.clone(), serde_json::Value::String(entry));
+    }
+    write_json_atomic(&pkg_json_path, &manifest)?;
     record_install_hash(project_root);
 
     Ok(())
@@ -3200,9 +3750,24 @@ async fn install_package_impl(
         );
     }
 
-    deps.insert(pkg_name.clone(), resolved_version.clone());
+    let npmrc_cfg = npmrc::discover_npmrc(Some(project_root));
 
-    // Write updated package.json
+    // What to record in package.json.
+    //
+    // Writing the bare resolved version here silently narrowed every range in
+    // the user's manifest: `"express": "^4.18.2"` became `"express": "4.19.2"`,
+    // which pins the project to whatever happened to be installed on the day
+    // the command ran and throws away every later 4.x. npm's rule is the
+    // default: save `^<version>`, and honour `save-exact` / `save-prefix`.
+    let declared_version = saved_range(
+        &resolved_version,
+        npmrc_cfg.save_prefix.as_deref(),
+        npmrc_cfg.save_exact,
+    );
+    deps.insert(pkg_name.clone(), declared_version.clone());
+
+    // Write updated package.json, preserving key order and formatting as far as
+    // serde_json can (see the `preserve_order` feature).
     if let Ok(content) = std::fs::read_to_string(&pkg_json_path)
         && let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content)
     {
@@ -3213,11 +3778,11 @@ async fn install_package_impl(
             if let Some(deps_map) = deps_obj.as_object_mut() {
                 deps_map.insert(
                     pkg_name.clone(),
-                    serde_json::Value::String(resolved_version.clone()),
+                    serde_json::Value::String(declared_version.clone()),
                 );
             }
         }
-        std::fs::write(&pkg_json_path, serde_json::to_string_pretty(&val).unwrap())?;
+        write_json_atomic(&pkg_json_path, &val)?;
     }
 
     // Generate lockfile
@@ -3947,6 +4512,73 @@ mod overrides_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_caret_range_reaches_the_resolver_intact() {
+        // The regression this guards: `^4.18.2` was collapsed to `4.18.2`,
+        // which the version endpoint resolves to the *first* published 4.18.x.
+        assert_eq!(manifest_spec("express", "^4.18.2"), "express@^4.18.2");
+        assert_eq!(manifest_spec("vite", "~5.0.0"), "vite@~5.0.0");
+        assert_eq!(manifest_spec("pg", ">=8.0.0 <9"), "pg@>=8.0.0 <9");
+        assert_eq!(manifest_spec("ms", "2.1.3"), "ms@2.1.3");
+        assert_eq!(manifest_spec("ms", "*"), "ms");
+        assert_eq!(manifest_spec("ms", "latest"), "ms@latest");
+    }
+
+    #[test]
+    fn a_caret_range_resolves_to_the_highest_satisfying_version() {
+        let versions: Vec<String> = ["4.17.0", "4.18.2", "4.18.7", "4.19.0", "5.0.0"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // `^4.18.2` is ">=4.18.2, <5.0.0" — 4.19.0 is inside it, and 5.0.0
+        // is not, so the answer is the newest 4.x.
+        assert_eq!(
+            select_best_version(&versions, "^4.18.2", Some("4.19.0")),
+            "4.19.0"
+        );
+        // And it must not degenerate into an exact pin on the floor.
+        assert_ne!(select_best_version(&versions, "^4.18.2", None), "4.18.2");
+        assert_eq!(select_best_version(&versions, "~4.18.0", None), "4.18.7");
+        assert_eq!(select_best_version(&versions, "4.18.2", None), "4.18.2");
+    }
+
+    #[test]
+    fn an_install_does_not_narrow_the_users_range() {
+        // The regression: recording the bare resolved version turned
+        // "^4.18.2" into "4.19.2" in the user's package.json.
+        assert_eq!(saved_range("4.19.2", None, false), "^4.19.2");
+        assert_eq!(saved_range("4.19.2", Some("~"), false), "~4.19.2");
+        assert_eq!(saved_range("4.19.2", Some("^"), false), "^4.19.2");
+        assert_eq!(saved_range("4.19.2", Some(""), false), "4.19.2");
+        assert_eq!(saved_range("4.19.2", None, true), "4.19.2");
+        assert_eq!(saved_range("4.19.2", Some("^"), true), "4.19.2");
+        // A prerelease stays exact — `^1.0.0-beta.1` would swallow the release.
+        assert_eq!(saved_range("1.0.0-beta.1", None, false), "1.0.0-beta.1");
+    }
+
+    #[test]
+    fn json_is_written_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        let v: serde_json::Value = serde_json::json!({"name": "x", "dependencies": {}});
+        write_json_atomic(&path, &v).unwrap();
+        assert!(!dir.path().join("package.json.tmp").exists());
+        let read: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(read["name"], "x");
+    }
+
+    #[test]
+    fn a_stale_install_does_not_satisfy_the_manifest() {
+        assert!(installed_version_satisfies("4.18.7", Some("^4.18.2")));
+        assert!(!installed_version_satisfies("4.17.0", Some("^4.18.2")));
+        assert!(installed_version_satisfies("4.18.2", Some("^4.18.2")));
+        assert!(!installed_version_satisfies("5.0.0", Some("^4.18.2")));
+        assert!(installed_version_satisfies("2.1.3", Some("2.1.3")));
+        assert!(installed_version_satisfies("1.0.0", Some("*")));
+        assert!(installed_version_satisfies("1.0.0", None));
+    }
 
     fn make_tgz(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
         let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());

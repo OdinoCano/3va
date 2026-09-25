@@ -5,7 +5,7 @@ use crate::resolver::DependencyGraph;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Lockfile {
     #[serde(rename = "lockfileVersion")]
     pub lockfile_version: u32,
@@ -15,7 +15,7 @@ pub struct Lockfile {
     pub dependencies: HashMap<String, LockfileDep>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LockfilePackage {
     pub version: String,
     pub resolved: Option<String>,
@@ -25,7 +25,7 @@ pub struct LockfilePackage {
     pub registry: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LockfileDep {
     pub version: String,
     pub resolved: Option<String>,
@@ -142,10 +142,28 @@ impl Lockfile {
         Ok(lock)
     }
 
+    /// Write the lockfile atomically.
+    ///
+    /// A lockfile is the record of what a tree contains, so a half-written one
+    /// is worse than none: the next install would treat the truncated file as
+    /// the resolved set. Write to a sibling temp file and rename, so a crash or
+    /// a full disk leaves the previous lockfile intact.
     pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
-        Ok(())
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, content.as_bytes())?;
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// The recorded decision for `name`, if the lockfile pins one.
+    pub fn pin(&self, name: &str) -> Option<&LockfileDep> {
+        self.dependencies.get(name)
     }
 }
 
@@ -153,6 +171,44 @@ impl Lockfile {
 mod tests {
     use super::*;
     use crate::resolver::DependencyGraph;
+
+    #[test]
+    fn a_pin_is_the_recorded_decision_for_a_name() {
+        let mut lf = Lockfile {
+            name: "app".into(),
+            version: "1.0.0".into(),
+            ..Default::default()
+        };
+        assert!(lf.pin("express").is_none());
+        lf.dependencies.insert(
+            "express".into(),
+            LockfileDep {
+                version: "4.19.2".into(),
+                resolved: Some("https://registry.npmjs.org/express/-/express-4.19.2.tgz".into()),
+                integrity: Some("sha512-abc".into()),
+                ..Default::default()
+            },
+        );
+        let pin = lf.pin("express").unwrap();
+        assert_eq!(pin.version, "4.19.2");
+        assert_eq!(pin.integrity.as_deref(), Some("sha512-abc"));
+    }
+
+    #[test]
+    fn save_is_atomic_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("3va-lock.json");
+        let mut lf = Lockfile {
+            name: "app".into(),
+            version: "1.0.0".into(),
+            ..Default::default()
+        };
+        lf.save(&path).unwrap();
+        assert!(!dir.path().join("3va-lock.json.tmp").exists());
+        lf.version = "2.0.0".into();
+        lf.save(&path).unwrap();
+        assert_eq!(Lockfile::load(&path).unwrap().version, "2.0.0");
+    }
 
     // ── save / load round-trip ────────────────────────────────────────────────
 
