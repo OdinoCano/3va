@@ -23,15 +23,12 @@ thread_local! {
     static HANDLED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-fn local_ptr<T>(local: v8::Local<T>) -> usize {
-    // Local<T> is repr(transparent) over NonNull<T>; read it as a pointer-sized int.
-    // Safe: Local<T> is guaranteed to be the same size as a pointer.
-    unsafe { *(&local as *const _ as *const usize) }
-}
-
 extern "C" fn on_promise_reject(msg: PromiseRejectMessage) {
     v8::callback_scope!(unsafe scope, &msg);
-    let ptr = local_ptr(msg.get_promise());
+    // The object's identity hash, not the Local's address: each callback gets
+    // a fresh handle slot for the same promise, so handle addresses never
+    // matched and every "handler added after reject" was still reported.
+    let ptr = msg.get_promise().get_identity_hash().get() as usize;
     match msg.get_event() {
         PromiseRejectEvent::PromiseRejectWithNoHandler => {
             let text = msg

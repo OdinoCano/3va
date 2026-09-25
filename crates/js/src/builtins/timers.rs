@@ -144,13 +144,28 @@ impl TimerManager {
     ) -> anyhow::Result<()> {
         let expired = manager.poll_expired_ids();
         for id in expired {
+            // Like Node: a throw from a timer callback goes to
+            // process.on('uncaughtException') if anyone listens, otherwise it
+            // is fatal. It used to be printed by V8 and ignored, so the
+            // process kept going and finally exited 0.
             let code = format!(
-                "if (typeof __fireTimer === 'function') {{ __fireTimer({}); }}",
-                id
+                "if (typeof __fireTimer === 'function') {{ try {{ __fireTimer({id}); }} catch (e) {{ \
+                 if (typeof process !== 'undefined' && typeof process.listenerCount === 'function' \
+                 && process.listenerCount('uncaughtException') > 0) {{ process.emit('uncaughtException', e, 'uncaughtException'); }} \
+                 else {{ throw e; }} }} }}"
             );
-            let script = v8::Script::compile(scope, v8::String::new(scope, &code).unwrap(), None);
-            if let Some(s) = script {
-                let _ = s.run(scope);
+            v8::tc_scope!(let try_catch, scope);
+            let source = v8::String::new(try_catch, &code).unwrap();
+            let Some(script) = v8::Script::compile(try_catch, source, None) else {
+                continue;
+            };
+            if script.run(try_catch).is_none() {
+                let text = try_catch
+                    .stack_trace()
+                    .or_else(|| try_catch.exception())
+                    .map(|e| e.to_rust_string_lossy(try_catch))
+                    .unwrap_or_else(|| "unknown error".to_string());
+                anyhow::bail!("Uncaught exception: {text}");
             }
         }
         Ok(())

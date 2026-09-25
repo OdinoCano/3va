@@ -3711,7 +3711,13 @@ pub fn inject_require(
 
                 var result = __httpListen(port, hostname);
                 if (typeof result !== 'number') {
-                    setTimeout(function() { self.emit('error', result); }, 0);
+                    // Node semantics: with no 'error' listener a failed listen
+                    // (e.g. EACCES without --allow-net) is an uncaught exception,
+                    // not a silent exit 0.
+                    setTimeout(function() {
+                        if (self.listenerCount('error') > 0) self.emit('error', result);
+                        else throw result;
+                    }, 0);
                     return self;
                 }
                 self._id = result;
