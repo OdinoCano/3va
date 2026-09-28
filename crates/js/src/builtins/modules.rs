@@ -3800,16 +3800,19 @@ pub fn inject_require(
             httpOutgoingMessage.prototype.setTimeout = function(msecs, callback) { return this; };
 
             // ClientRequest: a real HTTP client request that supports upgrade (WebSocket handshake).
-            function ClientRequest(options, callback) {
+            // defaultProtocol is 'https:' when called through the https module:
+            // those requests must go over TLS, never a plain TCP socket.
+            function ClientRequest(options, callback, defaultProtocol) {
                 EventEmitter.call(this);
                 if (typeof options === 'string') {
                     var u = new URL(options);
                     options = { protocol: u.protocol, hostname: u.hostname, port: parseInt(u.port) || (u.protocol === 'https:' ? 443 : 80), path: u.pathname + u.search };
                 }
+                this._secure = (options.protocol || defaultProtocol || 'http:') === 'https:';
                 this._method = (options.method || 'GET').toUpperCase();
                 this._path = options.path || '/';
                 this._host = options.hostname || options.host || 'localhost';
-                this._port = parseInt(options.port) || 80;
+                this._port = parseInt(options.port) || (this._secure ? 443 : 80);
                 this._headers = {};
                 if (options.headers) {
                     var oh = options.headers;
@@ -3846,7 +3849,9 @@ pub fn inject_require(
                 this._ended = true;
                 var self = this;
 
-                var socket = netConnect(self._port, self._host);
+                var socket = self._secure
+                    ? tlsConnect(self._port, self._host, { servername: self._host })
+                    : netConnect(self._port, self._host);
                 self._socket = socket;
 
                 socket.once('error', function(err) { self.emit('error', err); });
@@ -3929,6 +3934,12 @@ pub fn inject_require(
                 req.end();
                 return req;
             }
+            function httpsRequest(options, callback) { return new ClientRequest(options, callback, 'https:'); }
+            function httpsGet(options, callback) {
+                var req = httpsRequest(options, callback);
+                req.end();
+                return req;
+            }
 
             function createServer(opts, requestListener) {
                 return new httpServer(opts, requestListener);
@@ -3967,8 +3978,8 @@ pub fn inject_require(
                 globalAgent: new httpAgent(),
                 Agent: httpAgent,
                 Server: Server,
-                request: httpRequest,
-                get: httpGet,
+                request: httpsRequest,
+                get: httpsGet,
                 ClientRequest: ClientRequest
             };
             globalThis.__requireCache['https'] = httpsModule;

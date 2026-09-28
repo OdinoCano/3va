@@ -2,10 +2,12 @@
 // Copyright (c) 3va contributors
 
 use serde::Serialize;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use v8::{FunctionCallbackArguments, PinScope, ReturnValue};
+use vvva_permissions::{Capability, PermissionState};
 
 type EventQueue = Arc<Mutex<Vec<SseEvent>>>;
 type EsMap = Arc<Mutex<HashMap<u32, EsEntry>>>;
@@ -30,6 +32,7 @@ struct SseEvent {
 thread_local! {
     static ES_MAP: EsMap = Arc::new(Mutex::new(HashMap::new()));
     static ES_COUNTER: Arc<Mutex<u32>> = Arc::new(Mutex::new(0u32));
+    static ES_PERMISSIONS: RefCell<Option<Arc<PermissionState>>> = const { RefCell::new(None) };
 }
 fn map() -> EsMap {
     ES_MAP.with(|m| m.clone())
@@ -38,7 +41,11 @@ fn counter() -> Arc<Mutex<u32>> {
     ES_COUNTER.with(|c| c.clone())
 }
 
-pub fn inject_event_source(scope: &mut v8::ContextScope<v8::HandleScope>) {
+pub fn inject_event_source(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    permissions: Arc<PermissionState>,
+) {
+    ES_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions));
     let context = scope.get_current_context();
     let global = context.global(scope);
 
@@ -48,6 +55,31 @@ pub fn inject_event_source(scope: &mut v8::ContextScope<v8::HandleScope>) {
               args: FunctionCallbackArguments,
               mut rv: ReturnValue| {
             let url = args.get(0).to_rust_string_lossy(scope);
+
+            // Same gate as fetch(): the host must be granted with --allow-net.
+            let Some(host) = super::fetch::host_from_url(&url) else {
+                let err = v8::String::new(scope, "Invalid EventSource URL").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, err));
+                return;
+            };
+            // host:port, like fetch(), so a port-scoped grant applies.
+            let destination = super::fetch::destination_from_url(&url)
+                .map(|(h, p)| vvva_permissions::authority(&h, p))
+                .unwrap_or_else(|| host.clone());
+            let allowed = ES_PERMISSIONS.with(|p| {
+                p.borrow()
+                    .as_ref()
+                    .is_some_and(|p| p.check(&Capability::Network(destination.clone())))
+            });
+            if !allowed {
+                let msg = format!(
+                    "Network access denied. Run with --allow-net={}",
+                    destination
+                );
+                let err = v8::String::new(scope, &msg).unwrap();
+                scope.throw_exception(v8::Exception::error(scope, err));
+                return;
+            }
 
             let counter_arc = counter();
             let mut id_lock = counter_arc.lock().unwrap();

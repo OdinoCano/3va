@@ -207,7 +207,10 @@ pub fn inject_all(
     );
     t!("dgram", dgram::inject_dgram(scope, permissions.clone()))?;
     t!("sqlite", sqlite::inject_sqlite(scope))?;
-    t!("event_source", event_source::inject_event_source(scope));
+    t!(
+        "event_source",
+        event_source::inject_event_source(scope, permissions.clone())
+    );
     t!("imap", imap::inject_imap(scope, permissions.clone()));
     t!(
         "irc",

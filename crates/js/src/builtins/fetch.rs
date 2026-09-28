@@ -16,7 +16,7 @@ use vvva_permissions::{Capability, PermissionState};
 /// call via `fetch(url, { maxResponseSize })`.
 const MAX_RESPONSE_BODY_BYTES: u64 = 512 * 1024 * 1024;
 
-fn host_from_url(url: &str) -> Option<String> {
+pub(crate) fn host_from_url(url: &str) -> Option<String> {
     destination_from_url(url).map(|(host, _)| host)
 }
 
@@ -27,7 +27,7 @@ fn host_from_url(url: &str) -> Option<String> {
 /// HTTPS service and not an admin port on the same host. The scheme's default
 /// port is filled in when the URL omits it, so `https://api.example.com/` and
 /// `https://api.example.com:443/` ask the same question.
-fn destination_from_url(url: &str) -> Option<(String, u16)> {
+pub(crate) fn destination_from_url(url: &str) -> Option<(String, u16)> {
     let (scheme, rest) = url.split_once("://")?;
     let scheme = scheme.to_ascii_lowercase();
     let host_part = rest.split(['/', '?', '#']).next().unwrap_or(rest);

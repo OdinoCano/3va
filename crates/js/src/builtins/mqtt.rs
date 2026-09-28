@@ -241,32 +241,29 @@ pub fn inject_mqtt(
             match connect_tcp_with_timeout(&host, port, connect_timeout, io_timeout) {
                 Ok(tcp) => {
                     let conn = if use_tls {
-                        match super::tls::TlsConnector::new() {
-                            // Socket r/w timeouts are already set, so the
-                            // handshake below is bounded by `io_timeout`
-                            // instead of hanging forever on a silent peer.
-                            Ok(connector) => {
-                                let fallback = tcp.try_clone().ok();
-                                match connector.connect(&host, tcp) {
-                                    Ok(tls) => {
-                                        if tls.get_ref().set_nonblocking(true).is_ok() {
-                                            MqttConn::Tls(tls)
-                                        } else if let Some(tcp) = fallback {
-                                            MqttConn::Plain(tcp)
-                                        } else {
-                                            return;
-                                        }
-                                    }
-                                    Err(_) => {
-                                        if let Some(tcp) = fallback {
-                                            MqttConn::Plain(tcp)
-                                        } else {
-                                            return;
-                                        }
-                                    }
-                                }
+                        // Never fall back to plaintext: the caller asked for TLS, and a failed
+                        // handshake is exactly what an attacker in the middle can cause. The
+                        // old fallback then sent credentials in clear over the same socket.
+                        let tls = super::tls::TlsConnector::new()
+                            .map_err(|e| e.to_string())
+                            .and_then(|c| c.connect(&host, tcp).map_err(|e| e.to_string()))
+                            .and_then(|t| {
+                                t.get_ref()
+                                    .set_nonblocking(true)
+                                    .map(|_| t)
+                                    .map_err(|e| e.to_string())
+                            });
+                        match tls {
+                            Ok(t) => MqttConn::Tls(t),
+                            Err(e) => {
+                                let msg = v8::String::new(
+                                    scope,
+                                    &format!("MQTT TLS connection failed: {e}"),
+                                )
+                                .unwrap();
+                                scope.throw_exception(v8::Exception::error(scope, msg));
+                                return;
                             }
-                            Err(_) => MqttConn::Plain(tcp),
                         }
                     } else {
                         let _ = tcp.set_nonblocking(true);

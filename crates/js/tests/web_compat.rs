@@ -6,7 +6,14 @@
 
 use std::sync::Arc;
 use vvva_js::JsEngine;
-use vvva_permissions::PermissionState;
+use vvva_permissions::{Capability, PermissionState};
+
+/// EventSource needs a network grant, like fetch().
+async fn engine_with_localhost() -> JsEngine {
+    let state = PermissionState::new();
+    state.grant(Capability::Network("localhost".to_string()));
+    JsEngine::new(Arc::new(state)).await.unwrap()
+}
 
 async fn engine() -> JsEngine {
     JsEngine::new(Arc::new(PermissionState::new()))
@@ -274,7 +281,7 @@ async fn event_source_constructor_and_constants() {
 
 #[tokio::test]
 async fn event_source_close_does_not_throw() {
-    let mut e = engine().await;
+    let mut e = engine_with_localhost().await;
     let r = e
         .eval_to_string(
             r#"
@@ -290,7 +297,7 @@ async fn event_source_close_does_not_throw() {
 
 #[tokio::test]
 async fn event_source_add_event_listener() {
-    let mut e = engine().await;
+    let mut e = engine_with_localhost().await;
     let r = e
         .eval_to_string(
             r#"

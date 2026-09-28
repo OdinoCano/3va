@@ -123,29 +123,30 @@ pub fn inject_pop3(
             match TcpStream::connect(format!("{}:{}", host, port)) {
                 Ok(tcp) => {
                     let conn = if use_tls {
-                        match super::tls::TlsConnector::new() {
-                            Ok(connector) => {
-                                let fallback = tcp.try_clone().ok();
-                                match connector.connect(&host, tcp) {
-                                    Ok(tls) => {
-                                        if tls.get_ref().set_nonblocking(true).is_ok() {
-                                            Pop3Conn::Tls(tls)
-                                        } else if let Some(tcp) = fallback {
-                                            Pop3Conn::Plain(tcp)
-                                        } else {
-                                            return;
-                                        }
-                                    }
-                                    Err(_) => {
-                                        if let Some(tcp) = fallback {
-                                            Pop3Conn::Plain(tcp)
-                                        } else {
-                                            return;
-                                        }
-                                    }
-                                }
+                        // Never fall back to plaintext: the caller asked for TLS, and a failed
+                        // handshake is exactly what an attacker in the middle can cause. The
+                        // old fallback then sent credentials in clear over the same socket.
+                        let tls = super::tls::TlsConnector::new()
+                            .map_err(|e| e.to_string())
+                            .and_then(|c| c.connect(&host, tcp).map_err(|e| e.to_string()))
+                            .and_then(|t| {
+                                t.get_ref()
+                                    .set_nonblocking(true)
+                                    .map(|_| t)
+                                    .map_err(|e| e.to_string())
+                            });
+                        match tls {
+                            Ok(t) => Pop3Conn::Tls(t),
+                            Err(e) => {
+                                let msg = v8::String::new(
+                                    scope,
+                                    &format!("POP3 TLS connection failed: {e}"),
+                                )
+                                .unwrap();
+                                let err = v8::Exception::error(scope, msg);
+                                rv.set(err);
+                                return;
                             }
-                            Err(_) => Pop3Conn::Plain(tcp),
                         }
                     } else {
                         let _ = tcp.set_nonblocking(true);
@@ -302,7 +303,10 @@ pub fn inject_pop3(
             if (callback) self.on('connect', callback);
             setTimeout(function() {
                 try {
-                    __pop3Connect(self._id, self.host, self.port, self.tls);
+                    // The native side returns (not throws) its Error; a failed or
+                    // refused TLS connect must not be treated as connected.
+                    var connectErr = __pop3Connect(self._id, self.host, self.port, self.tls);
+                    if (connectErr instanceof Error) throw connectErr;
                     self._connected = true;
                     self._startPoll();
                     self._pendingCmd = 'GREETING';
