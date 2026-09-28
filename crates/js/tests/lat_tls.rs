@@ -38,7 +38,11 @@ async fn pump_until(e: &mut JsEngine, done_js: &str, deadline: std::time::Durati
                 _ = e.idle() => {},
                 _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {},
             }
-            let _ = e.run_event_loop().await;
+            // Slice the loop: with a client polling, run_event_loop() only
+            // returns at its 100k-iteration cap (~3s here, >10s under ASan),
+            // so done_js would never be checked before the deadline.
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(25), e.run_event_loop())
+                .await;
             tokio::task::yield_now().await;
             if e.eval_to_string(done_js).await.unwrap_or_default() == "true" {
                 return true;
