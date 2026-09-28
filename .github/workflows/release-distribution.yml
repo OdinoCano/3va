@@ -199,15 +199,16 @@ jobs:
   update-homebrew-and-scoop:
     name: Update Formula, Scoop, Nix, and Chocolatey VERIFICATION manifests
     permissions:
-      contents: write   # commit the updated manifests back to main
+      contents: read    # the manifest commit is pushed with the deploy key
     if: github.event.inputs.only_npm != 'true'
     needs: collect-hashes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          # Use the built-in token — no extra secrets needed.
-          token: ${{ github.token }}
+          # main is protected by a ruleset; this deploy key is the only
+          # bypass, used for the manifest commit below.
+          ssh-key: ${{ secrets.MAIN_PUSH_DEPLOY_KEY }}
 
       - name: Compute homebrew-core source tarball hash
         id: source_hash
