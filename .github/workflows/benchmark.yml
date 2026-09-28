@@ -32,9 +32,13 @@ jobs:
     name: Run benchmarks
     runs-on: ubuntu-latest
     permissions:
-      contents: write # needed to push the README install-time sync commit
+      contents: read # the README sync commit is pushed with the deploy key
     steps:
       - uses: actions/checkout@v4
+        with:
+          # main is protected by a ruleset; this deploy key is the only
+          # bypass, used for the README benchmark sync commit below.
+          ssh-key: ${{ secrets.MAIN_PUSH_DEPLOY_KEY }}
 
       - uses: dtolnay/rust-toolchain@stable
       # Deliberately no Swatinem/rust-cache here (unlike other workflows in
