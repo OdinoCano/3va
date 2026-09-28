@@ -7,14 +7,19 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
-### Changed (breaking)
-
-- **Plaintext protocols are off by default.** `fetch('http://…')`, `ws://` WebSockets, and FTP, IMAP, POP3, IRC, MQTT and gRPC connections without TLS to any **non-loopback** host now throw `Insecure protocol … is disabled by default`, even when `--allow-net` grants the host. Pass `--allow-insecure` to allow them. Loopback (`localhost`, `127.0.0.0/8`, `::1`) is unaffected.
+## [2.10.0] — 2026-09-28
 
 ### Security
 
+- **GHSA-73wr-jx24-m26h (high)**: `https.request()`/`https.get()` sent requests in plaintext. They now use TLS with certificate verification.
+- **GHSA-c83p-xcpg-5c69 (medium)**: `EventSource` connected without an `--allow-net` check; it now requires the destination to be granted.
+- **GHSA-9x9w-xxjx-96mv (high)**: the IRC, POP3, FTP and MQTT clients fell back to plaintext when the TLS handshake failed; a TLS failure now fails the connection.
 - **TLS 1.2 minimum everywhere**: the default (non-FIPS) build's native-tls connections (TCP/TLS, FTP, IMAP, POP3, IRC, MQTT, `wss://`) previously accepted whatever minimum version the OS allowed, which could be TLS 1.0. They now refuse anything older than TLS 1.2.
 - **Release workflows validate `workflow_dispatch` tags** before using them in shell steps, and every workflow now runs with a read-only token unless a job asks for more.
+
+### Changed (breaking)
+
+- **Plaintext protocols are off by default.** `fetch('http://…')`, `ws://` WebSockets, and FTP, IMAP, POP3, IRC, MQTT and gRPC connections without TLS to any **non-loopback** host now throw `Insecure protocol … is disabled by default`, even when `--allow-net` grants the host. Pass `--allow-insecure` to allow them. Loopback (`localhost`, `127.0.0.0/8`, `::1`) is unaffected.
 
 ### Fixed
 

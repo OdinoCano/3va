@@ -6,7 +6,7 @@
 
 ---
 
-## 1.2 Current Status (v2.9.0 · 2026-08-18)
+## 1.2 Current Status (v2.10.0 · 2026-09-28)
 
 ### Implemented and functional
 
