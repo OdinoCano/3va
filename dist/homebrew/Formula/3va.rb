@@ -1,8 +1,8 @@
 class ThreeVa < Formula
   desc "Secure-by-default JavaScript and TypeScript runtime"
   homepage "https://github.com/OdinoCano/3va"
-  url "https://github.com/OdinoCano/3va/archive/refs/tags/v2.9.0.tar.gz"
-  sha256 "0cfa0d03bb9c3662465c0dd3117e9531cc571ac08393693a48905e6c8a13e7c6"
+  url "https://github.com/OdinoCano/3va/archive/refs/tags/v2.10.0.tar.gz"
+  sha256 "97fe5108dccd7efe9dcee0f7d25641b9c52c854d1856160288302679cad1251c"
   license "MIT"
 
   depends_on "pkgconf" => :build
