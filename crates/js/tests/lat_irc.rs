@@ -31,8 +31,12 @@ async fn pump_until(e: &mut JsEngine, done_js: &str, deadline: std::time::Durati
                 _ = e.idle() => {},
                 _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {},
             }
-            // Surface uncaught exceptions in CI logs instead of hiding them.
-            if let Err(err) = e.run_event_loop().await {
+            // Slice the loop: with a client polling, run_event_loop() only
+            // returns at its 100k-iteration cap (~3s here, >10s under ASan),
+            // so done_js would never be checked before the deadline.
+            if let Ok(Err(err)) =
+                tokio::time::timeout(std::time::Duration::from_millis(25), e.run_event_loop()).await
+            {
                 eprintln!("event loop error: {err}");
             }
             tokio::task::yield_now().await;
@@ -56,8 +60,14 @@ async fn irc_registration_and_pong_latency_budget() {
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    // How far the daemon got (1 accepted, 2 saw USER, 3 sent 001+PING), so a
+    // hang reports which side stalled instead of just "never completed".
+    let stage = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let server_stage = stage.clone();
     let server = std::thread::spawn(move || {
+        use std::sync::atomic::Ordering::SeqCst;
         let (stream, _) = listener.accept().unwrap();
+        server_stage.store(1, SeqCst);
         let mut writer = stream.try_clone().unwrap();
         let mut reader = BufReader::new(stream);
         let mut saw_user = false;
@@ -70,8 +80,10 @@ async fn irc_registration_and_pong_latency_budget() {
                 saw_user = true;
             }
         }
+        server_stage.store(2, SeqCst);
         writer.write_all(b":t 001 nick :Welcome\r\n").unwrap();
         writer.write_all(b"PING :tok\r\n").unwrap();
+        server_stage.store(3, SeqCst);
         // Read the client's PONG so the daemon's join() correlates with it.
         let mut pong = String::new();
         let _ = reader.read_line(&mut pong);
@@ -84,6 +96,7 @@ async fn irc_registration_and_pong_latency_budget() {
         var irc = require('irc');
         var t0 = Date.now();
         var client = new irc.Client({{ host: '127.0.0.1', port: {port}, nick: 'nick' }});
+        client.on('error', function(err) {{ globalThis.__ircErr = String(err && err.message || err); }});
         client.on('ping', function() {{
             globalThis.__elapsed = Date.now() - t0;
             globalThis.__done = true;
@@ -102,7 +115,17 @@ async fn irc_registration_and_pong_latency_budget() {
         std::time::Duration::from_secs(10),
     )
     .await;
-    assert!(ok, "IRC registration+PONG never completed within 10s");
+    if !ok {
+        let client_err = e
+            .eval_to_string("String(globalThis.__ircErr)")
+            .await
+            .unwrap_or_default();
+        panic!(
+            "IRC registration+PONG never completed within 10s \
+             (daemon stage {} of 3, client error: {client_err})",
+            stage.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
     let _ = tokio::task::spawn_blocking(move || server.join()).await;
     let elapsed_ms: u128 = e
         .eval_to_string("String(globalThis.__elapsed)")

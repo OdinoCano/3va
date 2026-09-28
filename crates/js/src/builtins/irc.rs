@@ -34,11 +34,30 @@ impl IrcConn {
             IrcConn::Tls(s) => s.read(buf),
         }
     }
-    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        match self {
-            IrcConn::Plain(s) => s.write_all(data),
-            IrcConn::Tls(s) => s.write_all(data),
+    /// The socket is non-blocking, where `Write::write_all` gives up on the
+    /// first `WouldBlock` and the rest of the line is lost (a registration
+    /// that never reached the server). Retry until everything is written.
+    fn write_all(&mut self, mut data: &[u8]) -> io::Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !data.is_empty() {
+            let written = match self {
+                IrcConn::Plain(s) => s.write(data),
+                IrcConn::Tls(s) => s.write(data),
+            };
+            match written {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => data = &data[n..],
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => return Err(e),
+            }
         }
+        Ok(())
     }
     fn shutdown(&mut self) {
         match self {
@@ -397,7 +416,10 @@ pub fn inject_irc(
 
         Client.prototype.send = Client.prototype.raw = function(line, callback) {
             if (this._connected) {
-                __ircSend(this._id, line);
+                // The native side returns (not throws) an Error on failure;
+                // dropping it silently lost the line.
+                var err = __ircSend(this._id, line);
+                if (err instanceof Error) this.emit('error', err);
             }
             if (callback) callback();
         };
