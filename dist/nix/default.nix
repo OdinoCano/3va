@@ -1,25 +1,25 @@
 { lib, stdenv, fetchurl, autoPatchelfHook }:
 
 let
-  version = "2.10.0";
+  version = "2.11.0";
   pname   = "three-va";
 
   assets = {
     "x86_64-linux" = {
       url    = "https://github.com/OdinoCano/3va/releases/download/v${version}/3va-v${version}-x86_64-unknown-linux-gnu.tar.gz";
-      sha256 = "f680943400cbd65151d3116c7c40c694d659c3391199705514329d4c9b2f077b";
+      sha256 = "1d6e58c3d75ff8f8de0a393f27cedf09b12d0696ea5fe46208b795a5ffaa4433";
     };
     "aarch64-linux" = {
       url    = "https://github.com/OdinoCano/3va/releases/download/v${version}/3va-v${version}-aarch64-unknown-linux-gnu.tar.gz";
-      sha256 = "9bcd33f334d5788cad53820871e5315aadf501519ab8e846a7013944efd63b91";
+      sha256 = "a9c9d703059731d674fb45454e5954ad27e3d663b7f1ddb5e21721efdb78cc4d";
     };
     "x86_64-darwin" = {
       url    = "https://github.com/OdinoCano/3va/releases/download/v${version}/3va-v${version}-x86_64-apple-darwin.tar.gz";
-      sha256 = "f44f9c77227355920d13c5bab99a595c1f2ceef22c38f1422463fb2731392fd3";
+      sha256 = "befd2435f1fe842f9d5354a3cd592d26055d8fd81c8a6fc4b2cd5731d376df1e";
     };
     "aarch64-darwin" = {
       url    = "https://github.com/OdinoCano/3va/releases/download/v${version}/3va-v${version}-aarch64-apple-darwin.tar.gz";
-      sha256 = "905bff0a93646bb96e5a98b7f52e0753a94e92c60b480a125cd0a4d41b058528";
+      sha256 = "53c85d6540dfa044fadfcc525e0fb6ca5fa82f3019f469f0e8d94a13394365d4";
     };
   };
 
