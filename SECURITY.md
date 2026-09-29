@@ -12,8 +12,8 @@ LTS line; see [docs/12-roadmap/02-lts-criteria.md](docs/12-roadmap/02-lts-criter
 
 | Version | Status      | Notes |
 |---------|-------------|-------|
-| 2.10.x  | Current     | Receives security patches until 2.11.0 is released |
-| < 2.10  | Unsupported | No security updates. Upgrade to 2.10.x |
+| 2.11.x  | Current     | Receives security patches until 2.12.0 is released |
+| < 2.11  | Unsupported | No security updates. Upgrade to 2.11.x |
 
 ## Reporting a Vulnerability
 
@@ -137,10 +137,10 @@ Every release asset ships with:
 - `3va-<tag>.cdx.json`: a CycloneDX 1.5 SBOM, also signed with cosign
 
 ```sh
-sha256sum -c 3va-v2.10.0-x86_64-unknown-linux-gnu.tar.gz.sha256   # integrity
+sha256sum -c 3va-v2.11.0-x86_64-unknown-linux-gnu.tar.gz.sha256   # integrity
 
-cosign verify-blob 3va-v2.10.0-x86_64-unknown-linux-gnu.tar.gz \
-  --bundle 3va-v2.10.0-x86_64-unknown-linux-gnu.tar.gz.bundle \
+cosign verify-blob 3va-v2.11.0-x86_64-unknown-linux-gnu.tar.gz \
+  --bundle 3va-v2.11.0-x86_64-unknown-linux-gnu.tar.gz.bundle \
   --certificate-identity-regexp 'https://github.com/OdinoCano/3va/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -153,9 +153,9 @@ the exact workflow and commit. It can be checked with
 [slsa-verifier](https://github.com/slsa-framework/slsa-verifier):
 
 ```sh
-slsa-verifier verify-artifact 3va-v2.10.0-x86_64-unknown-linux-gnu.tar.gz \
+slsa-verifier verify-artifact 3va-v2.11.0-x86_64-unknown-linux-gnu.tar.gz \
   --provenance-path multiple.intoto.jsonl \
-  --source-uri github.com/OdinoCano/3va --source-tag v2.10.0
+  --source-uri github.com/OdinoCano/3va --source-tag v2.11.0
 ```
 
 ### FIPS 140-3
@@ -223,6 +223,7 @@ every minor release.
 
 | Advisory | Severity | Summary | Fixed in |
 |----------|----------|---------|----------|
+| [GHSA-9cr8-7vq5-f83h](https://github.com/OdinoCano/3va/security/advisories/GHSA-9cr8-7vq5-f83h) | Critical | Sandbox, per-package permission and package-manager trust bypasses (2026-09-28 audit, see `docs/SECURITY-AUDIT-2026-09-28.md`) | 2.11.0 |
 | [GHSA-73wr-jx24-m26h](https://github.com/OdinoCano/3va/security/advisories/GHSA-73wr-jx24-m26h) | High | `https.request()`/`https.get()` sent requests in plaintext | 2.10.0 |
 | [GHSA-c83p-xcpg-5c69](https://github.com/OdinoCano/3va/security/advisories/GHSA-c83p-xcpg-5c69) | Medium | `EventSource` bypassed `--allow-net` | 2.10.0 |
 | [GHSA-9x9w-xxjx-96mv](https://github.com/OdinoCano/3va/security/advisories/GHSA-9x9w-xxjx-96mv) | High | IRC/POP3/FTP/MQTT fell back to plaintext when TLS failed | 2.10.0 |

@@ -691,7 +691,7 @@ pub fn inject_process(
     }
 
     let versions = v8::Object::new(scope);
-    set_str(scope, versions, "3va", "2.10.0");
+    set_str(scope, versions, "3va", "2.11.0");
     // Expose fake Node.js-compatible version strings so packages checking
     // process.versions.node / process.versions.v8 don't crash.
     set_str(scope, versions, "node", "22.12.0");
