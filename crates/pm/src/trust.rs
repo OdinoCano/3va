@@ -73,6 +73,9 @@ pub struct TrustPolicy {
     integrity: BTreeMap<String, String>,
     /// Packages whose lifecycle scripts are allowed to run.
     build_allowed: Vec<String>,
+    /// `"3va".permissions.<pkg>` from the *project* manifest: what that
+    /// package's lifecycle scripts may do.
+    package_permissions: BTreeMap<String, Value>,
 }
 
 impl TrustPolicy {
@@ -105,6 +108,15 @@ impl TrustPolicy {
             for (k, v) in map {
                 if let Some(s) = v.as_str() {
                     policy.integrity.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        if let Some(map) = obj.get("permissions").and_then(Value::as_object) {
+            for (name, perms) in map {
+                if perms.is_object() {
+                    policy
+                        .package_permissions
+                        .insert(name.clone(), perms.clone());
                 }
             }
         }
@@ -193,19 +205,19 @@ impl TrustPolicy {
         }
     }
 
-    /// Flags for re-entering `3va run` on a lifecycle script, derived from the
-    /// package's own declared permissions.
+    /// Flags for re-entering `3va run` on a lifecycle script of `pkg_name`.
     ///
-    /// The script runs with exactly what its manifest asked for and nothing
-    /// more. A downloader that needs the network still has to have declared
-    /// `allowNet`, so opting into a lifecycle script does not silently hand it
-    /// the machine.
-    pub fn sandbox_argv(&self, package_dir: &Path) -> Vec<String> {
+    /// Beyond its own directory, the script gets only what the *project*
+    /// grants that package in `"3va".permissions.<pkg>` (same keys as the
+    /// `3va run` flags). The dependency's own manifest has no say: letting
+    /// the unreviewed artifact declare `allowFsWrite: true` handed it the
+    /// whole filesystem (VULN-10).
+    pub fn sandbox_argv(&self, package_dir: &Path, pkg_name: &str) -> Vec<String> {
         // Every lifecycle script may read its own package (its package.json,
         // its files) and the node_modules tree it sits in (e.g. esbuild's
         // install.js locating @esbuild/<platform>), and write inside its own
         // directory. Without these the script could not even read its own
-        // package.json. Everything else must be declared by the package.
+        // package.json.
         let own = package_dir
             .canonicalize()
             .unwrap_or_else(|_| package_dir.to_path_buf());
@@ -219,33 +231,29 @@ impl TrustPolicy {
             format!("--allow-read={}", tree.display()),
             format!("--allow-write={}", own.display()),
         ];
-        let manifest: Value = std::fs::read_to_string(package_dir.join("package.json"))
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or(Value::Null);
-        let perms = &manifest["3va"]["permissions"];
-        // Names of real `3va run` flags: `--allow-fs-write` did not exist, so a
-        // package declaring allowFsWrite made its own script fail to start.
-        for (flag, key) in [
-            ("--allow-net", "allowNet"),
-            ("--allow-write", "allowFsWrite"),
-            ("--allow-env", "allowEnv"),
-            ("--allow-ffi", "allowFfi"),
+        let Some(perms) = self.package_permissions.get(pkg_name) else {
+            return argv;
+        };
+        for key in [
+            "allow-net",
+            "allow-read",
+            "allow-write",
+            "allow-env",
+            "allow-ffi",
         ] {
-            if let Some(list) = perms[key].as_array() {
-                for v in list.iter().filter_map(|v| v.as_str()) {
-                    argv.push(format!("{flag}={v}"));
-                }
-            } else if perms[key].as_bool() == Some(true) {
-                argv.push(flag.to_string());
+            // A list only: a bare `true` would be an unscoped grant
+            // (`--allow-write` = the whole filesystem).
+            for v in perms[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                argv.push(format!("--{key}={v}"));
             }
         }
         // A boolean flag: `--allow-child-process=<x>` is rejected by the CLI.
-        if perms["allowChildProcess"].as_bool() == Some(true)
-            || perms["allowChildProcess"]
-                .as_array()
-                .is_some_and(|a| !a.is_empty())
-        {
+        if perms["allow-child-process"].as_bool() == Some(true) {
             argv.push("--allow-child-process".to_string());
         }
         argv
@@ -419,29 +427,46 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_argv_comes_from_the_scripts_own_declared_permissions() {
-        let dir = tempfile::tempdir().unwrap();
+    fn lifecycle_permissions_come_from_the_project_not_the_dependency() {
+        let root = tempfile::tempdir().unwrap();
+        let pkg = root.path().join("node_modules/x");
+        std::fs::create_dir_all(&pkg).unwrap();
+        // The dependency asks for everything; it must get none of it.
         std::fs::write(
-            dir.path().join("package.json"),
-            r#"{
-              "3va": {
-                "permissions": {
-                  "allowNet": ["api.example.com"],
-                  "allowFsWrite": ["./build"],
-                  "allowEnv": ["NODE_ENV"],
-                  "allowFfi": true
-                }
-              }
-            }"#,
+            pkg.join("package.json"),
+            r#"{"name":"x","3va":{"permissions":{"allowNet":true,"allowFsWrite":true,"allowChildProcess":true}}}"#,
         )
         .unwrap();
-        let policy = TrustPolicy::empty();
-        let argv = policy.sandbox_argv(dir.path());
+        let project = serde_json::json!({ "3va": { "permissions": { "x": {
+            "allow-net": ["api.example.com"],
+            "allow-write": ["./build"],
+            "allow-env": ["NODE_ENV"],
+            "allow-ffi": true
+        }}}});
+        let argv = TrustPolicy::from_manifest(&project)
+            .unwrap()
+            .sandbox_argv(&pkg, "x");
         assert!(argv.contains(&"--allow-net=api.example.com".to_string()));
-        // `--allow-write` is the real `3va run` flag (`--allow-fs-write` isn't).
         assert!(argv.contains(&"--allow-write=./build".to_string()));
         assert!(argv.contains(&"--allow-env=NODE_ENV".to_string()));
-        assert!(argv.contains(&"--allow-ffi".to_string()));
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a == "--allow-net" || a == "--allow-write")
+        );
+        assert!(
+            !argv.iter().any(|a| a.starts_with("--allow-ffi")),
+            "bare true is not a list"
+        );
+        assert!(!argv.contains(&"--allow-child-process".to_string()));
+        // Another package's grant doesn't apply.
+        assert_eq!(
+            TrustPolicy::from_manifest(&project)
+                .unwrap()
+                .sandbox_argv(&pkg, "y")
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -453,7 +478,7 @@ mod tests {
         let pkg = pkg.canonicalize().unwrap();
         let tree = pkg.parent().unwrap();
         assert_eq!(
-            TrustPolicy::empty().sandbox_argv(&pkg),
+            TrustPolicy::empty().sandbox_argv(&pkg, "x"),
             vec![
                 "--no-prompt".to_string(),
                 format!("--allow-read={}", tree.display()),

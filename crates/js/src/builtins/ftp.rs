@@ -146,10 +146,12 @@ pub fn inject_ftp(
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
             let host = args.get(1).to_rust_string_lossy(_scope);
-            let port = args.get(2).uint32_value(_scope).unwrap_or(21) as u16;
+            let port = super::port_from_js(args.get(2).uint32_value(_scope), 21);
             let use_tls = args.get(3).boolean_value(_scope);
 
-            if !permissions().check(&Capability::Network(host.clone())) {
+            if !permissions().check(&Capability::Network(vvva_permissions::authority(
+                &host, port,
+            ))) {
                 let msg = v8::String::new(
                     _scope,
                     &format!("Network access denied. Run with --allow-net={}", host),
@@ -170,7 +172,10 @@ pub fn inject_ftp(
                 return;
             }
 
-            match TcpStream::connect(format!("{}:{}", host, port)) {
+            match permissions()
+                .vetted_addrs(&host, port)
+                .and_then(|a| TcpStream::connect(&a[..]))
+            {
                 Ok(tcp) => {
                     let conn = if use_tls {
                         // Never fall back to plaintext: the caller asked for TLS, and a failed
@@ -314,9 +319,11 @@ pub fn inject_ftp(
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as FtpId;
             let host = args.get(1).to_rust_string_lossy(_scope);
-            let port = args.get(2).uint32_value(_scope).unwrap_or(0) as u16;
+            let port = super::port_from_js(args.get(2).uint32_value(_scope), 0);
 
-            if !permissions().check(&Capability::Network(host.clone())) {
+            if !permissions().check(&Capability::Network(vvva_permissions::authority(
+                &host, port,
+            ))) {
                 let msg = v8::String::new(
                     _scope,
                     &format!("Network access denied. Run with --allow-net={}", host),
@@ -327,7 +334,10 @@ pub fn inject_ftp(
                 return;
             }
 
-            match TcpStream::connect(format!("{}:{}", host, port)) {
+            match permissions()
+                .vetted_addrs(&host, port)
+                .and_then(|a| TcpStream::connect(&a[..]))
+            {
                 Ok(tcp) => {
                     let use_tls = ftp_registry()
                         .lock()

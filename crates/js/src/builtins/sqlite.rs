@@ -3,8 +3,23 @@
 
 use base64::Engine;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use v8::{ContextScope, Function, HandleScope, PinScope, Script, String as V8String};
+use vvva_permissions::{Capability, PermissionState};
+
+thread_local! {
+    static SQLITE_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn perms() -> Arc<PermissionState> {
+    SQLITE_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_sqlite not called on this thread")
+    })
+}
 
 type ConnMap = Arc<Mutex<HashMap<u32, Arc<Mutex<rusqlite::Connection>>>>>;
 type StmtMap = Arc<Mutex<HashMap<u32, (u32, String)>>>;
@@ -26,7 +41,11 @@ fn stmt_counter() -> &'static Arc<Mutex<u32>> {
     SQLITE_STMT_COUNTER.get().unwrap()
 }
 
-pub fn inject_sqlite(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> {
+pub fn inject_sqlite(
+    scope: &mut ContextScope<HandleScope>,
+    permissions: Arc<PermissionState>,
+) -> anyhow::Result<()> {
+    SQLITE_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions));
     SQLITE_CONNS.set(Arc::new(Mutex::new(HashMap::new()))).ok();
     SQLITE_STMTS.set(Arc::new(Mutex::new(HashMap::new()))).ok();
     SQLITE_CONN_COUNTER.set(Arc::new(Mutex::new(0u32))).ok();
@@ -40,10 +59,42 @@ pub fn inject_sqlite(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()
               args: v8::FunctionCallbackArguments<'_>,
               mut rv: v8::ReturnValue<'_>| {
             let path_arg = args.get(0);
-            let path = path_arg.to_rust_string_lossy(scope);
+            let path_str = path_arg.to_rust_string_lossy(scope);
+            let path = PathBuf::from(&path_str);
+            // ":memory:" and "" (a private temp database) touch no file.
+            let in_memory = path_str.is_empty() || path_str == ":memory:";
+            let p = perms();
+            if !in_memory
+                && (!p.check(&Capability::FileRead(path.clone()))
+                    || !p.check(&Capability::FileWrite(path.clone())))
+            {
+                let err = v8::Exception::error(
+                    scope,
+                    V8String::new(scope, &format!("EACCES: permission denied: '{path_str}'"))
+                        .unwrap(),
+                );
+                scope.throw_exception(err);
+                return;
+            }
 
-            match rusqlite::Connection::open(&path) {
+            // No SQLITE_OPEN_URI: a "file:…?…" string is then just a file
+            // name, the same one the check above saw.
+            let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+            match rusqlite::Connection::open_with_flags(&path, flags) {
                 Ok(conn) => {
+                    // ATTACH DATABASE and VACUUM INTO open or create any
+                    // file named in SQL, past the check above; with no
+                    // attach slots both fail. Plain VACUUM fails too.
+                    // SAFETY: valid handle of the connection just opened.
+                    unsafe {
+                        rusqlite::ffi::sqlite3_limit(
+                            conn.handle(),
+                            rusqlite::ffi::SQLITE_LIMIT_ATTACHED,
+                            0,
+                        );
+                    }
                     let mut id = conn_counter().lock().unwrap();
                     *id += 1;
                     let cid = *id;

@@ -97,8 +97,14 @@ fn connect_tcp_with_timeout(
     connect_timeout: std::time::Duration,
     io_timeout: std::time::Duration,
 ) -> io::Result<TcpStream> {
-    use std::net::ToSocketAddrs;
-    let addrs: Vec<_> = (host, port).to_socket_addrs()?.collect();
+    let addrs: Vec<std::net::SocketAddr> = match MQTT_PERMISSIONS.with(|p| p.borrow().clone()) {
+        Some(p) => p.vetted_addrs(host, port)?,
+        // No engine on this thread (unit tests): no policy to apply.
+        None => {
+            use std::net::ToSocketAddrs;
+            (host, port).to_socket_addrs()?.collect()
+        }
+    };
     if addrs.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -197,7 +203,7 @@ pub fn inject_mqtt(
               mut rv: v8::ReturnValue<'_>| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0) as MqttId;
             let host = args.get(1).to_rust_string_lossy(scope);
-            let port = args.get(2).uint32_value(scope).unwrap_or(1883) as u16;
+            let port = super::port_from_js(args.get(2).uint32_value(scope), 1883);
             let use_tls = args.get(3).boolean_value(scope);
             // Optional per-client timeout override in milliseconds (JS passes
             // `options.connectTimeout`); tests inject small values.
@@ -219,7 +225,9 @@ pub fn inject_mqtt(
 
             let perms = perms().clone();
 
-            if !perms.check(&Capability::Network(host.clone())) {
+            if !perms.check(&Capability::Network(vvva_permissions::authority(
+                &host, port,
+            ))) {
                 let msg = v8::String::new(
                     scope,
                     &format!("Network access denied. Run with --allow-net={}", host),

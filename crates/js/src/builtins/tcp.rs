@@ -88,9 +88,6 @@ pub(crate) fn pq_tls_client_config_native() -> std::result::Result<Arc<rustls::C
         .get_or_init(|| {
             let mut roots = rustls::RootCertStore::empty();
             let native = rustls_native_certs::load_native_certs();
-            for err in &native.errors {
-                eprintln!("[3va-tcp] pq-tls: native cert load warning: {err}");
-            }
             for cert in native.certs {
                 roots
                     .add(cert)
@@ -152,8 +149,10 @@ fn pq_tls_connect_blocking(
     let conn = rustls::ClientConnection::new(config, server_name)
         .map_err(|e| format!("PQ TLS init: {e}"))?;
 
-    let tcp =
-        TcpStream::connect(format!("{host}:{port}")).map_err(|e| format!("ECONNREFUSED: {e}"))?;
+    let tcp = permissions()
+        .vetted_addrs(host, port)
+        .and_then(|a| TcpStream::connect(&a[..]))
+        .map_err(|e| format!("ECONNREFUSED: {e}"))?;
     let mut stream = rustls::StreamOwned::new(conn, tcp);
 
     while stream.conn.is_handshaking() {
@@ -265,9 +264,11 @@ pub fn inject_tcp(
                 let host_arg = args.get(0);
                 let host = host_arg.to_rust_string_lossy(_scope);
                 let port_arg = args.get(1);
-                let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
+                let port: u16 = super::port_from_js(port_arg.uint32_value(_scope), 0);
 
-                if !permissions().check(&Capability::Network(host.clone())) {
+                if !permissions().check(&Capability::Network(vvva_permissions::authority(
+                    &host, port,
+                ))) {
                     let err = js_code_err(
                         _scope,
                         "EACCES",
@@ -277,7 +278,10 @@ pub fn inject_tcp(
                     return;
                 }
 
-                match TcpStream::connect(format!("{}:{}", host, port)) {
+                match permissions()
+                    .vetted_addrs(&host, port)
+                    .and_then(|a| TcpStream::connect(&a[..]))
+                {
                     Ok(stream) => {
                         if let Err(e) = stream.set_nonblocking(true) {
                             let err = js_err(_scope, &e.to_string());
@@ -285,11 +289,9 @@ pub fn inject_tcp(
                             return;
                         }
                         let id = alloc_id(pool(), next_id(), TcpConn::Plain(stream));
-                        eprintln!("[3va-tcp] connected {}:{} id={}", host, port, id);
                         rv.set(v8::Integer::new_from_unsigned(_scope, id).into());
                     }
                     Err(e) => {
-                        eprintln!("[3va-tcp] FAILED {}:{} => {}", host, port, e);
                         let err = js_code_err(_scope, "ECONNREFUSED", e.to_string());
                         rv.set(err);
                     }
@@ -313,9 +315,11 @@ pub fn inject_tcp(
                 let host_arg = args.get(0);
                 let host = host_arg.to_rust_string_lossy(_scope);
                 let port_arg = args.get(1);
-                let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
+                let port: u16 = super::port_from_js(port_arg.uint32_value(_scope), 0);
 
-                if !permissions().check(&Capability::Network(host.clone())) {
+                if !permissions().check(&Capability::Network(vvva_permissions::authority(
+                    &host, port,
+                ))) {
                     let err = js_code_err(
                         _scope,
                         "EACCES",
@@ -334,7 +338,10 @@ pub fn inject_tcp(
                     }
                 };
 
-                match TcpStream::connect(format!("{}:{}", host, port)) {
+                match permissions()
+                    .vetted_addrs(&host, port)
+                    .and_then(|a| TcpStream::connect(&a[..]))
+                {
                     Ok(tcp) => match connector.connect(&host, tcp) {
                         Ok(tls) => {
                             if let Err(e) = tls.get_ref().set_nonblocking(true) {
@@ -385,12 +392,10 @@ pub fn inject_tcp(
                     vec![]
                 };
 
-                eprintln!("[3va-tcp] __tcpWrite id={} len={}", id, data.len());
                 let mut guard = pool().lock().unwrap();
                 match guard.get_mut(&id) {
                     Some(conn) => {
                         if let Err(e) = conn.write_all(&data) {
-                            eprintln!("[3va-tcp] write error id={}: {}", id, e);
                             let err = js_code_err(_scope, "EPIPE", e.to_string());
                             rv.set(err);
                         } else {
@@ -514,11 +519,11 @@ pub fn inject_tcp(
                   args: v8::FunctionCallbackArguments,
                   mut rv: v8::ReturnValue| {
                 let port_arg = args.get(0);
-                let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
+                let port: u16 = super::port_from_js(port_arg.uint32_value(_scope), 0);
                 let host_arg = args.get(1);
                 let host = host_arg.to_rust_string_lossy(_scope);
 
-                if !permissions().check_bind(&host) {
+                let Some(host) = permissions().bind_host(&host) else {
                     let err = js_code_err(
                         _scope,
                         "EACCES",
@@ -526,7 +531,7 @@ pub fn inject_tcp(
                     );
                     rv.set(err);
                     return;
-                }
+                };
 
                 match std::net::TcpListener::bind(format!("{}:{}", host, port)) {
                     Ok(std_l) => {
@@ -655,7 +660,7 @@ pub fn inject_tcp(
                 let host_arg = args.get(0);
                 let host = host_arg.to_rust_string_lossy(_scope);
                 let port_arg = args.get(1);
-                let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
+                let port: u16 = super::port_from_js(port_arg.uint32_value(_scope), 0);
                 let ca_arg = args.get(2);
                 let ca_pem = if ca_arg.is_string() {
                     Some(ca_arg.to_rust_string_lossy(_scope))
@@ -663,7 +668,9 @@ pub fn inject_tcp(
                     None
                 };
 
-                if !permissions().check(&Capability::Network(host.clone())) {
+                if !permissions().check(&Capability::Network(vvva_permissions::authority(
+                    &host, port,
+                ))) {
                     let err = js_code_err(
                         _scope,
                         "EACCES",

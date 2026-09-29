@@ -134,8 +134,8 @@ The global store is concerned only with storage, not with execution context.
 
 ```bash
 3va store verify
-# Checks every entry has a complete package.json
-# Reports corrupt or partial extractions
+# Recomputes each entry's tree digest and compares it with the one
+# recorded at store time; reports modified, partial and unverifiable entries
 ```
 
 ### Inspect store size

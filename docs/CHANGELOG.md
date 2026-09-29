@@ -7,6 +7,29 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+### Security
+
+- **GHSA-9cr8-7vq5-f83h (critical)**: fixes for the 2026-09-28 security audit (23 findings, see `docs/SECURITY-AUDIT-2026-09-28.md`):
+  - Filesystem containment resolves symlinks and `..` like the kernel, and on Linux every `fs` operation acts on a descriptor that was checked (no check-then-open window). `existsSync`/`accessSync` no longer reveal paths outside the grant.
+  - Package `deny-*`/`allow-*` rules follow the calling package from the V8 stack, across timers, promises and bound builtins, instead of a JS wrapper that could be bypassed.
+  - Network: one URL parser for check and connect, `dns` gated, `host:port` checks in every socket builtin, resolved addresses vetted against IP deny rules, listeners on all interfaces only with an explicit grant.
+  - Package manager: transitive names validated, integrity fail-closed and pinned by the lockfile, `3va ci` strict, provenance verified against Sigstore (Fulcio + Rekor) with the signer pinned per package, lifecycle permissions from the project, `.npmrc` registries limited to `--allow-net` and HTTPS, store digests and `store verify`, credential files excluded from `pack`/`publish`.
+  - `node:sqlite` requires fs grants and can't open other files from SQL.
+  - `doctor` reports only checks it runs; `audit --deny` fails on incomplete scans; store, cache and `~/.npmrc` get private permissions.
+- **FFI stack overwrite**: `3va:ffi` calls returning `i8`/`i16`/`i32`/`u8`/`u16`/`u32` or `void` let libffi write a full 8-byte register into a smaller stack slot, which could crash the process. Return values are now read into a 64-bit buffer and narrowed.
+
+### Changed (breaking)
+
+- `listen(port)` without a host binds `127.0.0.1` unless `--allow-net` includes `0.0.0.0`, `::` or `*`.
+- Package-scoped grants apply only when every package on the call stack holds them.
+- Lifecycle script permissions come from the project's `"3va".permissions.<pkg>`.
+- An `.npmrc`-pinned registry host must be in `--allow-net`; plaintext registries only on loopback.
+- A lockfile integrity mismatch aborts the install; `3va ci` needs a complete lockfile with hashes.
+- `--require-provenance` accepts only a verified signer from the package's declared repository; signers are pinned in `.3va/provenance-signers.json` (commit it).
+- An unversioned `"trusted"` entry no longer overrides a failed malware scan.
+- `EventSource` does not follow redirects.
+- `node:sqlite`: `ATTACH`, `VACUUM INTO` and `VACUUM` fail.
+
 ## [2.10.0] — 2026-09-28
 
 ### Security

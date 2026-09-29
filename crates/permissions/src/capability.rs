@@ -114,6 +114,7 @@ impl PermissionState {
         if scope == ROOT_SCOPE {
             return self.grant(cap);
         }
+        scope::mark_scoped_rules_active();
         self.scoped_granted
             .write()
             .unwrap()
@@ -128,6 +129,7 @@ impl PermissionState {
         if scope == ROOT_SCOPE {
             return self.deny(cap);
         }
+        scope::mark_scoped_rules_active();
         self.scoped_denied
             .write()
             .unwrap()
@@ -242,11 +244,6 @@ impl PermissionState {
             _ => {}
         }
 
-        // Which package's code is currently executing (set by the JS engine's
-        // require() wrapper; "." / ROOT_SCOPE for the app's own code, or when
-        // no scoped grants were ever declared for this project).
-        let active_scope = scope::current_scope();
-
         // Paso 2: deny-list explícita — global primero, luego la del scope activo.
         {
             let denied = self.denied.read().unwrap();
@@ -254,26 +251,41 @@ impl PermissionState {
                 return false;
             }
         }
-        if active_scope != ROOT_SCOPE {
+        // A package's deny-* applies whenever its code is involved: the
+        // wrapper scope alone is set from JS and can be sidestepped (VULN-03).
+        // Reading the stack costs a V8 stack walk, so only do it when some
+        // package actually has deny rules.
+        {
             let scoped_denied = self.scoped_denied.read().unwrap();
-            if let Some(set) = scoped_denied.get(&active_scope)
-                && set.iter().any(|d| caps_match(d, required))
+            if !scoped_denied.is_empty()
+                && scope::deny_scopes().iter().any(|s| {
+                    scoped_denied
+                        .get(s)
+                        .is_some_and(|set| set.iter().any(|d| caps_match(d, required)))
+                })
             {
                 return false;
             }
         }
 
-        // Paso 3: granted-list — global primero, luego la del scope activo.
+        // Paso 3: granted-list — global, or a package grant held by *every*
+        // package involved (stack inspection): a package can't borrow another
+        // one's grant by forging the wrapper scope or by calling into it.
         {
             let granted = self.granted.read().unwrap();
             if granted.iter().any(|g| caps_match(g, required)) {
                 return true;
             }
         }
-        if active_scope != ROOT_SCOPE {
+        {
+            let scopes = scope::package_scopes();
             let scoped_granted = self.scoped_granted.read().unwrap();
-            if let Some(set) = scoped_granted.get(&active_scope)
-                && set.iter().any(|g| caps_match(g, required))
+            if !scopes.is_empty()
+                && scopes.iter().all(|s| {
+                    scoped_granted
+                        .get(s)
+                        .is_some_and(|set| set.iter().any(|g| caps_match(g, required)))
+                })
             {
                 return true;
             }
@@ -304,13 +316,71 @@ impl PermissionState {
     /// connect) — there, the granted host must still match the real
     /// destination, or granting `allow-net: ["api.example.com"]` would also
     /// silently permit SSRF-style requests to `127.0.0.1`.
+    /// Resolves `host:port` once and drops every address that an explicit
+    /// deny rule names by IP (or IP:port). Callers connect to exactly these
+    /// addresses: checking the name and letting the connect resolve it again
+    /// meant `--deny-net=169.254.169.254` could be bypassed by any name that
+    /// resolves (or rebinds) to that IP (VULN-18).
+    pub fn vetted_addrs(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        use std::net::ToSocketAddrs;
+        let all: Vec<_> = (host.trim_start_matches('[').trim_end_matches(']'), port)
+            .to_socket_addrs()?
+            .collect();
+        let allowed: Vec<_> = all
+            .iter()
+            .copied()
+            .filter(|a| !self.addr_denied(a))
+            .collect();
+        if allowed.is_empty() && !all.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("every address {host} resolves to is denied by a deny-net rule"),
+            ));
+        }
+        Ok(allowed)
+    }
+
+    fn addr_denied(&self, addr: &std::net::SocketAddr) -> bool {
+        let ip = addr.ip().to_string();
+        let caps = [
+            Capability::Network(ip.clone()),
+            Capability::Network(crate::authority(&ip, addr.port())),
+        ];
+        let hit =
+            |set: &HashSet<Capability>| caps.iter().any(|c| set.iter().any(|d| caps_match(d, c)));
+        if hit(&self.denied.read().unwrap()) {
+            return true;
+        }
+        let scoped = self.scoped_denied.read().unwrap();
+        !scoped.is_empty()
+            && scope::deny_scopes()
+                .iter()
+                .any(|s| scoped.get(s).is_some_and(&hit))
+    }
+
     pub fn check_bind(&self, host: &str) -> bool {
+        self.bind_host(host).is_some()
+    }
+
+    /// The address a server asking to bind `host` may actually bind, or
+    /// `None` if it may not listen at all.
+    ///
+    /// Loopback is allowed by any network grant. All interfaces (`0.0.0.0`,
+    /// `::`, the default of `listen(port)`) need a grant that says so
+    /// (`0.0.0.0`, `::` or `*`); with only other grants the server is kept on
+    /// loopback instead — `--allow-net=api.example.com` must not expose a
+    /// server to the whole network (VULN-13).
+    pub fn bind_host(&self, host: &str) -> Option<String> {
         let required = Capability::Network(host.to_string());
 
         if self.deny_all_net {
             self.record_bind_denial(host);
             self.record_audit(&required, false);
-            return false;
+            return None;
         }
         {
             let denied = self.denied.read().unwrap();
@@ -318,15 +388,39 @@ impl PermissionState {
                 drop(denied);
                 self.record_bind_denial(host);
                 self.record_audit(&required, false);
-                return false;
+                return None;
             }
         }
-        if is_local_bind_host(host) {
+        let (any_net, all_interfaces) = {
             let granted = self.granted.read().unwrap();
-            if granted.iter().any(|g| matches!(g, Capability::Network(_))) {
-                drop(granted);
+            (
+                granted.iter().any(|g| matches!(g, Capability::Network(_))),
+                granted.iter().any(|g| {
+                    matches!(g, Capability::Network(h) if matches!(h.as_str(), "*" | "0.0.0.0" | "::"))
+                }),
+            )
+        };
+        if any_net && matches!(host, "127.0.0.1" | "::1" | "localhost") {
+            self.record_audit(&required, true);
+            return Some(host.to_string());
+        }
+        if is_local_bind_host(host) {
+            if all_interfaces {
                 self.record_audit(&required, true);
-                return true;
+                return Some(host.to_string());
+            }
+            if any_net {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                let loopback = if host == "::" { "::1" } else { "127.0.0.1" };
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "note: listening on {loopback} only; to accept connections from other \
+                         machines, grant --allow-net=0.0.0.0"
+                    );
+                }
+                self.record_audit(&required, true);
+                return Some(loopback.to_string());
             }
         }
         // Not `self.check()`: a refused bind is not an outbound refusal, and
@@ -337,7 +431,7 @@ impl PermissionState {
             self.record_bind_denial(host);
         }
         self.record_audit(&required, allowed);
-        allowed
+        allowed.then(|| host.to_string())
     }
 
     /// Local bind hosts that were refused during this run, deduplicated.
@@ -539,16 +633,10 @@ fn normalize_path(p: &std::path::Path) -> std::borrow::Cow<'_, std::path::Path> 
     std::borrow::Cow::Borrowed(p)
 }
 
-/// Resolve symlinks for path comparison — falls back to the original path when
-/// canonicalize fails (e.g. path doesn't exist yet).
-fn canon_path(p: &std::path::Path) -> PathBuf {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
-}
-
 /// Make a relative path absolute against the process cwd, leaving absolute
-/// paths untouched. Like `canon_path` this falls back to the literal path when
-/// the cwd is unavailable — the caller keeps the raw path in that case, so
-/// matching simply behaves as it did before (fails closed rather than wide).
+/// paths untouched. Falls back to the literal path when the cwd is unavailable
+/// — the caller keeps the raw path in that case, so matching simply behaves as
+/// it did before (fails closed rather than wide).
 fn absolutize(p: &std::path::Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
@@ -559,6 +647,33 @@ fn absolutize(p: &std::path::Path) -> PathBuf {
     }
 }
 
+/// Where the kernel will actually land for `p`: symlinks and `..` in the
+/// longest existing prefix are resolved by `canonicalize` (physically, in path
+/// order — `link/..` is the parent of the link's *target*), then the components
+/// that don't exist yet are appended (the write case).
+///
+/// `None` when that non-existent tail contains `..`: after `mkdir -p` creates
+/// the missing directory, the kernel resolves the `..` and any symlink behind
+/// it, so no lexical answer is safe. Callers treat `None` as "not covered".
+fn resolve_physically(p: &std::path::Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let comps: Vec<Component> = p.components().collect();
+    for split in (1..=comps.len()).rev() {
+        let Ok(mut out) = comps[..split].iter().collect::<PathBuf>().canonicalize() else {
+            continue;
+        };
+        for c in &comps[split..] {
+            match c {
+                Component::Normal(name) => out.push(name),
+                Component::CurDir => {}
+                _ => return None,
+            }
+        }
+        return Some(out);
+    }
+    None
+}
+
 /// Check if `target` is covered by `allowed`, resolving symlinks on both sides
 /// so that `/lib64` (symlink → `/usr/lib64`) matches `--allow-read=/lib64`.
 ///
@@ -566,16 +681,18 @@ fn absolutize(p: &std::path::Path) -> PathBuf {
 /// CLI flag (`--allow-read=./config` resolved to `$CWD/config`) matches an
 /// application request regardless of whether that request was made with a
 /// relative or absolute path.
+///
+/// `..` is never collapsed lexically: `sandbox/link/../x` opens the parent of
+/// the link's target, not `sandbox/x`, so only physical resolution is sound.
+// ponytail: check-then-open is still a TOCTOU window (a worker can swap a
+// symlink in between); closing it needs openat2(RESOLVE_BENEATH) at open time.
 fn path_covered_by(target: &std::path::Path, allowed: &std::path::Path) -> bool {
-    let norm_t = normalize_path(target);
-    let norm_a = normalize_path(allowed);
-    let abs_t = absolutize(norm_t.as_ref());
-    let abs_a = absolutize(norm_a.as_ref());
-    if abs_t.starts_with(&abs_a) {
-        return true;
+    let abs_t = absolutize(normalize_path(target).as_ref());
+    let abs_a = absolutize(normalize_path(allowed).as_ref());
+    match (resolve_physically(&abs_t), resolve_physically(&abs_a)) {
+        (Some(t), Some(a)) => t.starts_with(a),
+        _ => false,
     }
-    // Re-check after resolving symlinks on both sides.
-    canon_path(&abs_t).starts_with(canon_path(&abs_a))
 }
 
 /// Wildcard/loopback addresses a server binds to when the app didn't ask for
@@ -967,6 +1084,36 @@ mod tests {
     }
 
     #[test]
+    fn resolved_addresses_are_checked_against_ip_denies() {
+        // VULN-18: a name that resolves to a denied IP must not reach it.
+        let state = PermissionState::new();
+        state.grant(Capability::Network("*".to_string()));
+        state.deny(Capability::Network("127.0.0.1".to_string()));
+        assert!(state.check(&Capability::Network("localhost".to_string())));
+        let err = state.vetted_addrs("127.0.0.1", 80).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        let open = PermissionState::new();
+        assert_eq!(open.vetted_addrs("127.0.0.1", 80).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn wildcard_bind_needs_an_explicit_grant_or_stays_on_loopback() {
+        // VULN-13: `--allow-net=api.example.com` must not expose a server on
+        // every interface; the default `listen(port)` is kept on loopback.
+        let state = PermissionState::new();
+        state.grant(Capability::Network("api.example.com".to_string()));
+        assert_eq!(state.bind_host("0.0.0.0").as_deref(), Some("127.0.0.1"));
+        assert_eq!(state.bind_host("::").as_deref(), Some("::1"));
+        assert_eq!(state.bind_host("localhost").as_deref(), Some("localhost"));
+
+        for grant in ["0.0.0.0", "*"] {
+            let state = PermissionState::new();
+            state.grant(Capability::Network(grant.to_string()));
+            assert_eq!(state.bind_host("0.0.0.0").as_deref(), Some("0.0.0.0"));
+        }
+    }
+
+    #[test]
     fn check_bind_denies_without_any_net_grant() {
         let state = PermissionState::new();
         assert!(!state.check_bind("0.0.0.0"));
@@ -1113,5 +1260,143 @@ mod tests {
                 .contains(&Capability::EnvAccess)
         );
         assert!(state.scoped_granted.read().unwrap().is_empty());
+    }
+
+    // ── path_covered_by (the real containment check used by FileRead/FileWrite/FFI) ──
+    // These test the enforcement path directly, not `VirtualFs` (dead code that
+    // no builtin invokes). Regression tests for VULN-01 (path traversal).
+
+    fn abs_grant(dir: &std::path::Path) -> PathBuf {
+        dir.to_path_buf()
+    }
+
+    #[test]
+    fn dotdot_traversal_is_not_covered_by_grant() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sandbox = tmp.path().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let secret = tmp.path().join("secret.txt");
+        std::fs::write(&secret, "x").unwrap();
+
+        let grant = abs_grant(&sandbox);
+        // ../secret.txt resolves out of the grant.
+        assert!(!path_covered_by(
+            &sandbox.join("..").join("secret.txt"),
+            &grant
+        ));
+        // Multiple levels, `.` and `//` segments, deep traversal.
+        assert!(!path_covered_by(
+            &sandbox.join("..").join("..").join("secret.txt"),
+            &grant
+        ));
+        assert!(!path_covered_by(
+            &sandbox.join("..").join("secret.txt"),
+            &grant
+        ));
+        // The legit in-grant file is still covered.
+        assert!(path_covered_by(&sandbox.join("ok.txt"), &grant));
+    }
+
+    #[test]
+    fn absolute_escape_target_is_rejected() {
+        // Even when target segments spell the grant prefix first, a `..` that
+        // collapses out must not be reported as covered.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sandbox = tmp.path().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+
+        let grant = abs_grant(&sandbox);
+        let target = sandbox
+            .join("sub")
+            .join("..")
+            .join("..")
+            .join("etc")
+            .join("passwd");
+        assert!(!path_covered_by(&target, &grant));
+    }
+
+    #[test]
+    fn symlinked_escape_outside_grant_is_rejected() {
+        // Canonicalization must win when the symlink points outside the grant,
+        // even though the lexical path spells the grant prefix first.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sandbox = tmp.path().join("sandbox");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = sandbox.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let grant = abs_grant(&sandbox);
+        assert!(!path_covered_by(&link.join("secret.txt"), &grant));
+        assert!(path_covered_by(&sandbox.join("ok.txt"), &grant));
+    }
+
+    #[test]
+    fn write_target_that_does_not_exist_yet_is_checked_against_real_parent() {
+        // Writing to a new file under a symlinked directory must be measured
+        // against where the file will actually land.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sandbox = tmp.path().join("sandbox");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = sandbox.join("realdir");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let grant = abs_grant(&sandbox);
+        assert!(!path_covered_by(&link.join("newfile.txt"), &grant));
+        assert!(path_covered_by(&sandbox.join("newfile.txt"), &grant));
+    }
+
+    #[test]
+    fn dotdot_after_symlink_resolves_like_the_kernel() {
+        // `sandbox/link/../x` is the parent of the link's *target*, not
+        // `sandbox/x`. A sandboxed script can create such a link itself.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sandbox = tmp.path().join("sandbox");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(sandbox.join("x")).unwrap();
+        std::fs::create_dir_all(outside.join("sub")).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::os::unix::fs::symlink(outside.join("sub"), sandbox.join("link")).unwrap();
+
+        let grant = abs_grant(&sandbox);
+        assert!(!path_covered_by(
+            &sandbox.join("link/../secret.txt"),
+            &grant
+        ));
+        assert!(!path_covered_by(&sandbox.join("link/../new.txt"), &grant));
+        // `..` that stays inside is still fine.
+        assert!(path_covered_by(&sandbox.join("x/../ok.txt"), &grant));
+    }
+
+    #[test]
+    fn dotdot_in_not_yet_existing_tail_fails_closed() {
+        // mkdir -p of `missing/../link/dir` would follow `link` once
+        // `missing` exists; no lexical verdict is safe.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sandbox = tmp.path().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let grant = abs_grant(&sandbox);
+        assert!(!path_covered_by(
+            &sandbox.join("missing/../link/dir"),
+            &grant
+        ));
+    }
+
+    #[test]
+    fn grant_under_symlink_matches_real_location() {
+        // --allow-read=/lib64 (a symlink to /usr/lib64) still matches requests
+        // for the real path.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        let link = tmp.path().join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert!(path_covered_by(&link.join("foo.txt"), &link));
+        assert!(path_covered_by(&real.join("foo.txt"), &link));
+        assert!(path_covered_by(&link.join("foo.txt"), &real));
     }
 }

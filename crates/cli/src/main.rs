@@ -188,13 +188,60 @@ fn rebuild_profiler_from_cpuprofile(json: &str) -> anyhow::Result<vvva_js::profi
     Ok(profiler)
 }
 
-fn check_system_info() -> anyhow::Result<()> {
+/// The permission and engine self-checks `doctor` reports, each actually
+/// exercised against the real `PermissionState` / V8 — `doctor` must not
+/// claim a protection it did not test (VULN-08).
+async fn doctor_checks() -> Vec<(bool, String)> {
+    use vvva_permissions::{Capability, PermissionState};
+    let mut out = Vec::new();
+
+    let fresh = PermissionState::new();
+    out.push((
+        !fresh.check(&Capability::FileRead(std::env::temp_dir())),
+        "Deny-by-default: no grants → access denied".to_string(),
+    ));
+
+    let base = std::env::temp_dir().join(format!("3va-doctor-{}", std::process::id()));
+    let sandbox = base.join("sandbox");
+    let contained = std::fs::create_dir_all(&sandbox).is_ok() && {
+        let perms = PermissionState::new();
+        perms.grant(Capability::FileRead(sandbox.clone()));
+        let ok = perms.check(&Capability::FileRead(sandbox.join("file.txt")))
+            && !perms.check(&Capability::FileRead(sandbox.join("../outside.txt")));
+        #[cfg(unix)]
+        let ok = ok
+            && std::os::unix::fs::symlink(&base, sandbox.join("link")).is_ok()
+            && !perms.check(&Capability::FileRead(sandbox.join("link/outside.txt")))
+            && !perms.check(&Capability::FileRead(sandbox.join("link/../outside.txt")));
+        ok
+    };
+    let _ = std::fs::remove_dir_all(&base);
+    out.push((
+        contained,
+        "Path containment: grant honored, `..`/symlink escapes denied".to_string(),
+    ));
+
+    let perms = PermissionState::new();
+    let cap = Capability::Network("doctor.invalid".to_string());
+    perms.grant(cap.clone());
+    perms.deny(cap.clone());
+    out.push((!perms.check(&cap), "Deny wins over grant".to_string()));
+
+    let v8_ok = match vvva_js::JsEngine::new(std::sync::Arc::new(PermissionState::new())).await {
+        Ok(mut engine) => matches!(engine.eval_to_string("1 + 1").await, Ok(v) if v.trim() == "2"),
+        Err(_) => false,
+    };
+    out.push((v8_ok, "V8 evaluates code (1 + 1 = 2)".to_string()));
+    out
+}
+
+async fn check_system_info() -> anyhow::Result<()> {
     println!("\n=== 3VA Doctor Report ===\n");
 
-    println!("[1/5] Runtime Version");
+    println!("[1/3] Runtime Version");
     println!("  ✓ 3va v{}", env!("CARGO_PKG_VERSION"));
 
-    println!("\n[2/5] Environment");
+    println!("\n[2/3] Environment");
     if let Ok(rustc) = Command::new("rustc").arg("--version").output() {
         let version = String::from_utf8_lossy(&rustc.stdout);
         println!("  ✓ Rust: {}", version.trim());
@@ -202,22 +249,19 @@ fn check_system_info() -> anyhow::Result<()> {
         println!("  ⚠ Rust: not found in PATH");
     }
 
-    println!("\n[3/5] Permissions Subsystem");
-    let _perms = vvva_permissions::PermissionState::new();
-    println!("  ✓ PermissionState initialized");
-    println!("  ✓ Sandbox enforcement available");
-
-    println!("\n[4/5] JS Engine");
-    println!("  ✓ V8 integration available");
-
-    println!("\n[5/5] Security Checks");
-    println!("  ✓ Capabilities: Allow by default (denied)");
-    println!("  ✓ VirtualFS: Path traversal protection");
-    println!("  ✓ VirtualNetwork: Host allowlist enforcement");
+    println!("\n[3/3] Self-checks");
+    let checks = doctor_checks().await;
+    for (ok, name) in &checks {
+        println!("  {} {}", if *ok { "✓" } else { "✗" }, name);
+    }
 
     println!("\n--- Summary ---");
-    println!("✓ 3VA is healthy and ready to use.");
-    println!("  Run '3va run <file>' to execute JavaScript securely.");
+    if checks.iter().all(|(ok, _)| *ok) {
+        println!("✓ 3VA is healthy and ready to use.");
+        println!("  Run '3va run <file>' to execute JavaScript securely.");
+    } else {
+        println!("✗ 3VA reported failing self-checks above — do not assume it is safe.");
+    }
 
     Ok(())
 }
@@ -3263,7 +3307,8 @@ enum Commands {
         #[arg(long = "no-scan")]
         no_scan: bool,
 
-        /// Require valid npm provenance (Sigstore attestation) for every
+        /// Require verified npm provenance (Sigstore: Fulcio chain, Rekor
+        /// entry, signer from the package's declared repository) for every
         /// newly downloaded package; abort otherwise.
         #[arg(long = "require-provenance")]
         require_provenance: bool,
@@ -3757,9 +3802,11 @@ async fn run_audit_human(deny: bool, update_cache: bool, scan_secrets: bool) -> 
             let ok = vvva_pm::print_audit_report(&report, deny);
             (Some(report), ok)
         }
+        // An error is not "no vulnerabilities": under --deny it fails the
+        // gate (VULN-20).
         Err(e) => {
             eprintln!("✗ OSV scan error: {e}");
-            (None, true) // no lockfile → no vulns to report
+            (None, !deny)
         }
     };
     let _ = report_opt;
@@ -3771,7 +3818,7 @@ async fn run_audit_human(deny: bool, update_cache: bool, scan_secrets: bool) -> 
         Ok(clean) => clean,
         Err(e) => {
             eprintln!("  (skipped: {e})");
-            true // no node_modules → nothing to flag
+            !deny
         }
     };
 
@@ -3785,10 +3832,16 @@ async fn run_audit_human(deny: bool, update_cache: bool, scan_secrets: bool) -> 
     };
 
     if !vuln_ok {
-        anyhow::bail!("Audit failed: CRITICAL or HIGH known vulnerabilities detected.");
+        anyhow::bail!(
+            "Audit failed: CRITICAL or HIGH known vulnerabilities detected, or the scan \
+             could not complete (--deny)."
+        );
     }
     if !malware_clean {
-        anyhow::bail!("Audit failed: critical-severity heuristic pattern detected.");
+        anyhow::bail!(
+            "Audit failed: critical-severity heuristic pattern detected, or the scan could \
+             not run (--deny)."
+        );
     }
     if !secrets_clean {
         anyhow::bail!("Audit failed: hardcoded secrets detected.");
@@ -3987,6 +4040,27 @@ fn split_version(spec: &str) -> (&str, Option<&str>) {
 /// `3va doctor --compat`: which installed packages depend on install-time
 /// scripts, and whether the project lets them run.
 fn print_install_script_report(project_root: &std::path::Path) {
+    // The project's own hooks are never run either (INFO-E).
+    let manifest = std::fs::read_to_string(project_root.join("package.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
+    if let Some(m) = manifest {
+        let root: Vec<&str> = ["preinstall", "install", "postinstall", "prepare"]
+            .into_iter()
+            .filter(|k| {
+                m["scripts"][*k]
+                    .as_str()
+                    .is_some_and(|s| !s.trim().is_empty())
+            })
+            .collect();
+        if !root.is_empty() {
+            println!(
+                "The project's own package.json defines {} — `3va install` does not run \
+                 them; run them explicitly.\n",
+                root.join(", ")
+            );
+        }
+    }
     let report = vvva_pm::lifecycle::packages_with_install_scripts(project_root);
     if report.is_empty() {
         println!("No installed package declares preinstall/install/postinstall scripts.");
@@ -4655,9 +4729,18 @@ async fn main() -> anyhow::Result<()> {
                 }
                 StoreAction::Verify => {
                     print!("Verifying store integrity... ");
-                    let corrupt = store.verify();
-                    if corrupt.is_empty() {
+                    let report = store.verify_report();
+                    let corrupt = report.corrupt;
+                    if corrupt.is_empty() && report.unverifiable.is_empty() {
                         println!("✓ All {} entries are intact.", store.stats().total_packages);
+                    } else if corrupt.is_empty() {
+                        println!();
+                        println!(
+                            "⚠ {} entry(s) predate integrity digests and could not be checked; \
+                             delete {} to have them re-fetched and recorded.",
+                            report.unverifiable.len(),
+                            store.root().display()
+                        );
                     } else {
                         eprintln!();
                         eprintln!("✗ {} corrupt entry(s) found:", corrupt.len());
@@ -4911,7 +4994,7 @@ async fn main() -> anyhow::Result<()> {
             if *compat {
                 print_install_script_report(&std::env::current_dir()?);
             } else {
-                check_system_info()?;
+                check_system_info().await?;
             }
         }
         Commands::Sandbox { plugins } => {
@@ -5425,6 +5508,13 @@ fn run_codemod(
     }
     let verb = if dry_run { "would change" } else { "changed" };
     println!("\nCodemod: {verb} {changed}/{} file(s).", files.len());
+    if !dry_run && !no_backup && changed > 0 {
+        // Backups are plain files git will pick up (INFO-D).
+        println!(
+            "Backups were written as *.bak next to each file; git does not ignore them. \
+             Delete them after review, or run `3va codemod --revert` to restore."
+        );
+    }
     Ok(())
 }
 
@@ -5714,6 +5804,7 @@ fn collect_pack_files(
     ];
 
     let mut result = Vec::new();
+    let mut warned_credentials = Vec::new();
 
     fn walk(
         dir: &std::path::Path,
@@ -5721,6 +5812,7 @@ fn collect_pack_files(
         files_field: &[String],
         excludes: &[&str],
         result: &mut Vec<PathBuf>,
+        warned_credentials: &mut Vec<PathBuf>,
     ) {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return;
@@ -5745,6 +5837,14 @@ fn collect_pack_files(
                 continue;
             }
 
+            // Credentials are never packed, whatever `files` says — a `.env`
+            // or private key copied into the project must not reach a registry.
+            // Excluding silently would be worse than packing: warn instead.
+            if is_credential_path(name, &rel) {
+                warned_credentials.push(path.clone());
+                continue;
+            }
+
             // If files field specified, only include matching paths
             if !files_field.is_empty()
                 && !files_field.iter().any(|f| rel.starts_with(f.as_str()))
@@ -5755,16 +5855,67 @@ fn collect_pack_files(
             }
 
             if path.is_dir() {
-                walk(&path, cwd, files_field, excludes, result);
+                walk(
+                    &path,
+                    cwd,
+                    files_field,
+                    excludes,
+                    result,
+                    warned_credentials,
+                );
             } else if path.is_file() {
                 result.push(path);
             }
         }
     }
 
-    walk(cwd, cwd, files_field, &default_excludes, &mut result);
+    walk(
+        cwd,
+        cwd,
+        files_field,
+        &default_excludes,
+        &mut result,
+        &mut warned_credentials,
+    );
     result.sort();
+
+    for w in &warned_credentials {
+        eprintln!(
+            "  ⚠ excluded credential (do not publish): {}",
+            w.strip_prefix(cwd).unwrap_or(w).display()
+        );
+    }
+
     Ok(result)
+}
+
+/// True for files/directories that hold credentials or private key material and
+/// therefore must never be packed or published: dot-env files, registry auth
+/// (`.npmrc`/`.netrc`), private keys, and credential directories.
+fn is_credential_path(name: &str, rel: &str) -> bool {
+    if name == ".env" || name.starts_with(".env.") {
+        return true;
+    }
+    if matches!(
+        name,
+        ".npmrc" | ".netrc" | ".pypirc" | "secrets.json" | "credentials.json"
+    ) {
+        return true;
+    }
+    const KEY_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".jks", ".ppk"];
+    if KEY_SUFFIXES.iter().any(|s| name.ends_with(s)) {
+        return true;
+    }
+    const KEY_NAMES: &[&str] = &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+    if KEY_NAMES.contains(&name) {
+        return true;
+    }
+    rel == ".aws"
+        || rel.starts_with(".aws/")
+        || rel == ".ssh"
+        || rel.starts_with(".ssh/")
+        || rel == ".3va"
+        || rel.starts_with(".3va/")
 }
 
 async fn pm_publish(registry: &str, dry_run: bool, _access: Option<&str>) -> anyhow::Result<()> {
@@ -6178,6 +6329,17 @@ fn read_npmrc_token(registry: &str) -> Option<String> {
     None
 }
 
+/// Prints the `"3va"."permissions"` block `3va run` reads from package.json.
+fn print_permissions_snippet(title: &str, perms: serde_json::Map<String, serde_json::Value>) {
+    let snippet = serde_json::json!({ "3va": { "permissions": { ".": perms } } });
+    println!("{title}:\n");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&snippet).unwrap_or_default()
+    );
+    println!();
+}
+
 fn save_npmrc_token(registry: &str, token: &str) -> anyhow::Result<()> {
     let npmrc_path = dirs_npmrc();
     let host = registry
@@ -6192,7 +6354,28 @@ fn save_npmrc_token(registry: &str, token: &str) -> anyhow::Result<()> {
         .map(|l| l.to_string())
         .collect();
     lines.push(entry);
-    std::fs::write(&npmrc_path, lines.join("\n") + "\n")?;
+    write_private(&npmrc_path, &(lines.join("\n") + "\n"))
+}
+
+/// Writes `content` with mode 0600: `~/.npmrc` holds registry tokens and was
+/// written world-readable under the default umask (VULN-21).
+fn write_private(path: &std::path::Path, content: &str) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        // `mode` only applies on creation; tighten an existing file too.
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f.write_all(content.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, content)?;
     Ok(())
 }
 
@@ -6207,8 +6390,7 @@ fn remove_npmrc_token(registry: &str) -> anyhow::Result<()> {
         .filter(|l| !l.contains(host))
         .map(|l| format!("{l}\n"))
         .collect();
-    std::fs::write(&npmrc_path, filtered)?;
-    Ok(())
+    write_private(&npmrc_path, &filtered)
 }
 
 fn dirs_npmrc() -> PathBuf {
@@ -6363,25 +6545,31 @@ fn permissions_suggest(paths: &[PathBuf], flags: bool) -> anyhow::Result<()> {
         }
         println!("3va run <your-script> {}", flag_parts.join(" "));
     } else {
-        println!("Suggested `3va.config.toml` permissions section:\n");
-        println!("[run.permissions]");
+        // package.json is where `3va run` reads project permissions; the
+        // `3va.config.toml [run.permissions]` this used to suggest was never
+        // read, so following it granted nothing (INFO-C).
+        let mut perms = serde_json::Map::new();
         if need_net {
-            println!("net = [\"*\"]  # narrow to specific hosts for tighter security");
+            perms.insert("allow-net".into(), serde_json::json!(["*"]));
         }
         if need_read {
-            println!("read = [\".\"]");
+            perms.insert("allow-read".into(), serde_json::json!(["."]));
         }
         if need_write {
-            println!("write = [\".\"]");
+            perms.insert("allow-write".into(), serde_json::json!(["."]));
         }
         if need_env {
-            println!("env = []  # scope to specific variables (e.g. [\"NODE_ENV\", \"PORT\"])");
+            perms.insert("allow-env".into(), serde_json::json!([]));
         }
         if need_child_process {
-            println!("childProcess = true");
+            perms.insert("allow-child-process".into(), serde_json::json!(true));
         }
         if need_ffi {
-            println!("ffi = [\".\"]");
+            perms.insert("allow-ffi".into(), serde_json::json!(["."]));
+        }
+        print_permissions_snippet("Suggested package.json permissions", perms);
+        if need_net {
+            println!("Narrow \"allow-net\" to specific hosts for tighter security.");
         }
         println!();
         println!(
@@ -6597,33 +6785,43 @@ async fn permissions_learn(file: &Path, write: bool, script_args: &[String]) -> 
     let writes = minimize_paths(&write_paths);
     let ffis = minimize_paths(&ffi_paths);
 
-    println!("Observed usage — suggested `3va.config.toml` section:\n");
-    println!("[run.permissions]");
-
+    let mut perms = serde_json::Map::new();
+    let list = |v: Vec<String>| serde_json::Value::from(v);
     if !net_hosts.is_empty() {
-        let hosts: Vec<String> = net_hosts.iter().map(|h| format!("\"{}\"", h)).collect();
-        println!("net = [{}]", hosts.join(", "));
+        perms.insert(
+            "allow-net".into(),
+            list(net_hosts.iter().cloned().collect()),
+        );
     }
     if !reads.is_empty() {
-        let r: Vec<String> = reads.iter().map(|p| format!("\"{}\"", p)).collect();
-        println!("read = [{}]", r.join(", "));
+        perms.insert(
+            "allow-read".into(),
+            list(reads.iter().map(|p| p.to_string()).collect()),
+        );
     }
     if !writes.is_empty() {
-        let w: Vec<String> = writes.iter().map(|p| format!("\"{}\"", p)).collect();
-        println!("write = [{}]", w.join(", "));
+        perms.insert(
+            "allow-write".into(),
+            list(writes.iter().map(|p| p.to_string()).collect()),
+        );
     }
     if need_env_all {
-        println!("env = []  # script accessed all env vars; consider scoping to specific names");
+        perms.insert("allow-env".into(), serde_json::json!([]));
     } else if !env_vars.is_empty() {
-        let v: Vec<String> = env_vars.iter().map(|v| format!("\"{}\"", v)).collect();
-        println!("env = [{}]", v.join(", "));
+        perms.insert("allow-env".into(), list(env_vars.iter().cloned().collect()));
     }
     if need_child_process {
-        println!("childProcess = true");
+        perms.insert("allow-child-process".into(), serde_json::json!(true));
     }
     if !ffis.is_empty() {
-        let f: Vec<String> = ffis.iter().map(|p| format!("\"{}\"", p)).collect();
-        println!("ffi = [{}]", f.join(", "));
+        perms.insert(
+            "allow-ffi".into(),
+            list(ffis.iter().map(|p| p.to_string()).collect()),
+        );
+    }
+    print_permissions_snippet("Observed usage — suggested package.json permissions", perms);
+    if need_env_all {
+        println!("The script read all env vars; consider scoping \"allow-env\" to specific names.");
     }
 
     println!("\nEquivalent CLI flags:");
@@ -8246,5 +8444,86 @@ export default Link;
                 "{path} debe emitir Connection: close — got: {resp}"
             );
         }
+    }
+
+    // ── doctor: every claim must be backed by a real self-check (VULN-08) ────
+
+    #[tokio::test]
+    async fn doctor_self_checks_actually_verify() {
+        // The doctor's `✓` lines must not assert protections it did not
+        // exercise (previously: "VirtualFS: Path traversal protection" and
+        // "VirtualNetwork: Host allowlist enforcement" over dead code).
+        let checks = doctor_checks().await;
+        assert!(
+            checks.iter().all(|(ok, _)| *ok),
+            "doctor self-checks must pass on a healthy build: {checks:?}"
+        );
+    }
+
+    // ── pack: credentials must never reach a tarball (VULN-02) ────────────────
+
+    #[test]
+    fn pack_excludes_credentials_even_when_files_field_lists_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"leaky","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("index.js"), "module.exports = {};").unwrap();
+        std::fs::write(dir.join(".env"), "DB_PASSWORD=supersecret").unwrap();
+        std::fs::write(dir.join(".env.production"), "DB_PASSWORD=supersecret2").unwrap();
+        std::fs::write(dir.join(".npmrc"), "_authToken=npm_XXXXX").unwrap();
+        std::fs::write(dir.join("server.key"), "PRIVATE KEY").unwrap();
+        std::fs::write(dir.join("id_rsa"), "PRIVATE").unwrap();
+        std::fs::create_dir_all(dir.join(".aws")).unwrap();
+        std::fs::write(dir.join(".aws/credentials"), "AKIA...").unwrap();
+        std::fs::create_dir_all(dir.join(".ssh")).unwrap();
+        std::fs::write(dir.join(".ssh/id_ed25519"), "PRIVATE").unwrap();
+        std::fs::write(dir.join("data.txt"), "ok").unwrap();
+
+        // `files` field explicitly listing credentials must NOT resurrect
+        // them: the credential check overrides any `files` entry.
+        let files = vec![
+            ".env".to_string(),
+            ".env.production".to_string(),
+            ".npmrc".to_string(),
+            "server.key".to_string(),
+            "id_rsa".to_string(),
+            ".aws".to_string(),
+            ".ssh".to_string(),
+            "index.js".to_string(),
+            "data.txt".to_string(),
+        ];
+        let packed = collect_pack_files(dir, &files).unwrap();
+        let packed: Vec<String> = packed
+            .iter()
+            .map(|p| {
+                p.strip_prefix(dir)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        for must_not_pack in [
+            ".env",
+            ".env.production",
+            ".npmrc",
+            "server.key",
+            "id_rsa",
+            ".aws",
+            ".aws/credentials",
+            ".ssh",
+            ".ssh/id_ed25519",
+        ] {
+            assert!(
+                !packed.iter().any(|p| p == must_not_pack),
+                "credential {must_not_pack} must not be packed — got: {packed:?}"
+            );
+        }
+        assert!(packed.iter().any(|p| p == "index.js"));
+        assert!(packed.iter().any(|p| p == "data.txt"));
     }
 }

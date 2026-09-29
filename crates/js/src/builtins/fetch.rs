@@ -28,41 +28,44 @@ pub(crate) fn host_from_url(url: &str) -> Option<String> {
 /// port is filled in when the URL omits it, so `https://api.example.com/` and
 /// `https://api.example.com:443/` ask the same question.
 pub(crate) fn destination_from_url(url: &str) -> Option<(String, u16)> {
-    let (scheme, rest) = url.split_once("://")?;
-    let scheme = scheme.to_ascii_lowercase();
-    let host_part = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    if host_part.is_empty() {
+    // WHATWG parser, the same one ureq connects with: a hand-rolled split
+    // disagreed on `\` (`http://127.0.0.1\@granted.host/` was checked as
+    // `granted.host` but connected to 127.0.0.1).
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https" | "ws" | "wss") {
         return None;
     }
-    // Credentials in the authority (`user:pass@host`) are not part of the
-    // destination.
-    let host_part = match host_part.rsplit_once('@') {
-        Some((_, after)) => after,
-        None => host_part,
+    let host = match parsed.host()? {
+        url::Host::Ipv6(addr) => addr.to_string(),
+        h => h.to_string(),
     };
-    let (host, port) = if let Some(rest) = host_part.strip_prefix('[') {
-        // Bracketed IPv6 literal.
-        let close = rest.find(']')?;
-        let host = &rest[..close];
-        let port = rest[close + 1..]
-            .strip_prefix(':')
-            .and_then(|p| p.parse::<u16>().ok());
-        (host.to_string(), port)
-    } else {
-        match host_part.rsplit_once(':') {
-            Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()),
-            None => (host_part.to_string(), None),
-        }
-    };
-    if host.is_empty() {
-        return None;
+    Some((host, parsed.port_or_known_default()?))
+}
+
+/// Canonical WHATWG serialization of `url`. Callers check permissions and
+/// connect on this string, so the checked and the dialed destination can't
+/// diverge.
+pub(crate) fn canonical_url(url: &str) -> Option<String> {
+    url::Url::parse(url).ok().map(String::from)
+}
+
+/// A ureq resolver that connects only to addresses no `--deny-net` rule names
+/// by IP, resolved once (VULN-18).
+pub(crate) fn vetted_resolver(
+    perms: Arc<PermissionState>,
+) -> impl Fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + Sync + 'static {
+    move |netloc: &str| {
+        let (host, port) = netloc
+            .rsplit_once(':')
+            .and_then(|(h, p)| Some((h, p.parse::<u16>().ok()?)))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("bad address {netloc}"),
+                )
+            })?;
+        perms.vetted_addrs(host, port)
     }
-    let port = port.or(match scheme.as_str() {
-        "https" | "wss" => Some(443),
-        "http" | "ws" => Some(80),
-        _ => None,
-    })?;
-    Some((host.to_lowercase(), port))
 }
 
 /// Streams `reader` into memory enforcing `cap` after every chunk read, so an
@@ -136,7 +139,10 @@ fn do_request(
         serde_json::from_str(&hdrs_json).unwrap_or(serde_json::Value::Object(Default::default()));
     let cap = max_response_size.unwrap_or(MAX_RESPONSE_BODY_BYTES);
 
-    let agent = super::tls::agent_builder().redirects(0).build();
+    let agent = super::tls::agent_builder()
+        .redirects(0)
+        .resolver(vetted_resolver(permissions()))
+        .build();
     let mut req = agent.request(&method, &url);
 
     if let Some(obj) = extra_val.as_object() {
@@ -165,24 +171,38 @@ fn do_request(
     Ok(json.to_string())
 }
 
-static INJECT_FETCH_PERMISSIONS: std::sync::OnceLock<Arc<PermissionState>> =
-    std::sync::OnceLock::new();
-fn permissions() -> &'static Arc<PermissionState> {
-    INJECT_FETCH_PERMISSIONS.get().unwrap()
+// Per thread, like the other builtins: a process-wide OnceLock kept the first
+// engine's PermissionState forever, so later engines (workers, tests) had
+// their fetch() checked against someone else's grants.
+thread_local! {
+    static INJECT_FETCH_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn permissions() -> Arc<PermissionState> {
+    INJECT_FETCH_PERMISSIONS.with(|p| {
+        p.borrow()
+            .clone()
+            .expect("inject_fetch not called on this thread")
+    })
 }
 
 pub fn inject_fetch(
     scope: &mut v8::ContextScope<HandleScope>,
     permissions_param: Arc<PermissionState>,
 ) -> anyhow::Result<()> {
-    INJECT_FETCH_PERMISSIONS.set(permissions_param).ok();
+    INJECT_FETCH_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions_param));
 
     let native_fn = Function::new(
         scope,
         move |scope: &mut PinScope<'_, '_>,
               args: FunctionCallbackArguments,
               mut rv: ReturnValue| {
-            let url = args.get(0).to_rust_string_lossy(scope);
+            let Some(url) = canonical_url(&args.get(0).to_rust_string_lossy(scope)) else {
+                let msg = v8::String::new(scope, "Invalid URL").unwrap();
+                let err = v8::Exception::type_error(scope, msg);
+                scope.throw_exception(err);
+                return;
+            };
             let method = args.get(1).to_rust_string_lossy(scope);
             let hdrs_json = args.get(2).to_rust_string_lossy(scope);
             let body_opt = if args.get(3).is_undefined() || args.get(3).is_null() {
@@ -343,4 +363,34 @@ pub fn inject_fetch(
     let _ = script.run(scope);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn destination_matches_what_is_dialed() {
+        // VULN-07: `\` is a path separator for special schemes, so the
+        // connection goes to 127.0.0.1 — the check must see the same host.
+        let raw = "http://127.0.0.1\\@granted.example.com:39311/";
+        assert_eq!(
+            destination_from_url(raw),
+            Some(("127.0.0.1".to_string(), 80))
+        );
+        let canon = canonical_url(raw).unwrap();
+        assert!(!canon.contains('\\'), "{canon}");
+        assert_eq!(destination_from_url(&canon), destination_from_url(raw));
+
+        assert_eq!(
+            destination_from_url("https://user:pw@API.Example.com/x"),
+            Some(("api.example.com".to_string(), 443))
+        );
+        assert_eq!(
+            destination_from_url("ws://[::1]:8080/"),
+            Some(("::1".to_string(), 8080))
+        );
+        assert_eq!(destination_from_url("file:///etc/passwd"), None);
+        assert_eq!(destination_from_url("not a url"), None);
+    }
 }

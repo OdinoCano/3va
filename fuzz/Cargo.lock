@@ -5859,6 +5859,7 @@ version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
+ "log",
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
@@ -6157,6 +6158,7 @@ dependencies = [
  "hickory-resolver",
  "hmac 0.12.1",
  "http",
+ "hyper-util",
  "inferno",
  "libc",
  "libffi",
@@ -6193,6 +6195,7 @@ dependencies = [
  "socket2 0.6.5",
  "tokio",
  "tonic",
+ "tower 0.4.13",
  "tungstenite",
  "ureq",
  "url",
@@ -6241,6 +6244,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "url",
  "vvva_permissions",
 ]
 

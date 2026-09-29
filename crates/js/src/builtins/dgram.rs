@@ -104,6 +104,16 @@ pub fn inject_dgram(
             let socket_type_arg = args.get(0);
             let socket_type = socket_type_arg.to_rust_string_lossy(_scope);
 
+            // The socket receives from anyone as soon as it exists, so it
+            // needs a network grant like any listener (VULN-19).
+            if !permissions().check_bind(if socket_type == "udp6" {
+                "::"
+            } else {
+                "0.0.0.0"
+            }) {
+                rv.set(v8::Integer::new_from_unsigned(_scope, 0).into());
+                return;
+            }
             let id = next_udp_id();
             let bind_addr: &str = if socket_type == "udp6" {
                 "[::]:0"
@@ -147,11 +157,13 @@ pub fn inject_dgram(
             let id_arg = args.get(0);
             let id = id_arg.uint32_value(_scope).unwrap_or(0);
             let port_arg = args.get(1);
-            let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
+            let port: u16 = super::port_from_js(port_arg.uint32_value(_scope), 0);
             let address_arg = args.get(2);
             let address = address_arg.to_rust_string_lossy(_scope);
 
-            if !permissions().check(&Capability::Network(address.clone())) {
+            // A listen, not an outbound connect: same rule as TCP/HTTP servers
+            // (VULN-19) — all interfaces only with an explicit grant.
+            let Some(address) = permissions().bind_host(&address) else {
                 let result = V8String::new(
                     _scope,
                     &format!("EACCES: permission denied (--allow-net={})", address),
@@ -159,9 +171,13 @@ pub fn inject_dgram(
                 .unwrap();
                 rv.set(result.into());
                 return;
-            }
+            };
 
-            let bind_addr = format!("{address}:{port}");
+            let bind_addr = if address.contains(':') {
+                format!("[{address}]:{port}")
+            } else {
+                format!("{address}:{port}")
+            };
             let reg = udp_registry().lock().unwrap();
             if let Some(_state) = reg.get(&id) {
                 drop(reg);
@@ -209,11 +225,13 @@ pub fn inject_dgram(
             let data_b64_arg = args.get(1);
             let data_b64 = data_b64_arg.to_rust_string_lossy(_scope);
             let port_arg = args.get(4);
-            let port: u16 = port_arg.uint32_value(_scope).unwrap_or(0) as u16;
+            let port: u16 = super::port_from_js(port_arg.uint32_value(_scope), 0);
             let address_arg = args.get(5);
             let address = address_arg.to_rust_string_lossy(_scope);
 
-            if !permissions().check(&Capability::Network(address.clone())) {
+            if !permissions().check(&Capability::Network(vvva_permissions::authority(
+                &address, port,
+            ))) {
                 let result = V8String::new(
                     _scope,
                     &format!("EACCES: permission denied (--allow-net={})", address),
@@ -232,10 +250,23 @@ pub fn inject_dgram(
                 }
             };
 
-            let dest = format!("{address}:{port}");
+            // Send only to a vetted address, resolved once (VULN-18).
+            let dest = match permissions().vetted_addrs(&address, port) {
+                Ok(a) if !a.is_empty() => a[0],
+                Ok(_) => {
+                    let result = V8String::new(_scope, &format!("ENOTFOUND: {address}")).unwrap();
+                    rv.set(result.into());
+                    return;
+                }
+                Err(e) => {
+                    let result = V8String::new(_scope, &format!("EACCES: {e}")).unwrap();
+                    rv.set(result.into());
+                    return;
+                }
+            };
             let reg = udp_registry().lock().unwrap();
             if let Some(state) = reg.get(&id) {
-                if let Err(e) = state.socket.send_to(&bytes, &dest) {
+                if let Err(e) = state.socket.send_to(&bytes, dest) {
                     let result = V8String::new(_scope, &e.to_string()).unwrap();
                     rv.set(result.into());
                     return;

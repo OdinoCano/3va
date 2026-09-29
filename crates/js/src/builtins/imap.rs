@@ -42,6 +42,9 @@ fn connect_tcp_bounded(
     connect_timeout: std::time::Duration,
 ) -> Result<TcpStream, String> {
     let target_host = host.to_string();
+    // Called from the IMAP bindings (state injected) and directly by unit
+    // tests (no engine, so no policy to apply).
+    let permissions = IMAP_PERMISSIONS.with(|p| p.borrow().clone());
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -50,8 +53,13 @@ fn connect_tcp_bounded(
         match tokio::time::timeout(
             connect_timeout,
             tokio::task::spawn_blocking(move || {
-                use std::net::ToSocketAddrs;
-                let addrs: Vec<_> = (target_host.as_str(), port).to_socket_addrs()?.collect();
+                let addrs: Vec<std::net::SocketAddr> = match &permissions {
+                    Some(p) => p.vetted_addrs(&target_host, port)?,
+                    None => {
+                        use std::net::ToSocketAddrs;
+                        (target_host.as_str(), port).to_socket_addrs()?.collect()
+                    }
+                };
                 let mut last_err: Option<std::io::Error> = None;
                 for addr in addrs {
                     match TcpStream::connect_timeout(&addr, connect_timeout) {
@@ -418,7 +426,7 @@ pub fn inject_imap(
               mut rv: v8::ReturnValue| {
             let imap_id = args.get(0).uint32_value(_scope).unwrap_or(0);
             let host = args.get(1).to_rust_string_lossy(_scope);
-            let port = args.get(2).uint32_value(_scope).unwrap_or(143) as u16;
+            let port = super::port_from_js(args.get(2).uint32_value(_scope), 143);
             let use_tls = args.get(3).boolean_value(_scope);
             // Optional per-client timeout override in milliseconds (JS passes
             // `options.connectTimeout`); tests inject small values.
@@ -451,7 +459,9 @@ pub fn inject_imap(
                 vvva_permissions::set_current_scope(&scope_for_thread);
                 let io_timeout = user_timeout.unwrap_or(IMAP_IO_TIMEOUT);
                 let result: Result<(), String> = (|| {
-                    if !perms.check(&Capability::Network(host.clone())) {
+                    if !perms.check(&Capability::Network(vvva_permissions::authority(
+                        &host, port,
+                    ))) {
                         return Err(format!(
                             "Network access denied. Run with --allow-net={}",
                             host

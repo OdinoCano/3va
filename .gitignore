@@ -63,8 +63,13 @@ dist/snap/*.snap
 # .semgrep/   → reglas de seguridad, deben commitearse
 # .cargo-husky/ → hooks source, debe commitearse
 # Cargo.lock  → trackeado para reproducibilidad y auditoría de supply chain
+# .3va/provenance-signers.json → pin TOFU de firmantes (no añadir .3va/ a .gitignore:
+#   se commitea igual que Cargo.lock, ver crates/pm/src/provenance.rs)
 # test262 suite — downloaded by scripts/setup-test262.sh, not committed
 tests/test262/
 
 bench/express/node_modules/
 bench/express/package-lock.json
+
+# CodeGraph local index
+.codegraph/

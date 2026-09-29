@@ -1036,7 +1036,7 @@ Removes packages from the global store that are not referenced by any lockfile i
 
 ### 2.10.4 `store verify`
 
-Verifies that every cached package has a complete extraction (no missing files).
+Verifies every cached package against the SHA-256 tree digest recorded when it was stored: a missing, added or modified file marks the entry corrupt (`3va store repair` removes it). Entries stored before digests existed are reported as unverifiable, never as intact.
 
 **Signature:**
 ```

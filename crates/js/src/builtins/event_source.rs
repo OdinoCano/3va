@@ -55,6 +55,7 @@ pub fn inject_event_source(
               args: FunctionCallbackArguments,
               mut rv: ReturnValue| {
             let url = args.get(0).to_rust_string_lossy(scope);
+            let url = super::fetch::canonical_url(&url).unwrap_or(url);
 
             // Same gate as fetch(): the host must be granted with --allow-net.
             let Some(host) = super::fetch::host_from_url(&url) else {
@@ -80,6 +81,19 @@ pub fn inject_event_source(
                 scope.throw_exception(v8::Exception::error(scope, err));
                 return;
             }
+            // Same plaintext gate as fetch(): http:// only to loopback
+            // unless --allow-insecure.
+            if url
+                .get(..7)
+                .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+                && !vvva_permissions::plaintext_allowed(&host)
+            {
+                let msg =
+                    vvva_permissions::plaintext_denied_message("EventSource (http://)", &host);
+                let err = v8::String::new(scope, &msg).unwrap();
+                scope.throw_exception(v8::Exception::error(scope, err));
+                return;
+            }
 
             let counter_arc = counter();
             let mut id_lock = counter_arc.lock().unwrap();
@@ -94,8 +108,15 @@ pub fn inject_event_source(
             let c2 = cancel.clone();
             let url2 = url.clone();
 
+            let es_perms = ES_PERMISSIONS.with(|p| p.borrow().clone());
             std::thread::spawn(move || {
-                let resp = match super::tls::agent_builder()
+                let mut builder = super::tls::agent_builder().redirects(0);
+                if let Some(perms) = es_perms {
+                    builder = builder.resolver(super::fetch::vetted_resolver(perms));
+                }
+                // No redirects: a hop to another host would skip the
+                // --allow-net check made on the original URL.
+                let resp = match builder
                     .build()
                     .get(&url2)
                     .set("Accept", "text/event-stream")

@@ -174,6 +174,13 @@ fn perm_err<'s>(
         .unwrap_or_else(|| v8::undefined(scope).into())
 }
 
+/// Truncating write, opened so it can't land outside the grant (VULN-01).
+fn write_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    crate::builtins::secure_fs::open(&perms(), path, &o, true)?.write_all(data)
+}
+
 fn set_fn(
     scope: &mut ContextScope<HandleScope>,
     obj: v8::Local<v8::Object>,
@@ -262,7 +269,12 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            match flags_to_open_options(&flags).open(&path) {
+            match crate::builtins::secure_fs::open(
+                &perms(),
+                &path,
+                &flags_to_open_options(&flags),
+                needs_write,
+            ) {
                 Ok(file) => {
                     let fd = fdt().lock().unwrap().insert(file);
                     rv.set(v8::Integer::new(scope, fd).into());
@@ -421,7 +433,10 @@ pub fn inject_fs(
             }
             // Create a temp dir with a random suffix
             let unique = format!("{}{}", prefix, std::process::id());
-            match std::fs::create_dir_all(&unique) {
+            match crate::builtins::secure_fs::create_dir_all(
+                &perms(),
+                std::path::Path::new(&unique),
+            ) {
                 Ok(()) => rv.set(v8::String::new(scope, &unique).unwrap().into()),
                 Err(e) => {
                     let err = fs_err(scope, &e, &unique);
@@ -444,7 +459,17 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            match std::fs::read_to_string(&path) {
+            let read = crate::builtins::secure_fs::open(
+                &perms(),
+                &path,
+                std::fs::OpenOptions::new().read(true),
+                false,
+            )
+            .and_then(|mut f| {
+                let mut s = String::new();
+                f.read_to_string(&mut s).map(|_| s)
+            });
+            match read {
                 Ok(content) => rv.set(v8::String::new(scope, &content).unwrap().into()),
                 Err(e) => {
                     let err = fs_err(scope, &e, &path_str);
@@ -469,9 +494,9 @@ pub fn inject_fs(
                 return;
             }
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
+                crate::builtins::secure_fs::create_dir_all(&perms(), parent).ok();
             }
-            if let Err(e) = std::fs::write(&path, &data) {
+            if let Err(e) = write_file(&path, &data) {
                 let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
@@ -491,7 +516,17 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            match std::fs::read(&path) {
+            let read = crate::builtins::secure_fs::open(
+                &perms(),
+                &path,
+                std::fs::OpenOptions::new().read(true),
+                false,
+            )
+            .and_then(|mut f| {
+                let mut v = Vec::new();
+                f.read_to_end(&mut v).map(|_| v)
+            });
+            match read {
                 Ok(bytes) => {
                     let json = serde_json::to_string(&bytes).unwrap_or_else(|_| "[]".to_string());
                     rv.set(v8::String::new(scope, &json).unwrap().into());
@@ -519,9 +554,9 @@ pub fn inject_fs(
                 return;
             }
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
+                crate::builtins::secure_fs::create_dir_all(&perms(), parent).ok();
             }
-            if let Err(e) = std::fs::write(&path, content) {
+            if let Err(e) = write_file(&path, content.as_bytes()) {
                 let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
@@ -542,10 +577,12 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path);
+            let file = crate::builtins::secure_fs::open(
+                &perms(),
+                &path,
+                std::fs::OpenOptions::new().create(true).append(true),
+                true,
+            );
             match file {
                 Ok(mut file) => {
                     if let Err(e) = file.write_all(content.as_bytes()) {
@@ -568,7 +605,13 @@ pub fn inject_fs(
         "__fsExistsSync",
         |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let path_str = args.get(0).to_rust_string_lossy(scope);
-            rv.set(v8::Boolean::new(scope, PathBuf::from(path_str).exists()).into());
+            // Without read permission a path "doesn't exist": answering
+            // made existsSync an oracle for the whole filesystem.
+            let path = PathBuf::from(path_str);
+            let exists = perms().check(&Capability::FileRead(path.clone()))
+                && crate::builtins::secure_fs::object(&perms(), &path, false, |_, _| Ok(()))
+                    .is_ok();
+            rv.set(v8::Boolean::new(scope, exists).into());
         },
     );
 
@@ -592,9 +635,13 @@ pub fn inject_fs(
                 return;
             }
             let meta = if follow {
-                std::fs::metadata(&path)
+                crate::builtins::secure_fs::object(&perms(), &path, false, |p, _| {
+                    std::fs::metadata(p)
+                })
             } else {
-                std::fs::symlink_metadata(&path)
+                crate::builtins::secure_fs::at(&perms(), &path, false, |p| {
+                    std::fs::symlink_metadata(p)
+                })
             };
             match meta {
                 Ok(meta) => rv.set(
@@ -620,12 +667,15 @@ pub fn inject_fs(
             let mode = args.get(1).uint32_value(scope).unwrap_or(0);
             let path = PathBuf::from(&path_str);
 
-            let result = if !path.exists() {
-                format!("ENOENT: no such file or directory: '{}'", path_str)
-            } else if (mode & 4 != 0 && !perms().check(&Capability::FileRead(path.clone())))
+            // Permission first, so existence isn't revealed outside the grant.
+            let result = if !perms().check(&Capability::FileRead(path.clone()))
                 || (mode & 2 != 0 && !perms().check(&Capability::FileWrite(path.clone())))
             {
                 format!("EACCES: permission denied: '{}'", path_str)
+            } else if crate::builtins::secure_fs::object(&perms(), &path, false, |_, _| Ok(()))
+                .is_err()
+            {
+                format!("ENOENT: no such file or directory: '{}'", path_str)
             } else {
                 "ok".to_string()
             };
@@ -646,7 +696,9 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            match std::fs::canonicalize(&path) {
+            match crate::builtins::secure_fs::object(&perms(), &path, false, |_, real| {
+                Ok(real.to_path_buf())
+            }) {
                 Ok(p) => rv.set(v8::String::new(scope, &p.to_string_lossy()).unwrap().into()),
                 Err(e) => {
                     let err = fs_err(scope, &e, &path_str);
@@ -669,12 +721,14 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            match std::fs::read_dir(&path) {
-                Ok(entries) => {
-                    let names: Vec<String> = entries
-                        .flatten()
-                        .filter_map(|e| e.file_name().into_string().ok())
-                        .collect();
+            let listed = crate::builtins::secure_fs::object(&perms(), &path, false, |p, _| {
+                Ok(std::fs::read_dir(p)?
+                    .flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect::<Vec<String>>())
+            });
+            match listed {
+                Ok(names) => {
                     let json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string());
                     rv.set(v8::String::new(scope, &json).unwrap().into());
                 }
@@ -699,7 +753,7 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            if let Err(e) = std::fs::create_dir_all(&path) {
+            if let Err(e) = crate::builtins::secure_fs::create_dir_all(&perms(), &path) {
                 let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
@@ -719,11 +773,15 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            let result = if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
+            // On the final component itself: a symlink is removed, never
+            // followed.
+            let result = crate::builtins::secure_fs::at(&perms(), &path, true, |p| {
+                if std::fs::symlink_metadata(p)?.is_dir() {
+                    std::fs::remove_dir_all(p)
+                } else {
+                    std::fs::remove_file(p)
+                }
+            });
             if let Err(e) = result {
                 let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
@@ -744,7 +802,9 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            if let Err(e) = std::fs::remove_file(&path) {
+            if let Err(e) =
+                crate::builtins::secure_fs::at(&perms(), &path, true, |p| std::fs::remove_file(p))
+            {
                 let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
@@ -771,7 +831,10 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            if let Err(e) = std::fs::rename(&from, &to) {
+            let renamed = crate::builtins::secure_fs::at(&perms(), &from, true, |f| {
+                crate::builtins::secure_fs::at(&perms(), &to, true, |t| std::fs::rename(f, t))
+            });
+            if let Err(e) = renamed {
                 let err = fs_err(scope, &e, &from_str);
                 scope.throw_exception(err);
             }
@@ -798,22 +861,41 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            fn copy_all(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
-                if src.is_dir() {
-                    std::fs::create_dir_all(dst)?;
-                    for entry in std::fs::read_dir(src)? {
-                        let entry = entry?;
-                        copy_all(&entry.path(), &dst.join(entry.file_name()))?;
+            // Every entry is checked where it really is: a symlink inside
+            // `src` pointing outside the grant is not copied.
+            fn copy_all(
+                p: &PermissionState,
+                src: &std::path::Path,
+                dst: &std::path::Path,
+            ) -> std::io::Result<()> {
+                use crate::builtins::secure_fs as sfs;
+                let names = sfs::object(p, src, false, |pinned, _| {
+                    if !std::fs::metadata(pinned)?.is_dir() {
+                        return Ok(None);
                     }
-                } else {
-                    if let Some(parent) = dst.parent() {
-                        std::fs::create_dir_all(parent)?;
+                    Ok(Some(
+                        std::fs::read_dir(pinned)?
+                            .map(|e| e.map(|e| e.file_name()))
+                            .collect::<std::io::Result<Vec<_>>>()?,
+                    ))
+                })?;
+                match names {
+                    Some(names) => {
+                        sfs::create_dir_all(p, dst)?;
+                        for n in names {
+                            copy_all(p, &src.join(&n), &dst.join(&n))?;
+                        }
                     }
-                    std::fs::copy(src, dst)?;
+                    None => {
+                        if let Some(parent) = dst.parent() {
+                            sfs::create_dir_all(p, parent)?;
+                        }
+                        sfs::copy_file(p, src, dst)?;
+                    }
                 }
                 Ok(())
             }
-            if let Err(e) = copy_all(&src, &dest) {
+            if let Err(e) = copy_all(&perms(), &src, &dest) {
                 let err = fs_err(scope, &e, &src_str);
                 scope.throw_exception(err);
             }
@@ -840,7 +922,7 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            if let Err(e) = std::fs::copy(&src, &dest) {
+            if let Err(e) = crate::builtins::secure_fs::copy_file(&perms(), &src, &dest) {
                 let err = fs_err(scope, &e, &src_str);
                 scope.throw_exception(err);
             }
@@ -871,9 +953,9 @@ pub fn inject_fs(
                 .unwrap_or(0o644);
             #[cfg(unix)]
             {
-                if let Err(e) =
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
-                {
+                if let Err(e) = crate::builtins::secure_fs::object(&perms(), &path, true, |p, _| {
+                    std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
+                }) {
                     let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
@@ -913,7 +995,9 @@ pub fn inject_fs(
                 return;
             }
             #[cfg(unix)]
-            let result = std::os::unix::fs::symlink(&target_str, &path);
+            let result = crate::builtins::secure_fs::at(&perms(), &path, true, |p| {
+                std::os::unix::fs::symlink(&target_str, p)
+            });
             #[cfg(windows)]
             let result = std::os::windows::fs::symlink_file(&target_str, &path);
             #[cfg(not(any(unix, windows)))]
@@ -1092,7 +1176,9 @@ pub fn inject_fs(
             // Handle::block_on — that combination panics outright on a
             // current_thread runtime (see __fsWatchNext's history above).
             std::thread::sleep(std::time::Duration::from_millis(interval_ms));
-            match std::fs::metadata(&path) {
+            match crate::builtins::secure_fs::object(&perms(), &path, false, |p, _| {
+                std::fs::metadata(p)
+            }) {
                 Ok(meta) => rv.set(
                     v8::String::new(scope, &stat_meta_to_json(&meta))
                         .unwrap()
@@ -1119,7 +1205,8 @@ pub fn inject_fs(
                 scope.throw_exception(err);
                 return;
             }
-            match std::fs::read_link(&path) {
+            match crate::builtins::secure_fs::at(&perms(), &path, false, |p| std::fs::read_link(p))
+            {
                 Ok(target) => rv.set(
                     v8::String::new(scope, &target.to_string_lossy())
                         .unwrap()
@@ -1152,13 +1239,15 @@ pub fn inject_fs(
             {
                 let uid = Some(uid);
                 let gid = Some(gid);
-                if let Err(e) = nix::unistd::chown(
-                    &path,
-                    uid.map(nix::unistd::Uid::from_raw),
-                    gid.map(nix::unistd::Gid::from_raw),
-                ) {
-                    let io_err = std::io::Error::from_raw_os_error(e as i32);
-                    let err = fs_err(scope, &io_err, &path_str);
+                if let Err(e) = crate::builtins::secure_fs::object(&perms(), &path, true, |p, _| {
+                    nix::unistd::chown(
+                        p,
+                        uid.map(nix::unistd::Uid::from_raw),
+                        gid.map(nix::unistd::Gid::from_raw),
+                    )
+                    .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+                }) {
+                    let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
             }
@@ -1186,15 +1275,17 @@ pub fn inject_fs(
             }
             #[cfg(unix)]
             {
-                if let Err(e) = nix::unistd::fchownat(
-                    None,
-                    &path,
-                    Some(nix::unistd::Uid::from_raw(uid)),
-                    Some(nix::unistd::Gid::from_raw(gid)),
-                    nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-                ) {
-                    let io_err = std::io::Error::from_raw_os_error(e as i32);
-                    let err = fs_err(scope, &io_err, &path_str);
+                if let Err(e) = crate::builtins::secure_fs::at(&perms(), &path, true, |p| {
+                    nix::unistd::fchownat(
+                        None,
+                        p,
+                        Some(nix::unistd::Uid::from_raw(uid)),
+                        Some(nix::unistd::Gid::from_raw(gid)),
+                        nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+                    )
+                    .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+                }) {
+                    let err = fs_err(scope, &e, &path_str);
                     scope.throw_exception(err);
                 }
             }
@@ -1259,7 +1350,9 @@ pub fn inject_fs(
                 filetime::FileTime::from_unix_time(atime as i64, ((atime.fract()) * 1e9) as u32);
             let mtime_ft =
                 filetime::FileTime::from_unix_time(mtime as i64, ((mtime.fract()) * 1e9) as u32);
-            if let Err(e) = filetime::set_file_times(&path, atime_ft, mtime_ft) {
+            if let Err(e) = crate::builtins::secure_fs::object(&perms(), &path, true, |p, _| {
+                filetime::set_file_times(p, atime_ft, mtime_ft)
+            }) {
                 let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }
@@ -1285,7 +1378,9 @@ pub fn inject_fs(
                 filetime::FileTime::from_unix_time(atime as i64, ((atime.fract()) * 1e9) as u32);
             let mtime_ft =
                 filetime::FileTime::from_unix_time(mtime as i64, ((mtime.fract()) * 1e9) as u32);
-            if let Err(e) = filetime::set_symlink_file_times(&path, atime_ft, mtime_ft) {
+            if let Err(e) = crate::builtins::secure_fs::at(&perms(), &path, true, |p| {
+                filetime::set_symlink_file_times(p, atime_ft, mtime_ft)
+            }) {
                 let err = fs_err(scope, &e, &path_str);
                 scope.throw_exception(err);
             }

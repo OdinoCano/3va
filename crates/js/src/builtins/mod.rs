@@ -27,6 +27,7 @@ pub mod napi;
 pub mod os_info;
 pub mod pop3;
 pub mod process;
+pub(crate) mod secure_fs;
 pub mod source_maps;
 pub mod sqlite;
 pub mod ssh;
@@ -206,7 +207,7 @@ pub fn inject_all(
         worker_threads::inject_worker_threads_native(scope, permissions.clone())
     );
     t!("dgram", dgram::inject_dgram(scope, permissions.clone()))?;
-    t!("sqlite", sqlite::inject_sqlite(scope))?;
+    t!("sqlite", sqlite::inject_sqlite(scope, permissions.clone()))?;
     t!(
         "event_source",
         event_source::inject_event_source(scope, permissions.clone())
@@ -236,4 +237,21 @@ pub fn inject_all(
     }
 
     Ok(())
+}
+
+/// A port number from JS as `u16`. Out-of-range values become 0 (which the OS
+/// refuses) instead of wrapping onto another port: `70000 as u16` is 4464, a
+/// port the permission check never saw (VULN-17).
+pub(crate) fn port_from_js(v: Option<u32>, default: u16) -> u16 {
+    v.map_or(default, |p| u16::try_from(p).unwrap_or(0))
+}
+
+#[cfg(test)]
+mod port_tests {
+    #[test]
+    fn out_of_range_ports_do_not_wrap() {
+        assert_eq!(super::port_from_js(Some(70000), 80), 0);
+        assert_eq!(super::port_from_js(Some(443), 80), 443);
+        assert_eq!(super::port_from_js(None, 80), 80);
+    }
 }

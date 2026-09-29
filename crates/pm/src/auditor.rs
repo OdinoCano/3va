@@ -685,6 +685,21 @@ pub fn print_audit_report(report: &AuditReport, deny: bool) -> bool {
     println!();
 
     if report.findings.is_empty() {
+        // Packages that couldn't be checked are not "clean": say so, and
+        // under --deny fail instead of passing a CI gate on a network outage
+        // (VULN-20).
+        if !report.network_errors.is_empty() {
+            println!(
+                "⚠ No vulnerabilities in the results received, but {} lookup(s) failed — \
+                 the audit is incomplete.",
+                report.network_errors.len()
+            );
+            println!();
+            if deny {
+                eprintln!("✗ Audit failed: incomplete results (--deny).");
+            }
+            return !deny;
+        }
         println!(
             "✓ No known vulnerabilities found in {} package(s).",
             report.total_packages

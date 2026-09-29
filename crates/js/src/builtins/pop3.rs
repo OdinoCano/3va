@@ -97,10 +97,12 @@ pub fn inject_pop3(
             };
             let id = args.get(0).uint32_value(scope).unwrap_or(0) as Pop3Id;
             let host = args.get(1).to_rust_string_lossy(scope);
-            let port = args.get(2).uint32_value(scope).unwrap_or(110) as u16;
+            let port = super::port_from_js(args.get(2).uint32_value(scope), 110);
             let use_tls = args.get(3).boolean_value(scope);
 
-            if !perms.check(&Capability::Network(host.clone())) {
+            if !perms.check(&Capability::Network(vvva_permissions::authority(
+                &host, port,
+            ))) {
                 let msg = v8::String::new(
                     scope,
                     &format!("Network access denied. Run with --allow-net={}", host),
@@ -120,7 +122,10 @@ pub fn inject_pop3(
                 return;
             }
 
-            match TcpStream::connect(format!("{}:{}", host, port)) {
+            match perms
+                .vetted_addrs(&host, port)
+                .and_then(|a| TcpStream::connect(&a[..]))
+            {
                 Ok(tcp) => {
                     let conn = if use_tls {
                         // Never fall back to plaintext: the caller asked for TLS, and a failed

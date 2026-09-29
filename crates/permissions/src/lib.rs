@@ -40,4 +40,7 @@ pub use enforcement::{EnvEnforcer, FsEnforcer, NetEnforcer, PermissionError, Pro
 pub use insecure::{plaintext_allowed, plaintext_denied_message, set_allow_insecure};
 pub use preset::PermissionPreset;
 pub use sandbox::{VirtualFs, VirtualNetwork};
-pub use scope::{ROOT_SCOPE, ScopeGuard, current_scope, set_current_scope};
+pub use scope::{
+    ROOT_SCOPE, ScopeGuard, current_scope, deny_scopes, package_scopes, scoped_rules_active,
+    set_current_scope, set_inherited_scopes, set_stack_scopes_resolver, stack_scopes,
+};

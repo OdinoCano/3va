@@ -88,7 +88,10 @@ impl ContentStore {
             return Ok(dest);
         }
 
-        // Create store root & registry subdirectory.
+        // Create store root & registry subdirectory. The root is private:
+        // with a group-writable umask another local user could swap a
+        // package every project links from (VULN-21).
+        create_private_dir(&self.root)?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -108,6 +111,9 @@ impl ContentStore {
             let _ = std::fs::remove_dir_all(&tmp);
             return Err(e);
         }
+        // Hard links share the mode: a group-writable file here would be
+        // group-writable in every project too.
+        strip_group_other_write(&tmp)?;
 
         // Atomic rename — if two processes race the last writer wins; both are
         // identical so neither can corrupt the store.
@@ -125,6 +131,10 @@ impl ContentStore {
                 }
             }
         }
+
+        // Record what was stored so `store verify` can detect later changes
+        // (e.g. a write through a hard link in some project's node_modules).
+        std::fs::write(digest_path(&dest), tree_digest(&dest)?)?;
 
         Ok(dest)
     }
@@ -199,6 +209,11 @@ impl ContentStore {
             .join("node_modules")
             .join(name); // preserves @scope/pkg directory structure
 
+        // A package name from the registry must never write outside
+        // node_modules (VULN-04) — the caller validates transitive names, this
+        // is the final containment guard before any create/remove_dir_all.
+        crate::safe_node_modules_path(node_modules, name)?;
+
         if virtual_pkg_dir.join("package.json").exists() {
             return Ok(virtual_pkg_dir); // already linked — idempotent
         }
@@ -232,7 +247,10 @@ impl ContentStore {
             );
         }
 
-        let dest = node_modules.join(name); // preserves @scope/pkg structure
+        // A package name from the registry must never write outside
+        // node_modules (VULN-04) — final containment guard before any
+        // create/remove_dir_all.
+        let dest = crate::safe_node_modules_path(node_modules, name)?;
         if dest.join("package.json").exists() {
             return Ok(dest); // already linked — idempotent
         }
@@ -277,10 +295,18 @@ impl ContentStore {
 
     // ── Maintenance ───────────────────────────────────────────────────────────
 
-    /// Verify every entry in the store has a `package.json` (i.e., was
-    /// extracted completely).  Returns a list of corrupt entries.
+    /// Entries that are incomplete or whose files changed since they were
+    /// stored (see [`Self::verify_report`]).
     pub fn verify(&self) -> Vec<PathBuf> {
-        let mut corrupt = Vec::new();
+        self.verify_report().corrupt
+    }
+
+    /// Checks every entry against the tree digest recorded when it was
+    /// stored. Used to look only for a `package.json` and report "intact"
+    /// for anything present, modified or not (VULN-14). Entries stored before
+    /// digests existed can't be checked and are listed as `unverifiable`.
+    pub fn verify_report(&self) -> VerifyReport {
+        let mut report = VerifyReport::default();
         if let Ok(reg_entries) = std::fs::read_dir(&self.root) {
             for reg in reg_entries.flatten() {
                 if !reg.path().is_dir() {
@@ -289,14 +315,26 @@ impl ContentStore {
                 if let Ok(pkg_entries) = std::fs::read_dir(reg.path()) {
                     for pkg in pkg_entries.flatten() {
                         let p = pkg.path();
-                        if p.is_dir() && !p.join("package.json").exists() {
-                            corrupt.push(p);
+                        if !p.is_dir() {
+                            continue;
+                        }
+                        if !p.join("package.json").exists() {
+                            report.corrupt.push(p);
+                            continue;
+                        }
+                        match std::fs::read_to_string(digest_path(&p)) {
+                            Ok(recorded) => {
+                                if tree_digest(&p).ok().as_deref() != Some(recorded.trim()) {
+                                    report.corrupt.push(p);
+                                }
+                            }
+                            Err(_) => report.unverifiable.push(p),
                         }
                     }
                 }
             }
         }
-        corrupt
+        report
     }
 
     /// Remove corrupt entries (incomplete extractions left by a prior crash).
@@ -306,6 +344,7 @@ impl ContentStore {
         for path in &corrupt {
             tracing::warn!("Removing corrupt store entry: {}", path.display());
             std::fs::remove_dir_all(path)?;
+            let _ = std::fs::remove_file(digest_path(path));
         }
         Ok(count)
     }
@@ -346,6 +385,7 @@ impl ContentStore {
                         if !keep.contains(&key) {
                             let size = dir_size(&pkg_path);
                             std::fs::remove_dir_all(&pkg_path)?;
+                            let _ = std::fs::remove_file(digest_path(&pkg_path));
                             removed += 1;
                             freed_bytes += size;
                         }
@@ -412,6 +452,14 @@ pub struct StoreStats {
     pub store_path: PathBuf,
 }
 
+#[derive(Default)]
+pub struct VerifyReport {
+    /// Incomplete, or files differ from what was stored.
+    pub corrupt: Vec<PathBuf>,
+    /// Stored before digests were recorded; nothing to compare against.
+    pub unverifiable: Vec<PathBuf>,
+}
+
 pub struct PruneResult {
     pub removed: usize,
     pub freed_bytes: u64,
@@ -430,6 +478,130 @@ impl PruneResult {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// `create_dir_all`, then mode 0700 on `dir` itself (unix).
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Clears group/other write bits under `dir`, whatever the umask was.
+fn strip_group_other_write(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let meta = std::fs::symlink_metadata(entry.path())?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            let mode = meta.permissions().mode();
+            if mode & 0o022 != 0 {
+                std::fs::set_permissions(
+                    entry.path(),
+                    std::fs::Permissions::from_mode(mode & !0o022),
+                )?;
+            }
+            if meta.is_dir() {
+                strip_group_other_write(&entry.path())?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+/// Sidecar next to a store entry: `<name>@<version>.sha256`.
+fn digest_path(pkg_dir: &Path) -> PathBuf {
+    let mut s = pkg_dir.as_os_str().to_owned();
+    s.push(".sha256");
+    PathBuf::from(s)
+}
+
+/// SHA-256 over every entry's relative path and, for files, contents, in
+/// sorted order: any added, removed or modified file changes it.
+pub(crate) fn tree_digest(dir: &Path) -> std::io::Result<String> {
+    use crate::fips::{Digest, Sha256};
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        out: &mut Vec<(String, Option<PathBuf>)>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                out.push((format!("{rel}/"), None));
+                walk(root, &path, out)?;
+            } else if ft.is_file() {
+                out.push((rel, Some(path)));
+            } else {
+                out.push((format!("{rel}@link"), None));
+            }
+        }
+        Ok(())
+    }
+    let mut entries = Vec::new();
+    walk(dir, dir, &mut entries)?;
+    entries.sort();
+    let mut h = Sha256::new();
+    for (rel, file) in entries {
+        h.update(rel.as_bytes());
+        h.update([0u8]);
+        if let Some(path) = file {
+            let data = std::fs::read(path)?;
+            h.update((data.len() as u64).to_le_bytes());
+            h.update(&data);
+        }
+    }
+    Ok(hex::encode(h.finalize()))
+}
+
+/// Replaces every hard-linked file under `dir` with a private copy, so code
+/// run in this package (its lifecycle scripts) can't modify the shared store
+/// inode and, through it, every other project linked to it (VULN-14).
+pub(crate) fn break_hardlinks(dir: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
+            break_hardlinks(&path)?;
+        } else if meta.is_file() && shares_inode(&meta) {
+            let mut tmp = path.clone().into_os_string();
+            tmp.push(".3va-unlink");
+            std::fs::copy(&path, &tmp)?;
+            std::fs::rename(&tmp, &path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn shares_inode(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.nlink() > 1
+}
+
+// Windows' link count is behind an unstable API, so every file gets a
+// private copy; this only runs for allowlisted lifecycle scripts.
+#[cfg(not(unix))]
+fn shares_inode(_meta: &std::fs::Metadata) -> bool {
+    true
+}
 
 pub(crate) fn safe_name(name: &str) -> String {
     name.replace('/', "+")
@@ -627,6 +799,78 @@ mod tests {
         std::fs::write(path.join("package.json"), b"{}").unwrap();
 
         assert!(store.verify().is_empty());
+    }
+
+    #[test]
+    fn verify_detects_files_changed_after_storing() {
+        // VULN-14: presence of package.json is not integrity.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::with_root(tmp.path().to_path_buf());
+        let path = store.package_path("registry.npmjs.org", "p", "1.0.0");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("package.json"), b"{}").unwrap();
+        std::fs::write(path.join("index.js"), b"ok").unwrap();
+        std::fs::write(digest_path(&path), tree_digest(&path).unwrap()).unwrap();
+        assert!(store.verify_report().corrupt.is_empty());
+
+        std::fs::write(path.join("index.js"), b"poisoned").unwrap();
+        assert_eq!(store.verify_report().corrupt, vec![path.clone()]);
+        std::fs::write(path.join("index.js"), b"ok").unwrap();
+        std::fs::write(path.join("extra.js"), b"").unwrap();
+        assert_eq!(store.verify(), vec![path]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_root_and_files_are_not_writable_by_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store");
+        let store = ContentStore::with_root(root.clone());
+        let pkg = tmp.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("a.js"), "x").unwrap();
+        std::fs::set_permissions(pkg.join("a.js"), std::fs::Permissions::from_mode(0o666)).unwrap();
+        strip_group_other_write(&pkg).unwrap();
+        assert_eq!(
+            std::fs::metadata(pkg.join("a.js"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o022,
+            0
+        );
+        create_private_dir(store.root()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn entries_without_a_digest_are_unverifiable_not_intact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::with_root(tmp.path().to_path_buf());
+        let path = store.package_path("registry.npmjs.org", "old", "1.0.0");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("package.json"), b"{}").unwrap();
+        let report = store.verify_report();
+        assert!(report.corrupt.is_empty());
+        assert_eq!(report.unverifiable, vec![path]);
+    }
+
+    #[test]
+    fn break_hardlinks_gives_a_private_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_file = tmp.path().join("store.js");
+        std::fs::write(&store_file, b"original").unwrap();
+        let pkg = tmp.path().join("pkg");
+        std::fs::create_dir_all(pkg.join("lib")).unwrap();
+        std::fs::hard_link(&store_file, pkg.join("lib/index.js")).unwrap();
+
+        break_hardlinks(&pkg).unwrap();
+        std::fs::write(pkg.join("lib/index.js"), b"script wrote this").unwrap();
+        assert_eq!(std::fs::read(&store_file).unwrap(), b"original");
     }
 
     #[test]

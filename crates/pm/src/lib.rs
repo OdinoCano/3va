@@ -589,6 +589,17 @@ fn collect_optional_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)>
     let mut specs = Vec::new();
     if let Some(deps) = meta["optionalDependencies"].as_object() {
         for (name, range) in deps {
+            // Transitive names come from the registry and must never be used
+            // as filesystem paths (VULN-04): reject anything that isn't a
+            // valid package name, e.g. `../../../../etc` from a compromised
+            // packument.
+            if !is_valid_package_name(name) {
+                tracing::warn!(
+                    "Skipping optional dependency with invalid package name: '{}'",
+                    name
+                );
+                continue;
+            }
             if let Some(r) = range.as_str() {
                 specs.push((name.clone(), r.to_string()));
             }
@@ -605,6 +616,17 @@ fn collect_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)> {
                 if key == "peerDependencies"
                     && meta["peerDependenciesMeta"][dep_name]["optional"] == true
                 {
+                    continue;
+                }
+                // Transitive names come from the registry and must never be
+                // used as filesystem paths (VULN-04): reject anything that
+                // isn't a valid package name, e.g. `../../../../home/...` from
+                // a compromised packument, before it reaches node_modules.
+                if !is_valid_package_name(dep_name) {
+                    tracing::warn!(
+                        "Skipping dependency with invalid package name: '{}'",
+                        dep_name
+                    );
                     continue;
                 }
                 if let Some(dv) = dep_ver.as_str() {
@@ -747,6 +769,43 @@ fn find_nearby_versions(requested: &str, available: &[String], count: usize) -> 
 }
 
 // ── Package spec parsing ──────────────────────────────────────────────────────
+
+/// Collapse `.` and `..` segments lexically so a containment check can't be
+/// fooled by a package name carrying `..` segments (`../../../../etc`).
+pub(crate) fn lexically_normalize(p: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Join a package name onto `node_modules`, refusing any name whose resolved
+/// path would land outside it (defense in depth for the transitive-name
+/// validation in [`collect_dep_specs`] / [`collect_optional_dep_specs`]).
+pub(crate) fn safe_node_modules_path(
+    node_modules: &std::path::Path,
+    name: &str,
+) -> anyhow::Result<PathBuf> {
+    let dest = node_modules.join(name);
+    let dest_norm = lexically_normalize(&dest);
+    if !dest_norm.starts_with(node_modules) {
+        anyhow::bail!(
+            "Refusing to install package '{}': resolved path escapes node_modules",
+            name
+        );
+    }
+    Ok(dest_norm)
+}
 
 fn is_valid_package_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 214 {
@@ -939,11 +998,62 @@ fn parse_package_spec(input: &str) -> anyhow::Result<(String, Option<String>)> {
 /// before it reaches the HTTP client, rather than relying on reqwest's
 /// default scheme support as the only guard.
 fn validate_tarball_url(url: &str) -> anyhow::Result<()> {
-    let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("");
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-        anyhow::bail!("Refusing to download tarball with non-http(s) URL: {url}");
+    let parsed = url::Url::parse(url)
+        .map_err(|_| anyhow::anyhow!("Refusing to download tarball with invalid URL: {url}"))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        // Plaintext only to this machine (local test/dev registries): over
+        // the network the bytes could be swapped in transit (VULN-11).
+        "http" if is_loopback_host(&parsed) => Ok(()),
+        "http" => anyhow::bail!("Refusing to download tarball over plaintext http: {url}"),
+        _ => anyhow::bail!("Refusing to download tarball with non-http(s) URL: {url}"),
     }
-    Ok(())
+}
+
+fn is_loopback_host(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
+/// A registry or tarball host must be one the user authorised with
+/// `--allow-net` (or a subdomain of it). A cloned repo's `.npmrc` can pin a
+/// scope to any URL; on its own that must not decide where code comes from
+/// (VULN-11). `--allow-net=` (empty) keeps meaning "any host".
+fn ensure_host_allowed(url: &str, allow_net: Option<&[String]>) -> anyhow::Result<()> {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| h.trim_matches(['[', ']']).to_ascii_lowercase())
+        })
+        .ok_or_else(|| anyhow::anyhow!("Refusing invalid registry URL: {url}"))?;
+    let hosts = allow_net.unwrap_or(&[]);
+    if allow_net.is_some() && hosts.iter().all(|h| h.trim().is_empty()) {
+        return Ok(());
+    }
+    let covered = hosts.iter().any(|h| {
+        let h = h.trim().to_ascii_lowercase();
+        let h = h
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        let h = h.split('/').next().unwrap_or(h);
+        let h = match h.strip_prefix('[') {
+            Some(v6) => v6.split(']').next().unwrap_or(v6),
+            None => h.split(':').next().unwrap_or(h),
+        };
+        !h.is_empty() && (host == h || host.ends_with(&format!(".{h}")))
+    });
+    if covered {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{url} is not covered by --allow-net; add --allow-net={host} if this registry is intended"
+        )
+    }
 }
 
 #[cfg(test)]
@@ -953,7 +1063,30 @@ mod tarball_url_tests {
     #[test]
     fn accepts_http_and_https() {
         assert!(validate_tarball_url("https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz").is_ok());
-        assert!(validate_tarball_url("http://registry.example.com/pkg.tgz").is_ok());
+        assert!(validate_tarball_url("http://127.0.0.1:4873/pkg.tgz").is_ok());
+        assert!(validate_tarball_url("http://localhost/pkg.tgz").is_ok());
+    }
+
+    #[test]
+    fn rejects_plaintext_to_remote_hosts() {
+        assert!(validate_tarball_url("http://registry.example.com/pkg.tgz").is_err());
+        assert!(validate_tarball_url("http://attacker.internal/pkg.tgz").is_err());
+    }
+
+    #[test]
+    fn registry_hosts_must_be_allowed() {
+        use super::ensure_host_allowed;
+        let allow = vec!["registry.npmjs.org".to_string(), "jsr.io".to_string()];
+        assert!(
+            ensure_host_allowed("https://registry.npmjs.org/x/-/x-1.tgz", Some(&allow)).is_ok()
+        );
+        assert!(ensure_host_allowed("https://npm.jsr.io/x", Some(&allow)).is_ok());
+        assert!(ensure_host_allowed("https://attacker.internal/x", Some(&allow)).is_err());
+        assert!(
+            ensure_host_allowed("https://registry.npmjs.org.evil.com/x", Some(&allow)).is_err()
+        );
+        assert!(ensure_host_allowed("https://anything/x", Some(&[])).is_ok());
+        assert!(ensure_host_allowed("https://anything/x", None).is_err());
     }
 
     #[test]
@@ -1910,6 +2043,14 @@ pub async fn install_from_manifest(
     project_root: &Path,
     allow_net: Option<&[String]>,
 ) -> anyhow::Result<()> {
+    install_from_manifest_opts(project_root, allow_net, false).await
+}
+
+async fn install_from_manifest_opts(
+    project_root: &Path,
+    allow_net: Option<&[String]>,
+    strict_lock: bool,
+) -> anyhow::Result<()> {
     let pkg_json = project_root.join("package.json");
     if !pkg_json.exists() {
         anyhow::bail!(
@@ -2017,9 +2158,9 @@ pub async fn install_from_manifest(
         };
         let an = allow_net_owned.clone();
         let r = root.clone();
-        set.spawn(
-            async move { install_with_transitive(&spec, false, an.as_deref(), &r, false).await },
-        );
+        set.spawn(async move {
+            install_with_transitive_opts(&spec, false, an.as_deref(), &r, false, strict_lock).await
+        });
     }
 
     let mut errors = Vec::new();
@@ -2042,7 +2183,85 @@ pub async fn install_from_manifest(
     record_install_hash(project_root);
     println!();
     println!("✓ All dependencies installed.");
+    warn_root_lifecycle_not_run(&val);
     Ok(())
+}
+
+/// The signer identity policy for verified provenance (VULN-09): each
+/// signer must have built from the repository the tarball's package.json
+/// declares, and match the signer recorded on first install. A package that
+/// declares no repository can't be bound; that only passes without
+/// `--require-provenance`.
+fn check_signers(
+    project_root: &Path,
+    pkg_name: &str,
+    tarball: &[u8],
+    signers: &[provenance::SignerIdentity],
+    require_provenance: bool,
+) -> Result<(), String> {
+    let declared = tarball_manifest(tarball)
+        .and_then(|m| match &m["repository"] {
+            serde_json::Value::String(s) => Some(s.clone()),
+            v => v["url"].as_str().map(str::to_string),
+        })
+        .map(|r| provenance::normalize_repository(&r));
+    for signer in signers {
+        let signed = signer
+            .repository()
+            .map(|r| provenance::normalize_repository(&r));
+        match (&declared, &signed) {
+            (Some(d), Some(s)) if d == s => {}
+            (None, _) if !require_provenance => {}
+            _ => {
+                return Err(format!(
+                    "provenance was built from {} but the package declares repository {}",
+                    signed.as_deref().unwrap_or(&signer.san),
+                    declared.as_deref().unwrap_or("(none)")
+                ));
+            }
+        }
+        provenance::check_signer_pin(project_root, pkg_name, Some(&signer.pin()))?;
+    }
+    Ok(())
+}
+
+/// `package/package.json` of an npm tarball.
+fn tarball_manifest(tarball: &[u8]) -> Option<serde_json::Value> {
+    use std::io::Read;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
+    for entry in archive.entries().ok()? {
+        let mut entry = entry.ok()?;
+        let path = entry.path().ok()?.into_owned();
+        if path.components().count() == 2
+            && path.file_name() == Some(std::ffi::OsStr::new("package.json"))
+        {
+            let mut s = String::new();
+            entry.read_to_string(&mut s).ok()?;
+            return serde_json::from_str(&s).ok();
+        }
+    }
+    None
+}
+
+/// The project's own install hooks are never run by 3va; say so instead of
+/// dropping `patch-package`, `husky`, `prisma generate`… silently (INFO-E).
+fn warn_root_lifecycle_not_run(manifest: &serde_json::Value) {
+    let skipped: Vec<&str> = ["preinstall", "install", "postinstall", "prepare"]
+        .into_iter()
+        .filter(|k| {
+            manifest["scripts"][*k]
+                .as_str()
+                .is_some_and(|s| !s.trim().is_empty())
+        })
+        .collect();
+    if !skipped.is_empty() {
+        println!(
+            "  ⚠  package.json defines {} — 3va does not run the project's own install \
+             scripts. Run them explicitly (e.g. `3va run {}`) if the project needs them.",
+            skipped.join(", "),
+            skipped[0]
+        );
+    }
 }
 
 /// Install every entry in `package.json`'s `configDependencies` map into
@@ -2221,7 +2440,77 @@ async fn install_with_transitive(
     project_root: &Path,
     update_manifest: bool,
 ) -> anyhow::Result<()> {
+    install_with_transitive_opts(
+        root_spec,
+        force,
+        allow_net,
+        project_root,
+        update_manifest,
+        false,
+    )
+    .await
+}
+
+/// Why `name@version` (with the registry's `integrity`) can't be installed
+/// under the project's lockfile, if it can't. A lockfile integrity always
+/// pins the bytes; `strict` (`3va ci`) also requires every package, transitive
+/// ones included, to be recorded with exactly this version and a hash
+/// (VULN-12).
+fn lock_violation(
+    lock: Option<&lockfile::Lockfile>,
+    strict: bool,
+    name: &str,
+    version: &str,
+    integrity: Option<&str>,
+) -> Option<String> {
+    let pin = lock.and_then(|l| l.pin(name));
+    match pin {
+        None if strict => Some(format!("{name}@{version} is not recorded in 3va-lock.json")),
+        None => None,
+        Some(pin) if pin.version != version => strict.then(|| {
+            format!(
+                "{name} resolved to {version} but 3va-lock.json pins {}",
+                pin.version
+            )
+        }),
+        Some(pin) => {
+            let algo = |h: &str| h.split('-').next().unwrap_or("").to_ascii_lowercase();
+            match (pin.integrity.as_deref(), integrity) {
+                (Some(locked), Some(served)) if locked == served => None,
+                // Different algorithms (an old `sha1-` lock vs the registry's
+                // `sha512-`) can't be compared as strings.
+                (Some(locked), Some(served)) if algo(locked) != algo(served) => strict.then(|| {
+                    format!(
+                        "{name}@{version}: 3va-lock.json records a {} hash that can't be \
+                             checked against the registry's {}; re-lock with `3va install`",
+                        algo(locked),
+                        algo(served)
+                    )
+                }),
+                (Some(locked), served) => Some(format!(
+                    "{name}@{version}: registry serves integrity {} but 3va-lock.json records \
+                     {locked}",
+                    served.unwrap_or("(none)")
+                )),
+                (None, _) if strict => Some(format!(
+                    "{name}@{version} has no integrity in 3va-lock.json"
+                )),
+                (None, _) => None,
+            }
+        }
+    }
+}
+
+async fn install_with_transitive_opts(
+    root_spec: &str,
+    force: bool,
+    allow_net: Option<&[String]>,
+    project_root: &Path,
+    update_manifest: bool,
+    strict_lock: bool,
+) -> anyhow::Result<()> {
     use std::collections::{HashMap as Map, HashSet};
+    let lock = lockfile::Lockfile::load(&project_root.join("3va-lock.json")).ok();
     use tokio::task::JoinSet;
 
     // ── Determine registry ────────────────────────────────────────────────────
@@ -2428,6 +2717,13 @@ async fn install_with_transitive(
             // Dependency-confusion guard: a scope pinned via .npmrc resolves
             // only against its private registry — never the public one.
             let pinned = npmrc::pinned_scope_registry(&npmrc_cfg, &node.name);
+            if let Some(pin) = &pinned {
+                validate_tarball_url(pin)
+                    .and_then(|_| ensure_host_allowed(pin, allow_net))
+                    .map_err(|e| {
+                        anyhow::anyhow!("'{}' is pinned by .npmrc to {pin}: {e}", node.name)
+                    })?;
+            }
             let base = pinned.clone().unwrap_or_else(|| base_url.clone());
             let registry = registry.clone();
             let platform = platform.clone();
@@ -2487,12 +2783,28 @@ async fn install_with_transitive(
             match result {
                 Ok(Ok(Some((pkg_name, version_to_fetch, info, dep_specs)))) => {
                     // Pick the highest version satisfying the requested range.
-                    let ver = select_best_version(
+                    let mut ver = select_best_version(
                         &info.versions,
                         &version_to_fetch,
                         info.latest.as_deref(),
                     );
+                    // `3va ci`: the lockfile decides, not the newest match.
+                    if strict_lock
+                        && let Some(pin) = lock.as_ref().and_then(|l| l.pin(&pkg_name))
+                        && info.version_meta.contains_key(&pin.version)
+                    {
+                        ver = pin.version.clone();
+                    }
                     if let Some(meta) = info.version_meta.get(&ver) {
+                        if let Some(v) = lock_violation(
+                            lock.as_ref(),
+                            strict_lock,
+                            &pkg_name,
+                            &ver,
+                            meta.integrity.as_deref(),
+                        ) {
+                            guard_errors.push(v);
+                        }
                         // Supply-chain guard: flag names suspiciously close
                         // to a popular package before anything is installed.
                         crate::typosquat::warn_if_typosquat(&pkg_name);
@@ -2599,7 +2911,7 @@ async fn install_with_transitive(
         let global_store = store::ContentStore::global();
         let reg_name = registry.display_name().to_string();
         let cache_dir = project_root.join(".3va-cache");
-        std::fs::create_dir_all(&cache_dir)?;
+        store::create_private_dir(&cache_dir)?;
         let node_modules = project_root.join("node_modules");
         std::fs::create_dir_all(&node_modules)?;
         let zero_install_on = zero_install_cache_enabled(manifest_val.as_ref());
@@ -2621,6 +2933,8 @@ async fn install_with_transitive(
         )> = JoinSet::new();
 
         for (pkg_name, ver, tarball_url, integrity) in to_install.iter().cloned() {
+            ensure_host_allowed(&tarball_url, allow_net)
+                .map_err(|e| anyhow::anyhow!("{pkg_name}@{ver} — {e}"))?;
             let client = dl_client.clone();
             let safe_pkg = pkg_name.replace('/', "-").trim_matches('-').to_string();
             let cached_path = cache_dir.join(format!("{}-{}.tgz", safe_pkg, ver));
@@ -2678,17 +2992,35 @@ async fn install_with_transitive(
                     let final_bytes = if bytes.is_empty() {
                         Vec::new() // store.link_to_virtual_store handles it
                     } else {
-                        // Verify integrity
-                        if let Some(ref int_hash) = integrity {
-                            match verifier.verify_from_registry(&bytes, Some(int_hash)) {
-                                VerificationStatus::Mismatch | VerificationStatus::Failed(_) => {
+                        // Verify integrity. A fresh download without a registry integrity hash
+                        // is refused (fail-closed): trusting bytes with no
+                        // digest lets a compromised registry substitute
+                        // anything (VULN-05). Packages already in the global
+                        // store or the local cache were verified when first
+                        // stored and never re-downloaded.
+                        match integrity.as_deref() {
+                            Some(int_hash) => {
+                                // Only a verified digest passes: an unknown
+                                // algorithm (`sha1-…`) reports Missing and
+                                // must not install unverified bytes.
+                                if !matches!(
+                                    verifier.verify_from_registry(&bytes, Some(int_hash)),
+                                    VerificationStatus::Verified
+                                ) {
                                     errors.push(format!(
                                         "Integrity check failed for {}@{}",
                                         pkg_name, ver
                                     ));
                                     continue;
                                 }
-                                _ => {}
+                            }
+                            None => {
+                                errors.push(format!(
+                                    "No integrity hash for {}@{} — refusing to install \
+                                     without verification",
+                                    pkg_name, ver
+                                ));
+                                continue;
                             }
                         }
                         // Security scan (malware + secrets) before the
@@ -2703,12 +3035,23 @@ async fn install_with_transitive(
                                 manifest_val.as_ref(),
                             );
                             match trust.status(&pkg_name, &ver, integrity.as_deref()) {
-                                crate::trust::TrustStatus::Trusted
-                                | crate::trust::TrustStatus::Unversioned => {
+                                crate::trust::TrustStatus::Trusted => {
                                     println!(
                                         "  ⚠  {pkg_name}@{ver} is trusted by \"3va\".\"trusted\" — \
                                          installing despite the security scan:\n  {report}"
                                     );
+                                }
+                                // A bare name never expires, so it would wave
+                                // through every future release unreviewed
+                                // (VULN-15). Only `name@version` overrides a
+                                // failed scan.
+                                crate::trust::TrustStatus::Unversioned => {
+                                    errors.push(format!(
+                                        "{pkg_name}@{ver} — {report}\n  (\"3va\".\"trusted\" lists \
+                                         \"{pkg_name}\" without a version; pin \
+                                         \"{pkg_name}@{ver}\" to accept this release)"
+                                    ));
+                                    continue;
                                 }
                                 _ => {
                                     errors.push(format!("{}@{} — {}", pkg_name, ver, report));
@@ -2727,13 +3070,52 @@ async fn install_with_transitive(
                                 std::env::var("_3VA_REQUIRE_PROVENANCE").as_deref() == Ok("1");
                             match provenance_result {
                                 Ok(Some(att)) => {
-                                    match provenance::verify_attestations(&att, &pkg_name, &ver) {
-                                        Ok(provenance::VerifyOutcome::Verified(_)) => {
+                                    let tarball_sha512 = {
+                                        use crate::fips::{Digest, Sha512};
+                                        let mut h = Sha512::new();
+                                        h.update(&bytes);
+                                        hex::encode(h.finalize())
+                                    };
+                                    match provenance::verify_attestations(
+                                        &att,
+                                        &pkg_name,
+                                        &ver,
+                                        &tarball_sha512,
+                                    ) {
+                                        // The leaf chains to the pinned Fulcio
+                                        // root and the tlog entry binds to the
+                                        // public Rekor log, so the signer is
+                                        // verified (VULN-09).
+                                        // Also who: the signer must build from
+                                        // the repository the package declares
+                                        // (what npm checks at publish time) and
+                                        // be the one recorded on first install.
+                                        Ok(provenance::VerifyOutcome::Verified(signers)) => {
+                                            if let Err(why) = check_signers(
+                                                project_root,
+                                                &pkg_name,
+                                                &bytes,
+                                                &signers,
+                                                require_provenance,
+                                            ) {
+                                                errors.push(format!("{pkg_name}@{ver} — {why}"));
+                                                continue;
+                                            }
                                             println!(
-                                                "  ✓ provenance verified for {pkg_name}@{ver}"
+                                                "  · provenance verified for {pkg_name}@{ver} \
+                                                 (signed by {})",
+                                                signers[0].pin()
                                             );
                                         }
                                         Ok(provenance::VerifyOutcome::Unsupported(why)) => {
+                                            if let Err(e) = provenance::check_signer_pin(
+                                                project_root,
+                                                &pkg_name,
+                                                None,
+                                            ) {
+                                                errors.push(format!("{pkg_name}@{ver} — {e}"));
+                                                continue;
+                                            }
                                             if require_provenance {
                                                 errors.push(format!(
                                                     "{pkg_name}@{ver} — provenance required but \
@@ -2751,6 +3133,12 @@ async fn install_with_transitive(
                                     }
                                 }
                                 Ok(None) => {
+                                    if let Err(e) =
+                                        provenance::check_signer_pin(project_root, &pkg_name, None)
+                                    {
+                                        errors.push(format!("{pkg_name}@{ver} — {e}"));
+                                        continue;
+                                    }
                                     if require_provenance {
                                         errors.push(format!(
                                             "{pkg_name}@{ver} — provenance required but the \
@@ -2760,6 +3148,12 @@ async fn install_with_transitive(
                                     }
                                 }
                                 Err(e) => {
+                                    if let Err(pin) =
+                                        provenance::check_signer_pin(project_root, &pkg_name, None)
+                                    {
+                                        errors.push(format!("{pkg_name}@{ver} — {pin}"));
+                                        continue;
+                                    }
                                     if require_provenance {
                                         errors.push(format!(
                                             "{pkg_name}@{ver} — provenance required but \
@@ -2790,7 +3184,16 @@ async fn install_with_transitive(
                         if let Err(e) =
                             global_store.link_hoisted(&reg_name, &pkg_name, &ver, &node_modules)
                         {
-                            let dest = node_modules.join(&pkg_name);
+                            let dest = match safe_node_modules_path(&node_modules, &pkg_name) {
+                                Ok(d) => d,
+                                Err(path_err) => {
+                                    errors.push(format!(
+                                        "Refusing unsafe package path for {}@{}: {}",
+                                        pkg_name, ver, path_err
+                                    ));
+                                    continue;
+                                }
+                            };
                             if !final_bytes.is_empty() {
                                 if let Err(e2) = extract_tarball(&final_bytes, &dest) {
                                     errors.push(format!(
@@ -2817,7 +3220,16 @@ async fn install_with_transitive(
                             Ok(p) => p,
                             Err(e) => {
                                 // If store link fails (bytes not in store), extract directly
-                                let dest = node_modules.join(&pkg_name);
+                                let dest = match safe_node_modules_path(&node_modules, &pkg_name) {
+                                    Ok(d) => d,
+                                    Err(path_err) => {
+                                        errors.push(format!(
+                                            "Refusing unsafe package path for {}@{}: {}",
+                                            pkg_name, ver, path_err
+                                        ));
+                                        continue;
+                                    }
+                                };
                                 if !final_bytes.is_empty() {
                                     if let Err(e2) = extract_tarball(&final_bytes, &dest) {
                                         errors.push(format!(
@@ -2859,16 +3271,31 @@ async fn install_with_transitive(
                     // convention and authorises the package, not a pin; the
                     // `trusted` list is where a specific version is required.
                     let allowlisted = trust.allows_lifecycle(&pkg_name);
-                    let sandbox_argv = trust.sandbox_argv(&pkg_dir);
+                    let sandbox_argv = trust.sandbox_argv(&pkg_dir, &pkg_name);
 
                     if let Ok(scripts_content) =
                         std::fs::read_to_string(pkg_dir.join("package.json"))
                         && let Ok(scripts_val) =
                             serde_json::from_str::<serde_json::Value>(&scripts_content)
                     {
+                        let mut unlinked = false;
                         for (phase, script) in crate::lifecycle::declared_scripts(&scripts_val) {
                             if script.trim().is_empty() {
                                 continue;
+                            }
+                            // The script must not write through hard links
+                            // into the shared store (VULN-14).
+                            if allowlisted && !unlinked {
+                                unlinked = true;
+                                let real =
+                                    pkg_dir.canonicalize().unwrap_or_else(|_| pkg_dir.clone());
+                                if let Err(e) = crate::store::break_hardlinks(&real) {
+                                    errors.push(format!(
+                                        "{pkg_name}@{ver}: could not give its {phase} script a \
+                                         private copy of the package ({e}); not running it"
+                                    ));
+                                    break;
+                                }
                             }
                             let outcome = crate::lifecycle::run(
                                 &pkg_dir,
@@ -3045,7 +3472,7 @@ pub async fn ci(project_root: &Path, allow_net: Option<&[String]>) -> anyhow::Re
         "Installing {} package(s) from 3va-lock.json...",
         lock.dependencies.len()
     );
-    install_from_manifest(project_root, allow_net).await
+    install_from_manifest_opts(project_root, allow_net, true).await
 }
 
 /// Update only the package.json and lockfile without re-downloading anything.
@@ -3696,7 +4123,7 @@ async fn install_package_impl(
 
     // ── Download, store, link ─────────────────────────────────────────────────
     let cache_dir = project_root.join(".3va-cache");
-    std::fs::create_dir_all(&cache_dir)
+    store::create_private_dir(&cache_dir)
         .map_err(|e| anyhow::anyhow!("Cannot create cache directory: {}", e))?;
 
     let safe_pkg = pkg_name.replace('/', "-").trim_matches('-').to_string();
@@ -3752,16 +4179,22 @@ async fn install_package_impl(
 
                 println!("  Downloading {}@{} ...", pkg_name, resolved_version);
                 tracing::info!("Downloading from {}", tarball_url);
+                ensure_host_allowed(&tarball_url, allow_net)?;
                 let bytes = download_tarball(&tarball_url).await?;
                 std::fs::write(&cached_tarball, &bytes)?;
                 bytes
             };
 
-            // Verify integrity before writing to the store.
-            if let Some(meta) = info.version_meta.get(&resolved_version) {
+            // Verify integrity before writing to the store. Fail closed: no
+            // metadata, no hash or an unknown algorithm all refuse (VULN-05).
+            {
+                let integrity = info
+                    .version_meta
+                    .get(&resolved_version)
+                    .and_then(|m| m.integrity.as_deref());
                 print!("  Verifying integrity... ");
                 let verifier = SignatureVerifier::sha512();
-                match verifier.verify_from_registry(&tarball_bytes, meta.integrity.as_deref()) {
+                match verifier.verify_from_registry(&tarball_bytes, integrity) {
                     VerificationStatus::Verified => println!("✓"),
                     VerificationStatus::Mismatch => {
                         let _ = std::fs::remove_file(&cached_tarball);
@@ -3772,8 +4205,15 @@ async fn install_package_impl(
                             resolved_version
                         );
                     }
-                    VerificationStatus::Missing => {
-                        println!("  (!) No integrity hash in registry — skipping check");
+                    VerificationStatus::Missing | VerificationStatus::Unverified => {
+                        let _ = std::fs::remove_file(&cached_tarball);
+                        eprintln!();
+                        anyhow::bail!(
+                            "No verifiable integrity hash for {}@{} — refusing to install \
+                             without verification",
+                            pkg_name,
+                            resolved_version
+                        );
                     }
                     VerificationStatus::Failed(e) => {
                         let _ = std::fs::remove_file(&cached_tarball);
@@ -3783,9 +4223,6 @@ async fn install_package_impl(
                             resolved_version,
                             e
                         );
-                    }
-                    VerificationStatus::Unverified => {
-                        println!("  (!) Integrity unverified");
                     }
                 }
             }
@@ -4829,6 +5266,17 @@ mod tests {
         builder.into_inner().unwrap().finish().unwrap()
     }
 
+    fn sha512_integrity(data: &[u8]) -> String {
+        use crate::fips::{Digest, Sha512};
+        use base64::Engine;
+        let mut h = Sha512::new();
+        h.update(data);
+        format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(h.finalize())
+        )
+    }
+
     #[test]
     fn extract_tarball_rejects_entry_over_per_file_cap() {
         let tgz = make_tgz(&[("package/big.bin", vec![0u8; 4096])]);
@@ -4972,11 +5420,16 @@ mod tests {
                 (404, b"{}".to_vec())
             } else {
                 // Version metadata endpoint ({base}/@miorg/pkg/1.0.0)
+                let tgz = make_tgz(&[(
+                    "package/index.js",
+                    b"module.exports = 'from-private-registry';".to_vec(),
+                )]);
                 let meta = serde_json::json!({
                     "name": "@miorg/pkg",
                     "version": "1.0.0",
                     "dist": {
-                        "tarball": format!("{}/@miorg/pkg/-/pkg-1.0.0.tgz", base)
+                        "tarball": format!("{}/@miorg/pkg/-/pkg-1.0.0.tgz", base),
+                        "integrity": sha512_integrity(&tgz)
                     }
                 });
                 (200, serde_json::to_vec(&meta).unwrap())
@@ -4991,8 +5444,25 @@ mod tests {
         )
         .unwrap();
 
-        // --allow-net points somewhere else entirely; the pin must win.
-        let allow = ["registry.npmjs.org"]
+        // Without the private host in --allow-net the pin is refused: the
+        // repo's .npmrc alone must not pick where code comes from (VULN-11).
+        let public_only = vec!["registry.npmjs.org".to_string()];
+        let err = install_with_transitive(
+            "@miorg/pkg@1.0.0",
+            false,
+            Some(public_only.as_slice()),
+            root.path(),
+            false,
+        )
+        .await
+        .expect_err("a pin to a host outside --allow-net must be refused");
+        assert!(
+            err.to_string().contains("not covered by --allow-net"),
+            "{err}"
+        );
+
+        // Authorised: the pin wins over the default registry.
+        let allow = ["registry.npmjs.org", "127.0.0.1"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
@@ -5070,10 +5540,14 @@ mod tests {
                 // Real bundle for sigstore@3.0.0 — subject mismatch vs @evil/pkg.
                 (200, PROVENANCE_FIXTURE_BYTES.as_bytes().to_vec())
             } else {
+                let tgz = make_tgz(&[("package/index.js", b"module.exports = 1;".to_vec())]);
                 let meta = serde_json::json!({
                     "name": "@evil/pkg",
                     "version": "1.0.0",
-                    "dist": { "tarball": format!("{base}/@evil/pkg/-/pkg-1.0.0.tgz") }
+                    "dist": {
+                        "tarball": format!("{base}/@evil/pkg/-/pkg-1.0.0.tgz"),
+                        "integrity": sha512_integrity(&tgz)
+                    }
                 });
                 (200, serde_json::to_vec(&meta).unwrap())
             }
@@ -5102,5 +5576,257 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(!root.path().join("node_modules/@evil").exists());
+    }
+
+    #[tokio::test]
+    async fn install_refuses_package_without_integrity_hash() {
+        // VULN-05 regression: a registry that omits `dist.integrity` must not
+        // silently install unverified bytes. The install must fail closed.
+        let reg = MockRegistry::start(std::sync::Arc::new(|path, base| {
+            if path.ends_with(".tgz") {
+                let tgz = make_tgz(&[("package/index.js", b"module.exports = 1;".to_vec())]);
+                (200, tgz)
+            } else if path.contains("/-/npm/v1/attestations/") {
+                (404, b"{}".to_vec())
+            } else {
+                // Metadata WITHOUT dist.integrity — the fail-open condition.
+                let meta = serde_json::json!({
+                    "name": "@nohash/pkg",
+                    "version": "1.0.0",
+                    "dist": { "tarball": format!("{base}/@nohash/pkg/-/pkg-1.0.0.tgz") }
+                });
+                (200, serde_json::to_vec(&meta).unwrap())
+            }
+        }));
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".npmrc"),
+            format!("@nohash:registry={}", reg.url),
+        )
+        .unwrap();
+        let allow = ["127.0.0.1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let err = install_with_transitive(
+            "@nohash/pkg@1.0.0",
+            false,
+            Some(allow.as_slice()),
+            root.path(),
+            false,
+        )
+        .await
+        .expect_err("missing integrity must abort the install");
+        assert!(
+            err.to_string().contains("No integrity hash"),
+            "unexpected error: {err}"
+        );
+        assert!(!root.path().join("node_modules/@nohash").exists());
+    }
+
+    #[tokio::test]
+    async fn install_accepts_package_with_valid_integrity_hash() {
+        // Positive control for the integrity gate: a package whose served
+        // tarball matches its published integrity hash installs fine.
+        let reg = MockRegistry::start(std::sync::Arc::new(|path, base| {
+            if path.ends_with(".tgz") {
+                let tgz = make_tgz(&[("package/index.js", b"module.exports = 1;".to_vec())]);
+                (200, tgz)
+            } else if path.contains("/-/npm/v1/attestations/") {
+                (404, b"{}".to_vec())
+            } else {
+                let tgz = make_tgz(&[("package/index.js", b"module.exports = 1;".to_vec())]);
+                let meta = serde_json::json!({
+                    "name": "@okhash/pkg",
+                    "version": "1.0.0",
+                    "dist": {
+                        "tarball": format!("{base}/@okhash/pkg/-/pkg-1.0.0.tgz"),
+                        "integrity": sha512_integrity(&tgz)
+                    }
+                });
+                (200, serde_json::to_vec(&meta).unwrap())
+            }
+        }));
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".npmrc"),
+            format!("@okhash:registry={}", reg.url),
+        )
+        .unwrap();
+        let allow = ["127.0.0.1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        install_with_transitive(
+            "@okhash/pkg@1.0.0",
+            false,
+            Some(allow.as_slice()),
+            root.path(),
+            false,
+        )
+        .await
+        .expect("valid-integrity package must install");
+        assert!(root.path().join("node_modules/@okhash").exists());
+    }
+
+    #[tokio::test]
+    async fn install_refuses_unknown_integrity_algorithm() {
+        // `sha1-…` (or any algorithm we can't check) verifies as Missing; it
+        // must refuse like an absent hash rather than install unverified.
+        let reg = MockRegistry::start(std::sync::Arc::new(|path, base| {
+            if path.ends_with(".tgz") {
+                (
+                    200,
+                    make_tgz(&[("package/index.js", b"module.exports = 1;".to_vec())]),
+                )
+            } else if path.contains("/-/npm/v1/attestations/") {
+                (404, b"{}".to_vec())
+            } else {
+                let meta = serde_json::json!({
+                    "name": "@sha1/pkg",
+                    "version": "1.0.0",
+                    "dist": {
+                        "tarball": format!("{base}/@sha1/pkg/-/pkg-1.0.0.tgz"),
+                        "integrity": "sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA="
+                    }
+                });
+                (200, serde_json::to_vec(&meta).unwrap())
+            }
+        }));
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".npmrc"),
+            format!("@sha1:registry={}", reg.url),
+        )
+        .unwrap();
+        let allow = vec!["127.0.0.1".to_string()];
+        install_with_transitive(
+            "@sha1/pkg@1.0.0",
+            false,
+            Some(allow.as_slice()),
+            root.path(),
+            false,
+        )
+        .await
+        .expect_err("unverifiable integrity must abort the install");
+        assert!(!root.path().join("node_modules/@sha1").exists());
+    }
+}
+
+#[cfg(test)]
+mod lock_binding_tests {
+    use super::lock_violation;
+    use crate::lockfile::{Lockfile, LockfileDep};
+
+    fn lock(version: &str, integrity: Option<&str>) -> Lockfile {
+        let mut l = Lockfile {
+            lockfile_version: 1,
+            name: "app".into(),
+            version: "1.0.0".into(),
+            packages: Default::default(),
+            dependencies: Default::default(),
+        };
+        l.dependencies.insert(
+            "a".into(),
+            LockfileDep {
+                version: version.into(),
+                integrity: integrity.map(str::to_string),
+                ..Default::default()
+            },
+        );
+        l
+    }
+
+    #[test]
+    fn lockfile_integrity_pins_the_bytes() {
+        let l = lock("1.0.0", Some("sha512-AAA"));
+        assert!(lock_violation(Some(&l), false, "a", "1.0.0", Some("sha512-AAA")).is_none());
+        // Same version, other bytes: refused even outside `ci`.
+        assert!(lock_violation(Some(&l), false, "a", "1.0.0", Some("sha512-BBB")).is_some());
+        // An old sha1 lock can't be compared: ok for install, not for ci.
+        let old = lock("1.0.0", Some("sha1-OLD"));
+        assert!(lock_violation(Some(&old), false, "a", "1.0.0", Some("sha512-X")).is_none());
+        assert!(lock_violation(Some(&old), true, "a", "1.0.0", Some("sha512-X")).is_some());
+    }
+
+    #[test]
+    fn ci_requires_every_package_recorded_with_a_hash() {
+        let l = lock("1.0.0", None);
+        assert!(lock_violation(Some(&l), true, "a", "1.0.0", Some("sha512-X")).is_some());
+        assert!(lock_violation(Some(&l), true, "a", "2.0.0", Some("sha512-X")).is_some());
+        assert!(lock_violation(Some(&l), true, "transitive", "1.0.0", None).is_some());
+        assert!(lock_violation(Some(&l), false, "transitive", "1.0.0", None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod vuln04_path_traversal_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn transitive_dep_name_with_dotdot_is_rejected() {
+        // A packument dependency key like `../../../../etc` must never be
+        // accepted as a transitive package name (VULN-04).
+        let meta = json!({
+            "dependencies": {
+                "../../../../tmp/opencode/vuln04/victim": "*",
+                "lodash": "^4.0.0"
+            },
+            "peerDependencies": {
+                "../escape": "1.0.0"
+            },
+            "optionalDependencies": {
+                "../../..": "1.0.0",
+                "@scope/ok": "^2.0.0"
+            }
+        });
+        let deps = collect_dep_specs(&meta);
+        let optional = collect_optional_dep_specs(&meta);
+
+        for (name, _) in deps.iter().chain(optional.iter()) {
+            assert!(
+                is_valid_package_name(name),
+                "invalid transitive name slipped through: {name}"
+            );
+        }
+        assert!(deps.iter().any(|(n, _)| n == "lodash"));
+        assert!(optional.iter().any(|(n, _)| n == "@scope/ok"));
+        assert!(!deps.iter().any(|(n, _)| n.contains("..")));
+        assert!(!optional.iter().any(|(n, _)| n.contains("..")));
+    }
+
+    #[test]
+    fn valid_transitive_names_still_collected() {
+        // The validation must not break normal dependency resolution.
+        let meta = json!({
+            "dependencies": { "@scope/pkg": "^1.0.0", "underscore": "1.0.0" },
+            "peerDependencies": { "react": "^18.0.0" }
+        });
+        let deps = collect_dep_specs(&meta);
+        assert!(deps.iter().any(|(n, v)| n == "@scope/pkg" && v == "^1.0.0"));
+        assert!(deps.iter().any(|(n, v)| n == "underscore" && v == "1.0.0"));
+        assert!(deps.iter().any(|(n, v)| n == "react" && v == "^18.0.0"));
+    }
+
+    #[test]
+    fn safe_node_modules_path_rejects_escape() {
+        let nm = std::path::PathBuf::from("/proj/node_modules");
+        assert!(
+            safe_node_modules_path(&nm, "../../../../etc").is_err(),
+            "dotdot name must be refused"
+        );
+        assert!(
+            safe_node_modules_path(&nm, "@scope/pkg").is_ok(),
+            "legit scoped name must be accepted"
+        );
+        assert!(
+            safe_node_modules_path(&nm, "lodash").is_ok(),
+            "legit bare name must be accepted"
+        );
+        assert!(
+            safe_node_modules_path(&nm, "pkg/../../etc").is_err(),
+            "dotdot inside name must be refused"
+        );
     }
 }

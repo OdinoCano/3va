@@ -151,21 +151,26 @@ unsafe fn call_native(
 
     let ffi_args: Vec<libffi::middle::Arg> = storages.iter().map(|s| s.as_ffi_arg()).collect();
 
+    // libffi writes a whole `ffi_arg` (8 bytes on 64-bit) for integer returns
+    // narrower than that, but `Cif::call::<R>` only reserves `size_of::<R>()`:
+    // reading an i32 as `R = i32` overran the stack by 4 bytes on every call
+    // (a SIGSEGV depending on stack layout). Read into a full register-sized
+    // value and narrow it; `void` gets the same room.
     Ok(match ret_type {
         "void" => {
-            cif.call::<()>(code, &ffi_args);
+            cif.call::<u64>(code, &ffi_args);
             serde_json::Value::Null
         }
         "i8" => {
-            let r: i8 = cif.call(code, &ffi_args);
+            let r = cif.call::<i64>(code, &ffi_args) as i8;
             serde_json::json!(r)
         }
         "i16" => {
-            let r: i16 = cif.call(code, &ffi_args);
+            let r = cif.call::<i64>(code, &ffi_args) as i16;
             serde_json::json!(r)
         }
         "i32" => {
-            let r: i32 = cif.call(code, &ffi_args);
+            let r = cif.call::<i64>(code, &ffi_args) as i32;
             serde_json::json!(r)
         }
         "i64" => {
@@ -173,15 +178,15 @@ unsafe fn call_native(
             serde_json::json!(r)
         }
         "u8" => {
-            let r: u8 = cif.call(code, &ffi_args);
+            let r = cif.call::<u64>(code, &ffi_args) as u8;
             serde_json::json!(r)
         }
         "u16" => {
-            let r: u16 = cif.call(code, &ffi_args);
+            let r = cif.call::<u64>(code, &ffi_args) as u16;
             serde_json::json!(r)
         }
         "u32" => {
-            let r: u32 = cif.call(code, &ffi_args);
+            let r = cif.call::<u64>(code, &ffi_args) as u32;
             serde_json::json!(r)
         }
         "u64" => {

@@ -2,7 +2,7 @@
 
 ## 7.1 Overview
 
-To facilitate transitioning from v1.0.0 to v2.0.0, 3va provides an automated migration tool (`3va codemod`). The tool parses JavaScript and TypeScript source files, performs AST-level renames and parameter mappings to match the new v2.0.0 APIs, and writes clean, formatted changes back to disk.
+To facilitate transitioning from v1.0.0 to v2.0.0, 3va provides an automated migration tool (`3va codemod`). The tool rewrites JavaScript and TypeScript source files in place: it renames v1 APIs and maps positional arguments to the v2.0.0 object parameters, leaving the rest of each file untouched.
 
 ---
 
@@ -31,7 +31,7 @@ To facilitate transitioning from v1.0.0 to v2.0.0, 3va provides an automated mig
 
 ## 7.3 Transformation Rules
 
-The codemod parses files using the built-in **Oxc AST Parser** to identify precise nodes where v1 API structures are used.
+The codemod matches the literal call text (`pq.dsa.sign(`, `pq.kem.generateKeypair`, …) and balances parentheses to find each call's arguments. It does not parse the file: calls reached through an alias or a destructured import (`const { sign } = pq.dsa`) are not rewritten, so review `--dry-run` output and search for remaining v1 calls.
 
 ### 7.3.1 Rule: `crypto.pq` Renames
 
@@ -70,17 +70,15 @@ const ok = pq.dsa.verify({ key: publicKeyHex, data: messageHex, signature: signa
 
 ---
 
-## 7.4 Implementation Architecture
+## 7.4 How it works
 
-1. **Pre-flight Checks:** Verify the target directory exists and check if git has unstaged changes. If unstaged changes exist, the codemod halts and warns the developer to commit or stash changes (can be overridden with `--force`).
-2. **AST Parsing & Matching:** 3va's CLI parses files into an Abstract Syntax Tree (AST) using Oxc's parser. It walks the AST to find `CallExpression` nodes matching the rules (e.g. MemberExpression chain `pq.dsa.sign`).
-3. **Source Patching:** Rather than generating new code from the AST (which could destroy spacing and custom formatting), the codemod calculates the exact offset span of matching nodes and patches the source file buffer directly.
-4. **Backup Creation:** For every modified file, a duplicate `<filename>.<ext>.bak` is created unless `--no-backup` is specified.
+1. **File collection:** every `.js`/`.ts` (and related) file under the given paths is read. There is no pre-flight check of the git working tree and no `--force` flag: commit or stash first so the change is easy to review.
+2. **Text rewriting:** the rules above are applied as literal text replacements; only the matched call text changes, so formatting elsewhere is preserved.
+3. **Backup creation:** for every modified file, a copy `<filename>.<ext>.bak` is written next to it unless `--no-backup` is given. These files are not ignored by git: add `*.bak` to `.gitignore`, or delete them once the migration is reviewed (`3va codemod --revert` restores the originals and removes the backups).
 
 ---
 
-## 7.5 Verification Plan
+## 7.5 Verification
 
-- **AST Matcher Tests:** Crate level unit tests verifying that various formats of `pq.dsa.sign` (such as destructured imports `const { sign } = pq.dsa`, imports with aliases, etc.) are matched and rewritten correctly.
-- **Dry-run Integration Tests:** Runs the codemod over v1.0.0 integration test files, asserts that the stdout diff is a valid unified diff, and verifies no source files were modified.
-- **AST Correctness:** The codemod compiles the modified code in a temporary environment to ensure the generated code remains syntactically valid TypeScript/JavaScript.
+- **Unit tests** in the CLI crate cover the renames and the `pq.dsa.sign` / `pq.dsa.verify` argument rewrites.
+- **`--dry-run`** prints a unified diff and writes nothing; use it before every real run.

@@ -155,6 +155,18 @@ fn collect_from_level(
         let manifest = read_manifest(&path);
         if let Some(manifest) = &manifest {
             for (name, rel) in bin_entries(manifest, &pkg_name) {
+                // A bin name is a file name in .bin/, never a path: `../x`
+                // or `/usr/local/bin/x` would write the shim elsewhere.
+                if name.is_empty()
+                    || name == "."
+                    || name == ".."
+                    || name.contains(['/', '\\', '\0'])
+                {
+                    summary
+                        .skipped
+                        .push((name.clone(), format!("{pkg_name}: invalid bin name")));
+                    continue;
+                }
                 let resolved = resolve_bin_entry(&path, &rel);
                 if !resolved.is_file() {
                     summary.skipped.push((
@@ -163,14 +175,48 @@ fn collect_from_level(
                     ));
                     continue;
                 }
+                // The target must be the package's own file: the shim is made
+                // executable, and that chmod follows it (VULN-16).
+                let inside = match (resolved.canonicalize(), path.canonicalize()) {
+                    (Ok(t), Ok(p)) => t.starts_with(p),
+                    _ => false,
+                };
+                if !inside {
+                    summary.skipped.push((
+                        name.clone(),
+                        format!(
+                            "{pkg_name}: bin {} points outside the package",
+                            rel.display()
+                        ),
+                    ));
+                    continue;
+                }
                 // Relative from .bin/ back to the package, so the tree stays
                 // movable and works inside a container bind-mount.
                 let rel_from_bin = rel_from(&bin_parent(node_modules), &resolved);
-                wanted.entry(name.clone()).or_insert(BinLink {
-                    name,
+                let link = BinLink {
+                    name: name.clone(),
                     target: rel_from_bin,
                     owner: pkg_name.clone(),
-                });
+                };
+                // Two packages claiming one command: the one it's named after
+                // wins, not whichever sorts first, so a dependency can't
+                // shadow another package's CLI (VULN-16). Always reported.
+                let owns = |owner: &str| owner.rsplit('/').next() == Some(name.as_str());
+                match wanted.get(&name) {
+                    None => {
+                        wanted.insert(name, link);
+                    }
+                    Some(existing) => {
+                        summary.skipped.push((
+                            name.clone(),
+                            format!("claimed by both {} and {}", existing.owner, pkg_name),
+                        ));
+                        if owns(&pkg_name) && !owns(&existing.owner) {
+                            wanted.insert(name, link);
+                        }
+                    }
+                }
             }
         }
         // Nested dependencies get their own .bin.
@@ -674,5 +720,43 @@ mod tests {
     #[cfg(unix)]
     fn read_link(path: &Path) -> PathBuf {
         std::fs::read_link(path).unwrap()
+    }
+
+    #[test]
+    fn bins_cannot_escape_or_shadow_other_packages() {
+        // VULN-16: `bin` names are file names, targets stay in the package,
+        // and a dependency can't take over another package's command.
+        let tmp = tempfile::tempdir().unwrap();
+        let nm = tmp.path().join("node_modules");
+        let mk = |name: &str, manifest: &str| {
+            let d = nm.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("package.json"), manifest).unwrap();
+            std::fs::write(d.join("cli.js"), "").unwrap();
+        };
+        std::fs::write(tmp.path().join("secret"), "").unwrap();
+        // "aaa" sorts first and claims "vite"; the real vite must win.
+        mk(
+            "aaa",
+            r#"{"name":"aaa","bin":{"vite":"cli.js","../../escape":"cli.js","out":"../../secret"}}"#,
+        );
+        mk("vite", r#"{"name":"vite","bin":{"vite":"cli.js"}}"#);
+
+        let summary = link_bins(&nm).unwrap();
+        let vite = summary.created.iter().find(|l| l.name == "vite").unwrap();
+        assert_eq!(vite.owner, "vite");
+        assert!(
+            summary
+                .created
+                .iter()
+                .all(|l| l.name != "out" && !l.name.contains('/'))
+        );
+        assert!(!tmp.path().join("escape").exists());
+        assert!(
+            summary
+                .skipped
+                .iter()
+                .any(|(n, why)| n == "vite" && why.contains("claimed by both"))
+        );
     }
 }

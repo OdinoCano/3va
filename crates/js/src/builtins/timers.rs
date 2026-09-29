@@ -22,6 +22,10 @@ struct TimerEntry {
     /// signal "I'm just housekeeping, not real pending work", and the loop
     /// (and the whole process) never exits on its own.
     background: bool,
+    /// Package deny scopes active when the timer was scheduled, re-applied
+    /// when it fires: `setTimeout(fetch.bind(null, url))` otherwise runs with
+    /// only builtin frames on the stack (VULN-03).
+    deny_scopes: Vec<String>,
 }
 
 pub struct TimerManager {
@@ -46,6 +50,7 @@ impl TimerManager {
                 interval_ms: 0,
                 cancelled: false,
                 background: false,
+                deny_scopes: vvva_permissions::deny_scopes(),
             },
         );
     }
@@ -71,6 +76,7 @@ impl TimerManager {
                 interval_ms: ms,
                 cancelled: false,
                 background,
+                deny_scopes: vvva_permissions::deny_scopes(),
             },
         );
     }
@@ -82,7 +88,7 @@ impl TimerManager {
         }
     }
 
-    pub fn poll_expired_ids(&self) -> Vec<TimerId> {
+    pub fn poll_expired_ids(&self) -> Vec<(TimerId, Vec<String>)> {
         let now = Instant::now();
         let mut expired = Vec::new();
         let mut timers = self.timers.lock().unwrap();
@@ -96,7 +102,7 @@ impl TimerManager {
                 continue;
             }
             if entry.fires_at <= now {
-                expired.push(id);
+                expired.push((id, entry.deny_scopes.clone()));
                 if entry.repeating {
                     to_reschedule.push((id, entry.interval_ms));
                 } else {
@@ -114,7 +120,7 @@ impl TimerManager {
             }
         }
 
-        expired.sort_unstable();
+        expired.sort_unstable_by_key(|(id, _)| *id);
         expired
     }
 
@@ -147,7 +153,7 @@ impl TimerManager {
         // after a throw (dropping them would silently kill unrelated timers,
         // e.g. a socket's poll loop) and report the first error at the end.
         let mut first_error: Option<String> = None;
-        for id in expired {
+        for (id, deny_scopes) in expired {
             // Like Node: a throw from a timer callback goes to
             // process.on('uncaughtException') if anyone listens, otherwise it
             // is fatal. It used to be printed by V8 and ignored, so the
@@ -163,7 +169,10 @@ impl TimerManager {
             let Some(script) = v8::Script::compile(try_catch, source, None) else {
                 continue;
             };
-            if script.run(try_catch).is_none() {
+            let prev_scopes = vvva_permissions::set_inherited_scopes(deny_scopes);
+            let ran = script.run(try_catch).is_some();
+            vvva_permissions::set_inherited_scopes(prev_scopes);
+            if !ran {
                 let text = try_catch
                     .stack_trace()
                     .or_else(|| try_catch.exception())

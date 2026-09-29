@@ -90,15 +90,27 @@ fn js_err<'s>(
 /// see fs_watch's `__fsWatchNext` fix for the same bug pattern. It also
 /// matches how most gRPC clients actually behave: channel construction
 /// doesn't fail on a down server, only the first call against it does.
+///
+/// The connection goes only to `addrs`, the addresses already resolved and
+/// vetted against IP deny rules, instead of letting the HTTP stack resolve
+/// the name again later (VULN-18).
 fn create_channel_lazy(
     host: String,
     port: u16,
     use_tls: bool,
+    addrs: Vec<std::net::SocketAddr>,
 ) -> std::result::Result<Channel, String> {
     let scheme = if use_tls { "https" } else { "http" };
     let addr = format!("{}://{}:{}", scheme, host, port);
     let endpoint = Endpoint::try_from(addr).map_err(|e| format!("Invalid address: {e}"))?;
-    Ok(endpoint.connect_lazy())
+    let connector = tower::service_fn(move |_uri: tonic::transport::Uri| {
+        let addrs = addrs.clone();
+        async move {
+            let tcp = tokio::net::TcpStream::connect(&addrs[..]).await?;
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(tcp))
+        }
+    });
+    Ok(endpoint.connect_with_connector_lazy(connector))
 }
 
 fn parse_package_definition(proto_content: &str) -> std::result::Result<serde_json::Value, String> {
@@ -222,10 +234,12 @@ pub fn inject_grpc(
         "__grpcCreateChannel",
         move |scope: &mut PinScope, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let host = args.get(0).to_rust_string_lossy(scope);
-            let port = args.get(1).uint32_value(scope).unwrap_or(0) as u16;
+            let port = super::port_from_js(args.get(1).uint32_value(scope), 0);
             let use_tls = args.get(2).boolean_value(scope);
 
-            if !permissions().check(&Capability::Network(host.clone())) {
+            if !permissions().check(&Capability::Network(vvva_permissions::authority(
+                &host, port,
+            ))) {
                 let err = js_err(
                     scope,
                     "EACCES",
@@ -244,7 +258,15 @@ pub fn inject_grpc(
                 return;
             }
 
-            let result = create_channel_lazy(host, port, use_tls);
+            let addrs = match permissions().vetted_addrs(&host, port) {
+                Ok(a) => a,
+                Err(e) => {
+                    let err = js_err(scope, "EACCES", e.to_string());
+                    scope.throw_exception(err);
+                    return;
+                }
+            };
+            let result = create_channel_lazy(host, port, use_tls, addrs);
 
             match result {
                 Ok(channel) => {

@@ -40,6 +40,9 @@ jobs:
         run: |
           # Write output to file to avoid $GITHUB_OUTPUT multiline issues
           cargo audit 2>&1 | tee audit-output.txt || true
+          # "0 vulnerabilities" above excludes what .cargo/audit.toml ignores;
+          # keep the suppressed advisories visible (INFO-A).
+          echo "Suppressed advisories (.cargo/audit.toml, justified there): $(grep -oE 'RUSTSEC-[0-9]+-[0-9]+' .cargo/audit.toml | tr '\n' ' ')" | tee -a audit-output.txt "$GITHUB_STEP_SUMMARY"
           cargo deny check advisories bans licenses 2>&1 | tee -a audit-output.txt || true
 
           if grep -qE "^error" audit-output.txt; then

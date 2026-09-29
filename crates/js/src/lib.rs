@@ -5,6 +5,7 @@
 
 pub mod async_context;
 pub mod builtins;
+mod caller_scope;
 pub mod esm;
 pub mod inspector;
 pub mod profiler;
@@ -545,6 +546,12 @@ pub struct JsEngine {
 
 const LOW_MEMORY_HINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+impl Drop for JsEngine {
+    fn drop(&mut self) {
+        caller_scope::uninstall(&self.isolate);
+    }
+}
+
 impl JsEngine {
     pub async fn new(permissions: Arc<PermissionState>) -> anyhow::Result<Self> {
         Self::new_full(permissions, None, None, None).await
@@ -642,11 +649,16 @@ impl JsEngine {
         let profiler = self.profiler.clone();
 
         rejection_tracker::install(&mut self.isolate);
+        caller_scope::install_promise_hook(&mut self.isolate);
+        // SAFETY: cleared in Drop, before the isolate is disposed.
+        let raw_isolate = unsafe { self.isolate.as_raw_isolate_ptr() };
         let mut handle_scope_storage = Box::pin(v8::HandleScope::new(&mut *self.isolate));
         let mut handle_scope = handle_scope_storage.as_mut().init();
         let context = v8::Context::new(&handle_scope, Default::default());
         self.context = Some(v8::Global::new(&handle_scope, context));
+        caller_scope::install(raw_isolate, v8::Global::new(&handle_scope, context));
         let mut scope = v8::ContextScope::new(&mut handle_scope, context);
+        caller_scope::install_bind_guard(&mut scope);
 
         let trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
         let t = std::time::Instant::now();
@@ -926,6 +938,7 @@ impl JsEngine {
         // — every *other* dependency the entry script pulls in is still
         // scoped normally.
         let entry_pkg_scope = entry_package_scope(&dirname);
+        caller_scope::set_entry_scope(entry_pkg_scope.clone());
 
         let code = transpiler::replace_import_meta(&code);
 

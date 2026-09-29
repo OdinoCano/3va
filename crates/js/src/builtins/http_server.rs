@@ -731,7 +731,7 @@ pub fn inject_http_server(
                 let host_arg = args.get(1);
                 let host = host_arg.to_rust_string_lossy(scope);
 
-                if !ctx.perms.check_bind(&host) {
+                let Some(host) = ctx.perms.bind_host(&host) else {
                     let err = js_code_err(
                         scope,
                         "EACCES",
@@ -739,7 +739,7 @@ pub fn inject_http_server(
                     );
                     rv.set(err);
                     return;
-                }
+                };
 
                 match bind_listener(&format!("{}:{}", host, port)) {
                     Ok(std_listener) => {
@@ -1161,6 +1161,39 @@ pub fn inject_http_server(
         );
     }
 
+    {
+        // The address actually bound, which can differ from the one asked
+        // for: a wildcard listen without an all-interfaces grant is kept on
+        // loopback (see PermissionState::bind_host).
+        let servers_ptr = native_ctx.leak(servers.clone());
+        let external = v8::External::new(scope, servers_ptr);
+        let http_server_address_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let servers = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const Arc<Mutex<HashMap<u32, Arc<TcpListener>>>>)
+                };
+                let server_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let ip = servers
+                    .lock()
+                    .unwrap()
+                    .get(&server_id)
+                    .and_then(|l| l.local_addr().ok())
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_default();
+                rv.set(V8String::new(scope, &ip).unwrap().into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpServerAddress").unwrap().into(),
+            http_server_address_fn.into(),
+        );
+    }
+
     Ok(())
 }
 
@@ -1187,6 +1220,14 @@ struct H2ClientState {
     streams: HashMap<u32, H2ClientStreamEntry>,
     next_stream_id: u32,
     response_queue: VecDeque<String>,
+    /// The thread running the h2 connection driver (its own current-thread
+    /// runtime). `h2` only transmits what this driver polls; spawning it on
+    /// a runtime that is torn down when `__h2Connect` returns orphaned the
+    /// connection, so every `session.request()` failed with "failed to
+    /// create stream". Keeping the driver on its own thread lets the client
+    /// actually send and receive until the connection closes, at which point
+    /// the thread exits by itself.
+    conn_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 struct H2ClientStreamEntry {
@@ -1221,12 +1262,12 @@ pub fn inject_http2_server(
                 };
                 let port = args.get(0).uint32_value(scope).unwrap_or(0) as u16;
                 let host = args.get(1).to_rust_string_lossy(scope);
-                if !perms.check_bind(&host) {
+                let Some(host) = perms.bind_host(&host) else {
                     let err = js_code_err(scope, "EACCES",
                         &format!("Network access denied. Run with --allow-net={}", host));
                     rv.set(err);
                     return;
-                }
+                };
                 match bind_listener(&format!("{}:{}", host, port)) {
                     Ok(std_listener) => {
                         if let Err(e) = std_listener.set_nonblocking(true) {
@@ -1600,7 +1641,8 @@ pub fn inject_http2_server(
                     .next()
                     .unwrap_or(&authority)
                     .to_string();
-                if !perms.check(&vvva_permissions::Capability::Network(host.clone())) {
+                // The whole authority, so a port-scoped grant applies (VULN-17).
+                if !perms.check(&vvva_permissions::Capability::Network(authority.clone())) {
                     let err = js_code_err(
                         scope,
                         "EACCES",
@@ -1614,6 +1656,20 @@ pub fn inject_http2_server(
                 } else {
                     format!("{}:80", authority)
                 };
+                // Dial only vetted addresses, resolved once (VULN-18).
+                let vetted = addr
+                    .rsplit_once(':')
+                    .and_then(|(h, p)| Some((h, p.parse::<u16>().ok()?)))
+                    .ok_or_else(|| std::io::Error::other(format!("invalid authority {addr}")))
+                    .and_then(|(h, p)| perms.vetted_addrs(h, p));
+                let addr = match vetted {
+                    Ok(a) => a,
+                    Err(e) => {
+                        let err = js_code_err(scope, "EACCES", &e.to_string());
+                        rv.set(err);
+                        return;
+                    }
+                };
                 let id = {
                     let mut n = nid.lock().unwrap();
                     let id = *n;
@@ -1621,40 +1677,69 @@ pub fn inject_http2_server(
                     id
                 };
 
-                // ponytail: synchronous handshake on separate thread to avoid blocking V8 on tokio
+                // ponytail: synchronous handshake on a thread with its own
+                // runtime, so the V8 thread isn't blocked on tokio. The h2
+                // `Connection` captures the runtime handle while it is
+                // handshaking, so the handshake AND the driver must run on
+                // the same runtime for the connection's lifetime — driving
+                // `conn` from a different runtime fails immediately with
+                // "A Tokio 1.x context was found, but it is being shutdown."
+                // The send_request half is handed back over a channel once
+                // the handshake completes; the thread then keeps polling the
+                // connection until it closes, at which point it exits.
                 let clients2 = clients.clone();
-                let handshake_result = std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
+                let (send_request_tx, send_request_rx) = std::sync::mpsc::channel();
+                let conn_thread = std::thread::spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
-                        .map_err(|e| e.to_string())?;
-                    rt.block_on(async move {
-                        match tokio::net::TcpStream::connect(&addr).await {
-                            Ok(tcp) => match h2::client::handshake(tcp).await {
-                                Ok((send_request, conn)) => {
-                                    tokio::spawn(async move {
-                                        let _ = conn.await;
-                                    });
-                                    let state = Arc::new(Mutex::new(H2ClientState {
-                                        send_request: Some(send_request),
-                                        streams: HashMap::new(),
-                                        next_stream_id: 1,
-                                        response_queue: VecDeque::new(),
-                                    }));
-                                    clients2.lock().unwrap().insert(id, state);
-                                    Ok(id)
-                                }
-                                Err(e) => Err(e.to_string()),
-                            },
-                            Err(e) => Err(e.to_string()),
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            let _ = send_request_tx.send(Err(e.to_string()));
+                            return;
                         }
-                    })
-                })
-                .join()
-                .unwrap_or(Err("thread panicked".to_string()));
+                    };
+                    rt.block_on(async move {
+                        let tcp = match tokio::net::TcpStream::connect(&addr[..]).await {
+                            Ok(tcp) => tcp,
+                            Err(e) => {
+                                let _ = send_request_tx.send(Err(e.to_string()));
+                                return;
+                            }
+                        };
+                        let (send_request, conn) = match h2::client::handshake(tcp).await {
+                            Ok(parts) => parts,
+                            Err(e) => {
+                                let _ = send_request_tx.send(Err(e.to_string()));
+                                return;
+                            }
+                        };
+                        if send_request_tx.send(Ok(send_request)).is_err() {
+                            return;
+                        }
+                        // Drive the connection; returning ends this thread.
+                        let _ = conn.await;
+                    });
+                });
+                let handshake_result = match send_request_rx.recv() {
+                    Ok(Ok(send_request)) => Ok(send_request),
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => Err("h2 conn thread panicked".to_string()),
+                };
 
                 match handshake_result {
-                    Ok(_) => rv.set(v8::Integer::new_from_unsigned(scope, id).into()),
+                    Ok(send_request) => {
+                        let state = Arc::new(Mutex::new(H2ClientState {
+                            send_request: Some(send_request),
+                            streams: HashMap::new(),
+                            next_stream_id: 1,
+                            response_queue: VecDeque::new(),
+                            conn_thread: Some(conn_thread),
+                        }));
+                        clients2.lock().unwrap().insert(id, state);
+                        rv.set(v8::Integer::new_from_unsigned(scope, id).into());
+                    }
                     Err(_) => rv.set(v8::Integer::new(scope, -1).into()),
                 }
             },
@@ -1956,7 +2041,14 @@ pub fn inject_http2_server(
                 let clients =
                     unsafe { &*(args.data().cast::<v8::External>().value() as *const H2Clients) };
                 let cid = args.get(0).uint32_value(scope).unwrap_or(0);
-                clients.lock().unwrap().remove(&cid);
+                if let Some(state) = clients.lock().unwrap().remove(&cid) {
+                    // Take the driver thread handle so it is dropped here (the
+                    // thread itself exits once the connection closes). The
+                    // field otherwise reads as unused.
+                    if let Ok(mut st) = state.lock() {
+                        st.conn_thread.take();
+                    }
+                }
                 rv.set(v8::undefined(scope).into());
             },
         )

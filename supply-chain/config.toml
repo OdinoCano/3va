@@ -2234,7 +2234,7 @@ version = "0.2.127"
 criteria = "safe-to-deploy"
 
 [[exemptions.wasmtime-internal-asm-macros]]
-version = "36.0.14"
+version = "36.0.16"
 criteria = "safe-to-deploy"
 
 [[exemptions.web-sys]]

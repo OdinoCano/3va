@@ -168,7 +168,7 @@ pub fn inject_ssh(
               mut rv: v8::ReturnValue| {
             let id = args.get(0).uint32_value(_scope).unwrap_or(0) as SshId;
             let host = args.get(1).to_rust_string_lossy(_scope);
-            let port = args.get(2).uint32_value(_scope).unwrap_or(22) as u16;
+            let port = super::port_from_js(args.get(2).uint32_value(_scope), 22);
             let username = args.get(3).to_rust_string_lossy(_scope);
             let password = args.get(4).to_rust_string_lossy(_scope);
             // Read on this (callback) thread, where the thread-local is
@@ -194,19 +194,25 @@ pub fn inject_ssh(
                 let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
                 let rt_for_conn = rt.clone();
                 let result: String = rt.block_on(async {
-                    if !perms_for_thread.check(&Capability::Network(host.clone())) {
+                    if !perms_for_thread.check(&Capability::Network(vvva_permissions::authority(
+                        &host, port,
+                    ))) {
                         return err_envelope(
                             "EACCES",
                             format!("Network access denied. Run with --allow-net={}", host),
                         );
                     }
 
+                    // Dial only vetted addresses, resolved once (VULN-18).
+                    let addrs = match perms_for_thread.vetted_addrs(&host, port) {
+                        Ok(a) => a,
+                        Err(e) => return err_envelope("EACCES", e),
+                    };
                     let config = Arc::new(client::Config::default());
-                    let mut handle =
-                        match client::connect(config, (&host[..], port), SshHandler).await {
-                            Ok(h) => h,
-                            Err(e) => return err_envelope("ECONNREFUSED", e),
-                        };
+                    let mut handle = match client::connect(config, &addrs[..], SshHandler).await {
+                        Ok(h) => h,
+                        Err(e) => return err_envelope("ECONNREFUSED", e),
+                    };
 
                     match handle.authenticate_password(&username, &password).await {
                         Ok(auth) if auth.success() => {

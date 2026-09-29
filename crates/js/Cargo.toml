@@ -69,6 +69,14 @@ name = "net_server"
 path = "tests/net_server.rs"
 
 [[test]]
+name = "dgram_module"
+path = "tests/dgram_module.rs"
+
+[[test]]
+name = "http2_module"
+path = "tests/http2_module.rs"
+
+[[test]]
 name = "system_modules"
 path = "tests/system_modules.rs"
 
@@ -218,6 +226,10 @@ async-trait = "0.1"
 h2 = "0.4"
 bytes = "1"
 tonic = { version = "0.12", features = ["tls"] }
+# Custom gRPC connector that dials only vetted addresses (already in the
+# tree through tonic; no new crates).
+tower = { version = "0.4", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 prost = "0.13"
 http = "1"
 

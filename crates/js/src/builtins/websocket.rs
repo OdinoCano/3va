@@ -18,7 +18,10 @@ fn ws_connect(url: &str) -> Result<(WsConn, tungstenite::handshake::client::Resp
     let u = url::Url::parse(url).map_err(|e| e.to_string())?;
     let host = u.host_str().ok_or("URL has no host")?;
     let port = u.port_or_known_default().ok_or("URL has no port")?;
-    let tcp = TcpStream::connect((host, port)).map_err(|e| e.to_string())?;
+    let tcp = perms()
+        .vetted_addrs(host, port)
+        .and_then(|a| TcpStream::connect(&a[..]))
+        .map_err(|e| e.to_string())?;
     #[cfg(feature = "fips")]
     let connector = tungstenite::Connector::Rustls(super::tcp::pq_tls_client_config_native()?);
     #[cfg(not(feature = "fips"))]
@@ -124,6 +127,7 @@ pub fn inject_websocket(
                   args: FunctionCallbackArguments,
                   mut rv: ReturnValue| {
                 let url = args.get(0).to_rust_string_lossy(scope);
+                let url = super::fetch::canonical_url(&url).unwrap_or(url);
 
                 let host = match host_from_url(&url) {
                     Some(h) => h,
@@ -133,7 +137,11 @@ pub fn inject_websocket(
                     }
                 };
 
-                if !perms().check(&Capability::Network(host.clone())) {
+                // host:port like fetch(), so a port-scoped grant applies (VULN-17).
+                let destination = super::fetch::destination_from_url(&url)
+                    .map(|(h, p)| vvva_permissions::authority(&h, p))
+                    .unwrap_or_else(|| host.clone());
+                if !perms().check(&Capability::Network(destination)) {
                     throw_js_error(
                         scope,
                         format!("Network access denied. Run with --allow-net={}", host),

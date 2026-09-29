@@ -195,7 +195,8 @@ fn script_env(phase: &str, package_dir: &Path) -> Vec<(String, String)> {
 /// Run one lifecycle script under the policy described at the module level.
 ///
 /// `sandbox_argv` is the trailing flag list for the re-entered 3va process
-/// (built from the package's own declared permissions by the caller).
+/// (built by the caller from what the project grants the package in
+/// `"3va".permissions.<pkg>`; the package's own manifest has no say).
 pub fn run(
     package_dir: &Path,
     pkg_name: &str,

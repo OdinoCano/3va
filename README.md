@@ -232,13 +232,20 @@ $ 3va permissions learn app.ts
 Running 'app.ts' with all permissions to observe usage...
 [... your script's normal output ...]
 
-Observed usage — suggested `3va.config.toml` section:
+Observed usage — suggested package.json permissions:
 
-[run.permissions]
-net = ["api.example.com"]
-read = ["./app.ts"]
-write = ["./output.txt"]
-env = ["NODE_ENV"]
+{
+  "3va": {
+    "permissions": {
+      ".": {
+        "allow-net": ["api.example.com"],
+        "allow-read": ["./app.ts"],
+        "allow-write": ["./output.txt"],
+        "allow-env": ["NODE_ENV"]
+      }
+    }
+  }
+}
 
 Equivalent CLI flags:
 3va run app.ts --allow-net=api.example.com --allow-read=./app.ts --allow-write=./output.txt --allow-env=NODE_ENV
@@ -587,7 +594,7 @@ for the full design, prior-art comparison, and real third-party interop test res
 - **HTTP layer**: RUDY (R-U-Dead-Yet) detection is implemented (`minBodyRateBps` minimum body rate + `bodyTimeoutMs` body deadline) and rate limiting is adaptive — repeat offenders get escalating auto-block durations (`blockEscalationFactor` up to `maxBlockDurationSecs`, reset after `strikeDecaySecs` of calm). The shipped default is still a fixed base of 100 req/s and 50 connections per source IP; adaptivity adjusts the *block penalty* for repeat offenders, not the per-IP token-bucket rate. Connection tracking is per source IP only — behind a reverse proxy that collapses clients onto one IP, the proxy's IP is what gets limited (no `X-Forwarded-For` trust yet). The request parser supports `Transfer-Encoding: chunked` and rejects requests carrying both `Content-Length` and `Transfer-Encoding` with `400` (request-smuggling guard; verified by the `content_length_plus_transfer_encoding_rejected_400` end-to-end test).
 - **Malware/secrets scanning is not automatic on `3va install`** — despite `docs/10-security/01-static-analysis.md` previously implying otherwise, the scanner only runs when you explicitly call `3va audit` / `3va audit --secrets`. Run it yourself after installing new dependencies.
 - **MQTT / IMAP clients**: sockets are bounded (`MQTT_CONNECT_TIMEOUT`/`MQTT_IO_TIMEOUT` and `IMAP_CONNECT_TIMEOUT`/`IMAP_IO_TIMEOUT`, defaults 10 s / 30 s; per-client `connectTimeout` option overrides for tests or slow links) so an unresponsive broker/server can no longer hang a connection indefinitely. Residual caveat: `mqtt`'s connect still runs synchronously on the JS engine thread (up to that same bound) before the async poll loop takes over; IMAP connects already run on a worker thread.
-- **Supply-chain detection gaps**: npm provenance verification checks the Sigstore DSSE signature and in-toto subject of registry attestations during `install` (opt-in strict mode: `--require-provenance`), but does not yet validate the Fulcio certificate chain to its root or Rekor inclusion proofs. Dependency-confusion protection (`.npmrc`-pinned scopes resolve only against their private registry — public fallback is refused), typosquatting detection (edit-distance against an embedded popular-packages list, warned during `install`), tarball integrity (SHA-256/512) and lifecycle-script blocking are implemented.
+- **Supply-chain detection gaps**: npm provenance is verified against the Sigstore public-good trust root: the DSSE signature, a leaf certificate chaining to the pinned Fulcio root, a Rekor entry (SET, and inclusion proof when present) that records this exact signature and certificate, and a subject digest matching the downloaded tarball. The signer must build from the repository the package declares and stays pinned per package after the first install (`.3va/provenance-signers.json`), so a later release signed by someone else, or without provenance, is refused. On a package's very first install, a registry that controls both tarball and attestation can still pass its own identity off by rewriting `repository`. Dependency-confusion protection (`.npmrc`-pinned scopes resolve only against their private registry, whose host must be in `--allow-net`), typosquatting detection, tarball integrity (SHA-512, fail-closed when missing, pinned by the lockfile), https-only registries (plaintext only to loopback) and lifecycle-script blocking are implemented.
 - **Bundler**: `--source-map` and `--split` are not implemented; the CLI rejects them with an error. `--minify` does not rename identifiers. Tree shaking is not yet applied to the multi-file graph.
 - **Dev server HMR**: full-page reload only, not granular per-module hot replacement.
 - **`package.json` permissions section**: `3va permissions suggest`/`learn` don't yet write directly into `package.json` — that's planned but manual editing is required today.

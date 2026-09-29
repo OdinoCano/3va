@@ -439,6 +439,54 @@ pub fn inject_require(
         set_caller_scope_fn.unwrap().into(),
     );
 
+    // ── __SCOPE_GATED_MODULES ────────────────────────────────────────────────
+    // Authoritative list (kept here in Rust, next to the capability checks
+    // they gate) of builtin modules the require() wrapper must scope per
+    // package. A capability-gated builtin missing from this set runs its
+    // permission checks in the root scope, silently ignoring the package's
+    // deny-* rules — the VULN-03 bypass. The wrapper itself still skips
+    // PascalCase constructors (net.Socket, http.Server, ...) to preserve
+    // `instanceof`, so modules exposing only such constructors (ssh2, imap,
+    // ftp, pop3, irc) are listed for completeness but wrap to a no-op.
+    const SCOPE_GATED_MODULES: &[&str] = &[
+        // filesystem
+        "fs",
+        "fs/promises",
+        // network
+        "net",
+        "tls",
+        "dgram",
+        "mqtt",
+        "http",
+        "http2",
+        "https",
+        "dns",
+        "dns/promises",
+        // network via protocol clients (PascalCase-only exports are skipped)
+        "ssh2",
+        "imap",
+        "ftp",
+        "pop3",
+        "irc",
+        "webrtc",
+        // process
+        "child_process",
+        "worker_threads",
+        // native code loading
+        "ffi",
+    ];
+    let gated_map = SCOPE_GATED_MODULES
+        .iter()
+        .map(|m| format!("{}: true", serde_json::to_string(m).unwrap()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let gated_script = format!("globalThis.__SCOPE_GATED_MODULES = {{{}}};", gated_map);
+    if let Some(script) =
+        v8::Script::compile(scope, V8String::new(scope, &gated_script).unwrap(), None)
+    {
+        let _ = script.run(scope);
+    }
+
     let require_resolve_fn = Function::new(
         scope,
         move |scope: &mut PinScope<'_, '_>,
@@ -585,6 +633,20 @@ pub fn inject_require(
             let hostname_arg = args.get(0);
             let hostname = hostname_arg.to_rust_string_lossy(scope);
 
+            // DNS resolution is a network operation: it must be gated by the
+            // same Capability::Network check as any other outbound activity,
+            // or a package with an empty grant set can exfiltrate via
+            // resolveTxt / tunnel via resolve4 (VULN-06).
+            if !permissions().check(&Capability::Network(hostname.clone())) {
+                let msg = format!(
+                    "EACCES: Network access denied. Run with --allow-net={}",
+                    hostname
+                );
+                let err_str = V8String::new(scope, &msg).unwrap();
+                rv.set(err_str.into());
+                return;
+            }
+
             // Plain blocking std::net::ToSocketAddrs — no tokio involved, so
             // no need for tokio::task::block_in_place (which requires a
             // multi_thread runtime and panics outright on current_thread,
@@ -633,6 +695,18 @@ pub fn inject_require(
             let hostname = hostname_arg.to_rust_string_lossy(scope);
             let rrtype_arg = args.get(1);
             let rrtype = rrtype_arg.to_rust_string_lossy(scope);
+
+            // Same capability gate as __dnsLookup: record queries leak
+            // whatever the caller can encode in a name (VULN-06).
+            if !permissions().check(&Capability::Network(hostname.clone())) {
+                let msg = format!(
+                    "EACCES: Network access denied. Run with --allow-net={}",
+                    hostname
+                );
+                let err_str = V8String::new(scope, &msg).unwrap();
+                rv.set(err_str.into());
+                return;
+            }
 
             use hickory_resolver::proto::rr::RecordType;
 
@@ -1610,45 +1684,80 @@ pub fn inject_require(
                 function lookup(hostname, options, callback) {
                     if (typeof options === 'function') { callback = options; options = {}; }
                     options = options || {};
+                    // The native lookup runs on a later tick, by which the
+                    // require()-boundary scope wrapper has reverted. Capture
+                    // the caller's scope now and re-apply it around the
+                    // deferred native call so package deny-* rules still gate
+                    // it (same pattern as fs streams' __streamScope).
+                    var __scope = (typeof globalThis.__currentCallerScope === 'string')
+                        ? globalThis.__currentCallerScope : '.';
                     setTimeout(function() {
-                        var raw = __dnsLookup(hostname);
-                        var ips;
-                        try { ips = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'getaddrinfo')); return; }
-                        if (options.all) {
-                            callback(null, ips.map(function(ip) { return { address: ip, family: ip.indexOf(':') !== -1 ? 6 : 4 }; }));
-                        } else {
-                            var ip = ips[0];
-                            callback(null, ip, ip.indexOf(':') !== -1 ? 6 : 4);
+                        var __prev = globalThis.__currentCallerScope;
+                        globalThis.__currentCallerScope = __scope;
+                        if (typeof __setCallerScope === 'function') __setCallerScope(__scope);
+                        try {
+                            var raw = __dnsLookup(hostname);
+                            var ips;
+                            try { ips = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'getaddrinfo')); return; }
+                            if (options.all) {
+                                callback(null, ips.map(function(ip) { return { address: ip, family: ip.indexOf(':') !== -1 ? 6 : 4 }; }));
+                            } else {
+                                var ip = ips[0];
+                                callback(null, ip, ip.indexOf(':') !== -1 ? 6 : 4);
+                            }
+                        } finally {
+                            globalThis.__currentCallerScope = __prev;
+                            if (typeof __setCallerScope === 'function') __setCallerScope(__prev);
                         }
                     }, 0);
                 }
 
                 function resolveFamily(hostname, family, callback) {
+                    var __scope = (typeof globalThis.__currentCallerScope === 'string')
+                        ? globalThis.__currentCallerScope : '.';
                     setTimeout(function() {
-                        var raw = __dnsLookup(hostname);
-                        var ips;
-                        try { ips = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'queryA')); return; }
-                        var filtered = ips.filter(function(ip) { return (ip.indexOf(':') !== -1) === (family === 6); });
-                        if (!filtered.length) { callback(mkErr('ENOTFOUND', hostname, 'queryA')); return; }
-                        callback(null, filtered);
+                        var __prev = globalThis.__currentCallerScope;
+                        globalThis.__currentCallerScope = __scope;
+                        if (typeof __setCallerScope === 'function') __setCallerScope(__scope);
+                        try {
+                            var raw = __dnsLookup(hostname);
+                            var ips;
+                            try { ips = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'queryA')); return; }
+                            var filtered = ips.filter(function(ip) { return (ip.indexOf(':') !== -1) === (family === 6); });
+                            if (!filtered.length) { callback(mkErr('ENOTFOUND', hostname, 'queryA')); return; }
+                            callback(null, filtered);
+                        } finally {
+                            globalThis.__currentCallerScope = __prev;
+                            if (typeof __setCallerScope === 'function') __setCallerScope(__prev);
+                        }
                     }, 0);
                 }
 
                 function resolveQuery(rrtype) {
                     return function(hostname, callback) {
+                        var __scope = (typeof globalThis.__currentCallerScope === 'string')
+                            ? globalThis.__currentCallerScope : '.';
                         setTimeout(function() {
-                            var raw = __dnsQuery(hostname, rrtype);
-                            var data;
-                            try { data = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'query' + rrtype)); return; }
-                            if (data === null || (Array.isArray(data) && data.length === 0)) {
-                                var err = new Error('query' + rrtype + ' ENODATA ' + hostname);
-                                err.code = 'ENODATA';
-                                err.hostname = hostname;
-                                err.syscall = 'query' + rrtype;
-                                callback(err);
-                                return;
+                            var __prev = globalThis.__currentCallerScope;
+                            globalThis.__currentCallerScope = __scope;
+                            if (typeof __setCallerScope === 'function') __setCallerScope(__scope);
+                            try {
+                                var raw = __dnsQuery(hostname, rrtype);
+                                var data;
+                                try { data = JSON.parse(raw); } catch (e) { callback(mkErr(raw, hostname, 'query' + rrtype)); return; }
+                                if (data === null || (Array.isArray(data) && data.length === 0)) {
+                                    var err = new Error('query' + rrtype + ' ENODATA ' + hostname);
+                                    err.code = 'ENODATA';
+                                    err.hostname = hostname;
+                                    err.syscall = 'query' + rrtype;
+                                    callback(err);
+                                    return;
+                                }
+                                callback(null, data);
+                            } finally {
+                                globalThis.__currentCallerScope = __prev;
+                                if (typeof __setCallerScope === 'function') __setCallerScope(__prev);
                             }
-                            callback(null, data);
                         }, 0);
                     };
                 }
@@ -1677,11 +1786,21 @@ pub fn inject_require(
                 }
 
                 function reverse(ip, callback) {
+                    var __scope = (typeof globalThis.__currentCallerScope === 'string')
+                        ? globalThis.__currentCallerScope : '.';
                     setTimeout(function() {
-                        var raw = __dnsQuery(ip, 'PTR');
-                        var data;
-                        try { data = JSON.parse(raw); } catch (e) { callback(mkErr(raw, ip, 'getHostByAddr')); return; }
-                        callback(null, data);
+                        var __prev = globalThis.__currentCallerScope;
+                        globalThis.__currentCallerScope = __scope;
+                        if (typeof __setCallerScope === 'function') __setCallerScope(__scope);
+                        try {
+                            var raw = __dnsQuery(ip, 'PTR');
+                            var data;
+                            try { data = JSON.parse(raw); } catch (e) { callback(mkErr(raw, ip, 'getHostByAddr')); return; }
+                            callback(null, data);
+                        } finally {
+                            globalThis.__currentCallerScope = __prev;
+                            if (typeof __setCallerScope === 'function') __setCallerScope(__prev);
+                        }
                     }, 0);
                 }
 
@@ -3730,7 +3849,7 @@ pub fn inject_require(
                 }
                 self._id = result;
                 self._port = __httpServerPort(result);
-                self._host = hostname;
+                self._host = __httpServerAddress(result) || hostname;
                 self.listening = true;
                 self._pollTimer = setInterval(function() {
                     try {
@@ -3784,10 +3903,25 @@ pub fn inject_require(
             httpServer.prototype.getConnections = function(cb) { cb(null, 0); };
             httpServer.prototype.setTimeout = function(ms, cb) { if (cb) this.once('timeout', cb); return this; };
             httpServer.prototype.keepAliveTimeout = 5000;
-            httpServer.prototype.requestTimeout = 0;
-            httpServer.prototype.headersTimeout = 60000;
-            httpServer.prototype.maxHeadersCount = null;
-            httpServer.prototype.maxConnections = 0;
+            // The native server takes its limits from the firewall config
+            // (header timeout 10 s by default), not from these properties.
+            // Report the real value and say so when code sets one, instead
+            // of silently accepting e.g. a slowloris `headersTimeout` (INFO-F).
+            [['requestTimeout', 0], ['headersTimeout', 10000],
+             ['maxHeadersCount', null], ['maxConnections', 0]].forEach(function(p) {
+                var warned = false;
+                Object.defineProperty(httpServer.prototype, p[0], {
+                    get: function() { return p[1]; },
+                    set: function() {
+                        if (!warned) {
+                            warned = true;
+                            console.warn('3va: http.Server.' + p[0] + ' has no effect; ' +
+                                'connection limits come from the built-in firewall config.');
+                        }
+                    },
+                    configurable: true,
+                });
+            });
             httpServer.prototype.ref = function() { return this; };
             httpServer.prototype.unref = function() { return this; };
             httpServer.prototype.listenOnServerHandler = function(socket) {};
@@ -4559,21 +4693,13 @@ pub fn inject_require(
         // (perms().check(...) in the Rust bindings) need scoping — wrapping
         // every required module would be pure overhead for no benefit, since
         // plain JS/data modules never touch PermissionState.
-        // ssh2/imap/ftp/pop3/irc/webrtc are NOT included here even though
-        // they perform capability-gated native calls: each exposes only a
-        // PascalCase `Client` constructor (`new require('ssh2').Client(...)`),
-        // and the wrapper below deliberately skips PascalCase properties to
-        // avoid breaking `instanceof` — same documented gap as `net.Socket`.
-        // Scoping those would need the constructor itself to stamp the
-        // creator's scope onto the instance and have its methods re-apply
-        // it, not just this require()-boundary wrapper. `mqtt` is included
-        // because it additionally exposes a lowercase `connect` factory
-        // function (mirroring `net.connect`) whose permission check runs
-        // synchronously in the same call, which the wrapper does cover.
-        var __SCOPE_GATED_MODULES = {
-            fs: true, 'fs/promises': true, net: true, tls: true,
-            dgram: true, child_process: true, mqtt: true,
-        };
+        // The set is injected by Rust (`__SCOPE_GATED_MODULES`) so a gated
+        // builtin can never be forgotten here: the list lives next to the
+        // permission checks it gates. ssh2/imap/ftp/pop3/irc are listed but
+        // their exports are PascalCase-only, which the wrapper below
+        // deliberately skips to avoid breaking `instanceof` — same documented
+        // gap as `net.Socket`.
+        var __SCOPE_GATED_MODULES = globalThis.__SCOPE_GATED_MODULES || {};
 
         // Shallow-wraps lowercase-named function properties (heuristic for
         // "plain function", as opposed to a PascalCase constructor/class like
@@ -4770,12 +4896,6 @@ pub fn inject_require(
                 if (depth === 0 && /^\s*\{/.test(rest.slice(i))) return match;
                 return '__importAsync(';
             });
-            if (resolved.indexOf('module-loader/vite') !== -1 || resolved.indexOf('module-runner') !== -1) {
-                __fsWriteFileSync('/tmp/debug_' + resolved.replace(/[^a-zA-Z0-9]/g, '_') + '.js', source);
-            }
-            if (resolved.indexOf('/chunks/config.js') !== -1) {
-                __fsWriteFileSync('/tmp/debug_config_js.js', source.slice(0, 5000));
-            }
             try {
                 // A required file's own `import.meta.url` must be ITS path,
                 // not the entry script's — replace_import_meta() rewrites
