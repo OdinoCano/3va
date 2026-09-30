@@ -83,7 +83,9 @@ impl std::fmt::Display for EvalPhase {
 
 pub fn ensure_v8_initialized() {
     V8_INIT.call_once(|| {
-        let platform = v8::new_default_platform(0, false).make_shared();
+        // 4 background threads (concurrent GC/compilation), Node's default.
+        // 0 meant one per core, all spawned on every start.
+        let platform = v8::new_default_platform(4, false).make_shared();
         v8::V8::initialize_platform(platform.clone());
         v8::V8::initialize();
         let _ = V8_PLATFORM.set(platform);
@@ -1145,25 +1147,6 @@ impl JsEngine {
                 );
             }
 
-            let next_js = self.timer_manager.next_expiry();
-            let next_rust = self.runtime_core.lock().unwrap().next_timer_duration();
-            let wait = match (next_js, next_rust) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
-
-            if builtins::http_server::has_ready(&self.isolate) {
-                // More queued requests than one batch: go straight round.
-            } else if let Some(wait) = wait
-                && wait > std::time::Duration::ZERO
-            {
-                sleep_or_wake(wait.min(std::time::Duration::from_millis(50)), &http_wake).await;
-            } else if wait.is_none() && !builtins::napi::has_pending_native_async() {
-                sleep_or_wake(std::time::Duration::from_millis(1), &http_wake).await;
-            }
-
             // Recomputed every iteration — a listener/child/server_mode that
             // only becomes true partway through the script (e.g. a CLI that
             // spawns a build subprocess after several awaited steps) must
@@ -1181,6 +1164,27 @@ impl JsEngine {
                 || has_child();
             if !still_pending || (!unlimited && iterations >= BOUNDED_MAX_ITERATIONS) {
                 break;
+            }
+
+            // Checked before sleeping: a script with nothing left to do used
+            // to sleep one more tick (1 ms or more) before noticing.
+            let next_js = self.timer_manager.next_expiry();
+            let next_rust = self.runtime_core.lock().unwrap().next_timer_duration();
+            let wait = match (next_js, next_rust) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+
+            if builtins::http_server::has_ready(&self.isolate) {
+                // More queued requests than one batch: go straight round.
+            } else if let Some(wait) = wait
+                && wait > std::time::Duration::ZERO
+            {
+                sleep_or_wake(wait.min(std::time::Duration::from_millis(50)), &http_wake).await;
+            } else if wait.is_none() && !builtins::napi::has_pending_native_async() {
+                sleep_or_wake(std::time::Duration::from_millis(1), &http_wake).await;
             }
         }
 

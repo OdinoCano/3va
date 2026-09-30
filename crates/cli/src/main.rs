@@ -4188,7 +4188,11 @@ fn print_version_with_hash() {
     }
 }
 
-#[tokio::main]
+// 4 workers, like libuv's default pool, instead of one per core: the JS
+// isolate runs on the main thread, workers only drive sockets and parsing,
+// and spawning a thread per core cost ~2.5 ms of every `3va run` on a
+// 32-core machine without making the HTTP server any faster.
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> anyhow::Result<()> {
     let __trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
     let __t_main = std::time::Instant::now();
