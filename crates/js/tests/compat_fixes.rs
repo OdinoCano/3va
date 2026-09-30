@@ -745,3 +745,23 @@ async fn process_resource_usage_values_positive() {
         .unwrap();
     assert_eq!(r, "true,true,true");
 }
+
+// WebAssembly.instantiate() compiles on a V8 background thread and settles
+// through a foreground task; the event loop used to exit before it did, so
+// the promise never resolved.
+#[tokio::test]
+async fn async_webassembly_instantiate_settles() {
+    let mut e = JsEngine::new(Arc::new(vvva_permissions::PermissionState::new()))
+        .await
+        .unwrap();
+    // (module (func (export "f") (result i32) i32.const 42))
+    e.eval(
+        "globalThis.__r = 'pending'; \
+         WebAssembly.instantiate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,5,1,1,102,0,0,10,6,1,4,0,65,42,11])) \
+           .then(r => { globalThis.__r = String(r.instance.exports.f()); }, e => { globalThis.__r = 'error: ' + e; });",
+    )
+    .await
+    .unwrap();
+    e.run_event_loop().await.unwrap();
+    assert_eq!(e.eval_to_string("globalThis.__r").await.unwrap(), "42");
+}

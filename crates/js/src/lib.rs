@@ -83,6 +83,12 @@ impl std::fmt::Display for EvalPhase {
 
 pub fn ensure_v8_initialized() {
     V8_INIT.call_once(|| {
+        // Start the young generation at 2 MB semi-spaces instead of V8's
+        // default 1 MB: bootstrapping the builtins filled the default one
+        // past the minor-GC-task trigger, so every `3va run` ended with an
+        // idle scavenge task (0.4-3.5 ms) run just before exiting. Also
+        // measured faster under HTTP load (fewer early scavenges).
+        v8::V8::set_flags_from_string("--min-semi-space-size=2");
         // 4 background threads (concurrent GC/compilation), Node's default.
         // 0 meant one per core, all spawned on every start.
         let platform = v8::new_default_platform(4, false).make_shared();
@@ -92,14 +98,19 @@ pub fn ensure_v8_initialized() {
     });
 }
 
-/// Runs one ready V8 platform task (foreground or background-completed) for
-/// `isolate`, if any is pending. Deliberately not looped to exhaustion: a
-/// task that reposts more work could otherwise spin this call forever. The
-/// caller (idle()/run_event_loop()) already runs repeatedly, so tasks drain
-/// incrementally across iterations just like timers do.
+/// Runs the V8 platform tasks (foreground or background-completed) ready for
+/// `isolate`, up to a small bound per call. Deliberately not looped to
+/// exhaustion: a task that reposts more work could otherwise spin this call
+/// forever. The caller (idle()/run_event_loop()) already runs repeatedly, so
+/// anything left drains on the next turn, just like timers do.
 fn pump_v8_platform_tasks(isolate: &v8::Isolate) {
     if let Some(platform) = V8_PLATFORM.get() {
-        v8::Platform::pump_message_loop(platform, isolate, false);
+        // A few per turn, not until empty (a task may repost itself).
+        for _ in 0..8 {
+            if !v8::Platform::pump_message_loop(platform, isolate, false) {
+                break;
+            }
+        }
     }
 }
 
@@ -1038,7 +1049,11 @@ impl JsEngine {
             }
         }
 
+        let __t = std::time::Instant::now();
         self.run_event_loop().await?;
+        if std::env::var_os("VVVA_STARTUP_TRACE").is_some() {
+            eprintln!("[startup] eval_file run_event_loop: {:?}", __t.elapsed());
+        }
 
         Ok(())
     }
@@ -1157,9 +1172,14 @@ impl JsEngine {
             // exactly the `3va run .../cli.js -- run-android` bug where the
             // whole process exited cleanly mid-Gradle-build.
             let unlimited = self.server_mode || has_listener() || has_child();
+            // V8's own background work (an async WebAssembly compile) is
+            // pending work too: its result arrives as a foreground task that
+            // resolves the promise. Without this, `WebAssembly.instantiate()`
+            // never settled — the process exited first.
             let still_pending = self.timer_manager.has_pending()
                 || self.runtime_core.lock().unwrap().pending_task_count() > 0
                 || builtins::napi::has_pending_native_async()
+                || self.isolate.has_pending_background_tasks()
                 || has_listener()
                 || has_child();
             if !still_pending || (!unlimited && iterations >= BOUNDED_MAX_ITERATIONS) {
