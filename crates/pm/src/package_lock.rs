@@ -112,6 +112,10 @@ fn parse_v1(content: String) -> anyhow::Result<Lockfile> {
                 dependencies: deps,
                 dev: dep.dev,
                 registry: None,
+                optional: None,
+                os: None,
+                cpu: None,
+                libc: None,
             },
         );
 
@@ -195,6 +199,10 @@ fn parse_v2v3(content: String, _version: u32) -> anyhow::Result<Lockfile> {
                             dependencies: pkg.dependencies.clone(),
                             dev: pkg.dev,
                             registry: None,
+                            optional: None,
+                            os: None,
+                            cpu: None,
+                            libc: None,
                         },
                     );
                 }
@@ -215,6 +223,10 @@ fn parse_v2v3(content: String, _version: u32) -> anyhow::Result<Lockfile> {
                 dependencies: deps,
                 dev: dep.dev,
                 registry: None,
+                optional: None,
+                os: None,
+                cpu: None,
+                libc: None,
             },
         );
     }
