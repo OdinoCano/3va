@@ -608,6 +608,27 @@ fn collect_optional_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)>
     specs
 }
 
+#[cfg(test)]
+mod collect_dep_specs_tests {
+    #[test]
+    fn optional_deps_copied_into_dependencies_are_not_required() {
+        // What npm publishes for a package with per-platform binaries.
+        let meta = serde_json::json!({
+            "dependencies": { "a": "^1.0.0", "@x/bin-darwin-arm64": "1.0.0" },
+            "optionalDependencies": { "@x/bin-darwin-arm64": "1.0.0" },
+            "peerDependencies": { "p": ">=1", "q": "*" },
+            "peerDependenciesMeta": { "q": { "optional": true } }
+        });
+        let mut got = super::collect_dep_specs(&meta);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![("a".into(), "^1.0.0".into()), ("p".into(), ">=1".into())]
+        );
+        assert_eq!(super::collect_optional_dep_specs(&meta).len(), 1);
+    }
+}
+
 fn collect_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)> {
     let mut dep_specs = Vec::new();
     for key in ["dependencies", "peerDependencies"] {
@@ -616,6 +637,14 @@ fn collect_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)> {
                 if key == "peerDependencies"
                     && meta["peerDependenciesMeta"][dep_name]["optional"] == true
                 {
+                    continue;
+                }
+                // npm publish copies optionalDependencies into dependencies
+                // too; those are optional (per-platform prebuilts, mostly) and
+                // are collected by `collect_optional_dep_specs`. Treating them
+                // as required fetched every platform's binary and failed the
+                // install when one didn't download.
+                if key == "dependencies" && meta["optionalDependencies"].get(dep_name).is_some() {
                     continue;
                 }
                 // Transitive names come from the registry and must never be
@@ -1370,6 +1399,45 @@ pub fn manifest_dep_hash(project_root: &Path) -> Option<String> {
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     Some(hex::encode(hasher.finalize()))
+}
+
+/// Hash of everything a manifest install depends on: the dependency fields
+/// of package.json plus the exact bytes of 3va-lock.json when there is one
+/// (a lockfile that changes, e.g. after a pull, means work to do).
+fn install_state_hash(project_root: &Path) -> Option<String> {
+    use crate::fips::{Digest, Sha256};
+    let deps = manifest_dep_hash(project_root)?;
+    let lock = std::fs::read(project_root.join("3va-lock.json")).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(deps.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(&lock);
+    Some(hex::encode(hasher.finalize()))
+}
+
+fn install_state_marker(project_root: &Path) -> PathBuf {
+    project_root.join("node_modules").join(".3va-install-state")
+}
+
+/// True when the last successful manifest install used exactly this
+/// package.json dependency set and lockfile, and every direct dependency is
+/// still present — so `3va install` has nothing to do.
+fn install_is_current(project_root: &Path, direct_deps: &[(String, String)]) -> bool {
+    let Some(current) = install_state_hash(project_root) else {
+        return false;
+    };
+    let Ok(recorded) = std::fs::read_to_string(install_state_marker(project_root)) else {
+        return false;
+    };
+    recorded.trim() == current
+        && direct_deps.iter().all(|(name, _)| {
+            is_valid_package_name(name)
+                && project_root
+                    .join("node_modules")
+                    .join(name)
+                    .join("package.json")
+                    .exists()
+        })
 }
 
 fn install_hash_marker(project_root: &Path) -> PathBuf {
@@ -2128,19 +2196,17 @@ async fn install_from_manifest_opts(
         return Ok(());
     }
 
+    if !strict_lock && install_is_current(project_root, &all_deps) {
+        println!("✓ Already up to date ({} dep(s)).", all_deps.len());
+        return Ok(());
+    }
+
     println!();
     println!("Installing {} dep(s) from manifest...", all_deps.len());
 
     // Install concurrently: each dep gets its own task.
-    let mut set = tokio::task::JoinSet::new();
-    let allow_net_owned: Option<Vec<String>> = allow_net.map(|v| v.to_vec());
-    let root = project_root.to_path_buf();
-
+    let mut specs: Vec<String> = Vec::with_capacity(all_deps.len());
     for (name, version) in all_deps {
-        // A lockfile pin wins over the manifest range, but only when it still
-        // satisfies it: an out-of-date lock must not silently hold a project
-        // back from a range it no longer meets, and the mismatch is reported
-        // instead of being hidden.
         let spec = match lock.as_ref().and_then(|l| l.pin(&name)) {
             Some(pin) if !pin.version.is_empty() => {
                 if installed_version_satisfies(&pin.version, Some(&version)) {
@@ -2156,31 +2222,17 @@ async fn install_from_manifest_opts(
             }
             _ => manifest_spec(&name, &version),
         };
-        let an = allow_net_owned.clone();
-        let r = root.clone();
-        set.spawn(async move {
-            install_with_transitive_opts(&spec, false, an.as_deref(), &r, false, strict_lock).await
-        });
+        specs.push(spec);
     }
 
-    let mut errors = Vec::new();
-    while let Some(res) = set.join_next().await {
-        match res {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => errors.push(e.to_string()),
-            Err(e) => errors.push(format!("task panic: {}", e)),
-        }
-    }
-
-    if !errors.is_empty() {
-        anyhow::bail!(
-            "{} dep(s) failed to install:\n{}",
-            errors.len(),
-            errors.join("\n")
-        );
-    }
+    install_with_transitive_opts(&specs, false, allow_net, project_root, false, strict_lock)
+        .await
+        .map_err(|e| anyhow::anyhow!("install failed:\n{e}"))?;
 
     record_install_hash(project_root);
+    if let Some(state) = install_state_hash(project_root) {
+        let _ = std::fs::write(install_state_marker(project_root), state);
+    }
     println!();
     println!("✓ All dependencies installed.");
     warn_root_lifecycle_not_run(&val);
@@ -2441,7 +2493,7 @@ async fn install_with_transitive(
     update_manifest: bool,
 ) -> anyhow::Result<()> {
     install_with_transitive_opts(
-        root_spec,
+        &[root_spec.to_string()],
         force,
         allow_net,
         project_root,
@@ -2501,8 +2553,14 @@ fn lock_violation(
     }
 }
 
+/// Resolves and installs `root_specs` and everything they depend on as ONE
+/// dependency graph. The roots form the first wave, so a version a root asks
+/// for wins over a looser range deeper in the tree (a peer `>=5.0.0` reuses
+/// the root's `typescript@^5.8.2` instead of pulling 7.x over it). Installing
+/// each root as its own graph, concurrently, let those graphs overwrite each
+/// other's `node_modules/<name>` and race on the same store links.
 async fn install_with_transitive_opts(
-    root_spec: &str,
+    root_specs: &[String],
     force: bool,
     allow_net: Option<&[String]>,
     project_root: &Path,
@@ -2517,7 +2575,10 @@ async fn install_with_transitive_opts(
     // allow_net=None → permission denied; allow_net=Some([]) → allow all (--allow-net=)
     let allowed_host = match allow_net {
         None => {
-            let (pkg_name, _) = parse_package_spec(root_spec)?;
+            let pkg_name = match root_specs.first() {
+                Some(spec) => parse_package_spec(spec)?.0,
+                None => String::from("<package>"),
+            };
             eprintln!();
             eprintln!("✗ Network access denied.");
             eprintln!();
@@ -2607,8 +2668,13 @@ async fn install_with_transitive_opts(
             == Some("hoisted");
 
     // Start with the root package
-    let (root_name, root_requested_ver) = parse_package_spec(root_spec)?;
-    let mut current_wave: Vec<WaveNode> = vec![WaveNode::required(&root_name, root_requested_ver)];
+    let mut root_names: HashSet<String> = HashSet::new();
+    let mut current_wave: Vec<WaveNode> = Vec::new();
+    for spec in root_specs {
+        let (name, requested) = parse_package_spec(spec)?;
+        current_wave.push(WaveNode::required(&name, requested));
+        root_names.insert(name);
+    }
 
     println!();
     println!("  Resolving dependency graph...");
@@ -2875,7 +2941,7 @@ async fn install_with_transitive_opts(
     let to_install: Vec<(String, String, String, Option<String>)> = resolved
         .iter()
         .filter(|(name, (ver, _, _))| {
-            if force && name.as_str() == root_name.as_str() {
+            if force && root_names.contains(name.as_str()) {
                 return true;
             }
             let dest = project_root.join("node_modules").join(name.as_str());
@@ -3374,6 +3440,14 @@ async fn install_with_transitive_opts(
     if !update_manifest {
         return Ok(());
     }
+    // Only single-package installs (`3va add x`) update the manifest.
+    let [root_spec] = root_specs else {
+        anyhow::bail!(
+            "manifest update needs exactly one package, got {}",
+            root_specs.len()
+        );
+    };
+    let root_spec = root_spec.as_str();
 
     // Delegate manifest update to a lightweight helper using the same logic as before
     // install_package_impl refuses a package that is already present; only in
@@ -4467,36 +4541,15 @@ pub async fn install_workspace(
         );
         println!();
 
-        let allow_net_owned: Option<Vec<String>> = allow_net.map(|v| v.to_vec());
-        let mut set = tokio::task::JoinSet::new();
-
-        for (dep_name, dep_version) in &merged {
-            let spec = manifest_spec(dep_name, dep_version);
-            let an = allow_net_owned.clone();
-            let r = root.to_path_buf();
-            // update_manifest=false for root-level shared deps (each package
-            // manages its own manifest; the root has no package.json of its own
-            // necessarily).
-            set.spawn(async move {
-                install_with_transitive(&spec, false, an.as_deref(), &r, false).await
-            });
-        }
-
-        let mut errors = Vec::new();
-        while let Some(res) = set.join_next().await {
-            match res {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => errors.push(e.to_string()),
-                Err(e) => errors.push(format!("task panic: {}", e)),
-            }
-        }
-        if !errors.is_empty() {
-            anyhow::bail!(
-                "{} dep(s) failed during workspace root install:\n{}",
-                errors.len(),
-                errors.join("\n")
-            );
-        }
+        // One graph for all shared deps (see install_with_transitive_opts);
+        // update_manifest=false: each package manages its own manifest.
+        let specs: Vec<String> = merged
+            .iter()
+            .map(|(dep_name, dep_version)| manifest_spec(dep_name, dep_version))
+            .collect();
+        install_with_transitive_opts(&specs, false, allow_net, root, false, false)
+            .await
+            .map_err(|e| anyhow::anyhow!("workspace root install failed:\n{e}"))?;
     }
 
     // ── Step 2: install each workspace package's own deps locally ─────────────
