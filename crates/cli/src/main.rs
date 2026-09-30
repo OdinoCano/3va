@@ -4383,6 +4383,8 @@ async fn main() -> anyhow::Result<()> {
                 })
             });
 
+            // Set by the JS path: the process exit code, once the run is done.
+            let mut run_exit_code: Option<i32> = None;
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext == "wasm" || ext == "wat" {
                 info!("Executing WebAssembly module...");
@@ -4446,17 +4448,26 @@ async fn main() -> anyhow::Result<()> {
 
                 let __t = std::time::Instant::now();
                 let mut run_result = Ok(());
+                let mut interrupted = false;
                 #[cfg(unix)]
                 tokio::select! {
                     result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
-                    _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
-                    _ = sigterm.recv() => { engine.drain_ws_connections().await; }
+                    _ = tokio::signal::ctrl_c() => { interrupted = true; engine.drain_ws_connections().await; }
+                    _ = sigterm.recv() => { interrupted = true; engine.drain_ws_connections().await; }
                 }
 
                 #[cfg(not(unix))]
                 tokio::select! {
                     result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
-                    _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
+                    _ = tokio::signal::ctrl_c() => { interrupted = true; engine.drain_ws_connections().await; }
+                }
+                // Node's natural end: 'beforeExit' (which may schedule more
+                // work), then 'exit', then process.exitCode as the status.
+                if run_result.is_ok() && !interrupted {
+                    match engine.finish().await {
+                        Ok(code) => run_exit_code = Some(code),
+                        Err(e) => run_result = Err(e),
+                    }
                 }
                 report_denials(&permissions);
                 run_result?;
@@ -4490,6 +4501,9 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => eprintln!("[heap-snapshot] error: {}", e),
                     }
                 }
+                // Exiting right after this (below): tearing down V8's heap
+                // and the isolate only delays the exit.
+                std::mem::forget(engine);
             }
 
             info!("Execution finished.");
@@ -4505,6 +4519,16 @@ async fn main() -> anyhow::Result<()> {
                     );
                 });
                 info!("Audit log written to {:?}", log_path);
+            }
+
+            // Like Node and Deno: once everything is written, end the process
+            // without running destructors (V8 heap teardown, runtime
+            // shutdown) — ~1-2 ms of every `3va run`, for nothing.
+            if let Some(code) = run_exit_code {
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().flush();
+                std::process::exit(code);
             }
         }
         Commands::Install {

@@ -546,6 +546,9 @@ pub struct JsEngine {
     // installed once a package-scoped rule exists (before that the hook
     // itself would return immediately anyway).
     promise_hook_installed: bool,
+    // Whether the last run_event_loop() call found work beyond its first
+    // turn (a `beforeExit` listener that scheduled something). See finish().
+    had_work_after_before_exit: bool,
     // V8 manages its own heap independently of Rust's global allocator, so
     // switching that allocator (e.g. to mimalloc) has zero effect on V8's
     // memory footprint. Left unprompted, V8 grows its heap to whatever
@@ -663,6 +666,7 @@ impl JsEngine {
             last_low_memory_hint: std::time::Instant::now(),
             server_mode: false,
             promise_hook_installed: false,
+            had_work_after_before_exit: false,
             native_ctx: builtins::NativeCtxRegistry::default(),
         };
 
@@ -1060,6 +1064,34 @@ impl JsEngine {
 
     /// Call before eval_file_with_args for long-running servers (3va dev).
     /// Removes the iteration cap so the event loop runs until process.exit() or SIGINT.
+    /// Ends a script run the way Node does once its event loop is empty:
+    /// emits `beforeExit` (running the loop again for as long as listeners
+    /// keep scheduling work), then `exit`, and returns `process.exitCode`.
+    pub async fn finish(&mut self) -> anyhow::Result<i32> {
+        const EMIT_BEFORE_EXIT: &str = "(function () { var p = globalThis.process; \
+            if (!p || typeof p.emit !== 'function' || p._exiting) return 'false'; \
+            if (typeof p.listenerCount === 'function' && p.listenerCount('beforeExit') === 0) return 'false'; \
+            p.emit('beforeExit', p.exitCode | 0); return 'true'; })()";
+        // Bounded like Node's own guard against a listener that always
+        // reschedules: each round needs real new work to continue.
+        for _ in 0..1000 {
+            if self.eval_to_string(EMIT_BEFORE_EXIT).await? != "true" {
+                break;
+            }
+            self.run_event_loop().await?;
+            if !self.had_work_after_before_exit {
+                break;
+            }
+        }
+        let code = self
+            .eval_to_string(
+                "(globalThis.process && typeof process.__emitExit === 'function') \
+                 ? String(process.__emitExit()) : '0'",
+            )
+            .await?;
+        Ok(code.trim().parse().unwrap_or(0))
+    }
+
     pub fn set_server_mode(&mut self, enabled: bool) {
         self.server_mode = enabled;
     }
@@ -1183,6 +1215,8 @@ impl JsEngine {
                 || has_listener()
                 || has_child();
             if !still_pending || (!unlimited && iterations >= BOUNDED_MAX_ITERATIONS) {
+                // More than one turn means something kept the loop alive.
+                self.had_work_after_before_exit = iterations > 1;
                 break;
             }
 

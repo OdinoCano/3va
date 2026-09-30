@@ -1355,6 +1355,24 @@ pub fn inject_process(
             process.getBuiltinModule = function(name) {
                 try { return globalThis.require(name); } catch(e) { return undefined; }
             };
+
+            // Node's exit semantics: process.exit(code) falls back to
+            // process.exitCode, and 'exit' listeners run exactly once, with
+            // the code, before the process ends (natural end: see
+            // JsEngine::finish). The native exit only flushes and exits.
+            var __nativeExit = process.exit;
+            process.__emitExit = function() {
+                var code = process.exitCode | 0;
+                if (!process._exiting) {
+                    process._exiting = true;
+                    if (typeof process.emit === 'function') process.emit('exit', code);
+                }
+                return process.exitCode | 0;
+            };
+            process.exit = function exit(code) {
+                if (code !== undefined && code !== null) process.exitCode = code;
+                __nativeExit(process.__emitExit());
+            };
         }());"#;
         crate::builtins::code_cache::compile_and_run_cached(scope, "process-tail", js_src)?;
     }
