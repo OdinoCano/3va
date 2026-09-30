@@ -7,7 +7,7 @@ use flate2::Compression;
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
 use std::io::{Read, Write};
-use v8::{ContextScope, Function, HandleScope, Script, String};
+use v8::{ContextScope, Function, HandleScope, String};
 
 /// Decompression-bomb guards for the zlib builtins.
 ///
@@ -810,8 +810,7 @@ pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> 
             }
         })();
     "#;
-    let source = String::new(scope, js_code).unwrap();
-    let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
+    let _ = crate::builtins::code_cache::bootstrap_js(scope, "zlib", js_code);
 
     Ok(())
 }

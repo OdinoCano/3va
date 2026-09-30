@@ -5,7 +5,7 @@ use base64::Engine;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use v8::{ContextScope, Function, HandleScope, PinScope, Script, String as V8String};
+use v8::{ContextScope, Function, HandleScope, PinScope, String as V8String};
 use vvva_permissions::{Capability, PermissionState};
 
 thread_local! {
@@ -546,8 +546,7 @@ pub fn inject_sqlite(
             }
         })();
     "#;
-    let source = V8String::new(scope, js_code).unwrap();
-    let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
+    let _ = crate::builtins::code_cache::bootstrap_js(scope, "sqlite", js_code);
 
     Ok(())
 }

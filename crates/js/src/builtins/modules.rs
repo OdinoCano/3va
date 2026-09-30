@@ -256,7 +256,7 @@ pub fn inject_require(
             return lines.join('\n');
         };
     "#;
-    crate::builtins::code_cache::compile_and_run_cached(scope, "require-intro", source_code)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "require-intro", source_code)?;
 
     let read_file_fn = Function::new(
         scope,
@@ -481,11 +481,7 @@ pub fn inject_require(
         .collect::<Vec<_>>()
         .join(",");
     let gated_script = format!("globalThis.__SCOPE_GATED_MODULES = {{{}}};", gated_map);
-    if let Some(script) =
-        v8::Script::compile(scope, V8String::new(scope, &gated_script).unwrap(), None)
-    {
-        let _ = script.run(scope);
-    }
+    let _ = crate::builtins::code_cache::bootstrap_js(scope, "scope-gated-modules", &gated_script);
 
     let require_resolve_fn = Function::new(
         scope,
@@ -4599,7 +4595,7 @@ pub fn inject_require(
         })();
         })();
     "#;
-    crate::builtins::code_cache::compile_and_run_cached(scope, "require-core", js_code)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "require-core", js_code)?;
 
     // ── require() — CommonJS module loader ────────────────────────────────────
     // Built-in modules (fs, process, util, events, ...) are looked up directly
@@ -4948,7 +4944,7 @@ pub fn inject_require(
         }
     })();
     "#;
-    crate::builtins::code_cache::compile_and_run_cached(scope, "require-tail", require_js)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "require-tail", require_js)?;
 
     Ok(())
 }

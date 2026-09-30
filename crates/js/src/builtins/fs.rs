@@ -2218,7 +2218,7 @@ pub fn inject_fs(
         }
     })();
     "#;
-    crate::builtins::code_cache::compile_and_run_cached(scope, "fs", js_src)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "fs", js_src)?;
 
     Ok(())
 }

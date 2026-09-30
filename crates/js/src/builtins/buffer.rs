@@ -164,7 +164,7 @@ if (typeof globalThis.TextDecoder === 'undefined') {
 }
 "#;
 
-    crate::builtins::code_cache::compile_and_run_cached(
+    crate::builtins::code_cache::bootstrap_js(
         scope,
         "text-encoder-decoder",
         text_encoder_decoder_code,
@@ -475,7 +475,7 @@ if (typeof globalThis.TextDecoder === 'undefined') {
 })();
 "#;
 
-    crate::builtins::code_cache::compile_and_run_cached(scope, "buffer", buffer_code)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "buffer", buffer_code)?;
 
     Ok(())
 }

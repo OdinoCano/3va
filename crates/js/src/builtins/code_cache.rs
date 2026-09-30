@@ -16,7 +16,6 @@
 
 use std::hash::{Hash, Hasher};
 use v8::script_compiler::{self, CompileOptions, NoCacheReason};
-use v8::{ContextScope, HandleScope};
 
 fn cache_dir() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
@@ -36,12 +35,65 @@ fn cache_path(name: &str, source: &str) -> Option<std::path::PathBuf> {
     Some(cache_dir()?.join(format!("{name}-{digest:016x}.v8cache")))
 }
 
+/// How engine bootstrap JS runs (see [`bootstrap_js`]). Per thread, like
+/// the isolate that runs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootMode {
+    /// Run every bootstrap script (the normal engine start).
+    Normal,
+    /// Run them and record `(name, source)` in order, to replay later.
+    Record,
+    /// Skip them: the context already contains their effects.
+    NativesOnly,
+}
+
+thread_local! {
+    static BOOT_MODE: std::cell::Cell<BootMode> = const { std::cell::Cell::new(BootMode::Normal) };
+    static RECORDED: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Sets this thread's bootstrap mode and returns the previous one.
+pub fn set_boot_mode(mode: BootMode) -> BootMode {
+    BOOT_MODE.with(|m| m.replace(mode))
+}
+
+/// The scripts recorded under [`BootMode::Record`], in execution order.
+pub fn take_recorded() -> Vec<(String, String)> {
+    RECORDED.with(|r| std::mem::take(&mut *r.borrow_mut()))
+}
+
+/// Runs one piece of engine bootstrap JS. Every script the builtins run
+/// while the engine is created goes through here, so the set can be
+/// recorded and replayed (or skipped) as a unit. Large sources use the
+/// on-disk code cache; small ones just compile.
+pub fn bootstrap_js(scope: &mut v8::PinScope, name: &str, source: &str) -> anyhow::Result<()> {
+    match BOOT_MODE.with(|m| m.get()) {
+        BootMode::NativesOnly => return Ok(()),
+        BootMode::Record => {
+            RECORDED.with(|r| r.borrow_mut().push((name.to_string(), source.to_string())));
+        }
+        BootMode::Normal => {}
+    }
+    if source.len() >= 4096 {
+        return compile_and_run_cached(scope, name, source);
+    }
+    let src = v8::String::new(scope, source)
+        .ok_or_else(|| anyhow::anyhow!("bootstrap source too large: {name}"))?;
+    let script = v8::Script::compile(scope, src, None)
+        .ok_or_else(|| anyhow::anyhow!("compile error in {name}"))?;
+    script
+        .run(scope)
+        .ok_or_else(|| anyhow::anyhow!("execution error in {name}"))?;
+    Ok(())
+}
+
 /// Compiles and runs `source` in `scope`, transparently reading/writing a
 /// per-source-hash code cache under `~/.cache/3va/codecache/`. Falls back to
 /// a plain compile on any cache miss/read/write failure — this is a pure
 /// speed optimization, never a correctness dependency.
 pub fn compile_and_run_cached(
-    scope: &mut ContextScope<HandleScope>,
+    scope: &mut v8::PinScope,
     name: &str,
     source: &str,
 ) -> anyhow::Result<()> {

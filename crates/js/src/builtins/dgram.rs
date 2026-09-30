@@ -7,7 +7,7 @@ use base64::Engine;
 use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex, OnceLock};
-use v8::{ContextScope, Function, HandleScope, Script, String as V8String};
+use v8::{ContextScope, Function, HandleScope, String as V8String};
 
 // Thread-local, not a process-wide static — see the identical fix (and
 // rationale) in fs.rs's FS_PERMISSIONS: a `OnceLock` here only keeps the
@@ -505,8 +505,7 @@ pub fn inject_dgram(
             globalThis.__requireCache['node:dgram'] = dgram;
         })();
     "#;
-    let source = V8String::new(scope, js_code).unwrap();
-    let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
+    let _ = crate::builtins::code_cache::bootstrap_js(scope, "dgram", js_code);
 
     Ok(())
 }

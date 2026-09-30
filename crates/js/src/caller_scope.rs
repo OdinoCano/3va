@@ -258,10 +258,7 @@ pub(crate) fn install_bind_guard(scope: &mut v8::PinScope) {
             },
         });
     })();"#;
-    let source = v8::String::new(scope, src).unwrap();
-    if let Some(script) = v8::Script::compile(scope, source, None) {
-        let _ = script.run(scope);
-    }
+    let _ = crate::builtins::code_cache::bootstrap_js(scope, "bind-guard", src);
 }
 
 #[cfg(test)]

@@ -141,18 +141,10 @@ pub fn inject_all(
 })();
 "#;
 
-    let script = v8::Script::compile(scope, v8::String::new(scope, atob_btoa).unwrap(), None)
-        .ok_or_else(|| anyhow::anyhow!("compile error"))?;
-    let _ = script.run(scope);
+    code_cache::bootstrap_js(scope, "atob-btoa", atob_btoa)?;
 
     let require_cache_init = "globalThis.__requireCache = globalThis.__requireCache || {}; globalThis.__loadedModules = globalThis.__loadedModules || {}; globalThis.__fallbackModules = globalThis.__fallbackModules || {};";
-    let script = v8::Script::compile(
-        scope,
-        v8::String::new(scope, require_cache_init).unwrap(),
-        None,
-    )
-    .ok_or_else(|| anyhow::anyhow!("compile error"))?;
-    let _ = script.run(scope);
+    code_cache::bootstrap_js(scope, "require-cache-init", require_cache_init)?;
 
     t!("buffer", buffer::inject_buffer(scope))?;
     t!(
@@ -161,13 +153,7 @@ pub fn inject_all(
     )?;
 
     let global_this_setup = "globalThis.global = globalThis; globalThis.GLOBAL = globalThis;";
-    let script = v8::Script::compile(
-        scope,
-        v8::String::new(scope, global_this_setup).unwrap(),
-        None,
-    )
-    .ok_or_else(|| anyhow::anyhow!("compile error"))?;
-    let _ = script.run(scope);
+    code_cache::bootstrap_js(scope, "global-this", global_this_setup)?;
 
     t!("web_globals", web_globals::inject_web_globals(scope))?;
     t!("intl", intl::inject_intl(scope))?;
@@ -404,10 +390,7 @@ fn install_lazy_modules(
         }})();"#,
         table = table.join(",")
     );
-    let source = v8::String::new(scope, &src).unwrap();
-    v8::Script::compile(scope, source, None)
-        .and_then(|s| s.run(scope))
-        .ok_or_else(|| anyhow::anyhow!("lazy module setup failed"))?;
+    code_cache::bootstrap_js(scope, "lazy-modules", &src)?;
     Ok(())
 }
 

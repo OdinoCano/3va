@@ -1377,7 +1377,7 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
     })();
     "#;
 
-    crate::builtins::code_cache::compile_and_run_cached(scope, "web-globals", web_globals_code)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "web-globals", web_globals_code)?;
 
     Ok(())
 }

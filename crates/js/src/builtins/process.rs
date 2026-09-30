@@ -661,8 +661,9 @@ pub fn inject_process(
         },
     );
     {
-        let src = v8::String::new(
+        let _ = crate::builtins::code_cache::bootstrap_js(
             scope,
+            "process-head",
             r#"(function() {
                 globalThis.__stdinRead = function() {
                     return new Promise(function(resolve) {
@@ -674,9 +675,7 @@ pub fn inject_process(
                     });
                 };
             })();"#,
-        )
-        .unwrap();
-        let _ = v8::Script::compile(scope, src, None).and_then(|s| s.run(scope));
+        );
     }
 
     // --- process object built via native Rust APIs (no format-string injection risk) ---
@@ -825,9 +824,11 @@ pub fn inject_process(
 
     // exit(): delegate to the native __processExit binding
     {
-        let src = v8::String::new(scope, "globalThis.__processExit = __processExit;").unwrap();
-        let script = v8::Script::compile(scope, src, None).unwrap();
-        let _ = script.run(scope);
+        let _ = crate::builtins::code_cache::bootstrap_js(
+            scope,
+            "process-exit-alias",
+            "globalThis.__processExit = __processExit;",
+        );
     }
     set_fn(
         scope,
@@ -1106,10 +1107,7 @@ pub fn inject_process(
         let key = v8::String::new(scope, "process").unwrap().into();
         globals.set(scope, key, process.into());
         let js_src = "if (globalThis.__requireCache) { globalThis.__requireCache['process'] = globalThis.process; globalThis.__requireCache['node:process'] = globalThis.process; }";
-        let source = v8::String::new(scope, js_src).unwrap();
-        if let Some(script) = v8::Script::compile(scope, source, None) {
-            let _ = script.run(scope);
-        }
+        let _ = crate::builtins::code_cache::bootstrap_js(scope, "process-require-cache", js_src);
     }
 
     // hrtime, nextTick, setImmediate, signal handlers — implemented in JS after process is on globalThis.
@@ -1382,7 +1380,7 @@ pub fn inject_process(
                 __nativeExit(process.__emitExit());
             };
         }());"#;
-        crate::builtins::code_cache::compile_and_run_cached(scope, "process-tail", js_src)?;
+        crate::builtins::code_cache::bootstrap_js(scope, "process-tail", js_src)?;
     }
 
     // localStorage backing — reads/writes ~/.local/share/3va/localStorage.json
