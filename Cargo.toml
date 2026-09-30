@@ -84,6 +84,16 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
+# Local edit-build-measure loop: release optimizations without fat LTO or
+# single-unit codegen, so touching one crate doesn't rebuild and re-link the
+# world. Shipped binaries and published benchmark numbers use `release`.
+#   cargo build --profile release-fast -p vvva_cli
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true
+
 [patch.crates-io]
 inferno   = { path = "vendor/inferno" }
 quick-xml = { path = "vendor/quick-xml" }
