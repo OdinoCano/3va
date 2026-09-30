@@ -153,24 +153,19 @@ impl TimerManager {
         // after a throw (dropping them would silently kill unrelated timers,
         // e.g. a socket's poll loop) and report the first error at the end.
         let mut first_error: Option<String> = None;
+        if expired.is_empty() {
+            return Ok(());
+        }
+        let fire = timer_fire_fn(scope);
+        let recv: v8::Local<v8::Value> = v8::undefined(scope).into();
         for (id, deny_scopes) in expired {
-            // Like Node: a throw from a timer callback goes to
-            // process.on('uncaughtException') if anyone listens, otherwise it
-            // is fatal. It used to be printed by V8 and ignored, so the
-            // process kept going and finally exited 0.
-            let code = format!(
-                "if (typeof __fireTimer === 'function') {{ try {{ __fireTimer({id}); }} catch (e) {{ \
-                 if (typeof process !== 'undefined' && typeof process.listenerCount === 'function' \
-                 && process.listenerCount('uncaughtException') > 0) {{ process.emit('uncaughtException', e, 'uncaughtException'); }} \
-                 else {{ throw e; }} }} }}"
-            );
             v8::tc_scope!(let try_catch, scope);
-            let source = v8::String::new(try_catch, &code).unwrap();
-            let Some(script) = v8::Script::compile(try_catch, source, None) else {
+            let Some(fire) = fire.as_ref().map(|f| v8::Local::new(try_catch, f)) else {
                 continue;
             };
+            let arg: v8::Local<v8::Value> = v8::Number::new(try_catch, id as f64).into();
             let prev_scopes = vvva_permissions::set_inherited_scopes(deny_scopes);
-            let ran = script.run(try_catch).is_some();
+            let ran = fire.call(try_catch, recv, &[arg]).is_some();
             vvva_permissions::set_inherited_scopes(prev_scopes);
             if !ran {
                 let text = try_catch
@@ -186,6 +181,30 @@ impl TimerManager {
             None => Ok(()),
         }
     }
+}
+
+/// The wrapper every timer fires through, compiled once per isolate instead
+/// of formatting and compiling a fresh script for each fire. `__fireTimer` is
+/// still looked up on each call, as before.
+struct TimerFireFn(v8::Global<v8::Function>);
+
+fn timer_fire_fn(scope: &mut ContextScope<HandleScope>) -> Option<v8::Global<v8::Function>> {
+    if let Some(f) = scope.get_slot::<TimerFireFn>() {
+        return Some(f.0.clone());
+    }
+    // Like Node: a throw from a timer callback goes to
+    // process.on('uncaughtException') if anyone listens, otherwise it is
+    // fatal (it used to be printed by V8 and ignored, exiting 0).
+    let src = "(function (id) { if (typeof __fireTimer === 'function') { try { __fireTimer(id); } catch (e) { \
+               if (typeof process !== 'undefined' && typeof process.listenerCount === 'function' \
+               && process.listenerCount('uncaughtException') > 0) { process.emit('uncaughtException', e, 'uncaughtException'); } \
+               else { throw e; } } } })";
+    let source = v8::String::new(scope, src)?;
+    let value = v8::Script::compile(scope, source, None)?.run(scope)?;
+    let f = v8::Local::<v8::Function>::try_from(value).ok()?;
+    let global = v8::Global::new(scope, f);
+    scope.set_slot(TimerFireFn(global.clone()));
+    Some(global)
 }
 
 impl Default for TimerManager {

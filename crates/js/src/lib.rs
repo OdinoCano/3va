@@ -528,6 +528,11 @@ pub struct JsEngine {
     profiler_interval_ms: u32,
     ws_pool: builtins::websocket::WsPool,
     server_mode: bool,
+    // Whether caller_scope's promise hook is installed. Any installed
+    // PromiseHook moves every promise in V8 off its fast path, so it is only
+    // installed once a package-scoped rule exists (before that the hook
+    // itself would return immediately anyway).
+    promise_hook_installed: bool,
     // V8 manages its own heap independently of Rust's global allocator, so
     // switching that allocator (e.g. to mimalloc) has zero effect on V8's
     // memory footprint. Left unprompted, V8 grows its heap to whatever
@@ -536,8 +541,11 @@ pub struct JsEngine {
     // served, indefinitely, under sustained load (see bench/README.md).
     // `low_memory_notification()` is the only thing that tells V8 to
     // actually try to free memory; run_event_loop calls it on a throttle
-    // (LOW_MEMORY_HINT_INTERVAL) so busy periods aren't paused by a full
-    // GC on every single tick.
+    // (LOW_MEMORY_HINT_INTERVAL). While requests are being served it sends
+    // a *moderate* pressure hint instead, which starts incremental marking
+    // rather than a blocking full GC: the full GC stalled every connection
+    // at once and was what pushed HTTP p99 latency past a second. The full
+    // `low_memory_notification()` only runs once the loop is idle.
     last_low_memory_hint: std::time::Instant,
     // Backs the raw pointers handed to V8 `External` callback data (see
     // `builtins::NativeCtxRegistry`) so they're freed when the engine is.
@@ -545,6 +553,18 @@ pub struct JsEngine {
 }
 
 const LOW_MEMORY_HINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn sleep_or_wake(d: std::time::Duration, wake: &Option<Arc<tokio::sync::Notify>>) {
+    match wake {
+        Some(n) => {
+            tokio::select! {
+                _ = tokio::time::sleep(d) => {}
+                _ = n.notified() => {}
+            }
+        }
+        None => tokio::time::sleep(d).await,
+    }
+}
 
 impl Drop for JsEngine {
     fn drop(&mut self) {
@@ -629,6 +649,7 @@ impl JsEngine {
             ws_pool: ws_pool.clone(),
             last_low_memory_hint: std::time::Instant::now(),
             server_mode: false,
+            promise_hook_installed: false,
             native_ctx: builtins::NativeCtxRegistry::default(),
         };
 
@@ -649,7 +670,7 @@ impl JsEngine {
         let profiler = self.profiler.clone();
 
         rejection_tracker::install(&mut self.isolate);
-        caller_scope::install_promise_hook(&mut self.isolate);
+        self.ensure_promise_hook();
         // SAFETY: cleared in Drop, before the isolate is disposed.
         let raw_isolate = unsafe { self.isolate.as_raw_isolate_ptr() };
         let mut handle_scope_storage = Box::pin(v8::HandleScope::new(&mut *self.isolate));
@@ -1026,6 +1047,16 @@ impl JsEngine {
         self.server_mode = enabled;
     }
 
+    /// Installs caller_scope's promise hook the first time package-scoped
+    /// rules are active. Rules are normally set before the engine is
+    /// created; the event loop re-checks in case they are added later.
+    fn ensure_promise_hook(&mut self) {
+        if !self.promise_hook_installed && vvva_permissions::scoped_rules_active() {
+            caller_scope::install_promise_hook(&mut self.isolate);
+            self.promise_hook_installed = true;
+        }
+    }
+
     pub async fn run_event_loop(&mut self) -> anyhow::Result<()> {
         // An open `http.createServer()`/`net.createServer()` listener needs
         // to keep this loop alive indefinitely too, exactly like
@@ -1040,6 +1071,10 @@ impl JsEngine {
         const BOUNDED_MAX_ITERATIONS: usize = 100_000;
         let mut iterations = 0usize;
         let mut last_heartbeat = std::time::Instant::now();
+        let mut busy_since_hint = false;
+        // Woken by HTTP connection tasks as soon as a request is parsed, so
+        // the sleeps below end early instead of waiting out their timeout.
+        let http_wake = builtins::http_server::wake_handle(&self.isolate);
 
         // A do-while, not a while: callers' eval()/eval_to_string() don't
         // perform their own microtask checkpoint, so this loop's body needs
@@ -1049,6 +1084,7 @@ impl JsEngine {
         // is still gated on real pending work, not a hardcoded flag.
         loop {
             iterations += 1;
+            self.ensure_promise_hook();
 
             let tm = self.timer_manager.clone();
             {
@@ -1058,6 +1094,9 @@ impl JsEngine {
                 let context = v8::Local::new(&scope, &context_global);
                 let mut scope = v8::ContextScope::new(&mut scope, context);
                 builtins::timers::TimerManager::fire_pending(&mut scope, tm)?;
+                if builtins::http_server::dispatch_ready(&mut scope)? {
+                    busy_since_hint = true;
+                }
             }
             builtins::napi::drain_async_completions();
             pump_v8_platform_tasks(&self.isolate);
@@ -1065,7 +1104,13 @@ impl JsEngine {
             rejection_tracker::report_pending();
 
             if self.last_low_memory_hint.elapsed() >= LOW_MEMORY_HINT_INTERVAL {
-                self.isolate.low_memory_notification();
+                if busy_since_hint {
+                    self.isolate
+                        .memory_pressure_notification(v8::MemoryPressureLevel::Moderate);
+                } else {
+                    self.isolate.low_memory_notification();
+                }
+                busy_since_hint = false;
                 self.last_low_memory_hint = std::time::Instant::now();
             }
 
@@ -1109,12 +1154,14 @@ impl JsEngine {
                 (None, None) => None,
             };
 
-            if let Some(wait) = wait
+            if builtins::http_server::has_ready(&self.isolate) {
+                // More queued requests than one batch: go straight round.
+            } else if let Some(wait) = wait
                 && wait > std::time::Duration::ZERO
             {
-                tokio::time::sleep(wait.min(std::time::Duration::from_millis(50))).await;
+                sleep_or_wake(wait.min(std::time::Duration::from_millis(50)), &http_wake).await;
             } else if wait.is_none() && !builtins::napi::has_pending_native_async() {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                sleep_or_wake(std::time::Duration::from_millis(1), &http_wake).await;
             }
 
             // Recomputed every iteration — a listener/child/server_mode that

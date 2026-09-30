@@ -34,7 +34,90 @@ pub fn has_active_listeners() -> bool {
 /// Requests that finished parsing, waiting to be picked up by JS, keyed by
 /// server id. Populated by the background accept task spawned in
 /// `__httpListen`; drained by the non-blocking `__httpAcceptPoll`.
-type ReadyQueue = Arc<Mutex<HashMap<u32, std::collections::VecDeque<String>>>>;
+type ReadyQueue = Arc<Mutex<HashMap<u32, std::collections::VecDeque<ReadyRequest>>>>;
+
+/// A parsed request waiting for JS. Handed over as plain values (see
+/// `__httpAcceptPoll`) rather than a JSON string JS would have to re-parse.
+struct ReadyRequest {
+    parsed: ParsedRequest,
+    conn_id: u32,
+    remote: IpAddr,
+}
+
+/// Per-isolate dispatch state (an isolate slot): connection tasks push into
+/// `ready` and signal `wake`; `run_event_loop` waits on `wake` instead of
+/// polling on a timer, then `dispatch_ready` calls each server's JS handler.
+/// Each handler runs with the package deny scopes captured when it was
+/// registered, the same way timers re-apply theirs (VULN-03).
+struct HttpDispatch {
+    ready: ReadyQueue,
+    wake: Arc<tokio::sync::Notify>,
+    handlers: HashMap<u32, (v8::Global<v8::Function>, Vec<String>)>,
+}
+
+/// The notifier `run_event_loop` waits on, if this isolate has an HTTP server
+/// backend.
+pub fn wake_handle(isolate: &v8::Isolate) -> Option<Arc<tokio::sync::Notify>> {
+    isolate.get_slot::<HttpDispatch>().map(|d| d.wake.clone())
+}
+
+/// Whether any server with a JS handler still has requests queued (the
+/// handler takes a bounded batch per call).
+pub fn has_ready(isolate: &v8::Isolate) -> bool {
+    isolate.get_slot::<HttpDispatch>().is_some_and(|d| {
+        let ready = d.ready.lock().unwrap();
+        d.handlers
+            .keys()
+            .any(|id| ready.get(id).is_some_and(|q| !q.is_empty()))
+    })
+}
+
+/// Calls the JS handler of every server with parsed requests waiting.
+/// Returns whether any handler ran.
+pub fn dispatch_ready(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::Result<bool> {
+    let pending: Vec<(v8::Global<v8::Function>, Vec<String>)> = {
+        let Some(d) = scope.get_slot::<HttpDispatch>() else {
+            return Ok(false);
+        };
+        let ready = d.ready.lock().unwrap();
+        d.handlers
+            .iter()
+            .filter(|(id, _)| ready.get(id).is_some_and(|q| !q.is_empty()))
+            .map(|(_, h)| h.clone())
+            .collect()
+    };
+    let ran = !pending.is_empty();
+    let mut first_error: Option<String> = None;
+    // Each handler call takes a batch of up to 64 requests; microtasks run
+    // between batches (so each batch's objects die young), up to 16 rounds
+    // before returning to the event loop so timers still get their turn.
+    for _ in 0..16 {
+        for (handler, deny_scopes) in &pending {
+            v8::tc_scope!(let try_catch, scope);
+            let f = v8::Local::new(try_catch, handler);
+            let recv: v8::Local<v8::Value> = v8::undefined(try_catch).into();
+            let prev = vvva_permissions::set_inherited_scopes(deny_scopes.clone());
+            let ok = f.call(try_catch, recv, &[]).is_some();
+            vvva_permissions::set_inherited_scopes(prev);
+            if !ok {
+                let text = try_catch
+                    .stack_trace()
+                    .or_else(|| try_catch.exception())
+                    .map(|e| e.to_rust_string_lossy(try_catch))
+                    .unwrap_or_else(|| "unknown error".to_string());
+                first_error.get_or_insert(text);
+            }
+        }
+        scope.perform_microtask_checkpoint();
+        if first_error.is_some() || !has_ready(scope) {
+            break;
+        }
+    }
+    match first_error {
+        Some(text) => anyhow::bail!("Uncaught exception: {text}"),
+        None => Ok(ran),
+    }
+}
 
 struct HttpListenCtx {
     perms: Arc<PermissionState>,
@@ -44,6 +127,7 @@ struct HttpListenCtx {
     conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
     conn_nid: Arc<Mutex<u32>>,
     ready: ReadyQueue,
+    wake: Arc<tokio::sync::Notify>,
 }
 
 struct HttpAcceptCtx {
@@ -149,8 +233,22 @@ fn parse_extra_headers(headers_json: &str) -> Vec<(String, String)> {
         .ok()
         .and_then(|v: serde_json::Value| {
             v.as_object().map(|obj| {
+                // Like Node: numbers are stringified and an array value
+                // (e.g. several Set-Cookie) becomes one header line each.
+                // They used to be sent as empty values.
+                let text = |v: &serde_json::Value| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Null => String::new(),
+                    other => other.to_string(),
+                };
                 obj.iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .flat_map(|(k, v)| match v {
+                        serde_json::Value::Array(items) => items
+                            .iter()
+                            .map(|i| (k.clone(), text(i)))
+                            .collect::<Vec<_>>(),
+                        _ => vec![(k.clone(), text(v))],
+                    })
                     .collect()
             })
         })
@@ -548,6 +646,7 @@ async fn handle_connection(
     conn_nid: Arc<Mutex<u32>>,
     fw: Arc<Option<Arc<Firewall>>>,
     ready: ReadyQueue,
+    wake: Arc<tokio::sync::Notify>,
 ) {
     let (read_half, mut writer) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -632,30 +731,6 @@ async fn handle_connection(
             }
         }
 
-        let hdr_pairs: Vec<String> = parsed
-            .headers
-            .iter()
-            .map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)))
-            .collect();
-        let body_str = String::from_utf8_lossy(&parsed.body);
-        let json = format!(
-            "{{\"method\":\"{m}\",\"url\":\"{u}\",\"headers\":{{{h}}},\"body\":\"{b}\",\
-             \"conn_id\":{c},\"remoteAddress\":\"{rip}\"}}",
-            m = json_escape(&parsed.method),
-            u = json_escape(&parsed.path),
-            h = hdr_pairs.join(","),
-            b = json_escape(&body_str),
-            c = conn_id,
-            rip = req_ip,
-        );
-
-        ready
-            .lock()
-            .unwrap()
-            .entry(server_id)
-            .or_default()
-            .push_back(json);
-
         requests_served += 1;
 
         let conn_hdr = parsed
@@ -671,6 +746,18 @@ async fn handle_connection(
             Some(v) => v == "close",
             None => parsed.http10,
         } || requests_served >= max_requests_per_conn;
+
+        ready
+            .lock()
+            .unwrap()
+            .entry(server_id)
+            .or_default()
+            .push_back(ReadyRequest {
+                parsed,
+                conn_id,
+                remote: req_ip,
+            });
+        wake.notify_one();
 
         let resp = match tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx.recv()).await {
             Ok(Some(r)) if r.conn_id == conn_id => r,
@@ -706,6 +793,12 @@ pub fn inject_http_server(
     let next_conn_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(1));
     let fw: Arc<Option<Arc<Firewall>>> = Arc::new(firewall);
     let ready: ReadyQueue = Arc::new(Mutex::new(HashMap::new()));
+    let wake = Arc::new(tokio::sync::Notify::new());
+    scope.set_slot(HttpDispatch {
+        ready: ready.clone(),
+        wake: wake.clone(),
+        handlers: HashMap::new(),
+    });
     let context = scope.get_current_context();
     let global = context.global(scope);
 
@@ -716,6 +809,7 @@ pub fn inject_http_server(
             conns: conns.clone(),
             conn_nid: next_conn_id.clone(),
             ready: ready.clone(),
+            wake: wake.clone(),
             nid: next_server_id.clone(),
             fw: fw.clone(),
         });
@@ -783,6 +877,7 @@ pub fn inject_http_server(
                                 let conn_nid = ctx.conn_nid.clone();
                                 let fw = ctx.fw.clone();
                                 let ready = ctx.ready.clone();
+                                let wake = ctx.wake.clone();
                                 tokio::spawn(async move {
                                     loop {
                                         let (stream, peer_addr) = match listener.accept().await {
@@ -853,6 +948,7 @@ pub fn inject_http_server(
                                         let conn_nid2 = conn_nid.clone();
                                         let fw2 = fw.clone();
                                         let ready2 = ready.clone();
+                                        let wake2 = wake.clone();
                                         tokio::spawn(async move {
                                             handle_connection(
                                                 stream,
@@ -870,6 +966,7 @@ pub fn inject_http_server(
                                                 conn_nid2,
                                                 fw2,
                                                 ready2,
+                                                wake2,
                                             )
                                             .await;
                                         });
@@ -928,9 +1025,26 @@ pub fn inject_http_server(
                     .and_then(|q| q.pop_front());
 
                 match popped {
-                    Some(json) => {
-                        let result_str = V8String::new(scope, &json).unwrap();
-                        rv.set(result_str.into());
+                    // [method, url, connId, remoteAddress, body, [k0, v0, k1, v1, ...]]
+                    Some(r) => {
+                        let p = &r.parsed;
+                        let flat: Vec<v8::Local<v8::Value>> = p
+                            .headers
+                            .iter()
+                            .flat_map(|(k, v)| [k, v])
+                            .map(|x| V8String::new(scope, x).unwrap().into())
+                            .collect();
+                        let headers = v8::Array::new_with_elements(scope, &flat);
+                        let body = String::from_utf8_lossy(&p.body);
+                        let items: [v8::Local<v8::Value>; 6] = [
+                            V8String::new(scope, &p.method).unwrap().into(),
+                            V8String::new(scope, &p.path).unwrap().into(),
+                            v8::Integer::new_from_unsigned(scope, r.conn_id).into(),
+                            V8String::new(scope, &r.remote.to_string()).unwrap().into(),
+                            V8String::new(scope, &body).unwrap().into(),
+                            headers.into(),
+                        ];
+                        rv.set(v8::Array::new_with_elements(scope, &items).into());
                     }
                     None => rv.set(v8::null(scope).into()),
                 }
@@ -1105,6 +1219,38 @@ pub fn inject_http_server(
     }
 
     {
+        // Registers the function `dispatch_ready` calls when requests for
+        // `server_id` are waiting. Scopes are captured here, at listen time.
+        let set_handler_fn = v8::Function::new(
+            scope,
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let server_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let Ok(f) = v8::Local::<v8::Function>::try_from(args.get(1)) else {
+                    let err = js_type_error_with_code(
+                        scope,
+                        "ERR_INVALID_ARG_TYPE",
+                        "handler must be a function",
+                    );
+                    scope.throw_exception(err);
+                    return;
+                };
+                let handler = v8::Global::new(scope, f);
+                let scopes = vvva_permissions::deny_scopes();
+                if let Some(d) = scope.get_slot_mut::<HttpDispatch>() {
+                    d.handlers.insert(server_id, (handler, scopes));
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpSetHandler").unwrap().into(),
+            set_handler_fn.into(),
+        );
+    }
+
+    {
         let servers_ptr = native_ctx.leak(servers.clone());
         let external = v8::External::new(scope, servers_ptr);
         let http_close_fn = v8::Function::builder(
@@ -1117,6 +1263,9 @@ pub fn inject_http_server(
                 let server_id = server_id_arg.uint32_value(scope).unwrap_or(0);
                 if servers.lock().unwrap().remove(&server_id).is_some() {
                     HTTP_ACTIVE_LISTENERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                if let Some(d) = scope.get_slot_mut::<HttpDispatch>() {
+                    d.handlers.remove(&server_id);
                 }
                 rv.set(v8::undefined(scope).into());
             },
