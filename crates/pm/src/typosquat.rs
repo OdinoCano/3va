@@ -161,6 +161,21 @@ mod tests {
     }
 
     #[test]
+    fn legitimate_popular_names_never_warn() {
+        // Real, widely-used packages that sit within TYPOSQUAT_MAX_DISTANCE of
+        // another list entry (preact→react, ms→ws/qs, zod→koa, jose→jest).
+        // They must never be flagged as typosquats of those neighbors.
+        for name in ["zod", "preact", "ms", "jose"] {
+            assert_eq!(
+                check_package_name(name),
+                None,
+                "{name} is a legitimate package and must not warn"
+            );
+            assert!(!warn_if_typosquat(name));
+        }
+    }
+
+    #[test]
     fn classic_typos_are_flagged() {
         let f = check_package_name("reqeust").expect("reqeust must be flagged");
         assert_eq!(f.likely_target, "request");

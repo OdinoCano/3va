@@ -4188,12 +4188,35 @@ fn print_version_with_hash() {
     }
 }
 
+/// Rust's `println!`/`eprintln!` panic when the underlying write fails — most
+/// commonly a broken pipe (`3va --version | head`, a closed terminal, a
+/// dropped SSH session). The console path already writes via `std::io` and
+/// discards such errors; route the remaining panics to a clean silent exit
+/// instead of a backtrace and exit code 101. Every other panic keeps the
+/// default hook.
+fn install_broken_pipe_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or_default();
+        if (msg.contains("stdout") || msg.contains("stderr")) && msg.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
+}
+
 // 4 workers, like libuv's default pool, instead of one per core: the JS
 // isolate runs on the main thread, workers only drive sockets and parsing,
 // and spawning a thread per core cost ~2.5 ms of every `3va run` on a
 // 32-core machine without making the HTTP server any faster.
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> anyhow::Result<()> {
+    install_broken_pipe_panic_hook();
     let __trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
     let __t_main = std::time::Instant::now();
     let raw_args =

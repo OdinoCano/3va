@@ -1153,7 +1153,15 @@ pub fn inject_process(
                 if (_nextTickQueue.length === 0) return;
                 var queue = _nextTickQueue.splice(0);
                 for (var i = 0; i < queue.length; i++) {
-                    try { queue[i].fn.apply(null, queue[i].args); } catch(e) {}
+                    try { queue[i].fn.apply(null, queue[i].args); }
+                    catch (e) {
+                        if (typeof process !== 'undefined' && typeof process.listenerCount === 'function'
+                            && process.listenerCount('uncaughtException') > 0) {
+                            process.emit('uncaughtException', e, 'uncaughtException');
+                        } else {
+                            throw e;
+                        }
+                    }
                 }
                 if (_nextTickQueue.length > 0) globalThis.__drainNextTick();
             };

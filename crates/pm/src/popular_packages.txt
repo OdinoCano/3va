@@ -5,10 +5,12 @@
 request
 express
 react
+preact
 react-dom
 lodash
 axios
 moment
+ms
 jquery
 chalk
 commander
@@ -29,6 +31,7 @@ core-js
 rxjs
 eslint
 jest
+jose
 mocha
 chai
 socket.io
@@ -57,6 +60,7 @@ semver
 glob
 rimraf
 yargs
+zod
 dotenv
 fastify
 koa
