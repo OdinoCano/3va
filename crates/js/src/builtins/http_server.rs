@@ -138,29 +138,43 @@ struct HttpRespondCtx {
     conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
 }
 
-#[cfg(unix)]
-fn bind_listener(addr: &str) -> std::io::Result<std::net::TcpListener> {
-    if std::env::var_os("VVVA_CLUSTER").is_none() {
-        return std::net::TcpListener::bind(addr);
+/// Binds a listening socket like `std::net::TcpListener::bind` (same name
+/// resolution, first address that binds wins) but with a 1024 backlog: std
+/// hardcodes 128, so a burst of more simultaneous connects than that had
+/// SYNs dropped and waited out a 1 s retransmit (Node uses 511).
+pub(crate) fn bind_listener(addr: &str) -> std::io::Result<std::net::TcpListener> {
+    use std::net::ToSocketAddrs;
+    let mut last_err = None;
+    for sockaddr in addr.to_socket_addrs()? {
+        match bind_one(sockaddr) {
+            Ok(l) => return Ok(l),
+            Err(e) => last_err = Some(e),
+        }
     }
-    let sockaddr: std::net::SocketAddr = addr
-        .parse()
-        .map_err(|e| std::io::Error::other(format!("invalid address {addr}: {e}")))?;
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("could not resolve to any addresses: {addr}"),
+        )
+    }))
+}
+
+fn bind_one(sockaddr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(sockaddr),
         socket2::Type::STREAM,
         Some(socket2::Protocol::TCP),
     )?;
+    // What std sets on Unix, so a restarted server can rebind at once.
+    #[cfg(unix)]
     socket.set_reuse_address(true)?;
-    socket.set_reuse_port(true)?;
+    #[cfg(unix)]
+    if std::env::var_os("VVVA_CLUSTER").is_some() {
+        socket.set_reuse_port(true)?;
+    }
     socket.bind(&sockaddr.into())?;
     socket.listen(1024)?;
     Ok(socket.into())
-}
-
-#[cfg(not(unix))]
-fn bind_listener(addr: &str) -> std::io::Result<std::net::TcpListener> {
-    std::net::TcpListener::bind(addr)
 }
 
 struct ConnEntry {

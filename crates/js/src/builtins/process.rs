@@ -1131,6 +1131,7 @@ pub fn inject_process(
             // callbacks are pending (since microtasks alone don't satisfy has_pending()).
             var _nextTickQueue = [];
             var _nextTickKeepalive = false;
+            var _nextTickScheduled = false;
             process.nextTick = function(cb) {
                 if (typeof cb !== 'function') throw new TypeError('callback is not a function');
                 var args = Array.prototype.slice.call(arguments, 1);
@@ -1140,10 +1141,15 @@ pub fn inject_process(
                     // keepalive timer so the event loop doesn't exit before microtasks drain
                     var tid = setTimeout(function() { _nextTickKeepalive = false; }, 0);
                 }
-                // Schedule drain as a microtask (runs before timers and I/O)
-                Promise.resolve().then(function() { globalThis.__drainNextTick(); });
+                // Schedule one drain microtask per batch (runs before timers
+                // and I/O); ticks queued before it runs share it.
+                if (!_nextTickScheduled) {
+                    _nextTickScheduled = true;
+                    Promise.resolve().then(function() { globalThis.__drainNextTick(); });
+                }
             };
             globalThis.__drainNextTick = function() {
+                _nextTickScheduled = false;
                 if (_nextTickQueue.length === 0) return;
                 var queue = _nextTickQueue.splice(0);
                 for (var i = 0; i < queue.length; i++) {
