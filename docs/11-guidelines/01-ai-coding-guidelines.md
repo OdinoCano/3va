@@ -126,7 +126,7 @@ The following methods exist in the require cache but **throw at call time**. The
 | `ftp.Client` | **Real** — `TcpStream`/TLS connect, RFC 959 commands (USER/PASS auth, PASV data channel, LIST/RETR/STOR) |
 | `pop3.Client` | **Real** — `TcpStream`/TLS connect, RFC 1939 line protocol (USER/PASS, LIST/RETR/DELE) |
 | `mqtt.connect()` | **Real** — `TcpStream`/TLS connect, MQTT 3.1.1 binary protocol (QoS 0 only, no keepalive PINGREQ) |
-| `ssh.Client` | **Real** — `russh`/`russh-sftp`, password auth only (no public-key), no host key verification (accepts any server key) |
+| `ssh.Client` | **Real** — `russh`/`russh-sftp`, password auth only (no public-key); host keys verified fail-closed (`hostFingerprint`/`knownHosts`/`hostVerifier`, or loopback / `--allow-insecure`) |
 | `webrtc.RTCPeerConnection` | **Mocked** — API shape only; no real ICE/DTLS/SRTP (requires STUN/TURN servers for P2P) |
 | `worker_threads.Worker` | No `SharedArrayBuffer`/`Atomics` — all data sharing must use `postMessage` |
 | `repl`, `wasi`, `trace_events` | Not implemented; `require()` throws `MODULE_NOT_FOUND` |
