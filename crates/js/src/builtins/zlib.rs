@@ -635,8 +635,11 @@ pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> 
                 return new Uint8Array(buf);
             }
 
-            function makeCallback(rustFn, name) {
+            // `nativeName` is looked up at call time, not captured while
+            // loading, so this module can live in a startup snapshot.
+            function makeCallback(nativeName, name) {
                 return function(buf, opts, cb) {
+                    var rustFn = globalThis[nativeName];
                     if (typeof opts === 'function') { cb = opts; opts = {}; }
                     var data = Array.from(bufToUint8(buf));
                     // rustFn is a plain synchronous native call (no real async
@@ -658,12 +661,12 @@ pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> 
             }
 
             var zlib = {
-                gzip:        makeCallback(__zlibGzip,       'gzip'),
-                gunzip:      makeCallback(__zlibGunzip,     'gunzip'),
-                deflate:     makeCallback(__zlibDeflate,    'deflate'),
-                inflate:     makeCallback(__zlibInflate,    'inflate'),
-                deflateRaw:  makeCallback(__zlibRawDeflate, 'deflateRaw'),
-                inflateRaw:  makeCallback(__zlibRawInflate, 'inflateRaw'),
+                gzip:        makeCallback('__zlibGzip',       'gzip'),
+                gunzip:      makeCallback('__zlibGunzip',     'gunzip'),
+                deflate:     makeCallback('__zlibDeflate',    'deflate'),
+                inflate:     makeCallback('__zlibInflate',    'inflate'),
+                deflateRaw:  makeCallback('__zlibRawDeflate', 'deflateRaw'),
+                inflateRaw:  makeCallback('__zlibRawInflate', 'inflateRaw'),
 
                 gzipSync:       function(buf) { return Buffer.from(__zlibGzipSync(Array.from(bufToUint8(buf)))); },
                 gunzipSync:     function(buf) { return Buffer.from(__zlibGunzipSync(Array.from(bufToUint8(buf)))); },
@@ -671,8 +674,8 @@ pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> 
                 inflateSync:    function(buf) { return Buffer.from(__zlibInflateSync(Array.from(bufToUint8(buf)))); },
                 deflateRawSync: function(buf) { return Buffer.from(__zlibRawDeflateSync(Array.from(bufToUint8(buf)))); },
                 inflateRawSync: function(buf) { return Buffer.from(__zlibRawInflateSync(Array.from(bufToUint8(buf)))); },
-                brotliCompress:     makeCallback(__zlibBrotliCompress, 'brotliCompress'),
-                brotliDecompress:   makeCallback(__zlibBrotliDecompress, 'brotliDecompress'),
+                brotliCompress:     makeCallback('__zlibBrotliCompress', 'brotliCompress'),
+                brotliDecompress:   makeCallback('__zlibBrotliDecompress', 'brotliDecompress'),
                 brotliCompressSync: function(buf) { return Buffer.from(__zlibBrotliCompressSync(Array.from(bufToUint8(buf)))); },
                 brotliDecompressSync: function(buf) { return Buffer.from(__zlibBrotliDecompressSync(Array.from(bufToUint8(buf)))); },
 

@@ -88,6 +88,30 @@ pub fn bootstrap_js(scope: &mut v8::PinScope, name: &str, source: &str) -> anyho
     Ok(())
 }
 
+/// Like [`bootstrap_js`], for a script that must run on every engine start
+/// and never be part of a startup snapshot: one that reads per-process state
+/// (environment, argv) or holds a native function by value. It runs in every
+/// mode, including [`BootMode::NativesOnly`], and is not recorded.
+pub fn bootstrap_js_per_run(
+    scope: &mut v8::PinScope,
+    name: &str,
+    source: &str,
+) -> anyhow::Result<()> {
+    let src = v8::String::new(scope, source)
+        .ok_or_else(|| anyhow::anyhow!("bootstrap source too large: {name}"))?;
+    let script = v8::Script::compile(scope, src, None)
+        .ok_or_else(|| anyhow::anyhow!("compile error in {name}"))?;
+    script
+        .run(scope)
+        .ok_or_else(|| anyhow::anyhow!("execution error in {name}"))?;
+    Ok(())
+}
+
+/// The current thread's bootstrap mode.
+pub fn boot_mode() -> BootMode {
+    BOOT_MODE.with(|m| m.get())
+}
+
 /// Compiles and runs `source` in `scope`, transparently reading/writing a
 /// per-source-hash code cache under `~/.cache/3va/codecache/`. Falls back to
 /// a plain compile on any cache miss/read/write failure — this is a pure

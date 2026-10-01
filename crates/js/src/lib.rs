@@ -10,6 +10,7 @@ pub mod esm;
 pub mod inspector;
 pub mod profiler;
 pub mod rejection_tracker;
+pub mod snapshot;
 pub mod transpiler;
 
 use std::net::SocketAddr;
@@ -636,9 +637,14 @@ impl JsEngine {
         }
 
         let t1 = std::time::Instant::now();
-        let mut isolate = Isolate::new(
-            Isolate::create_params().array_buffer_allocator(shared_array_buffer_allocator()),
-        );
+        let snapshot_blob = snapshot::load();
+        let from_snapshot = snapshot_blob.is_some();
+        let mut params =
+            Isolate::create_params().array_buffer_allocator(shared_array_buffer_allocator());
+        if let Some(blob) = snapshot_blob {
+            params = params.snapshot_blob(blob.into());
+        }
+        let mut isolate = Isolate::new(params);
         if trace {
             eprintln!("[startup] Isolate::new: {:?}", t1.elapsed());
         }
@@ -670,7 +676,7 @@ impl JsEngine {
             native_ctx: builtins::NativeCtxRegistry::default(),
         };
 
-        engine.initialize(permissions, timer_manager, firewall, ws_pool)?;
+        engine.initialize(permissions, timer_manager, firewall, ws_pool, from_snapshot)?;
 
         Ok(engine)
     }
@@ -681,6 +687,7 @@ impl JsEngine {
         timer_manager: Arc<TimerManager>,
         firewall: Option<Arc<Firewall>>,
         ws_pool: builtins::websocket::WsPool,
+        from_snapshot: bool,
     ) -> anyhow::Result<()> {
         let inspector_state = self.inspector.clone();
         let interval_ms = self.profiler_interval_ms;
@@ -692,7 +699,20 @@ impl JsEngine {
         let raw_isolate = unsafe { self.isolate.as_raw_isolate_ptr() };
         let mut handle_scope_storage = Box::pin(v8::HandleScope::new(&mut *self.isolate));
         let mut handle_scope = handle_scope_storage.as_mut().init();
-        let context = v8::Context::new(&handle_scope, Default::default());
+        // The builtins context from the snapshot, when there is one; a clean
+        // context (and the full bootstrap below) otherwise.
+        let snapshot_context = if from_snapshot {
+            v8::Context::from_snapshot(
+                &handle_scope,
+                snapshot::BUILTINS_CONTEXT,
+                Default::default(),
+            )
+        } else {
+            None
+        };
+        let from_snapshot = snapshot_context.is_some();
+        let context =
+            snapshot_context.unwrap_or_else(|| v8::Context::new(&handle_scope, Default::default()));
         self.context = Some(v8::Global::new(&handle_scope, context));
         caller_scope::install(raw_isolate, v8::Global::new(&handle_scope, context));
         let mut scope = v8::ContextScope::new(&mut handle_scope, context);
@@ -706,14 +726,33 @@ impl JsEngine {
         }
 
         let t = std::time::Instant::now();
-        builtins::inject_all(
+        // From a snapshot the context already holds the bootstrap scripts'
+        // effects: install only natives and per-run state. Otherwise run
+        // everything, recording the scripts if this process should build
+        // the snapshot.
+        let recording = !from_snapshot && snapshot::should_record();
+        let mode = if from_snapshot {
+            builtins::code_cache::BootMode::NativesOnly
+        } else if recording {
+            builtins::code_cache::BootMode::Record
+        } else {
+            builtins::code_cache::BootMode::Normal
+        };
+        let previous = builtins::code_cache::set_boot_mode(mode);
+        let injected = builtins::inject_all(
             &mut scope,
             permissions,
             timer_manager,
             firewall,
             ws_pool,
             &mut self.native_ctx,
-        )?;
+        );
+        builtins::code_cache::set_boot_mode(previous);
+        let recorded = builtins::code_cache::take_recorded();
+        injected?;
+        if recording {
+            snapshot::build_in_background(recorded);
+        }
         if trace {
             eprintln!("[startup] builtins::inject_all: {:?}", t.elapsed());
         }
@@ -1204,14 +1243,13 @@ impl JsEngine {
             // exactly the `3va run .../cli.js -- run-android` bug where the
             // whole process exited cleanly mid-Gradle-build.
             let unlimited = self.server_mode || has_listener() || has_child();
-            // V8's own background work (an async WebAssembly compile) is
-            // pending work too: its result arrives as a foreground task that
-            // resolves the promise. Without this, `WebAssembly.instantiate()`
-            // never settled — the process exited first.
+            // Not `has_pending_background_tasks()`: it counts any V8 job
+            // (concurrent GC, compiles) and kept processes alive polling for
+            // as long as one lingered. Async WebAssembly compiles keep the
+            // loop alive with a timer instead (see timers.rs).
             let still_pending = self.timer_manager.has_pending()
                 || self.runtime_core.lock().unwrap().pending_task_count() > 0
                 || builtins::napi::has_pending_native_async()
-                || self.isolate.has_pending_background_tasks()
                 || has_listener()
                 || has_child();
             if !still_pending || (!unlimited && iterations >= BOUNDED_MAX_ITERATIONS) {

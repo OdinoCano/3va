@@ -419,6 +419,25 @@ pub fn inject_timers(
         globalThis.queueMicrotask = function(fn) {
             Promise.resolve().then(fn);
         };
+
+        // Async WebAssembly compiles run on a V8 background thread and settle
+        // through a task the event loop pumps; a 1 ms interval keeps the loop
+        // alive (and pumping) until the promise settles, instead of the
+        // process exiting first.
+        (function() {
+            var W = globalThis.WebAssembly;
+            if (!W) return;
+            ['compile', 'instantiate', 'compileStreaming', 'instantiateStreaming'].forEach(function(k) {
+                var orig = W[k];
+                if (typeof orig !== 'function') return;
+                W[k] = function() {
+                    var keepAlive = setInterval(function() {}, 1);
+                    var p;
+                    try { p = orig.apply(W, arguments); } catch (e) { clearInterval(keepAlive); throw e; }
+                    return Promise.resolve(p).finally(function() { clearInterval(keepAlive); });
+                };
+            });
+        })();
     "#;
 
     crate::builtins::code_cache::bootstrap_js(scope, "timers", js_polyfill)?;

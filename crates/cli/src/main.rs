@@ -4450,6 +4450,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             } else {
                 let __t = std::time::Instant::now();
+                // Start from the V8 startup snapshot (built on first use).
+                vvva_js::snapshot::enable();
                 let mut engine = vvva_js::JsEngine::new_with_firewall_and_inspector(
                     permissions.clone(),
                     firewall,
@@ -4548,6 +4550,9 @@ async fn main() -> anyhow::Result<()> {
             // without running destructors (V8 heap teardown, runtime
             // shutdown) — ~1-2 ms of every `3va run`, for nothing.
             if let Some(code) = run_exit_code {
+                // First run only: let the snapshot build finish so it exists
+                // for the next one.
+                vvva_js::snapshot::wait_for_build();
                 use std::io::Write as _;
                 let _ = std::io::stdout().flush();
                 let _ = std::io::stderr().flush();

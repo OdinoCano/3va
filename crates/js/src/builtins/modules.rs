@@ -2705,7 +2705,13 @@ pub fn inject_require(
                 // calls .resume(), matching Node's flowing-mode semantics.
                 var stdin = new Readable();
                 stdin.fd = 0;
-                stdin.isTTY = typeof __isatty === 'function' ? __isatty(0) : false;
+                // Asked when read, not while loading: whether stdin is a
+                // terminal belongs to this run (startup snapshot).
+                Object.defineProperty(stdin, 'isTTY', {
+                    configurable: true, enumerable: true,
+                    get: function() { return typeof __isatty === 'function' ? __isatty(0) : false; },
+                    set: function(v) { Object.defineProperty(stdin, 'isTTY', { value: v, writable: true, configurable: true, enumerable: true }); },
+                });
                 stdin._paused = true;
                 stdin._ended = false;
                 stdin._encoding = null;
@@ -4919,6 +4925,14 @@ pub fn inject_require(
             return requireFrom(specifier, globalThis.__dirname || undefined);
         });
 
+    })();
+    "#;
+    crate::builtins::code_cache::bootstrap_js(scope, "require-tail", require_js)?;
+    // Per run: whether this process is a forked child is in its environment.
+    crate::builtins::code_cache::bootstrap_js_per_run(
+        scope,
+        "fork-ipc",
+        r#"(function() {
         // When this process is a forked child (child_process.fork or cluster.fork),
         // set up process.send and stdin IPC polling immediately — not gated on
         // require('cluster'), so child scripts that never require cluster still get IPC.
@@ -4942,9 +4956,8 @@ pub fn inject_require(
                 } catch(e) {}
             }, 10);
         }
-    })();
-    "#;
-    crate::builtins::code_cache::bootstrap_js(scope, "require-tail", require_js)?;
+    })();"#,
+    )?;
 
     Ok(())
 }

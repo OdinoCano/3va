@@ -679,7 +679,21 @@ pub fn inject_process(
     }
 
     // --- process object built via native Rust APIs (no format-string injection risk) ---
-    let process = v8::Object::new(scope);
+    // Starting from a snapshot, `process` already exists, decorated by the
+    // bootstrap JS: update that object in place with this run's natives and
+    // per-process values, and leave alone what the JS wrapped (exit,
+    // stdout/stderr, env, memoryUsage/cpuUsage).
+    let natives_only = crate::builtins::code_cache::boot_mode()
+        == crate::builtins::code_cache::BootMode::NativesOnly;
+    let existing_process = if natives_only {
+        let key = v8::String::new(scope, "process").unwrap();
+        globals
+            .get(scope, key.into())
+            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+    } else {
+        None
+    };
+    let process = existing_process.unwrap_or_else(|| v8::Object::new(scope));
 
     // Strings and numbers
     set_str(scope, process, "version", "v22.12.0");
@@ -821,26 +835,32 @@ pub fn inject_process(
         let key = v8::String::new(scope, "argv").unwrap().into();
         process.set(scope, key, argv.into());
     }
+    if natives_only {
+        // The bootstrap JS derives execPath from argv[0] while loading.
+        set_str(scope, process, "execPath", &bin);
+    }
 
     // exit(): delegate to the native __processExit binding
     {
-        let _ = crate::builtins::code_cache::bootstrap_js(
+        let _ = crate::builtins::code_cache::bootstrap_js_per_run(
             scope,
             "process-exit-alias",
             "globalThis.__processExit = __processExit;",
         );
     }
-    set_fn(
-        scope,
-        process,
-        "exit",
-        |_scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
-            let code = args.get(0).int32_value(_scope).unwrap_or(0);
-            let _ = std::io::Write::flush(&mut std::io::stdout());
-            let _ = std::io::Write::flush(&mut std::io::stderr());
-            std::process::exit(code);
-        },
-    );
+    if !natives_only {
+        set_fn(
+            scope,
+            process,
+            "exit",
+            |_scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+                let code = args.get(0).int32_value(_scope).unwrap_or(0);
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+                std::process::exit(code);
+            },
+        );
+    }
 
     // cwd(): return the process working directory (dynamic, reflects chdir)
     set_fn(
@@ -909,7 +929,7 @@ pub fn inject_process(
         let val = v8::Boolean::new(scope, false).into();
         stdout_plain.set(scope, key, val);
     }
-    {
+    if !natives_only {
         let key = v8::String::new(scope, "stdout").unwrap().into();
         process.set(scope, key, stdout_plain.into());
     }
@@ -933,13 +953,23 @@ pub fn inject_process(
         let val = v8::Boolean::new(scope, false).into();
         stderr_plain.set(scope, key, val);
     }
-    {
+    if !natives_only {
         let key = v8::String::new(scope, "stderr").unwrap().into();
         process.set(scope, key, stderr_plain.into());
     }
 
     // env: expose variables that pass permission check (replaced by Proxy in modules.rs)
-    let env_obj = v8::Object::new(scope);
+    // From a snapshot, fill the object the Proxy already wraps
+    // (globalThis.__vvva_env_raw__) instead of replacing process.env.
+    let env_target = if natives_only {
+        let key = v8::String::new(scope, "__vvva_env_raw__").unwrap();
+        globals
+            .get(scope, key.into())
+            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+    } else {
+        None
+    };
+    let env_obj = env_target.unwrap_or_else(|| v8::Object::new(scope));
     for (key, val) in std::env::vars() {
         // check_quiet: building process.env probes every variable; recording
         // each one would drown `3va permissions learn` in the whole host
@@ -949,7 +979,7 @@ pub fn inject_process(
             set_str(scope, env_obj, &key, &val);
         }
     }
-    {
+    if env_target.is_none() {
         let key = v8::String::new(scope, "env").unwrap().into();
         process.set(scope, key, env_obj.into());
     }
@@ -983,14 +1013,16 @@ pub fn inject_process(
     );
 
     // memoryUsage(): real RSS on Linux
-    set_fn(
-        scope,
-        process,
-        "memoryUsage",
+    // The JS wrappers (process-tail) call these globals by name; the
+    // process.* properties are the unwrapped defaults they replace.
+    let memory_usage =
         |scope: &mut PinScope, _args: FunctionCallbackArguments, mut rv: ReturnValue| {
             rv.set(v8::Integer::new_from_unsigned(scope, rss_bytes() as u32).into());
-        },
-    );
+        };
+    set_fn(scope, globals, "__processMemoryUsage", memory_usage);
+    if !natives_only {
+        set_fn(scope, process, "memoryUsage", memory_usage);
+    }
 
     // Native helpers for os module
     set_fn(
@@ -1089,10 +1121,7 @@ pub fn inject_process(
     );
 
     // cpuUsage(): returns "user,sys" microseconds — JS wrapper parses to {user, system}
-    set_fn(
-        scope,
-        process,
-        "cpuUsage",
+    let cpu_usage =
         |scope: &mut PinScope, _args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let (user, sys) = cpu_times_us();
             rv.set(
@@ -1100,8 +1129,11 @@ pub fn inject_process(
                     .unwrap()
                     .into(),
             );
-        },
-    );
+        };
+    set_fn(scope, globals, "__processCpuUsage", cpu_usage);
+    if !natives_only {
+        set_fn(scope, process, "cpuUsage", cpu_usage);
+    }
 
     {
         let key = v8::String::new(scope, "process").unwrap().into();
@@ -1113,9 +1145,10 @@ pub fn inject_process(
     // hrtime, nextTick, setImmediate, signal handlers — implemented in JS after process is on globalThis.
     {
         let js_src = r#"(function () {
-            var _epoch = Date.now();
+            // Process start time comes from __processStartMs, set per run
+            // (never captured while loading: startup snapshot).
             process.hrtime = function (prev) {
-                var ms = Date.now() - _epoch;
+                var ms = Date.now() - (globalThis.__processStartMs || 0);
                 var s  = Math.floor(ms / 1000);
                 var ns = (ms % 1000) * 1000000;
                 if (prev) { s -= prev[0]; ns -= prev[1]; if (ns < 0) { s -= 1; ns += 1000000000; } }
@@ -1239,19 +1272,20 @@ pub fn inject_process(
             };
 
             // Wrap native memoryUsage to return a proper object
-            var _nativeMemUsage = process.memoryUsage;
+            // Natives are looked up by name at call time (not captured while
+            // loading), so this script can live in a startup snapshot.
+            var _nativeMemUsage = function() { return __processMemoryUsage(); };
             process.memoryUsage = function() {
-                var rss = typeof _nativeMemUsage === 'function' ? _nativeMemUsage() : 0;
+                var rss = typeof __processMemoryUsage === 'function' ? _nativeMemUsage() : 0;
                 return { rss: rss, heapTotal: rss, heapUsed: Math.floor(rss * 0.7), external: 0, arrayBuffers: 0 };
             };
             process.memoryUsage.rss = function() {
-                return typeof _nativeMemUsage === 'function' ? _nativeMemUsage() : 0;
+                return typeof __processMemoryUsage === 'function' ? _nativeMemUsage() : 0;
             };
 
             // Wrap native cpuUsage to return a proper object
-            var _nativeCpuUsage = process.cpuUsage;
             process.cpuUsage = function(prev) {
-                var raw = typeof _nativeCpuUsage === 'function' ? _nativeCpuUsage() : '0,0';
+                var raw = typeof __processCpuUsage === 'function' ? __processCpuUsage() : '0,0';
                 var parts = typeof raw === 'string' ? raw.split(',') : ['0','0'];
                 var user = parseInt(parts[0]) || 0;
                 var sys  = parseInt(parts[1]) || 0;
@@ -1260,8 +1294,7 @@ pub fn inject_process(
             };
 
             // process.uptime(): seconds since process started
-            var _startMs = Date.now();
-            process.uptime = function() { return (Date.now() - _startMs) / 1000; };
+            process.uptime = function() { return (Date.now() - (globalThis.__processStartMs || 0)) / 1000; };
 
             // process.resourceUsage() — Node 12.6+ getrusage()-style object
             process.resourceUsage = function() {
@@ -1366,7 +1399,6 @@ pub fn inject_process(
             // process.exitCode, and 'exit' listeners run exactly once, with
             // the code, before the process ends (natural end: see
             // JsEngine::finish). The native exit only flushes and exits.
-            var __nativeExit = process.exit;
             process.__emitExit = function() {
                 var code = process.exitCode | 0;
                 if (!process._exiting) {
@@ -1377,9 +1409,14 @@ pub fn inject_process(
             };
             process.exit = function exit(code) {
                 if (code !== undefined && code !== null) process.exitCode = code;
-                __nativeExit(process.__emitExit());
+                __processExit(process.__emitExit());
             };
         }());"#;
+        crate::builtins::code_cache::bootstrap_js_per_run(
+            scope,
+            "process-start",
+            "globalThis.__processStartMs = Date.now();",
+        )?;
         crate::builtins::code_cache::bootstrap_js(scope, "process-tail", js_src)?;
     }
 

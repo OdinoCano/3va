@@ -390,7 +390,7 @@ fn install_lazy_modules(
         }})();"#,
         table = table.join(",")
     );
-    code_cache::bootstrap_js(scope, "lazy-modules", &src)?;
+    code_cache::bootstrap_js_per_run(scope, "lazy-modules", &src)?;
     Ok(())
 }
 

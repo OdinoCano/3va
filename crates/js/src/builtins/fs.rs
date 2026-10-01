@@ -2180,20 +2180,6 @@ pub fn inject_fs(
         fs.ReadStream = ReadStream;
         fs.WriteStream = WriteStream;
 
-        // ponytail: only start fsTrace interval if explicitly enabled — unconditional
-        // setInterval keeps the event loop alive forever even when idle.
-        if (process.env && process.env['3VA_FS_TRACE']) {
-            process.__fsTrace = [];
-            try {
-                setInterval(function() {
-                    if (process.__fsTrace && process.__fsTrace.length) {
-                        console.error('[fsTrace] ' + process.__fsTrace.slice(-8).join(' | '));
-                        process.__fsTrace.length = 0;
-                    }
-                }, 5000);
-            } catch(e) {}
-        }
-
         // Build fs.promises from fs async methods
         ['readFile','writeFile','appendFile','readdir','mkdir','rm','rmdir','unlink','rename',
          'copyFile','chmod','symlink','readlink','stat','lstat','realpath','access'].forEach(function(fn) {
@@ -2219,6 +2205,24 @@ pub fn inject_fs(
     })();
     "#;
     crate::builtins::code_cache::bootstrap_js(scope, "fs", js_src)?;
+    // ponytail: only start fsTrace interval if explicitly enabled — unconditional
+    // setInterval keeps the event loop alive forever even when idle. Per run:
+    // it reads this process's environment.
+    crate::builtins::code_cache::bootstrap_js_per_run(
+        scope,
+        "fs-trace",
+        r#"if (process.env && process.env['3VA_FS_TRACE']) {
+            process.__fsTrace = [];
+            try {
+                setInterval(function() {
+                    if (process.__fsTrace && process.__fsTrace.length) {
+                        console.error('[fsTrace] ' + process.__fsTrace.slice(-8).join(' | '));
+                        process.__fsTrace.length = 0;
+                    }
+                }, 5000);
+            } catch(e) {}
+        }"#,
+    )?;
 
     Ok(())
 }
