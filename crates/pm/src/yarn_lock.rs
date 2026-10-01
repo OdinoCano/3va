@@ -286,6 +286,10 @@ pub fn load_from_yarn_lock(path: &std::path::Path) -> anyhow::Result<Option<Lock
                 dependencies: deps,
                 dev: None,
                 registry: None,
+                optional: None,
+                os: None,
+                cpu: None,
+                libc: None,
             }
         });
     }

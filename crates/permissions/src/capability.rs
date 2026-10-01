@@ -359,7 +359,7 @@ impl PermissionState {
         !scoped.is_empty()
             && scope::deny_scopes()
                 .iter()
-                .any(|s| scoped.get(s).is_some_and(&hit))
+                .any(|s| scoped.get(s).is_some_and(hit))
     }
 
     pub fn check_bind(&self, host: &str) -> bool {

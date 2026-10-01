@@ -131,6 +131,6 @@ const INTL_SHIM: &str = r#"(function () {
 "#;
 
 pub fn inject_intl(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> {
-    crate::builtins::code_cache::compile_and_run_cached(scope, "intl-shim", INTL_SHIM)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "intl-shim", INTL_SHIM)?;
     Ok(())
 }

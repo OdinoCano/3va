@@ -388,9 +388,7 @@ pub fn inject_websocket(
     })();
     "#;
 
-    let source = v8::String::new(scope, js_code).unwrap();
-    let script = Script::compile(scope, source, None).unwrap();
-    let _ = script.run(scope);
+    let _ = crate::builtins::code_cache::bootstrap_js(scope, "websocket", js_code);
 
     Ok(())
 }

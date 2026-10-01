@@ -141,18 +141,10 @@ pub fn inject_all(
 })();
 "#;
 
-    let script = v8::Script::compile(scope, v8::String::new(scope, atob_btoa).unwrap(), None)
-        .ok_or_else(|| anyhow::anyhow!("compile error"))?;
-    let _ = script.run(scope);
+    code_cache::bootstrap_js(scope, "atob-btoa", atob_btoa)?;
 
     let require_cache_init = "globalThis.__requireCache = globalThis.__requireCache || {}; globalThis.__loadedModules = globalThis.__loadedModules || {}; globalThis.__fallbackModules = globalThis.__fallbackModules || {};";
-    let script = v8::Script::compile(
-        scope,
-        v8::String::new(scope, require_cache_init).unwrap(),
-        None,
-    )
-    .ok_or_else(|| anyhow::anyhow!("compile error"))?;
-    let _ = script.run(scope);
+    code_cache::bootstrap_js(scope, "require-cache-init", require_cache_init)?;
 
     t!("buffer", buffer::inject_buffer(scope))?;
     t!(
@@ -161,13 +153,7 @@ pub fn inject_all(
     )?;
 
     let global_this_setup = "globalThis.global = globalThis; globalThis.GLOBAL = globalThis;";
-    let script = v8::Script::compile(
-        scope,
-        v8::String::new(scope, global_this_setup).unwrap(),
-        None,
-    )
-    .ok_or_else(|| anyhow::anyhow!("compile error"))?;
-    let _ = script.run(scope);
+    code_cache::bootstrap_js(scope, "global-this", global_this_setup)?;
 
     t!("web_globals", web_globals::inject_web_globals(scope))?;
     t!("intl", intl::inject_intl(scope))?;
@@ -212,31 +198,238 @@ pub fn inject_all(
         "event_source",
         event_source::inject_event_source(scope, permissions.clone())
     );
-    t!("imap", imap::inject_imap(scope, permissions.clone()));
-    t!(
-        "irc",
-        irc::inject_irc(scope, permissions.clone(), native_ctx)
-    );
-    t!("ftp", ftp::inject_ftp(scope, permissions.clone()));
-    t!(
-        "pop3",
-        pop3::inject_pop3(scope, permissions.clone(), native_ctx)
-    );
-    t!("mqtt", mqtt::inject_mqtt(scope, permissions.clone()));
-    t!("ssh", ssh::inject_ssh(scope, permissions.clone()));
-    t!("webrtc", webrtc::inject_webrtc(scope, permissions.clone()));
-
-    // SSH (russh on ring, curve25519/chacha) and WebRTC (DTLS/SRTP in pure
-    // Rust) cannot run on the FIPS module, so the fips build refuses them.
-    if tls::FIPS {
-        let deny = "globalThis.__sshCreate = globalThis.__rtcCreatePeerConnection = function () { \
-            throw new Error('ERR_CRYPTO_FIPS_FORCED: SSH and WebRTC are unavailable in the FIPS build of 3va'); };";
-        let script = v8::Script::compile(scope, v8::String::new(scope, deny).unwrap(), None)
-            .ok_or_else(|| anyhow::anyhow!("compile error"))?;
-        let _ = script.run(scope);
-    }
+    // Protocol clients most scripts never touch are installed on first use
+    // (require() or their global), not on every start.
+    t!("lazy", install_lazy_modules(scope, permissions.clone())?);
 
     Ok(())
+}
+
+/// Modules installed on first access instead of at startup: name, the
+/// `__requireCache` keys, and the globals (public and the module's own
+/// native `__*` functions) that trigger it.
+const LAZY_MODULES: &[(&str, &[&str], &[&str])] = &[
+    (
+        "imap",
+        &["imap", "node:imap"],
+        &[
+            "imap",
+            "__imapAddFlags",
+            "__imapAppend",
+            "__imapCapability",
+            "__imapClose",
+            "__imapConnect",
+            "__imapCopy",
+            "__imapCreate",
+            "__imapCreateMailbox",
+            "__imapDeleteMailbox",
+            "__imapDisconnect",
+            "__imapExpunge",
+            "__imapFetch",
+            "__imapFetchBody",
+            "__imapListMailboxes",
+            "__imapLogin",
+            "__imapLogout",
+            "__imapMove",
+            "__imapRemoveFlags",
+            "__imapRenameMailbox",
+            "__imapSearch",
+            "__imapSelect",
+            "__imapSetFlags",
+            "__imapStatus",
+            "__imapSubscribe",
+        ],
+    ),
+    (
+        "irc",
+        &["irc", "node:irc"],
+        &[
+            "irc",
+            "__ircClose",
+            "__ircConnect",
+            "__ircCreate",
+            "__ircRead",
+            "__ircSend",
+        ],
+    ),
+    (
+        "ftp",
+        &["ftp", "node:ftp"],
+        &[
+            "ftp",
+            "__ftpClose",
+            "__ftpConnect",
+            "__ftpCreate",
+            "__ftpDataClose",
+            "__ftpDataConnect",
+            "__ftpDataRead",
+            "__ftpDataWrite",
+            "__ftpRead",
+            "__ftpSend",
+        ],
+    ),
+    (
+        "pop3",
+        &["pop3", "node:pop3"],
+        &[
+            "pop3",
+            "__pop3Close",
+            "__pop3Connect",
+            "__pop3Create",
+            "__pop3Read",
+            "__pop3Send",
+        ],
+    ),
+    (
+        "mqtt",
+        &["mqtt", "node:mqtt"],
+        &[
+            "mqtt",
+            "__mqttClose",
+            "__mqttConnect",
+            "__mqttCreate",
+            "__mqttDisconnect",
+            "__mqttIsConnected",
+            "__mqttRead",
+            "__mqttSend",
+        ],
+    ),
+    (
+        "ssh",
+        &["ssh2", "node:ssh2"],
+        &[
+            "ssh",
+            "__sftpMkdir",
+            "__sftpReadFile",
+            "__sftpReaddir",
+            "__sftpRename",
+            "__sftpRmdir",
+            "__sftpStat",
+            "__sftpUnlink",
+            "__sftpWriteFile",
+            "__sshClose",
+            "__sshConnect",
+            "__sshCreate",
+            "__sshExec",
+            "__sshOpPoll",
+            "__sshSftp",
+        ],
+    ),
+    (
+        "webrtc",
+        &["webrtc"],
+        &[
+            "RTCPeerConnection",
+            "RTCSessionDescription",
+            "RTCIceCandidate",
+            "RTCDataChannel",
+            "__rtcAddIceCandidate",
+            "__rtcClosePeerConnection",
+            "__rtcCreateAnswer",
+            "__rtcCreateDataChannel",
+            "__rtcCreateOffer",
+            "__rtcCreatePeerConnection",
+            "__rtcDataChannelClose",
+            "__rtcDataChannelSend",
+            "__rtcGetConnectionState",
+            "__rtcSetLocalDescription",
+            "__rtcSetRemoteDescription",
+        ],
+    ),
+];
+
+/// Isolate slot: what a lazily installed module's injector needs.
+struct LazyModules {
+    permissions: Arc<PermissionState>,
+    native_ctx: NativeCtxRegistry,
+}
+
+fn install_lazy_modules(
+    scope: &mut ContextScope<HandleScope>,
+    permissions: Arc<PermissionState>,
+) -> anyhow::Result<()> {
+    scope.set_slot(LazyModules {
+        permissions,
+        native_ctx: NativeCtxRegistry::default(),
+    });
+    let global = scope.get_current_context().global(scope);
+    let f = v8::Function::new(scope, lazy_inject)
+        .ok_or_else(|| anyhow::anyhow!("failed to create __lazyInject"))?;
+    let key = v8::String::new(scope, "__lazyInject").unwrap();
+    global.set(scope, key.into(), f.into());
+
+    let table: Vec<String> = LAZY_MODULES
+        .iter()
+        .map(|(name, keys, globals)| format!("[{name:?}, {keys:?}, {globals:?}]"))
+        .collect();
+    // Each trigger is an accessor that removes every trigger of its module,
+    // installs the module (which assigns the real values), then reads the
+    // real value back. Assigning to a trigger before first use just replaces
+    // it, like assigning to the plain property it stands in for.
+    let src = format!(
+        r#"(function () {{
+            var inject = globalThis.__lazyInject;
+            delete globalThis.__lazyInject;
+            [{table}].forEach(function (m) {{
+                var targets = m[1].map(function (k) {{ return [globalThis.__requireCache, k]; }})
+                    .concat(m[2].map(function (k) {{ return [globalThis, k]; }}));
+                function load() {{
+                    targets.forEach(function (t) {{ delete t[0][t[1]]; }});
+                    inject(m[0]);
+                }}
+                targets.forEach(function (t) {{
+                    Object.defineProperty(t[0], t[1], {{
+                        configurable: true, enumerable: true,
+                        get: function () {{ load(); return t[0][t[1]]; }},
+                        set: function (v) {{
+                            Object.defineProperty(t[0], t[1], {{ value: v, writable: true, configurable: true, enumerable: true }});
+                        }},
+                    }});
+                }});
+            }});
+        }})();"#,
+        table = table.join(",")
+    );
+    code_cache::bootstrap_js_per_run(scope, "lazy-modules", &src)?;
+    Ok(())
+}
+
+fn lazy_inject(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let Some(mut lazy) = scope.remove_slot::<LazyModules>() else {
+        return;
+    };
+    let context = scope.get_current_context();
+    {
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let perms = lazy.permissions.clone();
+        match name.as_str() {
+            "imap" => imap::inject_imap(scope, perms),
+            "irc" => irc::inject_irc(scope, perms, &mut lazy.native_ctx),
+            "ftp" => ftp::inject_ftp(scope, perms),
+            "pop3" => pop3::inject_pop3(scope, perms, &mut lazy.native_ctx),
+            "mqtt" => mqtt::inject_mqtt(scope, perms),
+            "ssh" => ssh::inject_ssh(scope, perms),
+            "webrtc" => webrtc::inject_webrtc(scope, perms),
+            _ => {}
+        }
+        // SSH (russh on ring, curve25519/chacha) and WebRTC (DTLS/SRTP in
+        // pure Rust) cannot run on the FIPS module, so the fips build
+        // refuses them.
+        if tls::FIPS && (name == "ssh" || name == "webrtc") {
+            let deny = "globalThis.__sshCreate = globalThis.__rtcCreatePeerConnection = function () { \
+                throw new Error('ERR_CRYPTO_FIPS_FORCED: SSH and WebRTC are unavailable in the FIPS build of 3va'); };";
+            let source = v8::String::new(scope, deny).unwrap();
+            if let Some(script) = v8::Script::compile(scope, source, None) {
+                let _ = script.run(scope);
+            }
+        }
+    }
+    scope.set_slot(lazy);
 }
 
 /// A port number from JS as `u16`. Out-of-range values become 0 (which the OS

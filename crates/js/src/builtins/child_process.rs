@@ -8,8 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(unix)]
 extern crate libc;
 use v8::{
-    ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, Script,
-    String as V8String,
+    ContextScope, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, String as V8String,
 };
 use vvva_permissions::{Capability, PermissionState};
 
@@ -1524,8 +1523,7 @@ pub fn inject_child_process(
             }
         })();
     "#;
-    let source = V8String::new(scope, js_code).unwrap();
-    let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
+    let _ = crate::builtins::code_cache::bootstrap_js(scope, "child_process", js_code);
 
     Ok(())
 }

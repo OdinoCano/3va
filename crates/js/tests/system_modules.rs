@@ -1190,6 +1190,25 @@ async fn uncaught_exception_in_timer_fails_the_event_loop() {
     assert!(err.contains("boom"), "got {err}");
 }
 
+// A nextTick callback that throws must reach process.on('uncaughtException')
+// when a listener is present (it used to be silently swallowed), and the rest
+// of the tick queue must still drain, matching Node.
+#[tokio::test]
+async fn next_tick_throw_delivers_to_uncaught_exception() {
+    let mut e = engine().await;
+    e.eval(
+        "var __caught = '';
+         process.on('uncaughtException', function(err) { __caught = err.message; });
+         process.nextTick(function() { throw new Error('nexttick-boom'); });
+         process.nextTick(function() { __caught += '/after'; });",
+    )
+    .await
+    .unwrap();
+    e.run_event_loop().await.unwrap();
+    let r = e.eval_to_string("__caught").await.unwrap();
+    assert_eq!(r, "nexttick-boom/after", "got {r}");
+}
+
 // fetch() used to reject with a bare string, so `err.message` was undefined.
 #[tokio::test]
 async fn fetch_rejects_with_an_error_object() {

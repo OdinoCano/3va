@@ -345,6 +345,10 @@ pub fn load_from_pnpm_lock(path: &std::path::Path) -> anyhow::Result<Option<Lock
                 dependencies: deps,
                 dev: entry.dev,
                 registry: None,
+                optional: None,
+                os: None,
+                cpu: None,
+                libc: None,
             }
         });
     }

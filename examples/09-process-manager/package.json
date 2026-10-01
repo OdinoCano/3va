@@ -5,7 +5,7 @@
     "no-prompt": true,
     "permissions": {
       ".": {
-        "allow-net": ["*"]
+        "allow-net": ["localhost:4000"]
       }
     }
   }

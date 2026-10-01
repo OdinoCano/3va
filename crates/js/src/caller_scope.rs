@@ -181,11 +181,12 @@ pub(crate) fn install_bind_guard(scope: &mut v8::PinScope) {
         |scope: &mut v8::PinScope,
          _args: v8::FunctionCallbackArguments,
          mut rv: v8::ReturnValue| {
-            let tag = if vvva_permissions::scoped_rules_active() {
-                vvva_permissions::deny_scopes().join("\n")
-            } else {
-                String::new()
-            };
+            // No rules: leave the return value undefined (falsy, same as "")
+            // so every `bind` doesn't allocate a string for nothing.
+            if !vvva_permissions::scoped_rules_active() {
+                return;
+            }
+            let tag = vvva_permissions::deny_scopes().join("\n");
             rv.set(v8::String::new(scope, &tag).unwrap().into());
         },
     )
@@ -257,10 +258,7 @@ pub(crate) fn install_bind_guard(scope: &mut v8::PinScope) {
             },
         });
     })();"#;
-    let source = v8::String::new(scope, src).unwrap();
-    if let Some(script) = v8::Script::compile(scope, source, None) {
-        let _ = script.run(scope);
-    }
+    let _ = crate::builtins::code_cache::bootstrap_js_per_run(scope, "bind-guard", src);
 }
 
 #[cfg(test)]

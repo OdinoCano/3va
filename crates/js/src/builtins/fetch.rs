@@ -4,7 +4,7 @@
 use base64::Engine as _;
 use std::io::Read;
 use std::sync::Arc;
-use v8::{Function, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, Script};
+use v8::{Function, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue};
 use vvva_permissions::{Capability, PermissionState};
 
 /// Hard ceiling on how many response-body bytes a single `fetch()` may buffer.
@@ -358,9 +358,7 @@ pub fn inject_fetch(
     };
     "#;
 
-    let source = v8::String::new(scope, js_code).unwrap();
-    let script = Script::compile(scope, source, None).unwrap();
-    let _ = script.run(scope);
+    let _ = crate::builtins::code_cache::bootstrap_js(scope, "fetch", js_code);
 
     Ok(())
 }

@@ -1437,7 +1437,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
 })();
 "#;
 
-    crate::builtins::code_cache::compile_and_run_cached(scope, "crypto", js_code)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "crypto", js_code)?;
 
     Ok(())
 }

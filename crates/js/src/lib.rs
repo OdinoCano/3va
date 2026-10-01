@@ -10,6 +10,7 @@ pub mod esm;
 pub mod inspector;
 pub mod profiler;
 pub mod rejection_tracker;
+pub mod snapshot;
 pub mod transpiler;
 
 use std::net::SocketAddr;
@@ -83,21 +84,34 @@ impl std::fmt::Display for EvalPhase {
 
 pub fn ensure_v8_initialized() {
     V8_INIT.call_once(|| {
-        let platform = v8::new_default_platform(0, false).make_shared();
+        // Start the young generation at 2 MB semi-spaces instead of V8's
+        // default 1 MB: bootstrapping the builtins filled the default one
+        // past the minor-GC-task trigger, so every `3va run` ended with an
+        // idle scavenge task (0.4-3.5 ms) run just before exiting. Also
+        // measured faster under HTTP load (fewer early scavenges).
+        v8::V8::set_flags_from_string("--min-semi-space-size=2");
+        // 4 background threads (concurrent GC/compilation), Node's default.
+        // 0 meant one per core, all spawned on every start.
+        let platform = v8::new_default_platform(4, false).make_shared();
         v8::V8::initialize_platform(platform.clone());
         v8::V8::initialize();
         let _ = V8_PLATFORM.set(platform);
     });
 }
 
-/// Runs one ready V8 platform task (foreground or background-completed) for
-/// `isolate`, if any is pending. Deliberately not looped to exhaustion: a
-/// task that reposts more work could otherwise spin this call forever. The
-/// caller (idle()/run_event_loop()) already runs repeatedly, so tasks drain
-/// incrementally across iterations just like timers do.
+/// Runs the V8 platform tasks (foreground or background-completed) ready for
+/// `isolate`, up to a small bound per call. Deliberately not looped to
+/// exhaustion: a task that reposts more work could otherwise spin this call
+/// forever. The caller (idle()/run_event_loop()) already runs repeatedly, so
+/// anything left drains on the next turn, just like timers do.
 fn pump_v8_platform_tasks(isolate: &v8::Isolate) {
     if let Some(platform) = V8_PLATFORM.get() {
-        v8::Platform::pump_message_loop(platform, isolate, false);
+        // A few per turn, not until empty (a task may repost itself).
+        for _ in 0..8 {
+            if !v8::Platform::pump_message_loop(platform, isolate, false) {
+                break;
+            }
+        }
     }
 }
 
@@ -528,6 +542,14 @@ pub struct JsEngine {
     profiler_interval_ms: u32,
     ws_pool: builtins::websocket::WsPool,
     server_mode: bool,
+    // Whether caller_scope's promise hook is installed. Any installed
+    // PromiseHook moves every promise in V8 off its fast path, so it is only
+    // installed once a package-scoped rule exists (before that the hook
+    // itself would return immediately anyway).
+    promise_hook_installed: bool,
+    // Whether the last run_event_loop() call found work beyond its first
+    // turn (a `beforeExit` listener that scheduled something). See finish().
+    had_work_after_before_exit: bool,
     // V8 manages its own heap independently of Rust's global allocator, so
     // switching that allocator (e.g. to mimalloc) has zero effect on V8's
     // memory footprint. Left unprompted, V8 grows its heap to whatever
@@ -536,8 +558,11 @@ pub struct JsEngine {
     // served, indefinitely, under sustained load (see bench/README.md).
     // `low_memory_notification()` is the only thing that tells V8 to
     // actually try to free memory; run_event_loop calls it on a throttle
-    // (LOW_MEMORY_HINT_INTERVAL) so busy periods aren't paused by a full
-    // GC on every single tick.
+    // (LOW_MEMORY_HINT_INTERVAL). While requests are being served it sends
+    // a *moderate* pressure hint instead, which starts incremental marking
+    // rather than a blocking full GC: the full GC stalled every connection
+    // at once and was what pushed HTTP p99 latency past a second. The full
+    // `low_memory_notification()` only runs once the loop is idle.
     last_low_memory_hint: std::time::Instant,
     // Backs the raw pointers handed to V8 `External` callback data (see
     // `builtins::NativeCtxRegistry`) so they're freed when the engine is.
@@ -545,6 +570,18 @@ pub struct JsEngine {
 }
 
 const LOW_MEMORY_HINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn sleep_or_wake(d: std::time::Duration, wake: &Option<Arc<tokio::sync::Notify>>) {
+    match wake {
+        Some(n) => {
+            tokio::select! {
+                _ = tokio::time::sleep(d) => {}
+                _ = n.notified() => {}
+            }
+        }
+        None => tokio::time::sleep(d).await,
+    }
+}
 
 impl Drop for JsEngine {
     fn drop(&mut self) {
@@ -600,9 +637,14 @@ impl JsEngine {
         }
 
         let t1 = std::time::Instant::now();
-        let mut isolate = Isolate::new(
-            Isolate::create_params().array_buffer_allocator(shared_array_buffer_allocator()),
-        );
+        let snapshot_blob = snapshot::load();
+        let from_snapshot = snapshot_blob.is_some();
+        let mut params =
+            Isolate::create_params().array_buffer_allocator(shared_array_buffer_allocator());
+        if let Some(blob) = snapshot_blob {
+            params = params.snapshot_blob(blob.into());
+        }
+        let mut isolate = Isolate::new(params);
         if trace {
             eprintln!("[startup] Isolate::new: {:?}", t1.elapsed());
         }
@@ -629,10 +671,12 @@ impl JsEngine {
             ws_pool: ws_pool.clone(),
             last_low_memory_hint: std::time::Instant::now(),
             server_mode: false,
+            promise_hook_installed: false,
+            had_work_after_before_exit: false,
             native_ctx: builtins::NativeCtxRegistry::default(),
         };
 
-        engine.initialize(permissions, timer_manager, firewall, ws_pool)?;
+        engine.initialize(permissions, timer_manager, firewall, ws_pool, from_snapshot)?;
 
         Ok(engine)
     }
@@ -643,18 +687,32 @@ impl JsEngine {
         timer_manager: Arc<TimerManager>,
         firewall: Option<Arc<Firewall>>,
         ws_pool: builtins::websocket::WsPool,
+        from_snapshot: bool,
     ) -> anyhow::Result<()> {
         let inspector_state = self.inspector.clone();
         let interval_ms = self.profiler_interval_ms;
         let profiler = self.profiler.clone();
 
         rejection_tracker::install(&mut self.isolate);
-        caller_scope::install_promise_hook(&mut self.isolate);
+        self.ensure_promise_hook();
         // SAFETY: cleared in Drop, before the isolate is disposed.
         let raw_isolate = unsafe { self.isolate.as_raw_isolate_ptr() };
         let mut handle_scope_storage = Box::pin(v8::HandleScope::new(&mut *self.isolate));
         let mut handle_scope = handle_scope_storage.as_mut().init();
-        let context = v8::Context::new(&handle_scope, Default::default());
+        // The builtins context from the snapshot, when there is one; a clean
+        // context (and the full bootstrap below) otherwise.
+        let snapshot_context = if from_snapshot {
+            v8::Context::from_snapshot(
+                &handle_scope,
+                snapshot::BUILTINS_CONTEXT,
+                Default::default(),
+            )
+        } else {
+            None
+        };
+        let from_snapshot = snapshot_context.is_some();
+        let context =
+            snapshot_context.unwrap_or_else(|| v8::Context::new(&handle_scope, Default::default()));
         self.context = Some(v8::Global::new(&handle_scope, context));
         caller_scope::install(raw_isolate, v8::Global::new(&handle_scope, context));
         let mut scope = v8::ContextScope::new(&mut handle_scope, context);
@@ -668,14 +726,33 @@ impl JsEngine {
         }
 
         let t = std::time::Instant::now();
-        builtins::inject_all(
+        // From a snapshot the context already holds the bootstrap scripts'
+        // effects: install only natives and per-run state. Otherwise run
+        // everything, recording the scripts if this process should build
+        // the snapshot.
+        let recording = !from_snapshot && snapshot::should_record();
+        let mode = if from_snapshot {
+            builtins::code_cache::BootMode::NativesOnly
+        } else if recording {
+            builtins::code_cache::BootMode::Record
+        } else {
+            builtins::code_cache::BootMode::Normal
+        };
+        let previous = builtins::code_cache::set_boot_mode(mode);
+        let injected = builtins::inject_all(
             &mut scope,
             permissions,
             timer_manager,
             firewall,
             ws_pool,
             &mut self.native_ctx,
-        )?;
+        );
+        builtins::code_cache::set_boot_mode(previous);
+        let recorded = builtins::code_cache::take_recorded();
+        injected?;
+        if recording {
+            snapshot::build_in_background(recorded);
+        }
         if trace {
             eprintln!("[startup] builtins::inject_all: {:?}", t.elapsed());
         }
@@ -1015,15 +1092,57 @@ impl JsEngine {
             }
         }
 
+        let __t = std::time::Instant::now();
         self.run_event_loop().await?;
+        if std::env::var_os("VVVA_STARTUP_TRACE").is_some() {
+            eprintln!("[startup] eval_file run_event_loop: {:?}", __t.elapsed());
+        }
 
         Ok(())
     }
 
     /// Call before eval_file_with_args for long-running servers (3va dev).
     /// Removes the iteration cap so the event loop runs until process.exit() or SIGINT.
+    /// Ends a script run the way Node does once its event loop is empty:
+    /// emits `beforeExit` (running the loop again for as long as listeners
+    /// keep scheduling work), then `exit`, and returns `process.exitCode`.
+    pub async fn finish(&mut self) -> anyhow::Result<i32> {
+        const EMIT_BEFORE_EXIT: &str = "(function () { var p = globalThis.process; \
+            if (!p || typeof p.emit !== 'function' || p._exiting) return 'false'; \
+            if (typeof p.listenerCount === 'function' && p.listenerCount('beforeExit') === 0) return 'false'; \
+            p.emit('beforeExit', p.exitCode | 0); return 'true'; })()";
+        // Bounded like Node's own guard against a listener that always
+        // reschedules: each round needs real new work to continue.
+        for _ in 0..1000 {
+            if self.eval_to_string(EMIT_BEFORE_EXIT).await? != "true" {
+                break;
+            }
+            self.run_event_loop().await?;
+            if !self.had_work_after_before_exit {
+                break;
+            }
+        }
+        let code = self
+            .eval_to_string(
+                "(globalThis.process && typeof process.__emitExit === 'function') \
+                 ? String(process.__emitExit()) : '0'",
+            )
+            .await?;
+        Ok(code.trim().parse().unwrap_or(0))
+    }
+
     pub fn set_server_mode(&mut self, enabled: bool) {
         self.server_mode = enabled;
+    }
+
+    /// Installs caller_scope's promise hook the first time package-scoped
+    /// rules are active. Rules are normally set before the engine is
+    /// created; the event loop re-checks in case they are added later.
+    fn ensure_promise_hook(&mut self) {
+        if !self.promise_hook_installed && vvva_permissions::scoped_rules_active() {
+            caller_scope::install_promise_hook(&mut self.isolate);
+            self.promise_hook_installed = true;
+        }
     }
 
     pub async fn run_event_loop(&mut self) -> anyhow::Result<()> {
@@ -1040,6 +1159,10 @@ impl JsEngine {
         const BOUNDED_MAX_ITERATIONS: usize = 100_000;
         let mut iterations = 0usize;
         let mut last_heartbeat = std::time::Instant::now();
+        let mut busy_since_hint = false;
+        // Woken by HTTP connection tasks as soon as a request is parsed, so
+        // the sleeps below end early instead of waiting out their timeout.
+        let http_wake = builtins::http_server::wake_handle(&self.isolate);
 
         // A do-while, not a while: callers' eval()/eval_to_string() don't
         // perform their own microtask checkpoint, so this loop's body needs
@@ -1049,6 +1172,7 @@ impl JsEngine {
         // is still gated on real pending work, not a hardcoded flag.
         loop {
             iterations += 1;
+            self.ensure_promise_hook();
 
             let tm = self.timer_manager.clone();
             {
@@ -1058,6 +1182,9 @@ impl JsEngine {
                 let context = v8::Local::new(&scope, &context_global);
                 let mut scope = v8::ContextScope::new(&mut scope, context);
                 builtins::timers::TimerManager::fire_pending(&mut scope, tm)?;
+                if builtins::http_server::dispatch_ready(&mut scope)? {
+                    busy_since_hint = true;
+                }
             }
             builtins::napi::drain_async_completions();
             pump_v8_platform_tasks(&self.isolate);
@@ -1065,7 +1192,13 @@ impl JsEngine {
             rejection_tracker::report_pending();
 
             if self.last_low_memory_hint.elapsed() >= LOW_MEMORY_HINT_INTERVAL {
-                self.isolate.low_memory_notification();
+                if busy_since_hint {
+                    self.isolate
+                        .memory_pressure_notification(v8::MemoryPressureLevel::Moderate);
+                } else {
+                    self.isolate.low_memory_notification();
+                }
+                busy_since_hint = false;
                 self.last_low_memory_hint = std::time::Instant::now();
             }
 
@@ -1100,23 +1233,6 @@ impl JsEngine {
                 );
             }
 
-            let next_js = self.timer_manager.next_expiry();
-            let next_rust = self.runtime_core.lock().unwrap().next_timer_duration();
-            let wait = match (next_js, next_rust) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
-
-            if let Some(wait) = wait
-                && wait > std::time::Duration::ZERO
-            {
-                tokio::time::sleep(wait.min(std::time::Duration::from_millis(50))).await;
-            } else if wait.is_none() && !builtins::napi::has_pending_native_async() {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-
             // Recomputed every iteration — a listener/child/server_mode that
             // only becomes true partway through the script (e.g. a CLI that
             // spawns a build subprocess after several awaited steps) must
@@ -1127,13 +1243,40 @@ impl JsEngine {
             // exactly the `3va run .../cli.js -- run-android` bug where the
             // whole process exited cleanly mid-Gradle-build.
             let unlimited = self.server_mode || has_listener() || has_child();
+            // Not `has_pending_background_tasks()`: it counts any V8 job
+            // (concurrent GC, compiles) and kept processes alive polling for
+            // as long as one lingered. Async WebAssembly compiles keep the
+            // loop alive with a timer instead (see timers.rs).
             let still_pending = self.timer_manager.has_pending()
                 || self.runtime_core.lock().unwrap().pending_task_count() > 0
                 || builtins::napi::has_pending_native_async()
                 || has_listener()
                 || has_child();
             if !still_pending || (!unlimited && iterations >= BOUNDED_MAX_ITERATIONS) {
+                // More than one turn means something kept the loop alive.
+                self.had_work_after_before_exit = iterations > 1;
                 break;
+            }
+
+            // Checked before sleeping: a script with nothing left to do used
+            // to sleep one more tick (1 ms or more) before noticing.
+            let next_js = self.timer_manager.next_expiry();
+            let next_rust = self.runtime_core.lock().unwrap().next_timer_duration();
+            let wait = match (next_js, next_rust) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+
+            if builtins::http_server::has_ready(&self.isolate) {
+                // More queued requests than one batch: go straight round.
+            } else if let Some(wait) = wait
+                && wait > std::time::Duration::ZERO
+            {
+                sleep_or_wake(wait.min(std::time::Duration::from_millis(50)), &http_wake).await;
+            } else if wait.is_none() && !builtins::napi::has_pending_native_async() {
+                sleep_or_wake(std::time::Duration::from_millis(1), &http_wake).await;
             }
         }
 

@@ -256,7 +256,7 @@ pub fn inject_require(
             return lines.join('\n');
         };
     "#;
-    crate::builtins::code_cache::compile_and_run_cached(scope, "require-intro", source_code)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "require-intro", source_code)?;
 
     let read_file_fn = Function::new(
         scope,
@@ -481,11 +481,7 @@ pub fn inject_require(
         .collect::<Vec<_>>()
         .join(",");
     let gated_script = format!("globalThis.__SCOPE_GATED_MODULES = {{{}}};", gated_map);
-    if let Some(script) =
-        v8::Script::compile(scope, V8String::new(scope, &gated_script).unwrap(), None)
-    {
-        let _ = script.run(scope);
-    }
+    let _ = crate::builtins::code_cache::bootstrap_js(scope, "scope-gated-modules", &gated_script);
 
     let require_resolve_fn = Function::new(
         scope,
@@ -2709,7 +2705,13 @@ pub fn inject_require(
                 // calls .resume(), matching Node's flowing-mode semantics.
                 var stdin = new Readable();
                 stdin.fd = 0;
-                stdin.isTTY = typeof __isatty === 'function' ? __isatty(0) : false;
+                // Asked when read, not while loading: whether stdin is a
+                // terminal belongs to this run (startup snapshot).
+                Object.defineProperty(stdin, 'isTTY', {
+                    configurable: true, enumerable: true,
+                    get: function() { return typeof __isatty === 'function' ? __isatty(0) : false; },
+                    set: function(v) { Object.defineProperty(stdin, 'isTTY', { value: v, writable: true, configurable: true, enumerable: true }); },
+                });
                 stdin._paused = true;
                 stdin._ended = false;
                 stdin._encoding = null;
@@ -3735,36 +3737,11 @@ pub fn inject_require(
                 this.finished = true;
 
                 var headersJson = JSON.stringify(this._headers);
+                // Node sends the standard reason phrase when none was set.
+                if (!this.statusMessage) this.statusMessage = HTTP_STATUS_CODES[String(this.statusCode)] || '';
                 var isBinary = this._chunks.some(function(c) {
                     return c instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(c));
                 });
-                // ponytail: fix Vite SSR transform mangling private field/method names.
-                // The parser used by Vite (oxc-parser via rollup/parseAst) represents
-                // the name part of a private identifier (#foo) as an Identifier node
-                // with the '#' as a preceding character. Vite's SSR walk then
-                // rewrites it as `#__vite_ssr_import_N__` (keeping the '#'), which
-                // produces `this.#__vite_ssr_import_N__.origName()` — V8 reads the
-                // '#' as a private field access (no such field is declared → SyntaxError)
-                // and the method-definition form `#__vite_ssr_import_N__.origName()`
-                // leaks `origName` as a phantom parameter. Strip the spurious
-                // `.origName()` suffix so the private identifier stays a single
-                // token and resolves to the class's own private method/field.
-                var __viteFix = function(buf) {
-                    try {
-                        if (typeof TextDecoder === 'undefined') return null;
-                        var __td = new TextDecoder('utf-8');
-                        var s = __td.decode(buf);
-                        var hashIdx = s.indexOf('#__vite_ssr_import_');
-                        var viteIdx = s.indexOf('__vite_ssr_import_');
-                        if (hashIdx === -1 && viteIdx === -1) return null;
-                        var fixed = s.replace(/#(__vite_ssr_import_\d+)__\.([A-Za-z_$][\w$]*)\(\s*\)/g, '#$1__()');
-                        if (fixed === s) return null;
-                        if (typeof TextEncoder !== 'undefined') {
-                            return new TextEncoder().encode(fixed);
-                        }
-                        return null;
-                    } catch (e) { return null; }
-                };
                 if (isBinary) {
                     var parts = this._chunks.map(function(c) {
                         if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.from(c) : new TextEncoder().encode(c);
@@ -3774,8 +3751,6 @@ pub fn inject_require(
                     var merged = new Uint8Array(total);
                     var off = 0;
                     parts.forEach(function(p) { merged.set(p, off); off += p.length; });
-                    var __fixed = __viteFix(merged);
-                    if (__fixed) merged = __fixed;
                     __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged);
                 } else {
                     // Route through __httpRespondBytes (JS-side TextEncoder,
@@ -3794,16 +3769,16 @@ pub fn inject_require(
                     // the byte-safe responder sidesteps the native
                     // conversion entirely rather than depending on finding
                     // the exact defect in it.
-                    var body = this._chunks.join('');
-                    var __fixedS = __viteFix(body);
-                    var __finalS = __fixedS || body;
+                    var __finalS = this._chunks.join('');
                     if (typeof Buffer !== 'undefined') {
                         __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'));
                     } else {
                         __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS));
                     }
                 }
-                setTimeout(function() { self.emit('finish'); self.emit('close'); if (typeof callback === 'function') callback(); }, 0);
+                // A microtask, not a 0 ms timer: it still runs after the handler
+                // returns, without a timer round-trip per response.
+                queueMicrotask(function() { self.emit('finish'); self.emit('close'); if (typeof callback === 'function') callback(); });
                 return this;
             };
             httpServerResponse.prototype.setTimeout = function() { return this; };
@@ -3836,7 +3811,17 @@ pub fn inject_require(
                 port = port || 0;
                 if (typeof callback === 'function') this.once('listening', callback);
 
-                var result = __httpListen(port, hostname);
+                var result;
+                if (self._tlsMissing) {
+                    // An https server with no key/cert must never fall back
+                    // to serving plaintext on its port.
+                    result = new TypeError('https server: `key` and `cert` are required to listen (refusing to serve plaintext)');
+                    result.code = 'ERR_MISSING_ARGS';
+                } else {
+                    result = self._tls
+                        ? __httpListen(port, hostname, self._tls.cert, self._tls.key)
+                        : __httpListen(port, hostname);
+                }
                 if (typeof result !== 'number') {
                     // Node semantics: with no 'error' listener a failed listen
                     // (e.g. EACCES without --allow-net) is an uncaught exception,
@@ -3851,27 +3836,43 @@ pub fn inject_require(
                 self._port = __httpServerPort(result);
                 self._host = __httpServerAddress(result) || hostname;
                 self.listening = true;
-                self._pollTimer = setInterval(function() {
+                // Called by the event loop (http_server.rs dispatch_ready) as
+                // soon as a connection task queues a parsed request — no
+                // polling interval, so no latency floor between arrivals.
+                __httpSetHandler(self._id, function() {
                     try {
-                    var raw;
-                    while ((raw = __httpAcceptPoll(self._id)) !== null && raw !== undefined) {
-                        var r;
-                        try { r = JSON.parse(raw); } catch (e) { continue; }
+                    // At most 64 per call: the event loop runs microtasks
+                    // between batches, so a burst doesn't keep hundreds of
+                    // requests' objects alive at once (they'd be promoted to
+                    // the old generation). The rest are dispatched next turn.
+                    var raw, _n = 0;
+                    while (_n++ < 64 && (raw = __httpAcceptPoll(self._id)) !== null && raw !== undefined) {
+                        // raw = [method, url, connId, remoteAddress, body, flatHeaders]
                         var _sock = new EventEmitter();
-                        _sock.remoteAddress = r.remoteAddress;
-                        _sock._connId = r.conn_id;
+                        _sock.remoteAddress = raw[3];
+                        _sock._connId = raw[2];
+                        // What frameworks read to tell https from http
+                        // (Express: req.secure / req.protocol).
+                        if (self._tls) _sock.encrypted = true;
                         var req = new httpIncomingMessage(_sock);
-                        req.method = r.method;
-                        req.url = r.url;
-                        req.headers = r.headers || {};
-                        var _rh = r.headers || {};
-                        req.rawHeaders = Object.keys(_rh).reduce(function(a, k) { a.push(k, _rh[k]); return a; }, []);
-                        req._body = r.body || '';
+                        req.method = raw[0];
+                        req.url = raw[1];
+                        // Last duplicate wins, as the JSON object this replaced did.
+                        var _flat = raw[5], _rh = {};
+                        for (var _i = 0; _i < _flat.length; _i += 2) _rh[_flat[_i]] = _flat[_i + 1];
+                        req.headers = _rh;
+                        var _rk = Object.keys(_rh), _raw = new Array(_rk.length * 2);
+                        for (var _j = 0; _j < _rk.length; _j++) { _raw[2 * _j] = _rk[_j]; _raw[2 * _j + 1] = _rh[_rk[_j]]; }
+                        req.rawHeaders = _raw;
+                        req._body = raw[4];
                         var res = new httpServerResponse(req);
                         self.emit('request', req, res);
                         self.emit('connection', req.socket);
                         (function(req) {
-                            setTimeout(function() {
+                            // Microtask: runs once the handler returns and
+                            // has had its chance to attach listeners (push()
+                            // buffers for any that attach later).
+                            queueMicrotask(function() {
                                 // Deliver through push() (not a bare emit)
                                 // so req.setEncoding() is honored: push()
                                 // runs the chunk through the stream's
@@ -3879,11 +3880,11 @@ pub fn inject_require(
                                 // incomplete sequence before 'end'.
                                 if (req._body) req.push(typeof Buffer !== 'undefined' ? Buffer.from(req._body) : req._body);
                                 req.push(null);
-                            }, 0);
+                            });
                         })(req);
                     }
-                    } catch(e) { console.error('[3va-poll-err] setInterval callback threw:', e && (e.stack || e.message || e)); }
-                }, 5);
+                    } catch(e) { console.error('[3va-http] request handler threw:', e && (e.stack || e.message || e)); }
+                });
                 setTimeout(function() { self.emit('listening'); }, 0);
                 return self;
             };
@@ -4108,7 +4109,43 @@ pub fn inject_require(
 
             // ── https module ─────────────────────────────────────────────────────────
             var httpsModule = {
-                createServer: function(opts, requestListener) { return createServer(opts, requestListener); },
+                // A real TLS listener (http_server.rs). This used to return a
+                // plain HTTP server and ignore `key`/`cert`: the app believed
+                // it was serving TLS while the port spoke cleartext. Options
+                // that can't be honoured are refused, never silently dropped.
+                createServer: function(opts, requestListener) {
+                    if (typeof opts === 'function') { requestListener = opts; opts = {}; }
+                    opts = opts || {};
+                    var pem = function(v, what) {
+                        if (Array.isArray(v)) v = v.map(function(x) { return pem(x, what); }).join('\n');
+                        if (typeof Buffer !== 'undefined' && Buffer.isBuffer(v)) v = v.toString('utf8');
+                        else if (v instanceof Uint8Array) v = new TextDecoder().decode(v);
+                        if (typeof v !== 'string' || v.indexOf('-----BEGIN') === -1) {
+                            var e = new TypeError('https.createServer: `' + what + '` must be a PEM string or Buffer');
+                            e.code = 'ERR_INVALID_ARG_VALUE';
+                            throw e;
+                        }
+                        return v;
+                    };
+                    ['pfx', 'passphrase', 'requestCert', 'ca', 'SNICallback', 'crl'].forEach(function(k) {
+                        if (opts[k] !== undefined && opts[k] !== false && opts[k] !== null) {
+                            var e = new Error('https.createServer: the `' + k + '` option is not supported by 3va yet');
+                            e.code = 'ERR_FEATURE_UNAVAILABLE_ON_PLATFORM';
+                            throw e;
+                        }
+                    });
+                    var server = createServer(opts, requestListener);
+                    var absent = function(v) { return v === undefined || v === null; };
+                    if (absent(opts.key) || absent(opts.cert)) {
+                        // Like Node, creating the server doesn't need a
+                        // certificate; listening does. Instead of listening
+                        // in cleartext, listen() fails (see httpServer.listen).
+                        server._tlsMissing = true;
+                    } else {
+                        server._tls = { key: pem(opts.key, 'key'), cert: pem(opts.cert, 'cert') };
+                    }
+                    return server;
+                },
                 globalAgent: new httpAgent(),
                 Agent: httpAgent,
                 Server: Server,
@@ -4613,7 +4650,7 @@ pub fn inject_require(
         })();
         })();
     "#;
-    crate::builtins::code_cache::compile_and_run_cached(scope, "require-core", js_code)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "require-core", js_code)?;
 
     // ── require() — CommonJS module loader ────────────────────────────────────
     // Built-in modules (fs, process, util, events, ...) are looked up directly
@@ -4757,12 +4794,6 @@ pub fn inject_require(
         }
 
         function requireFrom(specifier, dir) {
-            if (specifier && specifier.indexOf('node:') === 0 && specifier !== 'node:module') {
-                console.error('[3va-requireFrom] node: spec=' + specifier + ' inCache=' + Object.prototype.hasOwnProperty.call(globalThis.__requireCache, specifier));
-            }
-            if (specifier && (specifier.indexOf('devalue') !== -1 || specifier.indexOf('file://') === 0)) {
-                console.error('[3va-devalue] requireFrom spec=' + specifier + ' dir=' + dir);
-            }
             // Normalize file:// URLs: strip scheme, host, and query/fragment
             if (specifier && specifier.indexOf('file://') === 0) {
                 var stripped = specifier.slice('file://'.length);
@@ -4776,12 +4807,6 @@ pub fn inject_require(
                 specifier = stripped;
             }
             var bare = bareName(specifier);
-            if (specifier === 'rollup/parseAst' || specifier === 'rollup') {
-                console.error('[3va-require] require(' + specifier + ') inCache=' + Object.prototype.hasOwnProperty.call(globalThis.__requireCache, specifier));
-            }
-            if (specifier === 'node:console') {
-                console.error('[3va-require] require(node:console) inCache=' + Object.prototype.hasOwnProperty.call(globalThis.__requireCache, 'node:console') + ' val=' + typeof globalThis.__requireCache['node:console']);
-            }
             if (Object.prototype.hasOwnProperty.call(globalThis.__requireCache, specifier)) {
                 return __scopedModule(bare, globalThis.__requireCache[specifier], __pkgScopeFor(dir));
             }
@@ -4949,6 +4974,14 @@ pub fn inject_require(
             return requireFrom(specifier, globalThis.__dirname || undefined);
         });
 
+    })();
+    "#;
+    crate::builtins::code_cache::bootstrap_js(scope, "require-tail", require_js)?;
+    // Per run: whether this process is a forked child is in its environment.
+    crate::builtins::code_cache::bootstrap_js_per_run(
+        scope,
+        "fork-ipc",
+        r#"(function() {
         // When this process is a forked child (child_process.fork or cluster.fork),
         // set up process.send and stdin IPC polling immediately — not gated on
         // require('cluster'), so child scripts that never require cluster still get IPC.
@@ -4972,9 +5005,8 @@ pub fn inject_require(
                 } catch(e) {}
             }, 10);
         }
-    })();
-    "#;
-    crate::builtins::code_cache::compile_and_run_cached(scope, "require-tail", require_js)?;
+    })();"#,
+    )?;
 
     Ok(())
 }

@@ -218,13 +218,7 @@ impl ContentStore {
             return Ok(virtual_pkg_dir); // already linked — idempotent
         }
 
-        if let Some(parent) = virtual_pkg_dir.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if virtual_pkg_dir.exists() {
-            std::fs::remove_dir_all(&virtual_pkg_dir)?;
-        }
-        link_or_copy_dir(&src, &virtual_pkg_dir)?;
+        materialize_dir(&src, &virtual_pkg_dir)?;
         Ok(virtual_pkg_dir)
     }
 
@@ -254,13 +248,7 @@ impl ContentStore {
         if dest.join("package.json").exists() {
             return Ok(dest); // already linked — idempotent
         }
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if dest.exists() {
-            std::fs::remove_dir_all(&dest)?;
-        }
-        link_or_copy_dir(&src, &dest)?;
+        materialize_dir(&src, &dest)?;
         Ok(dest)
     }
 
@@ -672,6 +660,49 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Materializes `src` at `dest` (a package directory) without ever exposing
+/// a half-written tree: the copy goes to a unique sibling first and is then
+/// renamed into place. Several install tasks can link the same package at
+/// once; before, one would `remove_dir_all` the directory another was still
+/// filling ("Directory not empty"). If another task wins the rename, its
+/// complete copy is kept and ours is discarded.
+fn materialize_dir(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let parent = dest
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("no parent directory for {}", dest.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let leaf = dest.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = parent.join(format!(
+        ".{leaf}.tmp-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    if let Err(e) = link_or_copy_dir(src, &tmp) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    if std::fs::rename(&tmp, dest).is_ok() {
+        return Ok(());
+    }
+    if dest.join("package.json").exists() {
+        // Another task finished first; its tree is complete.
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Ok(());
+    }
+    // A stale partial tree (e.g. an interrupted earlier install): replace it.
+    let _ = std::fs::remove_dir_all(dest);
+    let result = std::fs::rename(&tmp, dest);
+    if result.is_err() && dest.join("package.json").exists() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Ok(());
+    }
+    result.map_err(|e| {
+        let _ = std::fs::remove_dir_all(&tmp);
+        anyhow::anyhow!("could not move {} into place: {e}", dest.display())
+    })
+}
+
 pub(crate) fn link_or_copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)
@@ -680,7 +711,14 @@ pub(crate) fn link_or_copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
+        // file_type() comes with the directory entry; is_dir() was one more
+        // stat per file (symlinks are followed, as is_dir() did).
+        let is_dir = match entry.file_type() {
+            Ok(t) if t.is_symlink() => src_path.is_dir(),
+            Ok(t) => t.is_dir(),
+            Err(_) => src_path.is_dir(),
+        };
+        if is_dir {
             link_or_copy_dir(&src_path, &dst_path)?;
         } else if std::fs::hard_link(&src_path, &dst_path).is_err() {
             std::fs::copy(&src_path, &dst_path)?;
@@ -750,6 +788,34 @@ mod tests {
         let store = ContentStore::with_root(dir.path().to_path_buf());
         let p = store.package_path("registry.npmjs.org", "@scope/pkg", "1.0.0");
         assert!(p.to_string_lossy().contains("@scope+pkg@1.0.0"));
+    }
+
+    #[test]
+    fn concurrent_materialize_of_one_package_all_succeed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("lib")).unwrap();
+        std::fs::write(src.join("package.json"), b"{}").unwrap();
+        for i in 0..200 {
+            std::fs::write(src.join("lib").join(format!("f{i}.js")), b"x").unwrap();
+        }
+        let dest = tmp.path().join("nm").join("@scope").join("pkg");
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (src, dest) = (src.clone(), dest.clone());
+                std::thread::spawn(move || materialize_dir(&src, &dest))
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        assert!(dest.join("package.json").exists());
+        assert_eq!(std::fs::read_dir(dest.join("lib")).unwrap().count(), 200);
+        let leftovers: Vec<_> = std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("pkg")]);
     }
 
     #[test]

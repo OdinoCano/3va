@@ -3,12 +3,57 @@
 
 use v8::{ContextScope, HandleScope};
 
+/// `__utf8Encode(str)`: UTF-8 bytes of `str` as a `Uint8Array`, encoded by V8
+/// itself. Lone surrogates become U+FFFD, as the WHATWG TextEncoder requires.
+fn utf8_encode(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Some(s) = args.get(0).to_string(scope) else {
+        return;
+    };
+    let mut bytes = vec![0u8; s.utf8_length(scope)];
+    let written = s.write_utf8_v2(scope, &mut bytes, v8::WriteFlags::kReplaceInvalidUtf8, None);
+    bytes.truncate(written);
+    let len = bytes.len();
+    let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
+    let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
+    if let Some(u8a) = v8::Uint8Array::new(scope, ab, 0, len) {
+        rv.set(u8a.into());
+    }
+}
+
+/// `__utf8Length(str)`: byte length of `str` in UTF-8, without encoding it.
+fn utf8_length(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Some(s) = args.get(0).to_string(scope) else {
+        return;
+    };
+    let n = s.utf8_length(scope);
+    rv.set(v8::Number::new(scope, n as f64).into());
+}
+
 pub fn inject_buffer(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> {
+    let global = scope.get_current_context().global(scope);
+    for (name, f) in [
+        ("__utf8Encode", v8::Function::new(scope, utf8_encode)),
+        ("__utf8Length", v8::Function::new(scope, utf8_length)),
+    ] {
+        let key = v8::String::new(scope, name).unwrap();
+        let f = f.ok_or_else(|| anyhow::anyhow!("failed to create {name}"))?;
+        global.set(scope, key.into(), f.into());
+    }
+
     let text_encoder_decoder_code = r#"
 if (typeof globalThis.TextEncoder === 'undefined') {
     globalThis.TextEncoder = function TextEncoder() { this.encoding = 'utf-8'; };
     globalThis.TextEncoder.prototype.encode = function(str) {
-        str = String(str || '');
+        str = str === undefined ? '' : String(str);
+        if (typeof __utf8Encode === 'function') return __utf8Encode(str);
         var bytes = [];
         for (var i = 0; i < str.length; i++) {
             var c = str.charCodeAt(i);
@@ -119,7 +164,7 @@ if (typeof globalThis.TextDecoder === 'undefined') {
 }
 "#;
 
-    crate::builtins::code_cache::compile_and_run_cached(
+    crate::builtins::code_cache::bootstrap_js(
         scope,
         "text-encoder-decoder",
         text_encoder_decoder_code,
@@ -128,6 +173,7 @@ if (typeof globalThis.TextDecoder === 'undefined') {
     let buffer_code = r#"
 (function() {
   function _encodeString(str, enc) {
+    if ((enc === 'utf8' || enc === 'utf-8' || enc === undefined) && typeof __utf8Encode === 'function') return __utf8Encode(str);
     enc = (enc || 'utf8').toLowerCase().replace(/[^a-z0-9]/g, '');
     if (enc === 'hex') {
       var b = [];
@@ -235,7 +281,12 @@ if (typeof globalThis.TextDecoder === 'undefined') {
     return ['utf8','utf-8','hex','base64','base64url','ascii','latin1','binary','ucs2','ucs-2','utf16le','utf-16le']
       .indexOf((enc||'').toLowerCase()) !== -1;
   };
-  Buffer.byteLength = function(str, enc) { return _encodeString(String(str), enc || 'utf8').length; };
+  Buffer.byteLength = function(str, enc) {
+    if (typeof str !== 'string') { if (str && typeof str.byteLength === 'number') return str.byteLength; str = String(str); }
+    var e = (enc || 'utf8').toLowerCase();
+    if ((e === 'utf8' || e === 'utf-8') && typeof __utf8Length === 'function') return __utf8Length(str);
+    return _encodeString(str, enc || 'utf8').length;
+  };
 
   Buffer.concat = function(list, totalLen) {
     if (!Array.isArray(list)) throw new TypeError('list must be an Array');
@@ -424,7 +475,7 @@ if (typeof globalThis.TextDecoder === 'undefined') {
 })();
 "#;
 
-    crate::builtins::code_cache::compile_and_run_cached(scope, "buffer", buffer_code)?;
+    crate::builtins::code_cache::bootstrap_js(scope, "buffer", buffer_code)?;
 
     Ok(())
 }

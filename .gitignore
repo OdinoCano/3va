@@ -59,6 +59,9 @@ dist/snap/prime/
 dist/snap/stage/
 dist/snap/*.snap
 
+# Security scan reports (generated locally, not committed)
+security-reports/
+
 # Security — estos archivos SÍ van al repo
 # .semgrep/   → reglas de seguridad, deben commitearse
 # .cargo-husky/ → hooks source, debe commitearse

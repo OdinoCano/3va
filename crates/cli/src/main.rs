@@ -4188,8 +4188,35 @@ fn print_version_with_hash() {
     }
 }
 
-#[tokio::main]
+/// Rust's `println!`/`eprintln!` panic when the underlying write fails — most
+/// commonly a broken pipe (`3va --version | head`, a closed terminal, a
+/// dropped SSH session). The console path already writes via `std::io` and
+/// discards such errors; route the remaining panics to a clean silent exit
+/// instead of a backtrace and exit code 101. Every other panic keeps the
+/// default hook.
+fn install_broken_pipe_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or_default();
+        if (msg.contains("stdout") || msg.contains("stderr")) && msg.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
+}
+
+// 4 workers, like libuv's default pool, instead of one per core: the JS
+// isolate runs on the main thread, workers only drive sockets and parsing,
+// and spawning a thread per core cost ~2.5 ms of every `3va run` on a
+// 32-core machine without making the HTTP server any faster.
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> anyhow::Result<()> {
+    install_broken_pipe_panic_hook();
     let __trace = std::env::var_os("VVVA_STARTUP_TRACE").is_some();
     let __t_main = std::time::Instant::now();
     let raw_args =
@@ -4379,6 +4406,8 @@ async fn main() -> anyhow::Result<()> {
                 })
             });
 
+            // Set by the JS path: the process exit code, once the run is done.
+            let mut run_exit_code: Option<i32> = None;
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext == "wasm" || ext == "wat" {
                 info!("Executing WebAssembly module...");
@@ -4421,6 +4450,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             } else {
                 let __t = std::time::Instant::now();
+                // Start from the V8 startup snapshot (built on first use).
+                vvva_js::snapshot::enable();
                 let mut engine = vvva_js::JsEngine::new_with_firewall_and_inspector(
                     permissions.clone(),
                     firewall,
@@ -4442,17 +4473,26 @@ async fn main() -> anyhow::Result<()> {
 
                 let __t = std::time::Instant::now();
                 let mut run_result = Ok(());
+                let mut interrupted = false;
                 #[cfg(unix)]
                 tokio::select! {
                     result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
-                    _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
-                    _ = sigterm.recv() => { engine.drain_ws_connections().await; }
+                    _ = tokio::signal::ctrl_c() => { interrupted = true; engine.drain_ws_connections().await; }
+                    _ = sigterm.recv() => { interrupted = true; engine.drain_ws_connections().await; }
                 }
 
                 #[cfg(not(unix))]
                 tokio::select! {
                     result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
-                    _ = tokio::signal::ctrl_c() => { engine.drain_ws_connections().await; }
+                    _ = tokio::signal::ctrl_c() => { interrupted = true; engine.drain_ws_connections().await; }
+                }
+                // Node's natural end: 'beforeExit' (which may schedule more
+                // work), then 'exit', then process.exitCode as the status.
+                if run_result.is_ok() && !interrupted {
+                    match engine.finish().await {
+                        Ok(code) => run_exit_code = Some(code),
+                        Err(e) => run_result = Err(e),
+                    }
                 }
                 report_denials(&permissions);
                 run_result?;
@@ -4486,6 +4526,9 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => eprintln!("[heap-snapshot] error: {}", e),
                     }
                 }
+                // Exiting right after this (below): tearing down V8's heap
+                // and the isolate only delays the exit.
+                std::mem::forget(engine);
             }
 
             info!("Execution finished.");
@@ -4501,6 +4544,19 @@ async fn main() -> anyhow::Result<()> {
                     );
                 });
                 info!("Audit log written to {:?}", log_path);
+            }
+
+            // Like Node and Deno: once everything is written, end the process
+            // without running destructors (V8 heap teardown, runtime
+            // shutdown) — ~1-2 ms of every `3va run`, for nothing.
+            if let Some(code) = run_exit_code {
+                // First run only: let the snapshot build finish so it exists
+                // for the next one.
+                vvva_js::snapshot::wait_for_build();
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().flush();
+                std::process::exit(code);
             }
         }
         Commands::Install {

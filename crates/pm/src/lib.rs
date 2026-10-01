@@ -608,6 +608,88 @@ fn collect_optional_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)>
     specs
 }
 
+#[cfg(test)]
+mod lockfile_platform_tests {
+    use super::*;
+
+    fn lock_with(os: &str) -> lockfile::Lockfile {
+        let mut l = lockfile::Lockfile::default();
+        l.dependencies.insert(
+            "@x/bin-darwin-arm64".into(),
+            lockfile::LockfileDep {
+                version: "1.2.0".into(),
+                optional: Some(true),
+                os: Some(serde_json::json!([os])),
+                cpu: Some(serde_json::json!(["arm64"])),
+                ..Default::default()
+            },
+        );
+        l
+    }
+
+    #[test]
+    fn recorded_foreign_optional_is_skipped_without_the_registry() {
+        let linux = crate::platform::Platform::new("linux", "x64", "glibc");
+        let mac = crate::platform::Platform::new("darwin", "arm64", "");
+        let node = WaveNode::optional("@x/bin-darwin-arm64", "^1.0.0".into());
+        assert!(lock_says_not_for_this_platform(
+            Some(&lock_with("darwin")),
+            &linux,
+            &node
+        ));
+        // Applies here: resolve it normally.
+        assert!(!lock_says_not_for_this_platform(
+            Some(&lock_with("darwin")),
+            &mac,
+            &node
+        ));
+        // The range moved past the pin: ask the registry.
+        let newer = WaveNode::optional("@x/bin-darwin-arm64", "^2.0.0".into());
+        assert!(!lock_says_not_for_this_platform(
+            Some(&lock_with("darwin")),
+            &linux,
+            &newer
+        ));
+    }
+
+    #[test]
+    fn lockfile_keys_are_written_in_order() {
+        let mut l = lockfile::Lockfile::default();
+        for name in ["zeta", "alpha", "mid"] {
+            l.dependencies
+                .insert(name.into(), lockfile::LockfileDep::default());
+        }
+        let out = serde_json::to_string(&l).unwrap();
+        let (a, m, z) = (
+            out.find("alpha").unwrap(),
+            out.find("mid").unwrap(),
+            out.find("zeta").unwrap(),
+        );
+        assert!(a < m && m < z);
+    }
+}
+
+#[cfg(test)]
+mod collect_dep_specs_tests {
+    #[test]
+    fn optional_deps_copied_into_dependencies_are_not_required() {
+        // What npm publishes for a package with per-platform binaries.
+        let meta = serde_json::json!({
+            "dependencies": { "a": "^1.0.0", "@x/bin-darwin-arm64": "1.0.0" },
+            "optionalDependencies": { "@x/bin-darwin-arm64": "1.0.0" },
+            "peerDependencies": { "p": ">=1", "q": "*" },
+            "peerDependenciesMeta": { "q": { "optional": true } }
+        });
+        let mut got = super::collect_dep_specs(&meta);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![("a".into(), "^1.0.0".into()), ("p".into(), ">=1".into())]
+        );
+        assert_eq!(super::collect_optional_dep_specs(&meta).len(), 1);
+    }
+}
+
 fn collect_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)> {
     let mut dep_specs = Vec::new();
     for key in ["dependencies", "peerDependencies"] {
@@ -616,6 +698,14 @@ fn collect_dep_specs(meta: &serde_json::Value) -> Vec<(String, String)> {
                 if key == "peerDependencies"
                     && meta["peerDependenciesMeta"][dep_name]["optional"] == true
                 {
+                    continue;
+                }
+                // npm publish copies optionalDependencies into dependencies
+                // too; those are optional (per-platform prebuilts, mostly) and
+                // are collected by `collect_optional_dep_specs`. Treating them
+                // as required fetched every platform's binary and failed the
+                // install when one didn't download.
+                if key == "dependencies" && meta["optionalDependencies"].get(dep_name).is_some() {
                     continue;
                 }
                 // Transitive names come from the registry and must never be
@@ -1370,6 +1460,45 @@ pub fn manifest_dep_hash(project_root: &Path) -> Option<String> {
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     Some(hex::encode(hasher.finalize()))
+}
+
+/// Hash of everything a manifest install depends on: the dependency fields
+/// of package.json plus the exact bytes of 3va-lock.json when there is one
+/// (a lockfile that changes, e.g. after a pull, means work to do).
+fn install_state_hash(project_root: &Path) -> Option<String> {
+    use crate::fips::{Digest, Sha256};
+    let deps = manifest_dep_hash(project_root)?;
+    let lock = std::fs::read(project_root.join("3va-lock.json")).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(deps.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(&lock);
+    Some(hex::encode(hasher.finalize()))
+}
+
+fn install_state_marker(project_root: &Path) -> PathBuf {
+    project_root.join("node_modules").join(".3va-install-state")
+}
+
+/// True when the last successful manifest install used exactly this
+/// package.json dependency set and lockfile, and every direct dependency is
+/// still present — so `3va install` has nothing to do.
+fn install_is_current(project_root: &Path, direct_deps: &[(String, String)]) -> bool {
+    let Some(current) = install_state_hash(project_root) else {
+        return false;
+    };
+    let Ok(recorded) = std::fs::read_to_string(install_state_marker(project_root)) else {
+        return false;
+    };
+    recorded.trim() == current
+        && direct_deps.iter().all(|(name, _)| {
+            is_valid_package_name(name)
+                && project_root
+                    .join("node_modules")
+                    .join(name)
+                    .join("package.json")
+                    .exists()
+        })
 }
 
 fn install_hash_marker(project_root: &Path) -> PathBuf {
@@ -2128,19 +2257,17 @@ async fn install_from_manifest_opts(
         return Ok(());
     }
 
+    if !strict_lock && install_is_current(project_root, &all_deps) {
+        println!("✓ Already up to date ({} dep(s)).", all_deps.len());
+        return Ok(());
+    }
+
     println!();
     println!("Installing {} dep(s) from manifest...", all_deps.len());
 
     // Install concurrently: each dep gets its own task.
-    let mut set = tokio::task::JoinSet::new();
-    let allow_net_owned: Option<Vec<String>> = allow_net.map(|v| v.to_vec());
-    let root = project_root.to_path_buf();
-
+    let mut specs: Vec<String> = Vec::with_capacity(all_deps.len());
     for (name, version) in all_deps {
-        // A lockfile pin wins over the manifest range, but only when it still
-        // satisfies it: an out-of-date lock must not silently hold a project
-        // back from a range it no longer meets, and the mismatch is reported
-        // instead of being hidden.
         let spec = match lock.as_ref().and_then(|l| l.pin(&name)) {
             Some(pin) if !pin.version.is_empty() => {
                 if installed_version_satisfies(&pin.version, Some(&version)) {
@@ -2156,31 +2283,26 @@ async fn install_from_manifest_opts(
             }
             _ => manifest_spec(&name, &version),
         };
-        let an = allow_net_owned.clone();
-        let r = root.clone();
-        set.spawn(async move {
-            install_with_transitive_opts(&spec, false, an.as_deref(), &r, false, strict_lock).await
-        });
+        specs.push(spec);
     }
 
-    let mut errors = Vec::new();
-    while let Some(res) = set.join_next().await {
-        match res {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => errors.push(e.to_string()),
-            Err(e) => errors.push(format!("task panic: {}", e)),
-        }
-    }
-
-    if !errors.is_empty() {
-        anyhow::bail!(
-            "{} dep(s) failed to install:\n{}",
-            errors.len(),
-            errors.join("\n")
-        );
-    }
+    // `3va ci` (strict) installs what the lockfile says and never rewrites it.
+    install_with_transitive_opts(
+        &specs,
+        false,
+        allow_net,
+        project_root,
+        false,
+        strict_lock,
+        !strict_lock,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("install failed:\n{e}"))?;
 
     record_install_hash(project_root);
+    if let Some(state) = install_state_hash(project_root) {
+        let _ = std::fs::write(install_state_marker(project_root), state);
+    }
     println!();
     println!("✓ All dependencies installed.");
     warn_root_lifecycle_not_run(&val);
@@ -2387,12 +2509,27 @@ impl WaveNode {
 /// Returns `Ok(None)` when the candidate is not published, or when its own
 /// `os` / `cpu` / `libc` fields exclude this machine — the case where fetching
 /// it would put a Darwin binary into a Linux tree, or an arm64 build on x64.
+/// An optional dependency that was resolved but does not apply to this
+/// platform, with the constraints that ruled it out (recorded in the
+/// lockfile so the next install need not fetch its packument to find out
+/// again).
+struct SkippedOptional {
+    name: String,
+    version: String,
+    os: Option<serde_json::Value>,
+    cpu: Option<serde_json::Value>,
+    libc: Option<serde_json::Value>,
+}
+
+type SkippedOptionals = std::sync::Arc<std::sync::Mutex<Vec<SkippedOptional>>>;
+
 async fn resolve_optional_dep(
     client: &reqwest::Client,
     base_url: &str,
     pkg_name: &str,
     range: &str,
     platform: &crate::platform::Platform,
+    skipped: &SkippedOptionals,
 ) -> anyhow::Result<Option<(RegistryInfo, Vec<(String, String)>)>> {
     let data = match fetch_packument(client, base_url, pkg_name).await {
         Ok(d) => d,
@@ -2427,6 +2564,13 @@ async fn resolve_optional_dep(
             platform.cpu,
             platform.libc
         );
+        skipped.lock().unwrap().push(SkippedOptional {
+            name: pkg_name.to_string(),
+            version: version.clone(),
+            os: version_meta.get("os").cloned(),
+            cpu: version_meta.get("cpu").cloned(),
+            libc: version_meta.get("libc").cloned(),
+        });
         return Ok(None);
     }
     let deps = collect_dep_specs(version_meta);
@@ -2441,11 +2585,12 @@ async fn install_with_transitive(
     update_manifest: bool,
 ) -> anyhow::Result<()> {
     install_with_transitive_opts(
-        root_spec,
+        &[root_spec.to_string()],
         force,
         allow_net,
         project_root,
         update_manifest,
+        false,
         false,
     )
     .await
@@ -2501,13 +2646,180 @@ fn lock_violation(
     }
 }
 
+/// Resolves `node` from `3va-lock.json` and the local content store alone,
+/// with no registry request: the lockfile pins a version (with integrity)
+/// that still satisfies the requested range, and that exact version is
+/// already in the store (whose contents were integrity-checked when they
+/// were stored). Dependencies come from the stored package.json. `None`
+/// means "ask the registry" — anything the lock and store can't answer
+/// (dist-tags, unpinned or uncached packages, optional packages built for
+/// another platform) takes the normal path.
+fn offline_resolution(
+    lock: Option<&lockfile::Lockfile>,
+    store: &store::ContentStore,
+    registry: &str,
+    platform: &crate::platform::Platform,
+    node: &WaveNode,
+) -> Option<(RegistryInfo, Vec<(String, String)>)> {
+    let pin = lock?.pin(&node.name)?;
+    let integrity = pin.integrity.clone()?;
+    let requested = node.requested.as_deref().unwrap_or("latest");
+    if !is_registry_range(requested) || requested.trim().chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let range = SemverRange::parse(requested)?;
+    if !range.matches(&Semver::parse(&pin.version)?) {
+        return None;
+    }
+    if !store.is_cached(registry, &node.name, &pin.version) {
+        return None;
+    }
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            store
+                .package_path(registry, &node.name, &pin.version)
+                .join("package.json"),
+        )
+        .ok()?,
+    )
+    .ok()?;
+    if node.optional && !crate::platform::manifest_accepts(&manifest, platform) {
+        return None;
+    }
+    let mut version_meta = HashMap::new();
+    version_meta.insert(
+        pin.version.clone(),
+        VersionMeta {
+            tarball: pin.resolved.clone().unwrap_or_default(),
+            integrity: Some(integrity),
+            optional_deps: collect_optional_dep_specs(&manifest),
+        },
+    );
+    Some((
+        RegistryInfo {
+            versions: vec![pin.version.clone()],
+            latest: None,
+            version_meta,
+        },
+        collect_dep_specs(&manifest),
+    ))
+}
+
+/// Records the resolved graph in `3va-lock.json` (name, version, tarball,
+/// integrity, registry), so the next install can pin every package and skip
+/// the registry. An entry resolved from disk without an integrity keeps the
+/// integrity the previous lockfile recorded for the same version.
+fn write_manifest_lockfile(
+    project_root: &Path,
+    manifest: Option<&serde_json::Value>,
+    registry: &str,
+    resolved: &HashMap<String, (String, String, Option<String>)>,
+    skipped: &[SkippedOptional],
+) -> anyhow::Result<()> {
+    let path = project_root.join("3va-lock.json");
+    let old = lockfile::Lockfile::load(&path).ok();
+    let mut lock = lockfile::Lockfile {
+        lockfile_version: 3,
+        name: manifest
+            .and_then(|m| m["name"].as_str())
+            .unwrap_or_default()
+            .to_string(),
+        version: manifest
+            .and_then(|m| m["version"].as_str())
+            .unwrap_or_default()
+            .to_string(),
+        packages: old.as_ref().map(|l| l.packages.clone()).unwrap_or_default(),
+        dependencies: HashMap::new(),
+    };
+    for (name, (version, tarball, integrity)) in resolved {
+        let previous = old
+            .as_ref()
+            .and_then(|l| l.pin(name))
+            .filter(|p| &p.version == version);
+        let integrity = integrity
+            .clone()
+            .or_else(|| previous.and_then(|p| p.integrity.clone()));
+        lock.dependencies.insert(
+            name.clone(),
+            lockfile::LockfileDep {
+                version: version.clone(),
+                resolved: Some(tarball.clone()),
+                integrity,
+                dependencies: None,
+                dev: None,
+                registry: previous
+                    .and_then(|p| p.registry.clone())
+                    .or_else(|| Some(registry.to_string())),
+                optional: None,
+                os: None,
+                cpu: None,
+                libc: None,
+            },
+        );
+    }
+    for sk in skipped {
+        if lock.dependencies.contains_key(&sk.name) {
+            continue;
+        }
+        lock.dependencies.insert(
+            sk.name.clone(),
+            lockfile::LockfileDep {
+                version: sk.version.clone(),
+                optional: Some(true),
+                os: sk.os.clone(),
+                cpu: sk.cpu.clone(),
+                libc: sk.libc.clone(),
+                ..Default::default()
+            },
+        );
+    }
+    lock.save(&path)
+}
+
+/// True when the lockfile records `node` as an optional dependency whose
+/// pinned version (still within the requested range) is built for another
+/// platform: it would be skipped anyway, so its packument isn't fetched.
+fn lock_says_not_for_this_platform(
+    lock: Option<&lockfile::Lockfile>,
+    platform: &crate::platform::Platform,
+    node: &WaveNode,
+) -> bool {
+    let Some(pin) = lock.and_then(|l| l.pin(&node.name)) else {
+        return false;
+    };
+    if pin.optional != Some(true) || (pin.os.is_none() && pin.cpu.is_none() && pin.libc.is_none()) {
+        return false;
+    }
+    let in_range = node
+        .requested
+        .as_deref()
+        .and_then(SemverRange::parse)
+        .zip(Semver::parse(&pin.version))
+        .is_some_and(|(r, v)| r.matches(&v));
+    let mut constraints = serde_json::Map::new();
+    for (k, v) in [("os", &pin.os), ("cpu", &pin.cpu), ("libc", &pin.libc)] {
+        if let Some(v) = v {
+            constraints.insert(k.to_string(), v.clone());
+        }
+    }
+    in_range
+        && !crate::platform::manifest_accepts(&serde_json::Value::Object(constraints), platform)
+}
+
+/// Resolves and installs `root_specs` and everything they depend on as ONE
+/// dependency graph. The roots form the first wave, so a version a root asks
+/// for wins over a looser range deeper in the tree (a peer `>=5.0.0` reuses
+/// the root's `typescript@^5.8.2` instead of pulling 7.x over it). Installing
+/// each root as its own graph, concurrently, let those graphs overwrite each
+/// other's `node_modules/<name>` and race on the same store links.
 async fn install_with_transitive_opts(
-    root_spec: &str,
+    root_specs: &[String],
     force: bool,
     allow_net: Option<&[String]>,
     project_root: &Path,
     update_manifest: bool,
     strict_lock: bool,
+    record_lock: bool,
 ) -> anyhow::Result<()> {
     use std::collections::{HashMap as Map, HashSet};
     let lock = lockfile::Lockfile::load(&project_root.join("3va-lock.json")).ok();
@@ -2517,7 +2829,10 @@ async fn install_with_transitive_opts(
     // allow_net=None → permission denied; allow_net=Some([]) → allow all (--allow-net=)
     let allowed_host = match allow_net {
         None => {
-            let (pkg_name, _) = parse_package_spec(root_spec)?;
+            let pkg_name = match root_specs.first() {
+                Some(spec) => parse_package_spec(spec)?.0,
+                None => String::from("<package>"),
+            };
             eprintln!();
             eprintln!("✗ Network access denied.");
             eprintln!();
@@ -2607,8 +2922,16 @@ async fn install_with_transitive_opts(
             == Some("hoisted");
 
     // Start with the root package
-    let (root_name, root_requested_ver) = parse_package_spec(root_spec)?;
-    let mut current_wave: Vec<WaveNode> = vec![WaveNode::required(&root_name, root_requested_ver)];
+    let offline_store = store::ContentStore::global();
+    let skipped_optionals: SkippedOptionals = Default::default();
+    let offline_registry = registry.display_name().to_string();
+    let mut root_names: HashSet<String> = HashSet::new();
+    let mut current_wave: Vec<WaveNode> = Vec::new();
+    for spec in root_specs {
+        let (name, requested) = parse_package_spec(spec)?;
+        current_wave.push(WaveNode::required(&name, requested));
+        root_names.insert(name);
+    }
 
     println!();
     println!("  Resolving dependency graph...");
@@ -2724,9 +3047,39 @@ async fn install_with_transitive_opts(
                         anyhow::anyhow!("'{}' is pinned by .npmrc to {pin}: {e}", node.name)
                     })?;
             }
+            if pinned.is_none()
+                && node.optional
+                && lock_says_not_for_this_platform(lock.as_ref(), &platform, &node)
+                && let Some(pin) = lock.as_ref().and_then(|l| l.pin(&node.name))
+            {
+                // Still skipped; keep its record in the rewritten lockfile.
+                skipped_optionals.lock().unwrap().push(SkippedOptional {
+                    name: node.name.clone(),
+                    version: pin.version.clone(),
+                    os: pin.os.clone(),
+                    cpu: pin.cpu.clone(),
+                    libc: pin.libc.clone(),
+                });
+                continue;
+            }
+            if pinned.is_none()
+                && !matches!(registry, Registry::Jsr)
+                && let Some((info, deps)) = offline_resolution(
+                    lock.as_ref(),
+                    &offline_store,
+                    &offline_registry,
+                    &platform,
+                    &node,
+                )
+            {
+                let requested = node.requested.clone().unwrap_or_else(|| "latest".into());
+                set.spawn(async move { Ok(Some((node.name, requested, info, deps))) });
+                continue;
+            }
             let base = pinned.clone().unwrap_or_else(|| base_url.clone());
             let registry = registry.clone();
             let platform = platform.clone();
+            let skipped = skipped_optionals.clone();
             set.spawn(async move {
                 let version_to_fetch = node.requested.as_deref().unwrap_or("latest");
                 let (info, deps) = match &registry {
@@ -2743,6 +3096,7 @@ async fn install_with_transitive_opts(
                                 &node.name,
                                 version_to_fetch,
                                 &platform,
+                                &skipped,
                             )
                             .await?
                             {
@@ -2875,7 +3229,7 @@ async fn install_with_transitive_opts(
     let to_install: Vec<(String, String, String, Option<String>)> = resolved
         .iter()
         .filter(|(name, (ver, _, _))| {
-            if force && name.as_str() == root_name.as_str() {
+            if force && root_names.contains(name.as_str()) {
                 return true;
             }
             let dest = project_root.join("node_modules").join(name.as_str());
@@ -2916,6 +3270,27 @@ async fn install_with_transitive_opts(
         std::fs::create_dir_all(&node_modules)?;
         let zero_install_on = zero_install_cache_enabled(manifest_val.as_ref());
         let project_root_owned = project_root.to_path_buf();
+
+        // Packages already in the content store need no download and no
+        // verification (both happened when they were stored): link them
+        // into node_modules in parallel up front. The loop below then finds
+        // each one linked (link_to_virtual_store is idempotent, and keeps
+        // its VULN-04 path guard) and only does the per-package rest.
+        // Linking them one by one in that loop was most of a warm install.
+        if !hoisted {
+            let mut link_set = JoinSet::new();
+            for (pkg_name, ver, _, _) in &to_install {
+                if global_store.is_cached(&reg_name, pkg_name, ver) {
+                    let (gs, rn, nm) =
+                        (global_store.clone(), reg_name.clone(), node_modules.clone());
+                    let (name, ver) = (pkg_name.clone(), ver.clone());
+                    link_set.spawn_blocking(move || {
+                        let _ = gs.link_to_virtual_store(&rn, &name, &ver, &nm);
+                    });
+                }
+            }
+            while link_set.join_next().await.is_some() {}
+        }
 
         // Provenance fetch is a per-package network round-trip (registry
         // attestations endpoint), same as the tarball download — it used
@@ -3361,6 +3736,17 @@ async fn install_with_transitive_opts(
     }
 
     // ── node_modules/.bin ────────────────────────────────────────────────────
+    if record_lock {
+        let skipped = std::mem::take(&mut *skipped_optionals.lock().unwrap());
+        write_manifest_lockfile(
+            project_root,
+            manifest_val.as_ref(),
+            registry.display_name(),
+            &resolved,
+            &skipped,
+        )?;
+    }
+
     // Every install leaves the bin shims in place, whether or not the manifest
     // is being updated: without them `node_modules/.bin/vite` does not exist
     // and every toolchain that shells out to its own bin (Vite, tsc, jest,
@@ -3374,6 +3760,14 @@ async fn install_with_transitive_opts(
     if !update_manifest {
         return Ok(());
     }
+    // Only single-package installs (`3va add x`) update the manifest.
+    let [root_spec] = root_specs else {
+        anyhow::bail!(
+            "manifest update needs exactly one package, got {}",
+            root_specs.len()
+        );
+    };
+    let root_spec = root_spec.as_str();
 
     // Delegate manifest update to a lightweight helper using the same logic as before
     // install_package_impl refuses a package that is already present; only in
@@ -4467,36 +4861,15 @@ pub async fn install_workspace(
         );
         println!();
 
-        let allow_net_owned: Option<Vec<String>> = allow_net.map(|v| v.to_vec());
-        let mut set = tokio::task::JoinSet::new();
-
-        for (dep_name, dep_version) in &merged {
-            let spec = manifest_spec(dep_name, dep_version);
-            let an = allow_net_owned.clone();
-            let r = root.to_path_buf();
-            // update_manifest=false for root-level shared deps (each package
-            // manages its own manifest; the root has no package.json of its own
-            // necessarily).
-            set.spawn(async move {
-                install_with_transitive(&spec, false, an.as_deref(), &r, false).await
-            });
-        }
-
-        let mut errors = Vec::new();
-        while let Some(res) = set.join_next().await {
-            match res {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => errors.push(e.to_string()),
-                Err(e) => errors.push(format!("task panic: {}", e)),
-            }
-        }
-        if !errors.is_empty() {
-            anyhow::bail!(
-                "{} dep(s) failed during workspace root install:\n{}",
-                errors.len(),
-                errors.join("\n")
-            );
-        }
+        // One graph for all shared deps (see install_with_transitive_opts);
+        // update_manifest=false: each package manages its own manifest.
+        let specs: Vec<String> = merged
+            .iter()
+            .map(|(dep_name, dep_version)| manifest_spec(dep_name, dep_version))
+            .collect();
+        install_with_transitive_opts(&specs, false, allow_net, root, false, false, false)
+            .await
+            .map_err(|e| anyhow::anyhow!("workspace root install failed:\n{e}"))?;
     }
 
     // ── Step 2: install each workspace package's own deps locally ─────────────
@@ -4991,6 +5364,10 @@ mod sbom_tests {
                 dependencies: None,
                 dev: None,
                 registry: None,
+                optional: None,
+                os: None,
+                cpu: None,
+                libc: None,
             },
         );
         let mut packages = HashMap::new();

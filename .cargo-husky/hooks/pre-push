@@ -6,10 +6,18 @@
 #   2. cargo deny check
 #   3. cargo fuzz run (short smoke test on each target)
 #   4. gitleaks (full-tree scan, catches anything added since the last push)
+#
+# The cargo steps are sized to this machine (scripts/hook-limits.sh): limited
+# parallel jobs and, with systemd, a memory-capped scope. That makes this hook
+# slow on purpose — the unlimited version got the whole desktop session killed
+# by the OOM daemon. Override with VVVA_HOOK_JOBS / VVVA_HOOK_MEM_MAX_MB.
 set -e
 
+. "$(git rev-parse --show-toplevel)/scripts/hook-limits.sh"
+hook_limits_init
+
 echo "[pre-push] 1/4 Running test suite..."
-cargo test
+run_limited cargo test
 
 echo "[pre-push] 2/4 Running cargo-deny..."
 cargo deny check
@@ -20,10 +28,15 @@ echo "[pre-push] 3/4 Running fuzz smoke tests..."
 # MAX_FUZZ_TIME below.
 MAX_FUZZ_TIME=10
 FUZZ_DIR="fuzz"
+# cargo-fuzz defaults to the triple it was itself built for. A prebuilt
+# (static, musl) cargo-fuzz therefore targets x86_64-unknown-linux-musl,
+# which neither has the sanitizers the fuzz build needs nor is usually
+# installed. Use the host triple of the rustc that will compile the targets.
+FUZZ_TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
 if [ -d "$FUZZ_DIR" ]; then
     for target in $(cd "$FUZZ_DIR" && cargo fuzz list 2>/dev/null); do
-        echo "[pre-push]   fuzz: $target (${MAX_FUZZ_TIME}s)"
-        (cd "$FUZZ_DIR" && cargo fuzz run "$target" -- \
+        echo "[pre-push]   fuzz: $target (${MAX_FUZZ_TIME}s, $FUZZ_TRIPLE)"
+        (cd "$FUZZ_DIR" && run_limited cargo fuzz run "$target" --target "$FUZZ_TRIPLE" -- \
             -max_total_time=$MAX_FUZZ_TIME \
             -max_len=4096 \
             -timeout=5)

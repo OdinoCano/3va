@@ -11,8 +11,19 @@ pub struct Lockfile {
     pub lockfile_version: u32,
     pub name: String,
     pub version: String,
+    #[serde(serialize_with = "sorted_map")]
     pub packages: HashMap<String, LockfilePackage>,
+    #[serde(serialize_with = "sorted_map")]
     pub dependencies: HashMap<String, LockfileDep>,
+}
+
+/// Writes a map with its keys in order: a lockfile is committed, and
+/// HashMap iteration order changed the file on every install.
+fn sorted_map<S: serde::Serializer, V: Serialize>(
+    map: &HashMap<String, V>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_map(map.iter().collect::<std::collections::BTreeMap<_, _>>())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -41,6 +52,17 @@ pub struct LockfileDep {
     pub dev: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<String>,
+    /// An optional dependency (per-platform prebuilt, mostly). Its
+    /// `os`/`cpu`/`libc` constraints are recorded so a later install can tell
+    /// whether it applies to this machine without asking the registry again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub libc: Option<serde_json::Value>,
 }
 
 impl Lockfile {
@@ -99,6 +121,10 @@ impl Lockfile {
                     dependencies: if deps.is_empty() { None } else { Some(deps) },
                     dev: None,
                     registry: None,
+                    optional: None,
+                    os: None,
+                    cpu: None,
+                    libc: None,
                 },
             );
         }

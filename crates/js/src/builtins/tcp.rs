@@ -533,7 +533,7 @@ pub fn inject_tcp(
                     return;
                 };
 
-                match std::net::TcpListener::bind(format!("{}:{}", host, port)) {
+                match crate::builtins::http_server::bind_listener(&format!("{}:{}", host, port)) {
                     Ok(std_l) => {
                         if let Err(e) = std_l.set_nonblocking(true) {
                             let err = js_err(_scope, &e.to_string());

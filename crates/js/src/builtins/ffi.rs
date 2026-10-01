@@ -10,8 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use v8::{
-    Function, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, Script,
-    String as V8String,
+    Function, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue, String as V8String,
 };
 use vvva_permissions::{Capability, PermissionState};
 
@@ -474,8 +473,7 @@ pub fn inject_ffi(
         globalThis.__requireCache['ffi']      = mod;
         globalThis.__requireCache['node:ffi'] = mod;
     })();"#;
-    let source = V8String::new(scope, js_code).unwrap();
-    let _ = Script::compile(scope, source, None).and_then(|s| s.run(scope));
+    let _ = crate::builtins::code_cache::bootstrap_js(scope, "ffi", js_code);
 
     Ok(())
 }

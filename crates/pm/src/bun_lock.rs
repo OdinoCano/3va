@@ -167,6 +167,10 @@ pub fn load_from_bun_lock(path: &std::path::Path) -> anyhow::Result<Option<Lockf
             dependencies,
             dev: None,
             registry: None,
+            optional: None,
+            os: None,
+            cpu: None,
+            libc: None,
         });
     }
     if pkgs.is_empty() {

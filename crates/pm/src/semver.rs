@@ -79,7 +79,34 @@ impl Ord for Semver {
         match (self.prerelease.is_empty(), other.prerelease.is_empty()) {
             (true, false) => Ordering::Greater,
             (false, true) => Ordering::Less,
-            _ => Ordering::Equal,
+            (true, true) => Ordering::Equal,
+            (false, false) => cmp_prerelease(&self.prerelease, &other.prerelease),
+        }
+    }
+}
+
+/// SemVer 2.0 §11: dot-separated identifiers compared left to right,
+/// numeric ones numerically and below alphanumeric ones; a shorter list of
+/// otherwise equal identifiers is lower.
+fn cmp_prerelease(a: &str, b: &str) -> Ordering {
+    let mut ai = a.split('.');
+    let mut bi = b.split('.');
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let o = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(n), Ok(m)) => n.cmp(&m),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if o != Ordering::Equal {
+                    return o;
+                }
+            }
         }
     }
 }
@@ -96,6 +123,8 @@ pub enum SemverRange {
     /// Conjunction of two ranges, both must match (used for compound ranges like
     /// `">=1.0.0 <2.0.0"`).
     And(Box<SemverRange>, Box<SemverRange>),
+    /// Either range matches (`"^1.0.0 || ^2.0.0"`).
+    Or(Box<SemverRange>, Box<SemverRange>),
     Any,
 }
 
@@ -113,6 +142,59 @@ impl SemverRange {
     /// - Dist-tags: `"latest"`, `"next"`, `"beta"` → treated as `Any`
     pub fn parse(range: &str) -> Option<Self> {
         let range = range.trim();
+
+        // `a || b`: any alternative may match; an empty alternative is `*`.
+        if range.contains("||") {
+            let mut out: Option<SemverRange> = None;
+            for alt in range.split("||") {
+                let r = SemverRange::parse(alt)?;
+                out = Some(match out {
+                    None => r,
+                    Some(prev) => SemverRange::Or(Box::new(prev), Box::new(r)),
+                });
+            }
+            return out;
+        }
+
+        // Hyphen range `1.2.3 - 2.3.4`: inclusive on both ends; a partial
+        // upper bound (`- 2.3`) means below the next minor/major.
+        if let Some((lo, hi)) = range.split_once(" - ") {
+            let lo = Semver::parse(lo.trim()).or_else(|| parse_partial(lo.trim()))?;
+            let hi = hi.trim();
+            let upper = match Semver::parse(hi) {
+                Some(v) => SemverRange::Lte(v),
+                None => {
+                    let dots = hi
+                        .trim_end_matches(".x")
+                        .trim_end_matches(".*")
+                        .matches('.')
+                        .count();
+                    let p = parse_partial(hi)?;
+                    let next = if dots == 0 {
+                        Semver {
+                            major: p.major + 1,
+                            minor: 0,
+                            patch: 0,
+                            prerelease: String::new(),
+                            build: String::new(),
+                        }
+                    } else {
+                        Semver {
+                            major: p.major,
+                            minor: p.minor + 1,
+                            patch: 0,
+                            prerelease: String::new(),
+                            build: String::new(),
+                        }
+                    };
+                    SemverRange::Lt(next)
+                }
+            };
+            return Some(SemverRange::And(
+                Box::new(SemverRange::Gte(lo)),
+                Box::new(upper),
+            ));
+        }
 
         if range == "*" || range.is_empty() {
             return Some(SemverRange::Any);
@@ -150,12 +232,12 @@ impl SemverRange {
         }
 
         if let Some(rest) = range.strip_prefix('^') {
-            let version = parse_partial(rest)?;
+            let version = Semver::parse(rest).or_else(|| parse_partial(rest))?;
             return Some(SemverRange::Caret(version));
         }
 
         if let Some(rest) = range.strip_prefix('~') {
-            let version = parse_partial(rest)?;
+            let version = Semver::parse(rest).or_else(|| parse_partial(rest))?;
             return Some(SemverRange::Tilde(version));
         }
 
@@ -192,7 +274,37 @@ impl SemverRange {
         Semver::parse(range).map(SemverRange::Exact)
     }
 
+    /// npm semantics: a prerelease version only matches when the range
+    /// itself names a prerelease of the same `major.minor.patch`
+    /// (`^1.2.3-beta.1` accepts `1.2.3-beta.2`, but `>=1.0.0` or `*` never
+    /// pick `2.0.0-rc.1`). Otherwise `*`/`latest`/`>=x` resolved to
+    /// whatever dev build had the highest number.
     pub fn matches(&self, version: &Semver) -> bool {
+        if let SemverRange::Or(a, b) = self {
+            return a.matches(version) || b.matches(version);
+        }
+        self.matches_ignoring_prerelease_rule(version)
+            && (version.prerelease.is_empty() || self.names_prerelease_of(version))
+    }
+
+    fn names_prerelease_of(&self, v: &Semver) -> bool {
+        match self {
+            SemverRange::Exact(b)
+            | SemverRange::Caret(b)
+            | SemverRange::Tilde(b)
+            | SemverRange::Gt(b)
+            | SemverRange::Gte(b)
+            | SemverRange::Lt(b)
+            | SemverRange::Lte(b) => {
+                !b.prerelease.is_empty()
+                    && (b.major, b.minor, b.patch) == (v.major, v.minor, v.patch)
+            }
+            SemverRange::And(a, b) => a.names_prerelease_of(v) || b.names_prerelease_of(v),
+            SemverRange::Or(_, _) | SemverRange::Any => false,
+        }
+    }
+
+    fn matches_ignoring_prerelease_rule(&self, version: &Semver) -> bool {
         match self {
             SemverRange::Any => true,
             SemverRange::Exact(v) => version == v,
@@ -212,7 +324,11 @@ impl SemverRange {
             SemverRange::Gte(v) => version >= v,
             SemverRange::Lt(v) => version < v,
             SemverRange::Lte(v) => version <= v,
-            SemverRange::And(a, b) => a.matches(version) && b.matches(version),
+            SemverRange::And(a, b) => {
+                a.matches_ignoring_prerelease_rule(version)
+                    && b.matches_ignoring_prerelease_rule(version)
+            }
+            SemverRange::Or(a, b) => a.matches(version) || b.matches(version),
         }
     }
 }
@@ -301,6 +417,46 @@ fn parse_compound(range: &str) -> Option<SemverRange> {
 
 #[cfg(test)]
 mod tests {
+    fn m(range: &str, v: &str) -> bool {
+        SemverRange::parse(range)
+            .unwrap()
+            .matches(&Semver::parse(v).unwrap())
+    }
+
+    #[test]
+    fn prereleases_need_an_explicit_prerelease_comparator() {
+        // The T3 bench install resolved `typescript` to a nightly this way.
+        assert!(!m(">=4.8.4", "7.1.0-dev.20260930.4"));
+        assert!(!m("*", "7.1.0-dev.20260930.4"));
+        assert!(!m("^5.8.2", "5.9.0-beta"));
+        assert!(m("^1.2.3-beta.1", "1.2.3-beta.2"));
+        assert!(!m("^1.2.3-beta.2", "1.2.3-beta.1"));
+        assert!(m("^1.2.3-beta.1", "1.4.0"));
+        assert!(!m("^1.2.3-beta.1", "1.4.0-beta.1"));
+        assert!(m("1.2.3-rc.1", "1.2.3-rc.1"));
+    }
+
+    #[test]
+    fn prerelease_ordering_follows_semver() {
+        let p = |s| Semver::parse(s).unwrap();
+        assert!(p("1.0.0-alpha") < p("1.0.0-alpha.1"));
+        assert!(p("1.0.0-alpha.1") < p("1.0.0-alpha.beta"));
+        assert!(p("1.0.0-beta.2") < p("1.0.0-beta.11"));
+        assert!(p("1.0.0-rc.1") < p("1.0.0"));
+    }
+
+    #[test]
+    fn or_and_hyphen_ranges() {
+        assert!(m("^4.0.0 || ^5.0.0", "5.3.1"));
+        assert!(m("^4 || ^5", "4.1.0"));
+        assert!(!m("^4 || ^5", "6.0.0"));
+        assert!(m("1.2.3 - 2.3.4", "2.3.4"));
+        assert!(!m("1.2.3 - 2.3.4", "2.3.5"));
+        assert!(m("1.2 - 2.3", "2.3.9"));
+        assert!(!m("1.2 - 2.3", "2.4.0"));
+        assert!(!m("1.2.3 - 2", "3.0.0"));
+    }
+
     #[test]
     fn operator_followed_by_space() {
         let r = SemverRange::parse(">= 2.1.2 < 3.0.0").unwrap();
