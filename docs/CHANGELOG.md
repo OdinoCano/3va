@@ -5,6 +5,43 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [Unreleased]
+
+### Security
+
+- **`https.createServer({ key, cert })` served cleartext.** It returned a plain HTTP server and ignored the key and certificate. It is now a real TLS listener: TLS 1.2 and 1.3 with the runtime's crypto provider (the FIPS module in a `fips` build), the hybrid post-quantum key exchange (X25519MLKEM768) with clients that offer it, and every firewall limit applied as for HTTP. Options that can't be honoured yet (`pfx`, `passphrase`, `requestCert`, `ca`, `SNICallback`, `crl`) and a missing or non-PEM `key`/`cert` now throw instead of being ignored.
+- **HTTP response bodies are no longer rewritten.** Every response of every `http` server was decoded and regex-rewritten to work around one Vite SSR case (`__viteFix`), which could alter user content and corrupt binary bodies. The server now sends exactly the bytes the app wrote.
+- **Prerelease versions no longer satisfy plain ranges.** `>=5.0.0`, `*` or `latest` could resolve to a nightly build (`7.1.0-dev…`); a prerelease now matches only when the range names a prerelease of the same `major.minor.patch`, as in npm.
+
+### Fixed
+
+- `3va install` resolves all of `package.json` as one dependency graph, so a transitive or peer range can't replace the version a direct dependency asked for, and two packages can't race linking the same files (`Store link failed … Directory not empty`). The real-app install in `bench/` failed every time.
+- `optionalDependencies` that npm also lists under `dependencies` are optional again: prebuilt binaries for other platforms are skipped instead of failing the install.
+- Semver ranges with `||` and hyphen ranges (`1.2.3 - 2.3.4`) matched nothing; prerelease identifiers are ordered per SemVer.
+- `3va install` writes `3va-lock.json` (sorted, stable between runs) and installs from it without contacting the registry when the store already has every package.
+- `WebAssembly.instantiate()`/`compile()` promises never settled: the process exited first.
+- `process.exitCode` was ignored and `beforeExit`/`exit` listeners never ran; `process.exit()` now runs `exit` listeners.
+- `process.nextTick` callbacks that throw reach `uncaughtException` instead of being swallowed.
+- Response headers with numeric or array values (several `Set-Cookie`) were sent empty; the status line now carries the standard reason phrase.
+- `TextEncoder` and `Buffer.from(string)` turn lone surrogates into U+FFFD; `Buffer.byteLength` of a typed array returns its byte length.
+- `3va … | head` no longer panics on the closed pipe; the typosquat check no longer flags `zod`, `preact`, `ms` or `jose`.
+
+### Changed
+
+- `3va run` starts from a V8 startup snapshot of the builtins, built on the first run and cached in `~/.cache/3va/snapshot/` (`VVVA_NO_SNAPSHOT=1` disables it).
+- The `imap`, `irc`, `ftp`, `pop3`, `mqtt`, `ssh2` and `webrtc` modules are installed on first use.
+- HTTP and `net` servers listen with a backlog of 1024 (was 128).
+- 4 runtime worker threads and 4 V8 platform threads instead of one of each per core.
+
+### Performance
+
+Measured with `bench/run.sh` on one 32-core machine, 2.11.0 → this release (Bun 1.3.14 in parentheses):
+
+- Startup: 15.8 → 6.5 ms (6.9 ms).
+- HTTP hello world, 1,000 connections: 45k → 183k req/s (117k); p99 832 → 13 ms (35 ms); peak RSS 509 → 74 MB (45 MB).
+- Express 5: 61k → 78k req/s (53k); peak RSS 606 → 115 MB (176 MB). Over HTTPS: 75k req/s (38k).
+- `3va install` with nothing to do: 12.8 → 2.6 ms (2.9 ms). Real app, warm cache: failed → 112 ms (171 ms).
+
 ## [2.11.0] — 2026-09-29
 
 ### Security
