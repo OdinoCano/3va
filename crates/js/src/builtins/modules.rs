@@ -3811,9 +3811,17 @@ pub fn inject_require(
                 port = port || 0;
                 if (typeof callback === 'function') this.once('listening', callback);
 
-                var result = self._tls
-                    ? __httpListen(port, hostname, self._tls.cert, self._tls.key)
-                    : __httpListen(port, hostname);
+                var result;
+                if (self._tlsMissing) {
+                    // An https server with no key/cert must never fall back
+                    // to serving plaintext on its port.
+                    result = new TypeError('https server: `key` and `cert` are required to listen (refusing to serve plaintext)');
+                    result.code = 'ERR_MISSING_ARGS';
+                } else {
+                    result = self._tls
+                        ? __httpListen(port, hostname, self._tls.cert, self._tls.key)
+                        : __httpListen(port, hostname);
+                }
                 if (typeof result !== 'number') {
                     // Node semantics: with no 'error' listener a failed listen
                     // (e.g. EACCES without --allow-net) is an uncaught exception,
@@ -4126,9 +4134,16 @@ pub fn inject_require(
                             throw e;
                         }
                     });
-                    var tls = { key: pem(opts.key, 'key'), cert: pem(opts.cert, 'cert') };
                     var server = createServer(opts, requestListener);
-                    server._tls = tls;
+                    var absent = function(v) { return v === undefined || v === null; };
+                    if (absent(opts.key) || absent(opts.cert)) {
+                        // Like Node, creating the server doesn't need a
+                        // certificate; listening does. Instead of listening
+                        // in cleartext, listen() fails (see httpServer.listen).
+                        server._tlsMissing = true;
+                    } else {
+                        server._tls = { key: pem(opts.key, 'key'), cert: pem(opts.cert, 'cert') };
+                    }
                     return server;
                 },
                 globalAgent: new httpAgent(),

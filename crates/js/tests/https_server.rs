@@ -183,7 +183,7 @@ async fn https_create_server_refuses_what_it_cannot_honour() {
             r#"
             var https = require('https');
             var codes = [];
-            [{ key: 'not pem', cert: 'not pem' }, {}, { pfx: 'x' }, { key: 'k', cert: 'c', requestCert: true }]
+            [{ key: 'not pem', cert: 'not pem' }, { pfx: 'x' }, { key: 'k', cert: 'c', requestCert: true }]
               .forEach(function (o) {
                 try { https.createServer(o, function () {}); codes.push('created'); }
                 catch (err) { codes.push(err.code); }
@@ -195,7 +195,39 @@ async fn https_create_server_refuses_what_it_cannot_honour() {
         .unwrap();
     assert_eq!(
         r,
-        "ERR_INVALID_ARG_VALUE,ERR_INVALID_ARG_VALUE,ERR_FEATURE_UNAVAILABLE_ON_PLATFORM,ERR_FEATURE_UNAVAILABLE_ON_PLATFORM"
+        "ERR_INVALID_ARG_VALUE,ERR_FEATURE_UNAVAILABLE_ON_PLATFORM,ERR_FEATURE_UNAVAILABLE_ON_PLATFORM"
+    );
+}
+
+// Like Node, an https server can be created without a certificate; what it
+// must never do is listen and answer in cleartext instead.
+#[tokio::test]
+async fn https_server_without_key_and_cert_fails_to_listen_not_to_serve_plaintext() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var https = require('https');
+        globalThis.__listenError = 'none';
+        var srv = https.createServer(function (req, res) {{ res.end('plaintext!'); }});
+        srv.on('error', function (err) {{ globalThis.__listenError = err.code; }});
+        srv.listen({port}, '127.0.0.1');
+        typeof srv.listen
+        "#
+    ))
+    .await
+    .unwrap();
+    // Not `run_event_loop().await`: it only returns once no HTTP listener is
+    // open anywhere in the process, and the other tests in this binary leave
+    // theirs open. Drive the loop for a bounded time instead.
+    drive_until(&mut e, tokio::time::sleep(Duration::from_millis(300))).await;
+    assert_eq!(
+        e.eval_to_string("globalThis.__listenError").await.unwrap(),
+        "ERR_MISSING_ARGS"
+    );
+    assert!(
+        std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_ok(),
+        "nothing may be listening on the port"
     );
 }
 
