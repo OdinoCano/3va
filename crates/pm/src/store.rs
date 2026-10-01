@@ -711,7 +711,14 @@ pub(crate) fn link_or_copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
+        // file_type() comes with the directory entry; is_dir() was one more
+        // stat per file (symlinks are followed, as is_dir() did).
+        let is_dir = match entry.file_type() {
+            Ok(t) if t.is_symlink() => src_path.is_dir(),
+            Ok(t) => t.is_dir(),
+            Err(_) => src_path.is_dir(),
+        };
+        if is_dir {
             link_or_copy_dir(&src_path, &dst_path)?;
         } else if std::fs::hard_link(&src_path, &dst_path).is_err() {
             std::fs::copy(&src_path, &dst_path)?;

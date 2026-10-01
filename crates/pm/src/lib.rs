@@ -3271,6 +3271,27 @@ async fn install_with_transitive_opts(
         let zero_install_on = zero_install_cache_enabled(manifest_val.as_ref());
         let project_root_owned = project_root.to_path_buf();
 
+        // Packages already in the content store need no download and no
+        // verification (both happened when they were stored): link them
+        // into node_modules in parallel up front. The loop below then finds
+        // each one linked (link_to_virtual_store is idempotent, and keeps
+        // its VULN-04 path guard) and only does the per-package rest.
+        // Linking them one by one in that loop was most of a warm install.
+        if !hoisted {
+            let mut link_set = JoinSet::new();
+            for (pkg_name, ver, _, _) in &to_install {
+                if global_store.is_cached(&reg_name, pkg_name, ver) {
+                    let (gs, rn, nm) =
+                        (global_store.clone(), reg_name.clone(), node_modules.clone());
+                    let (name, ver) = (pkg_name.clone(), ver.clone());
+                    link_set.spawn_blocking(move || {
+                        let _ = gs.link_to_virtual_store(&rn, &name, &ver, &nm);
+                    });
+                }
+            }
+            while link_set.join_next().await.is_some() {}
+        }
+
         // Provenance fetch is a per-package network round-trip (registry
         // attestations endpoint), same as the tarball download — it used
         // to run *after* this JoinSet drained, one package at a time in
