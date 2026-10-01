@@ -66,6 +66,35 @@ for kind, suffix in (("http", "http"), ("mem", "mem")):
         text,
     )
 
+# Startup (hello world): mean figure per runtime, like the install rows.
+startup_values = {}
+section_match = re.search(r"## Startup \(hello world\)\n\n(.*?)\n\n", bench, re.S)
+section = section_match.group(1) if section_match else ""
+for line in section.splitlines():
+    m = re.match(r"\|\s*(\S+)\s*\|\s*([\d.]+ ms)\s*\|", line)
+    if m:
+        startup_values[m.group(1)] = m.group(2)
+text = fill({f"startup-{k}": v for k, v in startup_values.items()}, text)
+
+# Express 5 and Express 5 over HTTPS: req/s per runtime, same shape as the
+# HTTP throughput row. Markers are BENCH:express-* and BENCH:expresshttps-*.
+for section_name, prefix in (
+    ("Express 5 hello world", "express"),
+    ("Express 5 over HTTPS", "expresshttps"),
+):
+    section_match = re.search(
+        rf"## {re.escape(section_name)}.*?\n\n(.*?)\n\n",
+        bench,
+        re.S,
+    )
+    section = section_match.group(1) if section_match else ""
+    express_values = {}
+    for line in section.splitlines():
+        m = re.match(r"\|\s*(\S+)\s*\|\s*([\d,]+)\s*\|\s*[\d.]+%\s*\|", line)
+        if m:
+            express_values[m.group(1)] = f"{m.group(2)} req/s"
+    text = fill({f"{prefix}-{k}": v for k, v in express_values.items()}, text)
+
 test262_values = {}
 section_match = re.search(r"## ECMAScript conformance \(test262\)\n\n(.*?)\n\n", bench, re.S)
 section = section_match.group(1) if section_match else ""

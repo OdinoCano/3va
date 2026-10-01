@@ -42,6 +42,8 @@ Measured with `bench/run.sh` on one 32-core machine, 2.11.0 → this release (Bu
 - Express 5: 61k → 78k req/s (53k); peak RSS 606 → 115 MB (176 MB). Over HTTPS: 75k req/s (38k).
 - `3va install` with nothing to do: 12.8 → 2.6 ms (2.9 ms). Real app, warm cache: failed → 112 ms (171 ms).
 
+The README comparison table's CI-measured figures ([run 36927280438](https://github.com/OdinoCano/3va/actions/runs/36927280438)) confirm the direction on a shared 4-core runner — 3va 121.9k vs Bun 116.8k req/s plain, 71.9k vs 48.8k under Express, 69.8k vs 43.5k over TLS — except startup, where the shared runner's noise reverses the dedicated-machine result (3va 11.6 vs Bun 3.1 ms; even on 32 cores, 6.5 vs 6.9 ms). Both figures are in `bench/README.md`, reported rather than hidden.
+
 ## [2.11.0] — 2026-09-29
 
 ### Security
