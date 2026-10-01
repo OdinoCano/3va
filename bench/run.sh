@@ -210,7 +210,7 @@ hwm_kb() {
 wait_for_server() {
   local port="$1" pid="$2" tries=0
   while [ "$tries" -lt 50 ]; do
-    if kill -0 "$pid" 2>/dev/null && curl -s -m 1 -o /dev/null "http://127.0.0.1:$port/"; then
+    if kill -0 "$pid" 2>/dev/null && curl -sk -m 1 -o /dev/null "${BENCH_SCHEME:-http}://127.0.0.1:$port/"; then
       return 0
     fi
     tries=$((tries + 1))
@@ -245,7 +245,10 @@ bench_http() {
   local idle_kb
   idle_kb=$(wait_for_rss "$pid")
   local out
-  out=$(oha -n 100000 -c 1000 --no-tui --output-format json "http://127.0.0.1:$port/" 2>/dev/null)
+  # BENCH_SCHEME=https (self-signed cert, hence --insecure) for the TLS section.
+  local insecure=""
+  [ "${BENCH_SCHEME:-http}" = "https" ] && insecure="--insecure"
+  out=$(oha -n 100000 -c 1000 --no-tui $insecure --output-format json "${BENCH_SCHEME:-http}://127.0.0.1:$port/" 2>/dev/null)
   local loaded_kb
   loaded_kb=$(rss_kb "$pid")
   local peak_kb
@@ -295,6 +298,27 @@ if [ -d express/node_modules/express ]; then
   if [ "$HAVE_BUN" = 1 ]; then bench_http "bun" "bun run express/express.mjs" 8823 || true; fi
 else
   echo "| — | — | — | — | — | — | express dependencies did not install |"
+fi
+echo
+
+# ── Express 5 over HTTPS (the workload Bun publishes) ───────────────────────
+# Same Express app behind https.createServer, with a throwaway self-signed
+# key/certificate generated here. Every runtime terminates TLS itself.
+echo "## Express 5 over HTTPS (100k requests, 1,000 concurrent) and memory"
+echo
+echo "| Runtime | Req/s | Success | Memory (idle) | Memory (post-load) | p99 latency | Peak memory |"
+echo "|---|---|---|---|---|---|---|"
+if [ -d express/node_modules/express ] && command -v openssl >/dev/null 2>&1 \
+  && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
+       -subj "/CN=localhost" -keyout "$RESULTS_DIR/tls-key.pem" -out "$RESULTS_DIR/tls-cert.pem" >/dev/null 2>&1; then
+  export TLS_KEY="$RESULTS_DIR/tls-key.pem" TLS_CERT="$RESULTS_DIR/tls-cert.pem"
+  export BENCH_SCHEME=https
+  bench_http "3va" "$BIN_3VA run express/express-https.mjs --allow-net= --allow-read=express,$RESULTS_DIR --allow-env=PORT,TLS_KEY,TLS_CERT" 8831 || true
+  if [ "$HAVE_NODE" = 1 ]; then bench_http "node" "node express/express-https.mjs" 8832 || true; fi
+  if [ "$HAVE_BUN" = 1 ]; then bench_http "bun" "bun run express/express-https.mjs" 8833 || true; fi
+  unset BENCH_SCHEME
+else
+  echo "| — | — | — | — | — | — | express dependencies or openssl missing |"
 fi
 echo
 

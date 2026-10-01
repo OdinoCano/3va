@@ -631,6 +631,30 @@ fn reject_stream(stream: tokio::net::TcpStream, status: u16, msg: &'static str) 
     });
 }
 
+/// Builds the TLS acceptor for an `https.createServer({ key, cert })`
+/// listener from PEM text: the runtime's crypto provider (the FIPS module in
+/// a `fips` build), rustls' safe default protocol versions (TLS 1.2 and
+/// 1.3), no client authentication, HTTP/1.1 over ALPN.
+fn tls_acceptor(cert_pem: &str, key_pem: &str) -> Result<tokio_rustls::TlsAcceptor, String> {
+    let certs = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_pem.as_bytes()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("invalid certificate PEM: {e}"))?;
+    if certs.is_empty() {
+        return Err("no certificate found in `cert`".to_string());
+    }
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_pem.as_bytes()))
+        .map_err(|e| format!("invalid private key PEM: {e}"))?
+        .ok_or_else(|| "no private key found in `key`".to_string())?;
+    let mut config = rustls::ServerConfig::builder_with_provider(super::tls::provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("TLS protocol versions: {e}"))?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("certificate/key rejected: {e}"))?;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+
 /// Idle timeout while waiting for JS to enqueue a response via
 /// `__httpRespond`. Guards against a request handler that never responds:
 /// without it a stalled handler would pin the connection open forever,
@@ -644,8 +668,9 @@ const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30)
 /// fires (Slowloris/RUDY), a response times out, or the stream errors — the
 /// `conns` entry and firewall connection accounting are cleaned up on exit.
 #[allow(clippy::too_many_arguments)]
-async fn handle_connection(
-    stream: tokio::net::TcpStream,
+async fn handle_connection<R, W>(
+    read_half: R,
+    mut writer: W,
     ip: IpAddr,
     server_id: u32,
     hdr_timeout: std::time::Duration,
@@ -661,8 +686,10 @@ async fn handle_connection(
     fw: Arc<Option<Arc<Firewall>>>,
     ready: ReadyQueue,
     wake: Arc<tokio::sync::Notify>,
-) {
-    let (read_half, mut writer) = stream.into_split();
+) where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let mut reader = BufReader::new(read_half);
 
     let conn_id = {
@@ -838,6 +865,22 @@ pub fn inject_http_server(
                 let port: u16 = port_arg.uint32_value(scope).unwrap_or(0) as u16;
                 let host_arg = args.get(1);
                 let host = host_arg.to_rust_string_lossy(scope);
+                // Optional (cert PEM, key PEM): an https server. Both or
+                // neither — the JS side validates the options.
+                let tls = if args.get(2).is_string() && args.get(3).is_string() {
+                    let cert = args.get(2).to_rust_string_lossy(scope);
+                    let key = args.get(3).to_rust_string_lossy(scope);
+                    match tls_acceptor(&cert, &key) {
+                        Ok(a) => Some(a),
+                        Err(e) => {
+                            let err = js_code_err(scope, "ERR_TLS_INVALID_CONTEXT", &e);
+                            rv.set(err);
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
 
                 let Some(host) = ctx.perms.bind_host(&host) else {
                     let err = js_code_err(
@@ -963,9 +1006,52 @@ pub fn inject_http_server(
                                         let fw2 = fw.clone();
                                         let ready2 = ready.clone();
                                         let wake2 = wake.clone();
+                                        let tls2 = tls.clone();
                                         tokio::spawn(async move {
+                                            // TLS: handshake first, bounded by
+                                            // the header timeout so a client
+                                            // that never finishes it can't park
+                                            // the connection (and its firewall
+                                            // slot) open.
+                                            if let Some(acceptor) = tls2 {
+                                                let handshake = tokio::time::timeout(
+                                                    hdr_timeout,
+                                                    acceptor.accept(stream),
+                                                )
+                                                .await;
+                                                let Ok(Ok(tls_stream)) = handshake else {
+                                                    if let Some(firewall) = fw2.as_ref().as_ref() {
+                                                        firewall.on_disconnect(ip);
+                                                    }
+                                                    return;
+                                                };
+                                                let (r, w) = tokio::io::split(tls_stream);
+                                                handle_connection(
+                                                    r,
+                                                    w,
+                                                    ip,
+                                                    id,
+                                                    hdr_timeout,
+                                                    body_timeout,
+                                                    keepalive_timeout,
+                                                    max_hdr_count,
+                                                    max_hdr_bytes,
+                                                    max_body,
+                                                    min_body_rate,
+                                                    max_requests_per_conn,
+                                                    conns2,
+                                                    conn_nid2,
+                                                    fw2,
+                                                    ready2,
+                                                    wake2,
+                                                )
+                                                .await;
+                                                return;
+                                            }
+                                            let (r, w) = stream.into_split();
                                             handle_connection(
-                                                stream,
+                                                r,
+                                                w,
                                                 ip,
                                                 id,
                                                 hdr_timeout,

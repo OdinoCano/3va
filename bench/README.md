@@ -46,6 +46,10 @@ it so the numbers are comparable in *what* is measured (not in hardware):
   median of 3. `3va install` runs with `--no-scan` because npm/bun don't scan;
   a tool whose install doesn't produce `node_modules/next` is reported as
   `failed`, never as a fast time.
+- **Express 5 over HTTPS** — `express/express-https.mjs`: the same Express
+  app behind `https.createServer`, the workload Bun publishes as "Serving
+  Express over HTTPS". The script generates a throwaway self-signed key and
+  certificate; each runtime terminates TLS itself.
 - **TypeScript startup** — `hello.ts` (3va and Bun run it directly; Node needs
   >= 23.6 for built-in type stripping).
 - **p99 latency and peak memory** — every HTTP table reports `oha`'s p99 and

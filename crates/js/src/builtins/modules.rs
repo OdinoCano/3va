@@ -3811,7 +3811,9 @@ pub fn inject_require(
                 port = port || 0;
                 if (typeof callback === 'function') this.once('listening', callback);
 
-                var result = __httpListen(port, hostname);
+                var result = self._tls
+                    ? __httpListen(port, hostname, self._tls.cert, self._tls.key)
+                    : __httpListen(port, hostname);
                 if (typeof result !== 'number') {
                     // Node semantics: with no 'error' listener a failed listen
                     // (e.g. EACCES without --allow-net) is an uncaught exception,
@@ -3841,6 +3843,9 @@ pub fn inject_require(
                         var _sock = new EventEmitter();
                         _sock.remoteAddress = raw[3];
                         _sock._connId = raw[2];
+                        // What frameworks read to tell https from http
+                        // (Express: req.secure / req.protocol).
+                        if (self._tls) _sock.encrypted = true;
                         var req = new httpIncomingMessage(_sock);
                         req.method = raw[0];
                         req.url = raw[1];
@@ -4096,7 +4101,36 @@ pub fn inject_require(
 
             // ── https module ─────────────────────────────────────────────────────────
             var httpsModule = {
-                createServer: function(opts, requestListener) { return createServer(opts, requestListener); },
+                // A real TLS listener (http_server.rs). This used to return a
+                // plain HTTP server and ignore `key`/`cert`: the app believed
+                // it was serving TLS while the port spoke cleartext. Options
+                // that can't be honoured are refused, never silently dropped.
+                createServer: function(opts, requestListener) {
+                    if (typeof opts === 'function') { requestListener = opts; opts = {}; }
+                    opts = opts || {};
+                    var pem = function(v, what) {
+                        if (Array.isArray(v)) v = v.map(function(x) { return pem(x, what); }).join('\n');
+                        if (typeof Buffer !== 'undefined' && Buffer.isBuffer(v)) v = v.toString('utf8');
+                        else if (v instanceof Uint8Array) v = new TextDecoder().decode(v);
+                        if (typeof v !== 'string' || v.indexOf('-----BEGIN') === -1) {
+                            var e = new TypeError('https.createServer: `' + what + '` must be a PEM string or Buffer');
+                            e.code = 'ERR_INVALID_ARG_VALUE';
+                            throw e;
+                        }
+                        return v;
+                    };
+                    ['pfx', 'passphrase', 'requestCert', 'ca', 'SNICallback', 'crl'].forEach(function(k) {
+                        if (opts[k] !== undefined && opts[k] !== false && opts[k] !== null) {
+                            var e = new Error('https.createServer: the `' + k + '` option is not supported by 3va yet');
+                            e.code = 'ERR_FEATURE_UNAVAILABLE_ON_PLATFORM';
+                            throw e;
+                        }
+                    });
+                    var tls = { key: pem(opts.key, 'key'), cert: pem(opts.cert, 'cert') };
+                    var server = createServer(opts, requestListener);
+                    server._tls = tls;
+                    return server;
+                },
                 globalAgent: new httpAgent(),
                 Agent: httpAgent,
                 Server: Server,
