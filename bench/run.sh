@@ -370,6 +370,54 @@ echo "_server broadcasts every message to all 16, so a full run is 20,480_"
 echo "_deliveries. p99 is the per-message round-trip on the sending connection._"
 echo
 
+# ── Postgres: Bun's "100 rows × 100 queries in flight" ───────────────────────
+# The same node-postgres (`pg`) client runs on every runtime, so this compares
+# each runtime's net/crypto (SCRAM-SHA-256 auth) and event loop, not three
+# database drivers. Skipped with a note when no server answers on PGPORT
+# (default 55432, the bench's local container) — same policy as Node/Bun rows
+# when the runtime is absent.
+echo "## Postgres (Bun's 100 rows × 100 queries in flight)"
+echo
+echo "| Runtime | Batch (100 in-flight) | Queries/s |"
+echo "|---|---|---|"
+if command -v npm >/dev/null 2>&1; then
+  ( cd postgres && npm install --silent --no-audit --no-fund ) >&2 || true
+elif [ "$HAVE_BUN" = 1 ]; then
+  ( cd postgres && bun install ) >&2 || true
+fi
+PG_PORT="${PGPORT:-55432}"
+pg_ready=0
+if timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/$PG_PORT" 2>/dev/null; then
+  pg_ready=1
+fi
+if [ "$pg_ready" = 1 ] && [ -d postgres/node_modules/pg ]; then
+  pg_row() {
+    local label="$1" cmd="$2"
+    local out
+    # `$cmd` deliberately unquoted so it word-splits into argv, like
+    # start_server does; every caller passes a literal command we wrote.
+    out=$(PGHOST=127.0.0.1 PGPORT="$PG_PORT" PGUSER=bench PGPASSWORD=bench $cmd 2>/dev/null) || {
+      echo "| $label | failed | $out |"
+      return
+    }
+    echo "$out" | awk -v l="$label" '{ printf "| %s | %s ms | %s |\n", l, $1, $2 }'
+  }
+  pg_row "3va" "$BIN_3VA run postgres/pg.js --allow-net=127.0.0.1 --allow-read=postgres --allow-env=PGHOST,PGPORT,PGUSER,PGPASSWORD,PGDATABASE,USER" || true
+  if [ "$HAVE_NODE" = 1 ]; then pg_row "node" "node postgres/pg.js" || true; fi
+  if [ "$HAVE_BUN" = 1 ]; then pg_row "bun" "bun run postgres/pg.js" || true; fi
+else
+  if [ -d postgres/node_modules/pg ]; then
+    echo "| — | skipped | no Postgres server on 127.0.0.1:$PG_PORT (set PGPORT or start one) |"
+  else
+    echo "| — | skipped | postgres dependencies did not install |"
+  fi
+fi
+echo
+echo "_The Postgres row measures a 100-query batch against a local server; it_"
+echo "_is skipped with a note (not faked) when PGPORT has no server — the_"
+echo "_bench's own container is started by scripts/run-pg-bench.sh._"
+echo
+
 if [ -n "${BENCH_SKIP_TEST262:-}" ]; then
   echo "Done (test262 skipped: BENCH_SKIP_TEST262 set)."
   exit 0
