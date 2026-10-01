@@ -5,13 +5,18 @@
 #   1. cargo fmt --check
 #   2. cargo clippy (lint)
 #   3. gitleaks (secret scan)
+# clippy is sized to this machine (scripts/hook-limits.sh): limited jobs and,
+# with systemd, a memory-capped scope, so it can't starve the desktop session.
 set -e
+
+. "$(git rev-parse --show-toplevel)/scripts/hook-limits.sh"
+hook_limits_init
 
 echo "[pre-commit] 1/3 Checking formatting..."
 cargo fmt --check
 
 echo "[pre-commit] 2/3 Running clippy..."
-cargo clippy --all-targets -- -D warnings
+run_limited cargo clippy --all-targets -- -D warnings
 
 echo "[pre-commit] 3/3 Scanning for secrets (gitleaks)..."
 # Scan only the staged diff so unrelated secrets already in the tree
