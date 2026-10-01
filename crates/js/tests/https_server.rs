@@ -198,3 +198,54 @@ async fn https_create_server_refuses_what_it_cannot_honour() {
         "ERR_INVALID_ARG_VALUE,ERR_INVALID_ARG_VALUE,ERR_FEATURE_UNAVAILABLE_ON_PLATFORM,ERR_FEATURE_UNAVAILABLE_ON_PLATFORM"
     );
 }
+
+/// True if the system `openssl` can offer the hybrid post-quantum group
+/// (OpenSSL >= 3.5), as in tests/pq_tls.rs.
+fn openssl_supports_pq() -> bool {
+    let Ok(out) = std::process::Command::new("openssl")
+        .arg("version")
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(ver) = text.split_whitespace().nth(1) else {
+        return false;
+    };
+    let mut parts = ver.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (3, 5)
+}
+
+// The server side of TLS uses the same provider as the client side
+// (rustls built with `prefer-post-quantum`): with a client that offers it,
+// the key exchange is the X25519 + ML-KEM-768 hybrid.
+#[tokio::test]
+async fn https_server_negotiates_hybrid_post_quantum_key_exchange() {
+    if !openssl_supports_pq() {
+        eprintln!("skipping: system openssl is older than 3.5 (no X25519MLKEM768)");
+        return;
+    }
+    let cert = gen_test_cert();
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    start_https_server(&mut e, &cert, port).await;
+
+    let handshake = async {
+        let out = tokio::process::Command::new("openssl")
+            .args(["s_client", "-CAfile"])
+            .arg(&cert.cert_path)
+            .args(["-connect", &format!("127.0.0.1:{port}")])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .expect("openssl s_client");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let report = drive_until(&mut e, handshake).await;
+    assert!(
+        report.contains("Negotiated TLS1.3 group: X25519MLKEM768"),
+        "expected the hybrid PQ group:\n{report}"
+    );
+    assert!(report.contains("Verification: OK"), "{report}");
+}
