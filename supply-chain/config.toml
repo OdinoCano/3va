@@ -901,10 +901,6 @@ criteria = "safe-to-deploy"
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.internal-russh-num-bigint]]
-version = "0.5.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.io-extras]]
 version = "0.18.4"
 criteria = "safe-to-deploy"
@@ -1147,6 +1143,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.num-bigint]]
 version = "0.4.8"
+criteria = "safe-to-deploy"
+
+[[exemptions.num-bigint]]
+version = "0.5.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.num-bigint-dig]]
@@ -1682,7 +1682,7 @@ version = "0.32.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.russh]]
-version = "0.62.7"
+version = "0.63.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.russh-cryptovec]]

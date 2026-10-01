@@ -36,7 +36,10 @@ impl client::Handler for SshHandler {
     type Error = russh::Error;
     async fn check_server_key(
         &mut self,
-        _key: &russh::keys::PublicKey,
+        // russh 0.63 passes the key or, for certificate-based hosts, the
+        // certificate. Neither is checked yet: see the note on host key
+        // verification (every server key is accepted).
+        _key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
         Ok(true)
     }
