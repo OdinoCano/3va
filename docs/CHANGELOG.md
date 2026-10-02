@@ -33,6 +33,10 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 - HTTP and `net` servers listen with a backlog of 1024 (was 128).
 - 4 runtime worker threads and 4 V8 platform threads instead of one of each per core.
 
+### Added
+
+- **WebSocket servers: `http` servers now emit `'upgrade'`.** `server.on('upgrade', (req, socket, head))` receives the raw duplex socket for any `Connection: upgrade` request (like Node), so the `ws` npm library works end to end over 3va — it performs the 101 handshake and drives the frames itself. The socket is bridged by a per-connection driver task; the firewall's per-IP connection limits and request checks apply, and a socket with no `'upgrade'` listener is closed instead of left open. `bench/run.sh` gains the WebSocket chat workload (16 clients × 80 messages broadcast to all, msgs/s + p99 round-trip + peak RSS per runtime).
+
 ### Performance
 
 Measured with `bench/run.sh` on one 32-core machine, 2.11.0 → this release (Bun 1.3.14 in parentheses):

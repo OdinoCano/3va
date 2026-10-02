@@ -51,6 +51,7 @@ struct ReadyRequest {
 /// registered, the same way timers re-apply theirs (VULN-03).
 struct HttpDispatch {
     ready: ReadyQueue,
+    upgrades: UpgradeQueue,
     wake: Arc<tokio::sync::Notify>,
     handlers: HashMap<u32, (v8::Global<v8::Function>, Vec<String>)>,
 }
@@ -66,9 +67,13 @@ pub fn wake_handle(isolate: &v8::Isolate) -> Option<Arc<tokio::sync::Notify>> {
 pub fn has_ready(isolate: &v8::Isolate) -> bool {
     isolate.get_slot::<HttpDispatch>().is_some_and(|d| {
         let ready = d.ready.lock().unwrap();
+        let upgrades = d.upgrades.lock().unwrap();
         d.handlers
             .keys()
             .any(|id| ready.get(id).is_some_and(|q| !q.is_empty()))
+            || d.handlers
+                .keys()
+                .any(|id| upgrades.get(id).is_some_and(|q| !q.is_empty()))
     })
 }
 
@@ -80,9 +85,13 @@ pub fn dispatch_ready(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::
             return Ok(false);
         };
         let ready = d.ready.lock().unwrap();
+        let upgrades = d.upgrades.lock().unwrap();
         d.handlers
             .iter()
-            .filter(|(id, _)| ready.get(id).is_some_and(|q| !q.is_empty()))
+            .filter(|(id, _)| {
+                ready.get(id).is_some_and(|q| !q.is_empty())
+                    || upgrades.get(id).is_some_and(|q| !q.is_empty())
+            })
             .map(|(_, h)| h.clone())
             .collect()
     };
@@ -127,6 +136,8 @@ struct HttpListenCtx {
     conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
     conn_nid: Arc<Mutex<u32>>,
     ready: ReadyQueue,
+    upgrades: UpgradeRegistry,
+    upgrades_q: UpgradeQueue,
     wake: Arc<tokio::sync::Notify>,
 }
 
@@ -134,8 +145,159 @@ struct HttpAcceptCtx {
     ready: ReadyQueue,
 }
 
+struct HttpUpgradeCtx {
+    upgrades: UpgradeRegistry,
+    upgrades_q: UpgradeQueue,
+}
+
 struct HttpRespondCtx {
     conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
+}
+
+// ── HTTP `Upgrade` (WebSocket) ──────────────────────────────────────────────
+//
+// A request with `Connection: upgrade` + an `Upgrade:` header is handed to JS
+// as `server.on('upgrade', (req, socket, head))`, exactly like Node: the http
+// layer does not answer it (the `ws` npm client/server library performs the
+// 101 handshake and drives the frames over the raw socket). The raw duplex
+// socket is bridged to JS by a per-connection driver task that owns the
+// stream and pushes read chunks into / drains writes from shared queues, so
+// JS sees the same pollable socket shape the `net` module uses. The firewall
+// already admitted the connection and request; the driver releases the
+// per-IP slot on close. A server-side frame codec / message-size limit is
+// the `ws` library's job in this design (its `maxPayload`), not the http
+// layer's.
+
+/// One bridged upgrade socket, shared between its driver task (tokio thread)
+/// and the JS natives (V8 thread).
+struct UpgradeConn {
+    read_q: Mutex<std::collections::VecDeque<UpgradeRead>>,
+    write_q: Mutex<std::collections::VecDeque<Vec<u8>>>,
+    write_wake: tokio::sync::Notify,
+    data_wake: tokio::sync::Notify,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+enum UpgradeRead {
+    Data(Vec<u8>),
+    Eof,
+}
+
+/// An upgrade request waiting for JS, like `ReadyRequest` but for the
+/// `upgrade` event. Carries the bytes already read past the headers (`head`)
+/// so the first thing the WS library sees is exactly what the client sent.
+struct UpgradeRequest {
+    parsed: ParsedRequest,
+    conn_id: u32,
+    remote: IpAddr,
+    head: Vec<u8>,
+}
+
+type UpgradeQueue = Arc<Mutex<HashMap<u32, std::collections::VecDeque<UpgradeRequest>>>>;
+type UpgradeRegistry = Arc<Mutex<HashMap<u32, Arc<UpgradeConn>>>>;
+
+/// Whether `parsed` is an HTTP upgrade request (any `Upgrade:` target — the
+/// `ws` library filters for `websocket` itself).
+fn is_upgrade_request(parsed: &ParsedRequest) -> bool {
+    let conn_upgrade = parsed.headers.iter().any(|(k, v)| {
+        k == "connection"
+            && v.to_ascii_lowercase()
+                .split(',')
+                .any(|tok| tok.trim() == "upgrade")
+    });
+    conn_upgrade && parsed.headers.iter().any(|(k, _)| k == "upgrade")
+}
+
+/// The task that owns an upgraded stream for its lifetime: pushes every byte
+/// read into `read_q` (with the already-buffered `head` first), drains
+/// JS-side writes from `write_q`, and on EOF/error/close pushes `Eof` and
+/// releases the firewall slot. Runs until the peer or JS closes the socket.
+fn spawn_upgrade_driver<S>(
+    mut stream: S,
+    head: Vec<u8>,
+    ip: IpAddr,
+    conn: Arc<UpgradeConn>,
+    upgrades: UpgradeRegistry,
+    fw: Arc<Option<Arc<Firewall>>>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        let conn_id = {
+            let reg = upgrades.lock().unwrap();
+            // reuse the conn id the registry was keyed under
+            reg.iter()
+                .find(|(_, c)| Arc::ptr_eq(&conn, *c))
+                .map(|(id, _)| *id)
+                .unwrap_or(0)
+        };
+
+        let send = |data: Vec<u8>| {
+            conn.read_q
+                .lock()
+                .unwrap()
+                .push_back(UpgradeRead::Data(data));
+            conn.data_wake.notify_one();
+        };
+        if !head.is_empty() {
+            send(head);
+        }
+
+        let mut buf = [0u8; 16_384];
+        loop {
+            if conn.closed.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            // Drain whatever JS wrote before waiting for more data. The
+            // write queue guard must not live across an await.
+            loop {
+                let bytes = conn.write_q.lock().unwrap().pop_front();
+                match bytes {
+                    Some(bytes) => {
+                        if stream.write_all(&bytes).await.is_err() {
+                            conn.read_q.lock().unwrap().push_back(UpgradeRead::Eof);
+                            conn.data_wake.notify_one();
+                            conn.closed
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            if conn.closed.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            tokio::select! {
+                _ = conn.write_wake.notified() => continue,
+                r = stream.read(&mut buf) => {
+                    match r {
+                        Ok(0) => {
+                            conn.read_q.lock().unwrap().push_back(UpgradeRead::Eof);
+                            conn.data_wake.notify_one();
+                            break;
+                        }
+                        Ok(n) => {
+                            send(buf[..n].to_vec());
+                        }
+                        Err(_) => {
+                            conn.read_q.lock().unwrap().push_back(UpgradeRead::Eof);
+                            conn.data_wake.notify_one();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        upgrades.lock().unwrap().remove(&conn_id);
+        if let Some(firewall) = fw.as_ref().as_ref() {
+            firewall.on_disconnect(ip);
+        }
+    });
 }
 
 /// Binds a listening socket like `std::net::TcpListener::bind` (same name
@@ -668,9 +830,8 @@ const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30)
 /// fires (Slowloris/RUDY), a response times out, or the stream errors — the
 /// `conns` entry and firewall connection accounting are cleaned up on exit.
 #[allow(clippy::too_many_arguments)]
-async fn handle_connection<R, W>(
-    read_half: R,
-    mut writer: W,
+async fn handle_connection<S>(
+    stream: S,
     ip: IpAddr,
     server_id: u32,
     hdr_timeout: std::time::Duration,
@@ -685,12 +846,14 @@ async fn handle_connection<R, W>(
     conn_nid: Arc<Mutex<u32>>,
     fw: Arc<Option<Arc<Firewall>>>,
     ready: ReadyQueue,
+    upgrades: UpgradeRegistry,
+    upgrades_q: UpgradeQueue,
     wake: Arc<tokio::sync::Notify>,
 ) where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let mut reader = BufReader::new(read_half);
+    let (mut read_half, mut writer) = tokio::io::split(stream);
+    let mut reader = BufReader::new(&mut read_half);
 
     let conn_id = {
         let mut n = conn_nid.lock().unwrap();
@@ -772,6 +935,47 @@ async fn handle_connection<R, W>(
             }
         }
 
+        // HTTP `Upgrade` (WebSocket): hand the raw duplex socket to JS instead
+        // of answering the request — `ws` (npm) performs the 101 handshake and
+        // drives the frames itself. The bytes already read past the headers go
+        // out as `head` so the client's first WS frame arrives intact.
+        if is_upgrade_request(&parsed) {
+            let head = reader.buffer().to_vec();
+            drop(reader);
+            let conn = Arc::new(UpgradeConn {
+                read_q: Mutex::new(std::collections::VecDeque::new()),
+                write_q: Mutex::new(std::collections::VecDeque::new()),
+                write_wake: tokio::sync::Notify::new(),
+                data_wake: tokio::sync::Notify::new(),
+                closed: std::sync::atomic::AtomicBool::new(false),
+            });
+            upgrades.lock().unwrap().insert(conn_id, conn.clone());
+            spawn_upgrade_driver(
+                read_half.unsplit(writer),
+                head.clone(),
+                ip,
+                conn,
+                upgrades,
+                fw.clone(),
+            );
+            upgrades_q
+                .lock()
+                .unwrap()
+                .entry(server_id)
+                .or_default()
+                .push_back(UpgradeRequest {
+                    parsed,
+                    conn_id,
+                    remote: req_ip,
+                    head,
+                });
+            wake.notify_one();
+            conns.lock().unwrap().remove(&conn_id);
+            // return, not break: the firewall slot now belongs to the driver,
+            // which releases it when the upgrade socket closes.
+            return;
+        }
+
         requests_served += 1;
 
         let conn_hdr = parsed
@@ -834,9 +1038,12 @@ pub fn inject_http_server(
     let next_conn_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(1));
     let fw: Arc<Option<Arc<Firewall>>> = Arc::new(firewall);
     let ready: ReadyQueue = Arc::new(Mutex::new(HashMap::new()));
+    let upgrades: UpgradeRegistry = Arc::new(Mutex::new(HashMap::new()));
+    let upgrades_q: UpgradeQueue = Arc::new(Mutex::new(HashMap::new()));
     let wake = Arc::new(tokio::sync::Notify::new());
     scope.set_slot(HttpDispatch {
         ready: ready.clone(),
+        upgrades: upgrades_q.clone(),
         wake: wake.clone(),
         handlers: HashMap::new(),
     });
@@ -850,6 +1057,8 @@ pub fn inject_http_server(
             conns: conns.clone(),
             conn_nid: next_conn_id.clone(),
             ready: ready.clone(),
+            upgrades: upgrades.clone(),
+            upgrades_q: upgrades_q.clone(),
             wake: wake.clone(),
             nid: next_server_id.clone(),
             fw: fw.clone(),
@@ -934,6 +1143,8 @@ pub fn inject_http_server(
                                 let conn_nid = ctx.conn_nid.clone();
                                 let fw = ctx.fw.clone();
                                 let ready = ctx.ready.clone();
+                                let upgrades = ctx.upgrades.clone();
+                                let upgrades_q = ctx.upgrades_q.clone();
                                 let wake = ctx.wake.clone();
                                 tokio::spawn(async move {
                                     loop {
@@ -1007,6 +1218,8 @@ pub fn inject_http_server(
                                         let ready2 = ready.clone();
                                         let wake2 = wake.clone();
                                         let tls2 = tls.clone();
+                                        let upgrades2 = upgrades.clone();
+                                        let upgrades_q2 = upgrades_q.clone();
                                         tokio::spawn(async move {
                                             // TLS: handshake first, bounded by
                                             // the header timeout so a client
@@ -1025,10 +1238,8 @@ pub fn inject_http_server(
                                                     }
                                                     return;
                                                 };
-                                                let (r, w) = tokio::io::split(tls_stream);
                                                 handle_connection(
-                                                    r,
-                                                    w,
+                                                    tls_stream,
                                                     ip,
                                                     id,
                                                     hdr_timeout,
@@ -1043,15 +1254,15 @@ pub fn inject_http_server(
                                                     conn_nid2,
                                                     fw2,
                                                     ready2,
+                                                    upgrades2,
+                                                    upgrades_q2,
                                                     wake2,
                                                 )
                                                 .await;
                                                 return;
                                             }
-                                            let (r, w) = stream.into_split();
                                             handle_connection(
-                                                r,
-                                                w,
+                                                stream,
                                                 ip,
                                                 id,
                                                 hdr_timeout,
@@ -1066,6 +1277,8 @@ pub fn inject_http_server(
                                                 conn_nid2,
                                                 fw2,
                                                 ready2,
+                                                upgrades2,
+                                                upgrades_q2,
                                                 wake2,
                                             )
                                             .await;
@@ -1157,6 +1370,178 @@ pub fn inject_http_server(
             scope,
             V8String::new(scope, "__httpAcceptPoll").unwrap().into(),
             http_accept_fn.into(),
+        );
+    }
+
+    // ── Upgrade (WebSocket) bridge ───────────────────────────────────────────
+    // The upgrade socket lives in a shared registry between the V8 thread (the
+    // natives below) and the driver task on a tokio thread. Read/write are
+    // queue-based, exactly like the `net` module's pollable sockets.
+    {
+        let ctx_ptr = native_ctx.leak(HttpUpgradeCtx {
+            upgrades: upgrades.clone(),
+            upgrades_q: upgrades_q.clone(),
+        });
+        let external = v8::External::new(scope, ctx_ptr);
+
+        let http_upgrade_poll_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpUpgradeCtx)
+                };
+                let server_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let popped = ctx
+                    .upgrades_q
+                    .lock()
+                    .unwrap()
+                    .get_mut(&server_id)
+                    .and_then(|q| q.pop_front());
+
+                match popped {
+                    // [connId, remoteAddress, head(Uint8Array), method, url, [k0,v0,...]]
+                    Some(r) => {
+                        let p = &r.parsed;
+                        let flat: Vec<v8::Local<v8::Value>> = p
+                            .headers
+                            .iter()
+                            .flat_map(|(k, v)| [k, v])
+                            .map(|x| V8String::new(scope, x).unwrap().into())
+                            .collect();
+                        let headers = v8::Array::new_with_elements(scope, &flat);
+                        let head =
+                            crate::builtins::v8_compat::uint8array_from_bytes(scope, &r.head);
+                        let items: [v8::Local<v8::Value>; 6] = [
+                            v8::Integer::new_from_unsigned(scope, r.conn_id).into(),
+                            V8String::new(scope, &r.remote.to_string()).unwrap().into(),
+                            head.into(),
+                            V8String::new(scope, &p.method).unwrap().into(),
+                            V8String::new(scope, &p.path).unwrap().into(),
+                            headers.into(),
+                        ];
+                        rv.set(v8::Array::new_with_elements(scope, &items).into());
+                    }
+                    None => rv.set(v8::null(scope).into()),
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpUpgradePoll").unwrap().into(),
+            http_upgrade_poll_fn.into(),
+        );
+
+        let upgrade_read_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpUpgradeCtx)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let max_bytes: usize = args
+                    .get(1)
+                    .uint32_value(scope)
+                    .unwrap_or(16_384)
+                    .min(65_536) as usize;
+
+                let conn = ctx.upgrades.lock().unwrap().get(&conn_id).cloned();
+                match conn {
+                    None => {
+                        let err = js_code_err(scope, "EOF", "upgrade socket closed");
+                        rv.set(err);
+                    }
+                    Some(c) => {
+                        let mut q = c.read_q.lock().unwrap();
+                        match q.pop_front() {
+                            Some(UpgradeRead::Data(bytes)) => {
+                                let n = bytes.len().min(max_bytes);
+                                let result = crate::builtins::v8_compat::uint8array_from_bytes(
+                                    scope,
+                                    &bytes[..n],
+                                );
+                                rv.set(result.into());
+                            }
+                            Some(UpgradeRead::Eof) => {
+                                let err = js_code_err(scope, "EOF", "connection closed");
+                                rv.set(err);
+                            }
+                            None if c.closed.load(std::sync::atomic::Ordering::Relaxed) => {
+                                let err = js_code_err(scope, "EOF", "connection closed");
+                                rv.set(err);
+                            }
+                            None => {
+                                let err = js_code_err(scope, "EAGAIN", "no data available");
+                                rv.set(err);
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__upgradeRead").unwrap().into(),
+            upgrade_read_fn.into(),
+        );
+
+        let upgrade_write_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpUpgradeCtx)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let bytes = crate::builtins::v8_compat::js_value_to_bytes(scope, args.get(1));
+                let conn = ctx.upgrades.lock().unwrap().get(&conn_id).cloned();
+                match conn {
+                    Some(c) if !c.closed.load(std::sync::atomic::Ordering::Relaxed) => {
+                        c.write_q.lock().unwrap().push_back(bytes);
+                        c.write_wake.notify_one();
+                        rv.set(v8::undefined(scope).into());
+                    }
+                    _ => {
+                        let err = js_code_err(scope, "EPIPE", "upgrade socket closed");
+                        rv.set(err);
+                    }
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__upgradeWrite").unwrap().into(),
+            upgrade_write_fn.into(),
+        );
+
+        let upgrade_close_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpUpgradeCtx)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                if let Some(c) = ctx.upgrades.lock().unwrap().remove(&conn_id) {
+                    c.closed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    c.write_wake.notify_one();
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__upgradeClose").unwrap().into(),
+            upgrade_close_fn.into(),
         );
     }
 

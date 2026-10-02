@@ -31,6 +31,16 @@ skipped rather than faked.
   connections against `server.js` (a minimal `http.createServer`/`Bun.serve`
   handler, same shape for every runtime so the comparison is the runtime,
   not three different servers).
+- **WebSocket chat** — Bun's published "32 clients broadcasting" workload
+  (`chat/server.js`): a chat room that broadcasts every message to every
+  client. 3va/Node serve it over `http` + the `ws` npm library via the
+  `'upgrade'` event; Bun uses `Bun.serve`. The load client is node + `ws`
+  (like `oha` is for HTTP). `chat/client.js` opens 16 connections × 80
+  messages each = 20,480 deliveries and reports msgs/s, p99 round-trip (on
+  the sending connection) and the server's peak RSS. On the dedicated
+  32-core machine: 3va ~63k, Node ~84k, Bun ~138k msgs/s — 3va is behind
+  because the upgrade-socket reads are poll-based (a 1 ms JS timer vs an
+  event-driven wake), an honest current limitation.
 
 ## Same workloads Bun and Deno publish
 

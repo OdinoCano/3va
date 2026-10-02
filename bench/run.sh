@@ -322,6 +322,54 @@ else
 fi
 echo
 
+# ── WebSocket chat (Bun's "32 clients broadcasting") ────────────────────────
+# The same chat room (every message broadcast to every client) runs on every
+# runtime: 3va/Node serve it over http + the `ws` npm library (the http
+# `upgrade` event hands them the raw duplex socket), Bun uses Bun.serve. The
+# load client is node + `ws` for all three, like oha is the HTTP load tool.
+echo "## WebSocket chat (16 clients × 80 messages each, broadcast to all) and memory"
+echo
+echo "| Runtime | Msgs/s | Deliveries | p99 round-trip | Peak memory |"
+echo "|---|---|---|---|---|"
+if command -v npm >/dev/null 2>&1; then
+  ( cd chat && npm install --silent --no-audit --no-fund ) >&2 || true
+elif [ "$HAVE_BUN" = 1 ]; then
+  ( cd chat && bun install ) >&2 || true
+fi
+if [ -d chat/node_modules/ws ]; then
+  chat_row() {
+    local label="$1" cmd="$2" port="$3"
+    start_server "$cmd" "$port"
+    local pid="$SERVER_PID"
+    if ! wait_for_server "$port" "$pid"; then
+      echo "| $label | — | — | — | server did not start |"
+      kill -9 "$pid" 2>/dev/null || true
+      return
+    fi
+    local out
+    out=$(node chat/client.js "$port" 2>/dev/null) || {
+      echo "| $label | failed | — | — | client errored: $out |"
+      kill -9 "$pid" 2>/dev/null || true
+      return
+    }
+    local peak_kb
+    peak_kb=$(hwm_kb "$pid")
+    kill -9 "$pid" 2>/dev/null || true
+    echo "$out" | awk -v l="$label" -v pk="$peak_kb" \
+      '{ printf "| %s | %s | %s | %s ms | %.1f MB |\n", l, $3, $1, $4, pk/1024 }'
+  }
+  chat_row "3va" "$BIN_3VA run chat/server.js --allow-net=127.0.0.1 --allow-read=chat --allow-env=PORT" 47131 || true
+  if [ "$HAVE_NODE" = 1 ]; then chat_row "node" "node chat/server.js" 47132 || true; fi
+  if [ "$HAVE_BUN" = 1 ]; then chat_row "bun" "bun run chat/server.js" 47133 || true; fi
+else
+  echo "| — | — | — | — | chat dependencies did not install |"
+fi
+echo
+echo "_The WebSocket chat row drives 16 clients that each send 80 messages; the_"
+echo "_server broadcasts every message to all 16, so a full run is 20,480_"
+echo "_deliveries. p99 is the per-message round-trip on the sending connection._"
+echo
+
 if [ -n "${BENCH_SKIP_TEST262:-}" ]; then
   echo "Done (test262 skipped: BENCH_SKIP_TEST262 set)."
   exit 0

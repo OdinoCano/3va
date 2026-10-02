@@ -1,0 +1,9 @@
+{
+  "name": "bench-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebSocket chat benchmark (Bun's published workload: N clients broadcasting, messages/sec). Same server on 3va/Node over http+ws, Bun.serve on Bun.",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
