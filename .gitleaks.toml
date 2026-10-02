@@ -14,6 +14,7 @@ paths = [
   '''crates/firewall/Cargo.toml''',          # "mSlowloris/RUDY" is a path-like string, not a secret
   '''docs/''',
   '''crates/js/tests/compat_fixes\.rs''',   # PEM test fixture
+  '''crates/js/tests/http_upgrade_ws\.rs''', # RFC 6455 sample Sec-WebSocket-Key ("the sample nonce")
   '''crates/pm/src/secrets\.rs''',          # JWT example with placeholder values
   '''\.md$''',
   '''target/''',
