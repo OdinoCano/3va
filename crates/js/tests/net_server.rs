@@ -195,3 +195,50 @@ async fn net_server_listening_flag() {
 
     assert_eq!(result, "false,true");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_sockets_destroyed_in_a_data_handler_leave_no_timers_behind() {
+    // Clients that destroy the socket from inside their own 'data' handler
+    // (a database driver does this on a protocol error) must not re-arm the
+    // read poll, nor leave a callback registered per connection.
+    const SESSIONS: usize = 30;
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in l.incoming().take(SESSIONS) {
+            let mut s = s.unwrap();
+            let _ = s.write_all(b"x");
+            std::thread::sleep(Duration::from_millis(50)); // keep it open
+        }
+    });
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var net = require('net');
+        globalThis.__done = 0;
+        (function next(n) {{
+            if (n === 0) return;
+            var s = net.connect({port}, '127.0.0.1');
+            s.on('data', function() {{ s.destroy(); globalThis.__done++; next(n - 1); }});
+        }})({SESSIONS});
+        "0""#
+    ))
+    .await
+    .unwrap();
+    tokio::select! {
+        _ = drive_forever(&mut e) => unreachable!(),
+        _ = tokio::time::sleep(Duration::from_millis(3000)) => {},
+    }
+    let done = e.eval_to_string("String(__done)").await.unwrap();
+    assert_eq!(done, SESSIONS.to_string());
+    let left: usize = e
+        .eval_to_string("String(Object.keys(globalThis.__timerCallbacks).length)")
+        .await
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        left < 5,
+        "{SESSIONS} destroyed sockets left {left} timer callbacks"
+    );
+}

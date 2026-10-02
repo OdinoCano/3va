@@ -3344,14 +3344,17 @@ pub fn inject_require(
                         self.destroy();
                         return;
                     }
-                    var delay = idleTicks < 8 ? 1 : 5;
-                    if (self._pollTimer) { clearInterval(self._pollTimer); }
-                    self._pollTimer = setInterval(step, delay);
+                    // A 'data' listener may have destroyed the socket; do not
+                    // re-arm then (the timer could never be cancelled).
+                    if (self.destroyed || self._connId === null) { self._pollTimer = null; return; }
+                    self._pollTimer = setTimeout(step, idleTicks < 8 ? 1 : 5);
                 };
-                self._pollTimer = setInterval(step, 5);
+                // A chain of timeouts, not intervals: clearing an interval from
+                // inside its own callback leaks the callback entry in the engine.
+                self._pollTimer = setTimeout(step, 5);
             };
             Socket.prototype._stopPoll = function() {
-                if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+                if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
             };
 
             Socket.prototype._write = function(chunk, encoding, cb) {
