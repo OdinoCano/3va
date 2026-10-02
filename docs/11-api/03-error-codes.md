@@ -1,10 +1,12 @@
 # 03 - ERROR CODES
 
-> **Status: PLANNED — not implemented.** The structured `ERR_*` error-code system
-> described below is a design goal for a future version. As of v2.0.x the runtime
+> **Status: partially implemented.** Most of the structured `ERR_*` error-code
+> system described below is a design goal for a future version. As of v2.0.x the runtime
 > reports errors as plain `Error` objects with descriptive messages (e.g.
 > `PermissionError::FileReadDenied` surfaces as a thrown JS error with a
 > human-readable message), without machine-readable codes or `metadata`.
+> A few codes are already real and shipped — see §3.5 for `EHOSTUNVERIFY`
+> and the `https.createServer` codes.
 
 ## 3.1 Error Codes (planned)
 
@@ -44,6 +46,9 @@
 | ERR_DNS_RESOLVE | DNS error |
 | ERR_CONNECTION_REFUSED | Connection refused |
 | ERR_TLS_ERROR | TLS error |
+| EHOSTUNVERIFY | SSH host-key verification failed (see [01-js-api.md §1.11](01-js-api.md)) |
+
+> `EHOSTUNVERIFY` (and the `https.createServer` codes `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`, `ERR_INVALID_ARG_VALUE`, `ERR_MISSING_ARGS`) are real machine-readable codes today, ahead of the rest of this specification.
 
 ## 3.6 File System Errors
 

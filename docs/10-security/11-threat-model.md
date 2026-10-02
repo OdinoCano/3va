@@ -63,7 +63,7 @@ Assets: the user's files and environment secrets, network reach from the user's 
 |-------------|--------|------------|
 | Builtins called by untrusted packages | Elevation of privilege: bypass a grant | Every builtin checks permissions (B1), grants are per scope (R2), and CI runs the permission-sandbox fuzz target (`fuzz_permission_sandbox`) and the capability-bypass test suite |
 | `fs` paths | Tampering / information disclosure via traversal or symlinks | Canonicalization plus a prefix match against the granted paths |
-| `fetch`, WebSocket, TCP, and the mail/chat protocols | Spoofing / MITM; SSRF to internal hosts | TLS with certificate verification and a TLS 1.2 floor; plaintext gated (R4); `--allow-net` matches the real destination host, so granting `api.example.com` never allows `127.0.0.1` |
+| `fetch`, WebSocket, TCP, SSH (`ssh2`), and the mail/chat protocols | Spoofing / MITM; SSRF to internal hosts | TLS with certificate verification and a TLS 1.2 floor; plaintext gated (R4); SSH host keys verified fail-closed (`hostFingerprint`/`knownHosts`/`hostVerifier`); `--allow-net` matches the real destination host, so granting `api.example.com` never allows `127.0.0.1` |
 | Response bodies and protocol parsers | Denial of service via oversized or malformed input | Response-size caps (`fetch` `maxResponseSize`), connect and IO timeouts, and fuzzing of parsers |
 | `3va install` | Malicious package or dependency confusion | No install scripts (R3), SRI and provenance checks, malware scanner, OSV audit, and a lockfile with a `registry` field |
 | HTTP server | Denial of service | Firewall: per-IP connection and rate limits |

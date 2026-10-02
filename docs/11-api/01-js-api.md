@@ -106,9 +106,44 @@ const dec = new TextDecoder();
 const str = dec.decode(bytes);       // 'hello'
 ```
 
+## 1.10 `https.createServer({ key, cert })`
+
+A real TLS listener (TLS 1.2 and 1.3 with the runtime's crypto provider — the FIPS module in a `fips` build), offering the hybrid post-quantum key exchange `X25519MLKEM768` to clients that support it. Every firewall limit applies as for HTTP.
+
+```javascript
+const https = require('https');
+https.createServer({ key, cert }, (req, res) => res.end('ok')).listen(8443);
+```
+
+`key` and `cert` must be PEM strings or Buffers. Options that can't be honoured yet throw instead of being ignored: `pfx`, `passphrase`, `requestCert`, `ca`, `SNICallback`, `crl`. A server created without a `key`/`cert` fails on `listen()` — it never serves plaintext.
+
+## 1.11 `ssh2` host-key verification
+
+`ssh2.Client.connect()` fails closed: it no longer accepts any server key. A connection requires one of the following; only a connect that passes none of them is trusted on loopback or under `--allow-insecure` (an explicit pin is enforced there too):
+
+- `hostFingerprint` — the `SHA256:…` ssh-keygen fingerprint of the server key;
+- `knownHosts` — path to an OpenSSH `known_hosts` file (read through the `--allow-read` permission model);
+- `hostVerifier` — a callback `(fingerprint) => boolean`, sync or Promise.
+
+With none of them the connection is refused with `EHOSTUNVERIFY`; a `known_hosts` entry whose recorded key changed is refused too. **Breaking change:** scripts that relied on accepting any key must pass one of the options above or run with `--allow-insecure`. The loopback/`--allow-insecure` exemption applies only when no explicit option is given — a supplied `hostFingerprint`/`knownHosts`/`hostVerifier` is always enforced.
+
+## 1.12 HTTP server `'upgrade'` (WebSocket)
+
+`http` servers emit `'upgrade'` for any `Connection: upgrade` request, like Node:
+
+```javascript
+server.on('upgrade', (req, socket, head) => { /* 101 handshake; drive frames */ });
+```
+
+`socket` is the raw duplex socket; `head` is the bytes read behind the handshake, delivered once. The socket is bridged by a per-connection driver task that reads at most 1 MiB ahead of the application (past that, TCP flow control applies to the peer) and drops a peer that stops reading while the app has queued more than 32 MiB for it. A socket with no `'upgrade'` listener is closed instead of left open.
+
+## 1.13 `crypto.subtle` and `net`
+
+`crypto.subtle` implements HMAC (`importKey` + `sign`) and PBKDF2 (`importKey` + `deriveBits`) — without them node-postgres's SCRAM-SHA-256 auth could connect but never compute the client proof. `net` client sockets set `TCP_NODELAY` (as Node does) and `Socket#setNoDelay()` now actually toggles it.
+
 ---
 
-## 1.10 Planned APIs (not yet implemented)
+## 1.14 Planned APIs (not yet implemented)
 
 > **Status: PENDING** — the following are design goals, not current behavior.
 

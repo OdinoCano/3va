@@ -158,8 +158,10 @@ would have succeeded at; check `pqNegotiated` to know which happened.
 
 **Known limitations (stated, not hidden):**
 
-- **Client-only.** 3va has no TLS server termination at all (`https.createServer`
-  doesn't terminate TLS today) — a pre-existing gap, not introduced by this change.
+- **`tls.pqConnect` is the client path.** Server-side TLS now exists too:
+  `https.createServer({ key, cert })` is a real TLS listener and offers the
+  hybrid `X25519MLKEM768` group to clients that support it (TLS 1.2/1.3, the
+  FIPS provider in a `fips` build) — a separate path from this client API.
 - **Scoped to this one client path.** `tls.connect()` (classical), WebSocket
   `wss://`, and gRPC (`tonic`) TLS remain on `native-tls`/classical `rustls`
   respectively — migrating those wasn't needed to deliver real PQ-TLS and
@@ -192,7 +194,7 @@ is tracked as future work, not part of the PQ-TLS change in §5.3.
 | v0.3.0 | Post-handshake PQ key exchange bolt-on (`__pqTlsConnect`, superseded) | ⚠️ Replaced |
 | current | Real in-handshake hybrid PQ-TLS, RFC 10024 X25519MLKEM768 (`tls.pqConnect`, client-only) | ✅ Done |
 | Future | `require('crypto').pq` JS bindings for `vvva_crypto` | 📋 Planned |
-| Future | PQ-TLS server support | 📋 Planned |
+| `https.createServer` | Real TLS server termination; offers X25519MLKEM768 to PQ-capable clients | ✅ Done |
 | Future | SLH-DSA-SHA2-128s (SPHINCS⁺) | 📋 Planned |
 | Future | BIKE, HQC (code-based KEM) | 📋 Future |
 

@@ -196,4 +196,13 @@ pub fn start(addr: SocketAddr) -> Option<Arc<InspectorState>> {
 
 ---
 
+## 1.7 Startup Snapshot
+
+`3va run` starts from a V8 startup snapshot of the builtins. It is built on
+the first run and cached in `~/.cache/3va/snapshot/`; later runs load it
+instead of re-initializing the builtins. `VVVA_NO_SNAPSHOT=1` disables it (the
+normal startup path is used). Source: `crates/js/src/snapshot.rs`.
+
+---
+
 *Integration via the `v8` crate. Source: `crates/js/src/lib.rs`.*

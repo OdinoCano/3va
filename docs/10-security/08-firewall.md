@@ -391,6 +391,20 @@ cargo test -p vvva_js --test http_server
 
 ---
 
+## 8.10 Servidores WebSocket (evento `'upgrade'`)
+
+Los servidores `http` emiten `'upgrade'` para cualquier petición `Connection: upgrade`, como en Node:
+
+```javascript
+server.on('upgrade', (req, socket, head) => { /* handshake 101; manejo de frames */ });
+```
+
+`socket` es el socket dúplex crudo y `head` los bytes leídos tras el handshake, entregados una sola vez. Los límites de conexión por IP y los checks de request del firewall se aplican igual que en HTTP; un socket sin listener `'upgrade'` se cierra en lugar de quedar abierto.
+
+Cada socket conectado se puentea con una tarea driver por conexión que lee **como máximo 1 MiB por delante** de la aplicación (más allá de eso, el control de flujo TCP aplica al peer) y **cierra al peer que deja de leer** cuando la app tiene encolados más de 32 MiB para él. `socket.unshift()` conserva sus bytes y el socket arranca en pausa hasta que un consumidor se conecta o llama `resume()`, como en Node.
+
+---
+
 *Implementación: `crates/firewall/src/lib.rs`*
 *Integración HTTP: `crates/js/src/builtins/http_server.rs`*
 *Schema de config: `crates/config/src/schema.rs` → `FirewallConfig`*
