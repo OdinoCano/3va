@@ -90,25 +90,44 @@ return `403`. Both numbers are real; they answer different questions.
 
 ## Reference run
 
-The numbers backing the main README's comparison table now come from
+The numbers backing the main README's comparison table come from
 [`.github/workflows/benchmark.yml`](../.github/workflows/benchmark.yml)
 itself, not a hand-run on a maintainer's machine — see the "CI" section
 below for why. Latest published run:
-[actions/runs/32180248410](https://github.com/OdinoCano/3va/actions/runs/32180248410)
-(2026-08-18, commit `2917866`), on a GitHub-hosted `ubuntu-latest` runner
+[actions/runs/36927280438](https://github.com/OdinoCano/3va/actions/runs/36927280438)
+(2026-10-01, commit `2961d12`), on a GitHub-hosted `ubuntu-latest` runner
 (4 vCPU, 15 GiB RAM, Linux 6.17-azure):
 
 - 3va: this repo, release build (`cargo build --release`)
 - Node.js 24.19.0
 - Bun 1.3.14
 
-| Runtime | Startup (mean) | HTTP throughput (c=1000) | Memory, idle → post-load | Install, warm |
-|---|---|---|---|---|
-| Node.js 24.19 | 28.2 ms | 19,056 req/s | 48.0 MB → 77.2 MB | — |
-| Bun 1.3.14 | 15.4 ms | 54,112 req/s | 41.8 MB → 50.7 MB | — |
-| **3va** | 25.8 ms | 6,899 req/s¹ | 50.8 MB → 87.0 MB | 24.8 ms |
+| Runtime | Startup (mean) | HTTP throughput (c=1000) | Express 5 | Express 5 over HTTPS | Memory, idle → post-load | Install, warm |
+|---|---|---|---|---|---|---|
+| Node.js 24.19 | 18.9 ms | 62,650 req/s | 36,918 req/s | 23,170 req/s | 50.0 MB → 88.1 MB | 241.1 ms |
+| Bun 1.3.14 | 3.1 ms | 116,809 req/s | 48,841 req/s | 43,502 req/s | 19.5 MB → 37.8 MB | 1.7 ms |
+| **3va** | 11.6 ms | 121,871 req/s¹ | 71,881 req/s | 69,764 req/s | 43.4 MB → 76.1 MB | 3.9 ms |
 
 ¹ With `3va.config.json`'s opened-up firewall limits — see above.
+
+Two caveats about this run, reported rather than hidden:
+
+- **Startup contradicts the dedicated 32-core bench, and the cause is not
+  known.** On the dedicated machine 3va and Bun are even (7.4 vs 7.3 ms,
+  measured 2026-10-02); on this shared 4-vCPU runner Bun's 3.1 ms is 3.7×
+  faster than 3va's 11.6 ms. What was checked: the optimization applies on
+  CI (3va went from 25.6 ms in the 2.11.0 release run to 11.6 ms, the same
+  ~2.2× as on the dedicated machine, 15.8 → 7.4 ms); pinning both runtimes
+  to 4 CPUs, or to 1, on the dedicated machine leaves them level (8.0 vs
+  8.3 ms with 4 CPUs), so the core count is not the explanation; and
+  Bun itself is 2.3× faster on the CI runner than on the dedicated machine
+  (3.1 vs 7.3 ms) while 3va is 1.6× slower there. Both figures are real;
+  they measure different environments. Open item.
+- **Postgres is not in the CI run.** It needs a live server, which the
+  runner does not have, so CI prints the skip note. Run
+  `scripts/run-pg-bench.sh` before `bench/run.sh` locally to get those
+  numbers; on the dedicated 32-core machine they are 3va ~460, Node
+  ~7,900, Bun ~8,900 q/s for the 100-query batch.
 
 GitHub's shared runners are weaker and noisier than dedicated hardware —
 absolute numbers here run meaningfully lower than a quiet dedicated box for
@@ -194,5 +213,5 @@ policy by accident: a number anyone can regenerate by clicking "Run
 workflow" (or that reruns automatically on a schedule) is more credible
 than one only reproducible on a maintainer's specific machine, even though
 the dedicated-hardware run above has cleaner absolute figures. Re-run it
-yourself, compare against the [linked run](https://github.com/OdinoCano/3va/actions/runs/32180248410)
+yourself, compare against the [linked run](https://github.com/OdinoCano/3va/actions/runs/36927280438)
 above, or diff any two runs in the Actions tab for a regression check.
