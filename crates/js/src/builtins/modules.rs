@@ -3408,16 +3408,57 @@ pub fn inject_require(
                 this.remoteAddress = undefined;
                 this.remotePort = undefined;
                 this._pollTimer = null;
-                if (this._connId !== null) this._startPoll();
+                this._unshifted = null;
+                // Born paused, like a Node socket: nothing is read until a
+                // consumer attaches a 'data' listener or calls resume() (see
+                // below). Reading from the start lost whatever arrived before
+                // the application got around to calling ws.handleUpgrade().
             }
             util.inherits(UpgradeSocket, Duplex);
 
+            // resume()/pause() start and stop the native read poll. Paused, the
+            // bytes stay in the native queue, which stops reading from the
+            // network at its high-water mark: real backpressure.
+            UpgradeSocket.prototype.resume = function() {
+                Duplex.prototype.resume.call(this);
+                if (this._connId !== null) this._startPoll();
+                return this;
+            };
+            UpgradeSocket.prototype.pause = function() {
+                Duplex.prototype.pause.call(this);
+                this._stopPoll();
+                return this;
+            };
+            // The shared Readable.unshift emits 'data' on the spot, which loses
+            // the bytes when no listener is attached yet — and `ws` unshifts the
+            // upgrade `head` just before attaching its listener. Keep them and
+            // deliver them first, in order, once reading starts.
+            UpgradeSocket.prototype.unshift = function(chunk) {
+                if (chunk == null || chunk.length === 0) return this;
+                (this._unshifted = this._unshifted || []).unshift(chunk);
+                return this;
+            };
+
+            // Reads are polled: 1 ms while data is flowing, 5 ms once idle. A
+            // chain of timeouts, not an interval that is cleared and recreated
+            // on every step: the engine keeps the callback of a cleared
+            // interval, so recreating one every millisecond leaked a closure
+            // per step, and re-arming after a 'data' listener destroyed the
+            // socket (ws does, on a bad frame) left a timer nobody could
+            // cancel — the process then never exited.
             UpgradeSocket.prototype._startPoll = function() {
                 var self = this;
                 if (self._pollTimer || self.destroyed) return;
                 var idleTicks = 0;
                 var step = function() {
+                    self._pollTimer = null;
                     if (self.destroyed || self._connId === null) return;
+                    if (self._unshifted) {
+                        var pending = self._unshifted;
+                        self._unshifted = null;
+                        for (var pi = 0; pi < pending.length; pi++) self.push(Buffer.from(pending[pi]));
+                        if (self.destroyed || self._connId === null) return;
+                    }
                     var chunk = __upgradeRead(self._connId, 65536);
                     if (chunk instanceof Uint8Array) {
                         idleTicks = 0;
@@ -3425,23 +3466,21 @@ pub fn inject_require(
                     } else if (chunk instanceof Error && chunk.code === 'EAGAIN') {
                         idleTicks += 1;
                     } else if (chunk instanceof Error && chunk.code === 'EOF') {
-                        self._stopPoll();
                         self.push(null);
                         return;
                     } else {
-                        self._stopPoll();
                         self.emit('error', chunk instanceof Error ? chunk : new Error(String(chunk)));
                         self.destroy();
                         return;
                     }
-                    var delay = idleTicks < 8 ? 1 : 5;
-                    if (self._pollTimer) { clearInterval(self._pollTimer); }
-                    self._pollTimer = setInterval(step, delay);
+                    // A 'data' listener may have destroyed the socket.
+                    if (self.destroyed || self._connId === null) return;
+                    self._pollTimer = setTimeout(step, idleTicks < 8 ? 1 : 5);
                 };
-                self._pollTimer = setInterval(step, 5);
+                self._pollTimer = setTimeout(step, 1);
             };
             UpgradeSocket.prototype._stopPoll = function() {
-                if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+                if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
             };
 
             UpgradeSocket.prototype._write = function(chunk, encoding, cb) {

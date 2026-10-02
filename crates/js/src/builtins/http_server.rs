@@ -176,6 +176,92 @@ struct UpgradeConn {
     write_wake: tokio::sync::Notify,
     data_wake: tokio::sync::Notify,
     closed: std::sync::atomic::AtomicBool,
+    /// Set when the connection is dropped without flushing what JS queued
+    /// (the write queue overflowed because the peer isn't reading).
+    aborted: std::sync::atomic::AtomicBool,
+    /// Bytes currently held in `read_q` / `write_q`.
+    read_bytes: std::sync::atomic::AtomicUsize,
+    write_bytes: std::sync::atomic::AtomicUsize,
+    /// Signalled when JS drains `read_q`, so a paused driver resumes reading.
+    drained: tokio::sync::Notify,
+}
+
+/// Most bytes the driver reads ahead of JS. At this point it stops reading
+/// the socket, so TCP flow control pushes back on the peer instead of the
+/// process buffering whatever a fast client sends while JS is busy.
+const UPGRADE_READ_HIGH_WATER: usize = 1024 * 1024;
+
+/// Most bytes JS may have queued for the driver to write. A peer that stops
+/// reading while the app keeps sending (a chat broadcast to a stalled
+/// client) would otherwise grow this without bound; past the limit the
+/// connection is dropped, as WebSocket servers do for slow consumers.
+const UPGRADE_WRITE_HARD_LIMIT: usize = 32 * 1024 * 1024;
+
+/// A write that makes no progress for this long means the peer is gone or
+/// stalled: the connection is closed so it can't hold its firewall slot.
+const UPGRADE_WRITE_STALL: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl UpgradeConn {
+    fn new() -> Self {
+        Self {
+            read_q: Mutex::new(std::collections::VecDeque::new()),
+            write_q: Mutex::new(std::collections::VecDeque::new()),
+            write_wake: tokio::sync::Notify::new(),
+            data_wake: tokio::sync::Notify::new(),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            aborted: std::sync::atomic::AtomicBool::new(false),
+            read_bytes: std::sync::atomic::AtomicUsize::new(0),
+            write_bytes: std::sync::atomic::AtomicUsize::new(0),
+            drained: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+enum UpgradeTake {
+    Data(Vec<u8>),
+    Eof,
+    Empty,
+}
+
+/// Takes up to `max` bytes from the front of the read queue. When JS asks for
+/// less than the chunk holds, the rest stays queued, in order (it used to be
+/// dropped), and the driver is woken if it had paused for lack of room.
+fn take_upgrade_read(c: &UpgradeConn, max: usize) -> UpgradeTake {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut q = c.read_q.lock().unwrap();
+    match q.pop_front() {
+        Some(UpgradeRead::Data(mut bytes)) => {
+            if bytes.len() > max {
+                let rest = bytes.split_off(max);
+                q.push_front(UpgradeRead::Data(rest));
+            }
+            drop(q);
+            c.read_bytes.fetch_sub(bytes.len(), Relaxed);
+            c.drained.notify_one();
+            UpgradeTake::Data(bytes)
+        }
+        Some(UpgradeRead::Eof) => UpgradeTake::Eof,
+        None if c.closed.load(Relaxed) => UpgradeTake::Eof,
+        None => UpgradeTake::Empty,
+    }
+}
+
+/// Queues `bytes` for the driver to write. Returns false (and aborts the
+/// connection) when the peer has not read for so long that the queue would
+/// pass [`UPGRADE_WRITE_HARD_LIMIT`].
+fn queue_upgrade_write(conn: &UpgradeConn, bytes: Vec<u8>) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = bytes.len();
+    if conn.write_bytes.fetch_add(n, Relaxed) + n > UPGRADE_WRITE_HARD_LIMIT {
+        conn.write_bytes.fetch_sub(n, Relaxed);
+        conn.aborted.store(true, Relaxed);
+        conn.closed.store(true, Relaxed);
+        conn.write_wake.notify_one();
+        return false;
+    }
+    conn.write_q.lock().unwrap().push_back(bytes);
+    conn.write_wake.notify_one();
+    true
 }
 
 enum UpgradeRead {
@@ -209,95 +295,87 @@ fn is_upgrade_request(parsed: &ParsedRequest) -> bool {
 }
 
 /// The task that owns an upgraded stream for its lifetime: pushes every byte
-/// read into `read_q` (with the already-buffered `head` first), drains
-/// JS-side writes from `write_q`, and on EOF/error/close pushes `Eof` and
-/// releases the firewall slot. Runs until the peer or JS closes the socket.
+/// read into `read_q`, drains JS-side writes from `write_q`, and on
+/// EOF/error/close pushes `Eof` and releases the firewall slot. The bytes the
+/// http parser had already read past the headers (`head`) are NOT replayed
+/// here: they travel in the `upgrade` event, as in Node, and the `ws` library
+/// unshifts them itself. Runs until the peer or JS closes the socket.
 fn spawn_upgrade_driver<S>(
     mut stream: S,
-    head: Vec<u8>,
     ip: IpAddr,
+    conn_id: u32,
     conn: Arc<UpgradeConn>,
     upgrades: UpgradeRegistry,
     fw: Arc<Option<Arc<Firewall>>>,
-) where
+) -> tokio::task::JoinHandle<()>
+where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
+        use std::sync::atomic::Ordering::Relaxed;
         use tokio::io::AsyncReadExt;
         use tokio::io::AsyncWriteExt;
 
-        let conn_id = {
-            let reg = upgrades.lock().unwrap();
-            // reuse the conn id the registry was keyed under
-            reg.iter()
-                .find(|(_, c)| Arc::ptr_eq(&conn, *c))
-                .map(|(id, _)| *id)
-                .unwrap_or(0)
-        };
-
-        let send = |data: Vec<u8>| {
-            conn.read_q
-                .lock()
-                .unwrap()
-                .push_back(UpgradeRead::Data(data));
+        let push_eof = || {
+            conn.read_q.lock().unwrap().push_back(UpgradeRead::Eof);
             conn.data_wake.notify_one();
         };
-        if !head.is_empty() {
-            send(head);
-        }
 
         let mut buf = [0u8; 16_384];
-        loop {
-            if conn.closed.load(std::sync::atomic::Ordering::Relaxed) {
+        'io: loop {
+            // Flush what JS wrote first — also when it has already asked to
+            // close: `socket.end(data)` is write-then-close, and the last
+            // frame (a WebSocket close echo) must not be lost to the close.
+            if conn.aborted.load(Relaxed) {
+                conn.write_q.lock().unwrap().clear();
                 break;
             }
-            // Drain whatever JS wrote before waiting for more data. The
-            // write queue guard must not live across an await.
             loop {
-                let bytes = conn.write_q.lock().unwrap().pop_front();
-                match bytes {
-                    Some(bytes) => {
-                        if stream.write_all(&bytes).await.is_err() {
-                            conn.read_q.lock().unwrap().push_back(UpgradeRead::Eof);
-                            conn.data_wake.notify_one();
-                            conn.closed
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                            break;
-                        }
-                    }
-                    None => break,
+                let next = conn.write_q.lock().unwrap().pop_front();
+                let Some(bytes) = next else { break };
+                let len = bytes.len();
+                let written =
+                    tokio::time::timeout(UPGRADE_WRITE_STALL, stream.write_all(&bytes)).await;
+                conn.write_bytes.fetch_sub(len, Relaxed);
+                if !matches!(written, Ok(Ok(()))) {
+                    push_eof();
+                    conn.closed.store(true, Relaxed);
+                    break 'io;
                 }
             }
-            if conn.closed.load(std::sync::atomic::Ordering::Relaxed) {
+            if conn.closed.load(Relaxed) {
                 break;
             }
+            // Past the high-water mark stop reading until JS drains: TCP
+            // flow control then slows the peer instead of us buffering it.
+            let paused = conn.read_bytes.load(Relaxed) >= UPGRADE_READ_HIGH_WATER;
             tokio::select! {
-                _ = conn.write_wake.notified() => continue,
-                r = stream.read(&mut buf) => {
-                    match r {
-                        Ok(0) => {
-                            conn.read_q.lock().unwrap().push_back(UpgradeRead::Eof);
-                            conn.data_wake.notify_one();
-                            break;
-                        }
-                        Ok(n) => {
-                            send(buf[..n].to_vec());
-                        }
-                        Err(_) => {
-                            conn.read_q.lock().unwrap().push_back(UpgradeRead::Eof);
-                            conn.data_wake.notify_one();
-                            break;
-                        }
+                _ = conn.write_wake.notified() => {}
+                _ = conn.drained.notified(), if paused => {}
+                r = stream.read(&mut buf), if !paused => match r {
+                    Ok(0) | Err(_) => {
+                        push_eof();
+                        break;
                     }
-                }
+                    Ok(n) => {
+                        conn.read_bytes.fetch_add(n, Relaxed);
+                        conn.read_q
+                            .lock()
+                            .unwrap()
+                            .push_back(UpgradeRead::Data(buf[..n].to_vec()));
+                        conn.data_wake.notify_one();
+                    }
+                },
             }
         }
 
+        // Send the FIN (and a TLS close_notify) rather than just dropping.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), stream.shutdown()).await;
         upgrades.lock().unwrap().remove(&conn_id);
         if let Some(firewall) = fw.as_ref().as_ref() {
             firewall.on_disconnect(ip);
         }
-    });
+    })
 }
 
 /// Binds a listening socket like `std::net::TcpListener::bind` (same name
@@ -942,18 +1020,12 @@ async fn handle_connection<S>(
         if is_upgrade_request(&parsed) {
             let head = reader.buffer().to_vec();
             drop(reader);
-            let conn = Arc::new(UpgradeConn {
-                read_q: Mutex::new(std::collections::VecDeque::new()),
-                write_q: Mutex::new(std::collections::VecDeque::new()),
-                write_wake: tokio::sync::Notify::new(),
-                data_wake: tokio::sync::Notify::new(),
-                closed: std::sync::atomic::AtomicBool::new(false),
-            });
+            let conn = Arc::new(UpgradeConn::new());
             upgrades.lock().unwrap().insert(conn_id, conn.clone());
             spawn_upgrade_driver(
                 read_half.unsplit(writer),
-                head.clone(),
                 ip,
+                conn_id,
                 conn,
                 upgrades,
                 fw.clone(),
@@ -1453,31 +1525,21 @@ pub fn inject_http_server(
                         let err = js_code_err(scope, "EOF", "upgrade socket closed");
                         rv.set(err);
                     }
-                    Some(c) => {
-                        let mut q = c.read_q.lock().unwrap();
-                        match q.pop_front() {
-                            Some(UpgradeRead::Data(bytes)) => {
-                                let n = bytes.len().min(max_bytes);
-                                let result = crate::builtins::v8_compat::uint8array_from_bytes(
-                                    scope,
-                                    &bytes[..n],
-                                );
-                                rv.set(result.into());
-                            }
-                            Some(UpgradeRead::Eof) => {
-                                let err = js_code_err(scope, "EOF", "connection closed");
-                                rv.set(err);
-                            }
-                            None if c.closed.load(std::sync::atomic::Ordering::Relaxed) => {
-                                let err = js_code_err(scope, "EOF", "connection closed");
-                                rv.set(err);
-                            }
-                            None => {
-                                let err = js_code_err(scope, "EAGAIN", "no data available");
-                                rv.set(err);
-                            }
+                    Some(c) => match take_upgrade_read(&c, max_bytes) {
+                        UpgradeTake::Data(bytes) => {
+                            let result =
+                                crate::builtins::v8_compat::uint8array_from_bytes(scope, &bytes);
+                            rv.set(result.into());
                         }
-                    }
+                        UpgradeTake::Eof => {
+                            let err = js_code_err(scope, "EOF", "connection closed");
+                            rv.set(err);
+                        }
+                        UpgradeTake::Empty => {
+                            let err = js_code_err(scope, "EAGAIN", "no data available");
+                            rv.set(err);
+                        }
+                    },
                 }
             },
         )
@@ -1501,9 +1563,16 @@ pub fn inject_http_server(
                 let conn = ctx.upgrades.lock().unwrap().get(&conn_id).cloned();
                 match conn {
                     Some(c) if !c.closed.load(std::sync::atomic::Ordering::Relaxed) => {
-                        c.write_q.lock().unwrap().push_back(bytes);
-                        c.write_wake.notify_one();
-                        rv.set(v8::undefined(scope).into());
+                        if queue_upgrade_write(&c, bytes) {
+                            rv.set(v8::undefined(scope).into());
+                        } else {
+                            let err = js_code_err(
+                                scope,
+                                "EPIPE",
+                                "upgrade socket write buffer is full (the peer is not reading)",
+                            );
+                            rv.set(err);
+                        }
                     }
                     _ => {
                         let err = js_code_err(scope, "EPIPE", "upgrade socket closed");
@@ -2973,5 +3042,157 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(ParseError::Respond(501, _))));
+    }
+
+    // ── upgrade bridge ────────────────────────────────────────────────────
+
+    fn test_upgrade() -> (Arc<UpgradeConn>, UpgradeRegistry) {
+        let conn = Arc::new(UpgradeConn::new());
+        let registry: UpgradeRegistry = Arc::new(Mutex::new(HashMap::new()));
+        registry.lock().unwrap().insert(7, conn.clone());
+        (conn, registry)
+    }
+
+    fn loopback_ip() -> IpAddr {
+        "127.0.0.1".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn upgrade_driver_stops_reading_when_js_does_not_drain() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (server_end, mut peer) = tokio::io::duplex(64 * 1024);
+        let (conn, registry) = test_upgrade();
+        spawn_upgrade_driver(
+            server_end,
+            loopback_ip(),
+            7,
+            conn.clone(),
+            registry,
+            Arc::new(None),
+        );
+        // A fast peer: 16 MiB, while JS never reads.
+        let flood = tokio::spawn(async move {
+            let chunk = vec![7u8; 64 * 1024];
+            for _ in 0..256 {
+                if peer.write_all(&chunk).await.is_err() {
+                    return false;
+                }
+            }
+            true
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let queued = conn.read_bytes.load(Relaxed);
+        assert!(
+            queued <= UPGRADE_READ_HIGH_WATER + 16 * 1024,
+            "read ahead of JS must stop at the high-water mark, queued {queued} bytes"
+        );
+        assert!(
+            !flood.is_finished(),
+            "the peer's write must be held back by TCP flow control, not absorbed"
+        );
+        // JS starts reading: everything arrives, in the end.
+        let drain = async {
+            let mut total = 0usize;
+            while total < 256 * 64 * 1024 {
+                match take_upgrade_read(&conn, 65_536) {
+                    UpgradeTake::Data(b) => total += b.len(),
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(1)).await,
+                }
+            }
+            total
+        };
+        let total = tokio::time::timeout(std::time::Duration::from_secs(20), drain)
+            .await
+            .expect("draining the queue must let the peer finish");
+        assert_eq!(total, 256 * 64 * 1024);
+        assert!(flood.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn upgrade_driver_flushes_writes_queued_before_close() {
+        use tokio::io::AsyncReadExt;
+        let (server_end, mut peer) = tokio::io::duplex(64 * 1024);
+        let (conn, registry) = test_upgrade();
+        let driver = spawn_upgrade_driver(
+            server_end,
+            loopback_ip(),
+            7,
+            conn.clone(),
+            registry,
+            Arc::new(None),
+        );
+        // What `socket.end(frame)` does: write, then close right away.
+        assert!(queue_upgrade_write(&conn, b"closing frame".to_vec()));
+        conn.closed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        conn.write_wake.notify_one();
+
+        let mut got = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            peer.read_to_end(&mut got),
+        )
+        .await
+        .expect("the driver must close the connection")
+        .unwrap();
+        assert_eq!(
+            got, b"closing frame",
+            "the last write must not be lost to the close"
+        );
+        driver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn upgrade_write_overflow_drops_the_connection_instead_of_buffering() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (server_end, _peer) = tokio::io::duplex(1024); // a peer that never reads
+        let (conn, registry) = test_upgrade();
+        let driver = spawn_upgrade_driver(
+            server_end,
+            loopback_ip(),
+            7,
+            conn.clone(),
+            registry.clone(),
+            Arc::new(None),
+        );
+        let chunk = vec![1u8; 1024 * 1024];
+        let mut accepted = 0usize;
+        while queue_upgrade_write(&conn, chunk.clone()) {
+            accepted += chunk.len();
+            assert!(
+                accepted <= UPGRADE_WRITE_HARD_LIMIT,
+                "queue grew past its limit"
+            );
+        }
+        assert!(conn.aborted.load(Relaxed) && conn.closed.load(Relaxed));
+        tokio::time::timeout(std::time::Duration::from_secs(5), driver)
+            .await
+            .expect("an aborted connection must not wait for a peer that never reads")
+            .unwrap();
+        assert!(
+            registry.lock().unwrap().is_empty(),
+            "the registry entry is released"
+        );
+    }
+
+    #[test]
+    fn upgrade_read_keeps_the_rest_of_a_chunk_that_js_did_not_ask_for() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let conn = UpgradeConn::new();
+        conn.read_bytes.store(10, Relaxed);
+        conn.read_q
+            .lock()
+            .unwrap()
+            .push_back(UpgradeRead::Data(b"0123456789".to_vec()));
+        let take = |max| match take_upgrade_read(&conn, max) {
+            UpgradeTake::Data(b) => b,
+            _ => panic!("expected data"),
+        };
+        assert_eq!(take(4), b"0123");
+        assert_eq!(conn.read_bytes.load(Relaxed), 6);
+        assert_eq!(take(4), b"4567");
+        assert_eq!(take(4), b"89");
+        assert_eq!(conn.read_bytes.load(Relaxed), 0);
+        assert!(matches!(take_upgrade_read(&conn, 4), UpgradeTake::Empty));
     }
 }
