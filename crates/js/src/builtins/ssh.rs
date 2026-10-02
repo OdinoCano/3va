@@ -9,7 +9,9 @@
 //!
 //! Native functions:
 //! - `__sshCreate()` -> id
-//! - `__sshConnect(id, host, port, username, password)` -> Promise<envelope>
+//! - `__sshConnect(id, host, port, username, password, hostFingerprint, knownHosts, hasHostVerifier)` -> Promise<envelope>
+//! - `__sshVerifyPoll(opId)` -> `{verificationId, fingerprint}` | null
+//! - `__sshVerifyReply(verificationId, accept)` -> bool
 //! - `__sshExec(id, command)` -> Promise<envelope {stdout, stderr, code}>
 //! - `__sshSftp(id)` -> Promise<envelope {sftpId}>
 //! - `__sftpReaddir(id, path)` -> Promise<envelope [entries]>
@@ -22,27 +24,245 @@
 
 use russh::ChannelMsg;
 use russh::client::{self, Handle};
+use russh::keys::HashAlg;
 use russh_sftp::client::SftpSession;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use vvva_permissions::{Capability, PermissionState};
 
+use hmac::{Hmac, Mac};
+use sha1::Sha1;
+
+use base64::Engine;
+
 type SshId = u32;
 type SftpId = u32;
 
-struct SshHandler;
+// Host-key verification policy for one `connect()`, supplied by the JS glue
+// from the `connect()` options and read by `SshHandler::check_server_key`.
+// Without one of `fingerprint`, `known_hosts` or `verifier` the connect fails
+// closed (`EHOSTUNVERIFY`), unless `--allow-insecure` was passed or the host
+// is loopback — the same trust model as the plaintext-protocol policy.
+struct HostKeyPolicy {
+    fingerprint: Option<String>,
+    known_hosts: Option<String>,
+    verifier: bool,
+}
+
+struct SshHandler {
+    host: String,
+    port: u16,
+    policy: HostKeyPolicy,
+    // op id of the connect that owns this handshake; used to route a
+    // `hostVerifier` decision request back to the JS glue that started it.
+    op_id: u32,
+}
+
 impl client::Handler for SshHandler {
     type Error = russh::Error;
+
     async fn check_server_key(
         &mut self,
-        // russh 0.63 passes the key or, for certificate-based hosts, the
-        // certificate. Neither is checked yet: see the note on host key
-        // verification (every server key is accepted).
-        _key: &russh::keys::PublicKeyOrCertificate,
+        key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        Ok(true)
+        let pubkey = key.public_key();
+        match host_key_check(
+            &self.host,
+            self.port,
+            &self.policy,
+            vvva_permissions::insecure_ssh_allowed(&self.host),
+            &pubkey,
+        ) {
+            HostKeyCheck::Accepted => Ok(true),
+            HostKeyCheck::Rejected => Ok(false),
+            // A `hostVerifier` callback decides: the handshake parks here until
+            // the JS glue answers; the reply is routed by verification id so
+            // several connects can verify concurrently.
+            HostKeyCheck::NeedsVerifier(fingerprint) => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let verification_id = next_verification_id();
+                pending_verifications().lock().unwrap().insert(
+                    verification_id,
+                    PendingVerification {
+                        op_id: self.op_id,
+                        fingerprint,
+                        reply: tx,
+                    },
+                );
+                // A verifier that never answers must not hang the connect forever.
+                let decision = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or(false);
+                pending_verifications()
+                    .lock()
+                    .unwrap()
+                    .remove(&verification_id);
+                Ok(decision)
+            }
+        }
     }
+}
+
+// The outcome of the deterministic part of host-key verification. The
+// `NeedsVerifier` case hands back to JS; every other case is decided here.
+enum HostKeyCheck {
+    Accepted,
+    Rejected,
+    NeedsVerifier(String),
+}
+
+// Loopback and `--allow-insecure` trust the first key presented when the
+// connect gave no `hostFingerprint`, `knownHosts` or `hostVerifier`, like the
+// plaintext-protocol policy trusts the first hop on this machine. Otherwise
+// the key must match `hostFingerprint`, a `knownHosts` entry, or the
+// `hostVerifier` callback; with none of those, verification fails closed.
+fn host_key_check(
+    host: &str,
+    port: u16,
+    policy: &HostKeyPolicy,
+    insecure_allowed: bool,
+    pubkey: &russh::keys::ssh_key::PublicKey,
+) -> HostKeyCheck {
+    let configured =
+        policy.fingerprint.is_some() || policy.known_hosts.is_some() || policy.verifier;
+    // The exemption only covers a connect with no explicit policy: a pin the
+    // caller asked for must hold on loopback too, or a wrong pin is silently
+    // accepted.
+    if insecure_allowed && !configured {
+        return HostKeyCheck::Accepted;
+    }
+    let fingerprint = pubkey.fingerprint(HashAlg::Sha256).to_string();
+    if let Some(expected) = &policy.fingerprint {
+        return if fingerprint_matches(expected, &fingerprint) {
+            HostKeyCheck::Accepted
+        } else {
+            HostKeyCheck::Rejected
+        };
+    }
+    if let Some(content) = &policy.known_hosts {
+        // A changed recorded key (Err) is refused too, as OpenSSH does.
+        return if known_hosts_check(host, port, content, pubkey).unwrap_or(false) {
+            HostKeyCheck::Accepted
+        } else {
+            HostKeyCheck::Rejected
+        };
+    }
+    if policy.verifier {
+        HostKeyCheck::NeedsVerifier(fingerprint)
+    } else {
+        HostKeyCheck::Rejected
+    }
+}
+
+// A `hostVerifier` decision the JS glue must make before the handshake can
+// continue. `check_server_key` registers one and awaits `reply`; the JS glue
+// learns about it through `__sshVerifyPoll` and answers via `__sshVerifyReply`.
+struct PendingVerification {
+    op_id: u32,
+    fingerprint: String,
+    reply: tokio::sync::oneshot::Sender<bool>,
+}
+
+static PENDING_VERIFICATIONS: OnceLock<Mutex<HashMap<u32, PendingVerification>>> = OnceLock::new();
+
+fn pending_verifications() -> &'static Mutex<HashMap<u32, PendingVerification>> {
+    PENDING_VERIFICATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_verification_id() -> u32 {
+    static C: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    C.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+// True when `expected` equals `actual` (`SHA256:<base64>`), or is the bare
+// base64 of it. The base64 is case-sensitive (folding case would make a pin
+// match far more keys than the one it names); only the `SHA256:` prefix is
+// not.
+fn fingerprint_matches(expected: &str, actual: &str) -> bool {
+    let Some((_, b64)) = actual.split_once(':') else {
+        return false;
+    };
+    let expected = expected.trim();
+    let expected = match expected.split_once(':') {
+        Some((alg, rest)) if alg.eq_ignore_ascii_case("sha256") => rest,
+        _ => expected,
+    };
+    expected == b64
+}
+
+// known_hosts matching over in-memory content (the JS glue reads the file
+// through the fs permission model and passes it here, so a script can't use
+// this module as a file oracle). Mirrors OpenSSH: comma-separated host
+// patterns, `[host]:port` for non-22 ports, and hashed `|1|salt|hash` lines.
+// Returns Ok(true) when any entry for the host matches the key, Ok(false)
+// when the host has no usable entry, and Err(()) when entries of the same key
+// type exist but none matches ("key changed"). A host may list several keys
+// of one type (rotation), so a mismatch only counts once every line is seen.
+fn known_hosts_check(
+    host: &str,
+    port: u16,
+    content: &str,
+    pubkey: &russh::keys::ssh_key::PublicKey,
+) -> Result<bool, ()> {
+    let host_port = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    let mut changed = false;
+    for raw_line in content.lines() {
+        let line = raw_line.trim_end();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let hosts = fields.next().unwrap_or_default();
+        let _key_type = fields.next();
+        let key_b64 = fields.next();
+        let Some(key_b64) = key_b64 else { continue };
+        if !known_hosts_hostname_matches(&host_port, hosts) {
+            continue;
+        }
+        let Ok(recorded) = russh::keys::parse_public_key_base64(key_b64) else {
+            continue;
+        };
+        if *pubkey == recorded {
+            return Ok(true);
+        }
+        changed |= pubkey.algorithm() == recorded.algorithm();
+    }
+    if changed { Err(()) } else { Ok(false) }
+}
+
+fn known_hosts_hostname_matches(host: &str, pattern: &str) -> bool {
+    for entry in pattern.split(',') {
+        if let Some(rest) = entry.strip_prefix("|1|") {
+            // Hashed host line: `|1|<salt b64>|<sha1-b64>` where the hash is
+            // HMAC-SHA1 keyed by the salt over the hostname.
+            let mut parts = rest.split('|');
+            let (Some(salt), Some(hash)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            let (Ok(salt), Ok(hash)) = (
+                base64::engine::general_purpose::STANDARD.decode(salt.as_bytes()),
+                base64::engine::general_purpose::STANDARD.decode(hash.as_bytes()),
+            ) else {
+                continue;
+            };
+            if let Ok(mut mac) = Hmac::<Sha1>::new_from_slice(&salt) {
+                mac.update(host.as_bytes());
+                if mac.verify_slice(&hash).is_ok() {
+                    return true;
+                }
+            }
+        } else if host == entry {
+            return true;
+        }
+    }
+    false
 }
 
 struct SshConn {
@@ -174,6 +394,17 @@ pub fn inject_ssh(
             let port = super::port_from_js(args.get(2).uint32_value(_scope), 22);
             let username = args.get(3).to_rust_string_lossy(_scope);
             let password = args.get(4).to_rust_string_lossy(_scope);
+            // Host-key verification policy (see HostKeyPolicy). The JS glue
+            // already resolved `knownHosts` to file content through the fs
+            // permission model before calling here.
+            let fingerprint = args.get(5).to_rust_string_lossy(_scope);
+            let known_hosts = args.get(6).to_rust_string_lossy(_scope);
+            let has_verifier = args.get(7).uint32_value(_scope).unwrap_or(0) != 0;
+            let policy = HostKeyPolicy {
+                fingerprint: (!fingerprint.is_empty()).then_some(fingerprint),
+                known_hosts: (!known_hosts.is_empty()).then_some(known_hosts),
+                verifier: has_verifier,
+            };
             // Read on this (callback) thread, where the thread-local is
             // actually populated, and move the clone into the spawned
             // thread — permissions() itself would panic if called from
@@ -212,9 +443,33 @@ pub fn inject_ssh(
                         Err(e) => return err_envelope("EACCES", e),
                     };
                     let config = Arc::new(client::Config::default());
-                    let mut handle = match client::connect(config, &addrs[..], SshHandler).await {
+                    let mut handle = match client::connect(
+                        config,
+                        &addrs[..],
+                        SshHandler {
+                            host: host.clone(),
+                            port,
+                            policy,
+                            op_id,
+                        },
+                    )
+                    .await
+                    {
                         Ok(h) => h,
-                        Err(e) => return err_envelope("ECONNREFUSED", e),
+                        Err(e) => {
+                            // check_server_key returned false: no recorded key
+                            // matched and no explicit verification option was
+                            // given, so the host key is unverified (MITM).
+                            if matches!(e, russh::Error::UnknownKey) {
+                                return err_envelope(
+                                    "EHOSTUNVERIFY",
+                                    "Host key verification failed. Pass hostFingerprint, \
+                                     knownHosts or hostVerifier to connect(), or run with \
+                                     --allow-insecure",
+                                );
+                            }
+                            return err_envelope("ECONNREFUSED", e);
+                        }
                     };
 
                     match handle.authenticate_password(&username, &password).await {
@@ -243,6 +498,59 @@ pub fn inject_ssh(
         scope,
         v8::String::new(scope, "__sshConnect").unwrap().into(),
         connect_fn.into(),
+    );
+
+    let verify_poll_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let op_id = args.get(0).uint32_value(_scope).unwrap_or(0);
+            let guard = pending_verifications().lock().unwrap();
+            for (verification_id, pv) in guard.iter() {
+                if pv.op_id == op_id {
+                    let payload = json!({
+                        "verificationId": verification_id,
+                        "fingerprint": pv.fingerprint,
+                    })
+                    .to_string();
+                    rv.set(v8::String::new(_scope, &payload).unwrap().into());
+                    return;
+                }
+            }
+            rv.set(v8::null(_scope).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sshVerifyPoll").unwrap().into(),
+        verify_poll_fn.into(),
+    );
+
+    let verify_reply_fn = v8::Function::new(
+        scope,
+        move |_scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut rv: v8::ReturnValue| {
+            let verification_id = args.get(0).uint32_value(_scope).unwrap_or(0);
+            let accept = args.get(1).uint32_value(_scope).unwrap_or(0) != 0;
+            let replied = match pending_verifications()
+                .lock()
+                .unwrap()
+                .remove(&verification_id)
+            {
+                Some(pv) => pv.reply.send(accept).is_ok(),
+                None => false,
+            };
+            rv.set(v8::Boolean::new(_scope, replied).into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        v8::String::new(scope, "__sshVerifyReply").unwrap().into(),
+        verify_reply_fn.into(),
     );
 
     let exec_fn = v8::Function::new(
@@ -796,10 +1104,41 @@ pub fn inject_ssh(
         // V8 Promise here). This polls __sshOpPoll(opId) until the
         // background thread's result is ready, wrapped as a Promise so the
         // call sites read the same as before.
-        function _pollOp(startFn, args) {
+        function _pollOp(startFn, args, onVerify) {
             var opId = startFn.apply(null, args);
             return new Promise(function(resolve) {
                 (function check() {
+                    // A hostVerifier callback is pending: __sshVerifyPoll
+                    // hands us the fingerprint, we ask the callback (which may
+                    // be async) and report the decision back to the handshake.
+                    var v = __sshVerifyPoll(opId);
+                    if (v !== null && v !== undefined) {
+                        var pv = JSON.parse(v);
+                        var decision;
+                        try {
+                            decision = onVerify ? onVerify(pv.fingerprint) : false;
+                        } catch (e) {
+                            __sshVerifyReply(pv.verificationId, 0);
+                            resolve(JSON.stringify({
+                                ok: false,
+                                code: 'EHOSTUNVERIFY',
+                                message: 'hostVerifier threw: ' + (e && e.message || e)
+                            }));
+                            return;
+                        }
+                        Promise.resolve(decision).then(function(accept) {
+                            __sshVerifyReply(pv.verificationId, accept === true ? 1 : 0);
+                            setTimeout(check, 5);
+                        }, function(e) {
+                            __sshVerifyReply(pv.verificationId, 0);
+                            resolve(JSON.stringify({
+                                ok: false,
+                                code: 'EHOSTUNVERIFY',
+                                message: 'hostVerifier rejected: ' + (e && e.message || e)
+                            }));
+                        });
+                        return;
+                    }
                     var r = __sshOpPoll(opId);
                     if (r === null || r === undefined) { setTimeout(check, 5); return; }
                     resolve(r);
@@ -830,8 +1169,33 @@ pub fn inject_ssh(
             var username = options.username || 'root';
             var password = options.password || '';
 
+            // Host-key verification: without one of these the connect fails
+            // closed (EHOSTUNVERIFY) unless the host is loopback or the
+            // process ran with --allow-insecure. knownHosts is read through
+            // the fs permission model (it needs --allow-read for the file).
+            var fingerprint = options.hostFingerprint || '';
+            var knownHosts = '';
+            if (typeof options.knownHosts === 'string' && options.knownHosts) {
+                try {
+                    knownHosts = require('fs').readFileSync(options.knownHosts, 'utf8');
+                } catch (e) {
+                    var err = new Error('Failed to read knownHosts: ' + e.message);
+                    err.code = 'EHOSTUNVERIFY';
+                    self.emit('error', err);
+                    return this;
+                }
+            }
+            var verifier = typeof options.hostVerifier === 'function'
+                ? options.hostVerifier
+                : null;
+
             this._id = __sshCreate();
-            _pollOp(__sshConnect, [this._id, host, port, username, password]).then(function(json) {
+            _pollOp(
+                __sshConnect,
+                [this._id, host, port, username, password,
+                 fingerprint, knownHosts, verifier ? 1 : 0],
+                function(fp) { return verifier ? verifier(fp) : false; }
+            ).then(function(json) {
                 var r = _unwrap(json);
                 if (r.error) { self.emit('error', r.error); return; }
                 self._connected = true;
@@ -1050,4 +1414,211 @@ pub fn inject_ssh(
     "#;
 
     let _ = crate::builtins::code_cache::bootstrap_js(scope, "ssh", js_code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Two distinct Ed25519 public keys, straight from russh's own known_hosts
+    // test fixtures.
+    fn key_a() -> russh::keys::ssh_key::PublicKey {
+        russh::keys::parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ",
+        )
+        .unwrap()
+    }
+
+    fn key_b() -> russh::keys::ssh_key::PublicKey {
+        russh::keys::parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G1sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X",
+        )
+        .unwrap()
+    }
+
+    fn policy(
+        fingerprint: Option<&str>,
+        known_hosts: Option<&str>,
+        verifier: bool,
+    ) -> HostKeyPolicy {
+        HostKeyPolicy {
+            fingerprint: fingerprint.map(str::to_string),
+            known_hosts: known_hosts.map(str::to_string),
+            verifier,
+        }
+    }
+
+    fn key_a_fingerprint() -> String {
+        key_a().fingerprint(HashAlg::Sha256).to_string()
+    }
+
+    #[test]
+    fn fingerprint_matches_exact_and_bare_base64() {
+        let fp = key_a_fingerprint();
+        assert!(fingerprint_matches(&fp, &fp));
+        // bare base64 without the "SHA256:" prefix
+        let bare = fp.split_once(':').unwrap().1;
+        assert!(fingerprint_matches(bare, &fp));
+        // the algorithm prefix is case-insensitive, the base64 is not
+        assert!(fingerprint_matches(
+            &fp.replacen("SHA256", "sha256", 1),
+            &fp
+        ));
+        assert!(!fingerprint_matches(&fp.to_lowercase(), &fp));
+        assert!(!fingerprint_matches(&fp.to_uppercase(), &fp));
+        // a different key's fingerprint must not match
+        assert!(!fingerprint_matches(
+            &key_b().fingerprint(HashAlg::Sha256).to_string(),
+            &fp
+        ));
+    }
+
+    #[test]
+    fn host_key_check_accepts_loopback_and_allow_insecure() {
+        let p = policy(None, None, false);
+        // insecure_allowed = loopback exemption or --allow-insecure
+        assert!(matches!(
+            host_key_check("example.com", 22, &p, true, &key_a()),
+            HostKeyCheck::Accepted
+        ));
+    }
+
+    #[test]
+    fn host_key_check_pin_still_applies_on_loopback() {
+        // insecure_allowed (loopback / --allow-insecure) must not override an
+        // explicit pin, known_hosts or verifier.
+        let wrong = policy(
+            Some(&key_b().fingerprint(HashAlg::Sha256).to_string()),
+            None,
+            false,
+        );
+        assert!(matches!(
+            host_key_check("127.0.0.1", 22, &wrong, true, &key_a()),
+            HostKeyCheck::Rejected
+        ));
+        let v = policy(None, None, true);
+        assert!(matches!(
+            host_key_check("127.0.0.1", 22, &v, true, &key_a()),
+            HostKeyCheck::NeedsVerifier(_)
+        ));
+    }
+
+    #[test]
+    fn known_hosts_accepts_any_matching_line_of_the_same_type() {
+        use russh::keys::PublicKeyBase64;
+        let content = format!(
+            "example.com ssh-ed25519 {}\nexample.com ssh-ed25519 {}\n",
+            key_b().public_key_base64(),
+            key_a().public_key_base64()
+        );
+        assert_eq!(
+            known_hosts_check("example.com", 22, &content, &key_a()),
+            Ok(true)
+        );
+        let only_b = format!("example.com ssh-ed25519 {}\n", key_b().public_key_base64());
+        assert_eq!(
+            known_hosts_check("example.com", 22, &only_b, &key_a()),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn host_key_check_fails_closed_without_options() {
+        let p = policy(None, None, false);
+        assert!(matches!(
+            host_key_check("example.com", 22, &p, false, &key_a()),
+            HostKeyCheck::Rejected
+        ));
+    }
+
+    #[test]
+    fn host_key_check_fingerprint_match_and_mismatch() {
+        let fp = key_a_fingerprint();
+        let ok = policy(Some(&fp), None, false);
+        assert!(matches!(
+            host_key_check("example.com", 22, &ok, false, &key_a()),
+            HostKeyCheck::Accepted
+        ));
+        let wrong = policy(
+            Some(&key_b().fingerprint(HashAlg::Sha256).to_string()),
+            None,
+            false,
+        );
+        assert!(matches!(
+            host_key_check("example.com", 22, &wrong, false, &key_a()),
+            HostKeyCheck::Rejected
+        ));
+    }
+
+    #[test]
+    fn host_key_check_known_hosts_match_no_entry_and_changed() {
+        use russh::keys::PublicKeyBase64;
+        let content = format!(
+            "# comment\nexample.com ssh-ed25519 {}\n",
+            key_a().public_key_base64()
+        );
+        let p = policy(None, Some(&content), false);
+        assert!(matches!(
+            host_key_check("example.com", 22, &p, false, &key_a()),
+            HostKeyCheck::Accepted
+        ));
+
+        // A different host has no entry: refused.
+        assert!(matches!(
+            host_key_check("other.example.com", 22, &p, false, &key_a()),
+            HostKeyCheck::Rejected
+        ));
+
+        // The recorded key is a different key of the same type: refused.
+        assert!(matches!(
+            host_key_check("example.com", 22, &p, false, &key_b()),
+            HostKeyCheck::Rejected
+        ));
+    }
+
+    #[test]
+    fn host_key_check_known_hosts_non_default_port() {
+        use russh::keys::PublicKeyBase64;
+        let content = format!(
+            "[example.com]:2222 ssh-ed25519 {}\n",
+            key_a().public_key_base64()
+        );
+        let p = policy(None, Some(&content), false);
+        assert!(matches!(
+            host_key_check("example.com", 2222, &p, false, &key_a()),
+            HostKeyCheck::Accepted
+        ));
+        assert!(matches!(
+            host_key_check("example.com", 22, &p, false, &key_a()),
+            HostKeyCheck::Rejected
+        ));
+    }
+
+    #[test]
+    fn host_key_check_known_hosts_hashed_entry() {
+        // |1|salt|hash line from russh's known_hosts tests (host "example.com").
+        let content = "|1|O33ESRMWPVkMYIwJ1Uw+n877jTo=|nuuC5vEqXlEZ/8BXQR7m619W6Ak= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILIG2T/B0l0gaqj3puu510tu9N1OkQ4znY3LYuEm5zCF\n";
+        let key = russh::keys::parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAILIG2T/B0l0gaqj3puu510tu9N1OkQ4znY3LYuEm5zCF",
+        )
+        .unwrap();
+        let p = policy(None, Some(content), false);
+        assert!(matches!(
+            host_key_check("example.com", 22, &p, false, &key),
+            HostKeyCheck::Accepted
+        ));
+        assert!(matches!(
+            host_key_check("other.example.com", 22, &p, false, &key),
+            HostKeyCheck::Rejected
+        ));
+    }
+
+    #[test]
+    fn host_key_check_verifier_defers_to_js() {
+        let p = policy(None, None, true);
+        assert!(matches!(
+            host_key_check("example.com", 22, &p, false, &key_a()),
+            HostKeyCheck::NeedsVerifier(_)
+        ));
+    }
 }

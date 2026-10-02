@@ -23,7 +23,7 @@ async fn engine_no_net() -> JsEngine {
 
 // ── Real SSH server (russh::server), used to verify the client end-to-end ──
 
-use russh::keys::{Algorithm, PrivateKey};
+use russh::keys::{Algorithm, PrivateKey, PublicKeyBase64};
 use russh::server::{Auth, ChannelOpenHandle, Handler as ServerHandler, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{Attrs, FileAttributes, StatusCode};
@@ -119,16 +119,23 @@ impl ServerHandler for TestSshServer {
     }
 }
 
-fn start_fake_sshd() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+fn start_fake_sshd_on(ip: std::net::IpAddr) -> (u16, String, String) {
+    let listener = std::net::TcpListener::bind((ip, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
     let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
 
+    let key = PrivateKey::random(&mut rand10::rng(), Algorithm::Ed25519).unwrap();
+    let pubkey = key.public_key();
+    // The SHA256 fingerprint (ssh-keygen format) and the `ssh-ed25519 <base64>`
+    // known_hosts line for the key this server will present.
+    let fingerprint = pubkey.fingerprint(russh::keys::HashAlg::Sha256).to_string();
+    let known_hosts_line = format!("ssh-ed25519 {}", pubkey.public_key_base64());
+
     let config = Arc::new(russh::server::Config {
         auth_rejection_time: std::time::Duration::from_millis(0),
         auth_rejection_time_initial: Some(std::time::Duration::from_millis(0)),
-        keys: vec![PrivateKey::random(&mut rand10::rng(), Algorithm::Ed25519).unwrap()],
+        keys: vec![key],
         ..Default::default()
     });
     let mut server = TestSshServer {
@@ -140,7 +147,24 @@ fn start_fake_sshd() -> u16 {
         let _ = running.await;
     });
 
-    port
+    (port, fingerprint, known_hosts_line)
+}
+
+fn start_fake_sshd() -> u16 {
+    start_fake_sshd_on(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)).0
+}
+
+// A local, non-loopback IP this machine can actually bind, so that host-key
+// verification (which trusts loopback) is genuinely exercised. None when the
+// machine only has loopback (some CI sandboxes): the tests that need it skip.
+fn non_loopback_addr() -> Option<std::net::IpAddr> {
+    // A UDP "connect" never sends a packet; it just makes the kernel pick the
+    // source address that would leave the machine. TEST-NET-1 (192.0.2.0/24)
+    // is reserved and not routed, so nothing goes anywhere.
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("192.0.2.1:9").ok()?;
+    let addr = sock.local_addr().ok()?.ip();
+    if addr.is_loopback() { None } else { Some(addr) }
 }
 
 // ── API shape ────────────────────────────────────────────────────────────────
@@ -621,5 +645,191 @@ async fn ssh_real_sftp_stat_returns_real_attrs_not_fallback_zeros() {
     assert!(
         !result.contains("\"size\":0"),
         "still returning fallback zeros: {result}"
+    );
+}
+
+// ── Host-key verification (the default is fail-closed) ─────────────────────
+
+// Runs `script`, pumping the event loop until the JS sets `__done`, then
+// returns the value of `__result`. All connect()-level tests share this shape.
+async fn connect_and_wait(e: &mut JsEngine, script: &str) -> String {
+    e.eval(script).await.unwrap();
+    for _ in 0..400 {
+        e.idle().await;
+        let _ = e.run_event_loop().await;
+        tokio::task::yield_now().await;
+        if e.eval_to_string("String(__done)").await.unwrap() == "true" {
+            break;
+        }
+    }
+    e.eval_to_string("String(__result)").await.unwrap()
+}
+
+fn connect_script(host: &str, port: u16, extra_opts: &str) -> String {
+    format!(
+        r#"
+        var __done = false, __result = '', __seenFp = '';
+        var client = new ssh.Client();
+        client.on('error', function(err) {{ __result = err.code || err.message; __done = true; }});
+        client.on('ready', function() {{ __result = 'READY'; __done = true; }});
+        client.connect({{ host: '{host}', port: {port}, username: 'testuser', password: 'testpass'{extra_opts} }});
+        "#
+    )
+}
+
+#[tokio::test]
+async fn ssh_rejects_unverified_host_key_fail_closed() {
+    let Some(ip) = non_loopback_addr() else {
+        return;
+    };
+    let host = ip.to_string();
+    let (port, _, _) = start_fake_sshd_on(ip);
+    let mut e = engine_with_net(&host).await;
+    let result = connect_and_wait(&mut e, &connect_script(&host, port, "")).await;
+    // The old behavior accepted any server key (MITM). It must now fail closed.
+    assert_eq!(
+        result, "EHOSTUNVERIFY",
+        "an unverified non-loopback server key must be refused, got: {result}"
+    );
+}
+
+#[tokio::test]
+async fn ssh_accepts_matching_host_fingerprint() {
+    let Some(ip) = non_loopback_addr() else {
+        return;
+    };
+    let host = ip.to_string();
+    let (port, fingerprint, _) = start_fake_sshd_on(ip);
+    let mut e = engine_with_net(&host).await;
+    let result = connect_and_wait(
+        &mut e,
+        &connect_script(&host, port, &format!(", hostFingerprint: '{fingerprint}'")),
+    )
+    .await;
+    assert_eq!(result, "READY", "correct hostFingerprint must connect");
+}
+
+#[tokio::test]
+async fn ssh_rejects_wrong_host_fingerprint() {
+    let Some(ip) = non_loopback_addr() else {
+        return;
+    };
+    let host = ip.to_string();
+    let (port, _, _) = start_fake_sshd_on(ip);
+    let mut e = engine_with_net(&host).await;
+    // A different Ed25519 key's fingerprint, so it can never match.
+    let wrong = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let result = connect_and_wait(
+        &mut e,
+        &connect_script(&host, port, &format!(", hostFingerprint: '{wrong}'")),
+    )
+    .await;
+    assert_eq!(
+        result, "EHOSTUNVERIFY",
+        "a wrong hostFingerprint must be refused, got: {result}"
+    );
+}
+
+#[tokio::test]
+async fn ssh_accepts_known_hosts_entry() {
+    let Some(ip) = non_loopback_addr() else {
+        return;
+    };
+    let host = ip.to_string();
+    let (port, _, line) = start_fake_sshd_on(ip);
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    std::fs::write(&kh, format!("[{host}]:{port} {line}\n")).unwrap();
+    // The JS glue reads knownHosts through the fs permission model, so the
+    // engine needs a read grant for the file.
+    let state = PermissionState::new();
+    state.grant(Capability::Network(host.clone()));
+    state.grant(Capability::FileRead(dir.path().to_path_buf()));
+    let mut e = JsEngine::new(Arc::new(state)).await.unwrap();
+    let result = connect_and_wait(
+        &mut e,
+        &connect_script(&host, port, &format!(", knownHosts: '{}'", kh.display())),
+    )
+    .await;
+    assert_eq!(result, "READY", "a matching known_hosts entry must connect");
+}
+
+#[tokio::test]
+async fn ssh_host_verifier_accepts_and_rejects() {
+    let Some(ip) = non_loopback_addr() else {
+        return;
+    };
+    let host = ip.to_string();
+    let (port, fingerprint, _) = start_fake_sshd_on(ip);
+
+    // hostVerifier returning true accepts the key, and sees the real
+    // fingerprint of the presented key.
+    let mut e = engine_with_net(&host).await;
+    let accepted = connect_and_wait(
+        &mut e,
+        &connect_script(
+            &host,
+            port,
+            ", hostVerifier: function(fp) { __seenFp = fp; return true; }",
+        ),
+    )
+    .await;
+    assert_eq!(accepted, "READY", "a true hostVerifier must connect");
+    let seen = e.eval_to_string("String(__seenFp)").await.unwrap();
+    assert_eq!(
+        seen, fingerprint,
+        "hostVerifier received the real fingerprint"
+    );
+
+    // hostVerifier returning false rejects the key.
+    let mut e = engine_with_net(&host).await;
+    let rejected = connect_and_wait(
+        &mut e,
+        &connect_script(
+            &host,
+            port,
+            ", hostVerifier: function(fp) { return false; }",
+        ),
+    )
+    .await;
+    assert_eq!(
+        rejected, "EHOSTUNVERIFY",
+        "a false hostVerifier must refuse the key, got: {rejected}"
+    );
+}
+
+#[tokio::test]
+async fn ssh_host_verifier_accepts_async_promise() {
+    let Some(ip) = non_loopback_addr() else {
+        return;
+    };
+    let host = ip.to_string();
+    let (port, _, _) = start_fake_sshd_on(ip);
+    let mut e = engine_with_net(&host).await;
+    // A verifier that resolves asynchronously must still gate the handshake.
+    let accepted = connect_and_wait(
+        &mut e,
+        &connect_script(
+            &host,
+            port,
+            ", hostVerifier: function(fp) { return Promise.resolve(fp.length > 0); }",
+        ),
+    )
+    .await;
+    assert_eq!(accepted, "READY", "an async true hostVerifier must connect");
+
+    let mut e = engine_with_net(&host).await;
+    let rejected = connect_and_wait(
+        &mut e,
+        &connect_script(
+            &host,
+            port,
+            ", hostVerifier: function(fp) { return Promise.resolve(false); }",
+        ),
+    )
+    .await;
+    assert_eq!(
+        rejected, "EHOSTUNVERIFY",
+        "an async false hostVerifier must refuse the key, got: {rejected}"
     );
 }

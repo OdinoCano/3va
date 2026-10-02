@@ -31,6 +31,15 @@ pub fn plaintext_denied_message(protocol: &str, host: &str) -> String {
     )
 }
 
+/// True when SSH host-key verification may be skipped for `host`: either the
+/// user passed `--allow-insecure` (accept any server key, like the plaintext
+/// policy) or `host` is loopback (the peer is on this machine, so the
+/// man-in-the-middle a key check defends against cannot intercept the
+/// connection).
+pub fn insecure_ssh_allowed(host: &str) -> bool {
+    ALLOW_INSECURE.load(Ordering::Relaxed) || is_loopback(host)
+}
+
 fn is_loopback(host: &str) -> bool {
     let h = host.trim_start_matches('[').trim_end_matches(']');
     h.eq_ignore_ascii_case("localhost") || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
@@ -50,6 +59,16 @@ mod tests {
         assert!(!plaintext_allowed("10.0.0.1"));
         set_allow_insecure(true);
         assert!(plaintext_allowed("example.com"));
+        set_allow_insecure(false);
+    }
+
+    #[test]
+    fn insecure_ssh_allowed_follows_loopback_and_opt_in() {
+        assert!(insecure_ssh_allowed("localhost"));
+        assert!(insecure_ssh_allowed("127.0.0.1"));
+        assert!(!insecure_ssh_allowed("example.com"));
+        set_allow_insecure(true);
+        assert!(insecure_ssh_allowed("example.com"));
         set_allow_insecure(false);
     }
 }
