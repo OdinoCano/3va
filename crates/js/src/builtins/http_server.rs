@@ -51,6 +51,7 @@ struct ReadyRequest {
 /// registered, the same way timers re-apply theirs (VULN-03).
 struct HttpDispatch {
     ready: ReadyQueue,
+    upgrades: UpgradeQueue,
     wake: Arc<tokio::sync::Notify>,
     handlers: HashMap<u32, (v8::Global<v8::Function>, Vec<String>)>,
 }
@@ -66,9 +67,13 @@ pub fn wake_handle(isolate: &v8::Isolate) -> Option<Arc<tokio::sync::Notify>> {
 pub fn has_ready(isolate: &v8::Isolate) -> bool {
     isolate.get_slot::<HttpDispatch>().is_some_and(|d| {
         let ready = d.ready.lock().unwrap();
+        let upgrades = d.upgrades.lock().unwrap();
         d.handlers
             .keys()
             .any(|id| ready.get(id).is_some_and(|q| !q.is_empty()))
+            || d.handlers
+                .keys()
+                .any(|id| upgrades.get(id).is_some_and(|q| !q.is_empty()))
     })
 }
 
@@ -80,9 +85,13 @@ pub fn dispatch_ready(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::
             return Ok(false);
         };
         let ready = d.ready.lock().unwrap();
+        let upgrades = d.upgrades.lock().unwrap();
         d.handlers
             .iter()
-            .filter(|(id, _)| ready.get(id).is_some_and(|q| !q.is_empty()))
+            .filter(|(id, _)| {
+                ready.get(id).is_some_and(|q| !q.is_empty())
+                    || upgrades.get(id).is_some_and(|q| !q.is_empty())
+            })
             .map(|(_, h)| h.clone())
             .collect()
     };
@@ -127,6 +136,8 @@ struct HttpListenCtx {
     conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
     conn_nid: Arc<Mutex<u32>>,
     ready: ReadyQueue,
+    upgrades: UpgradeRegistry,
+    upgrades_q: UpgradeQueue,
     wake: Arc<tokio::sync::Notify>,
 }
 
@@ -134,8 +145,237 @@ struct HttpAcceptCtx {
     ready: ReadyQueue,
 }
 
+struct HttpUpgradeCtx {
+    upgrades: UpgradeRegistry,
+    upgrades_q: UpgradeQueue,
+}
+
 struct HttpRespondCtx {
     conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
+}
+
+// ── HTTP `Upgrade` (WebSocket) ──────────────────────────────────────────────
+//
+// A request with `Connection: upgrade` + an `Upgrade:` header is handed to JS
+// as `server.on('upgrade', (req, socket, head))`, exactly like Node: the http
+// layer does not answer it (the `ws` npm client/server library performs the
+// 101 handshake and drives the frames over the raw socket). The raw duplex
+// socket is bridged to JS by a per-connection driver task that owns the
+// stream and pushes read chunks into / drains writes from shared queues, so
+// JS sees the same pollable socket shape the `net` module uses. The firewall
+// already admitted the connection and request; the driver releases the
+// per-IP slot on close. A server-side frame codec / message-size limit is
+// the `ws` library's job in this design (its `maxPayload`), not the http
+// layer's.
+
+/// One bridged upgrade socket, shared between its driver task (tokio thread)
+/// and the JS natives (V8 thread).
+struct UpgradeConn {
+    read_q: Mutex<std::collections::VecDeque<UpgradeRead>>,
+    write_q: Mutex<std::collections::VecDeque<Vec<u8>>>,
+    write_wake: tokio::sync::Notify,
+    data_wake: tokio::sync::Notify,
+    closed: std::sync::atomic::AtomicBool,
+    /// Set when the connection is dropped without flushing what JS queued
+    /// (the write queue overflowed because the peer isn't reading).
+    aborted: std::sync::atomic::AtomicBool,
+    /// Bytes currently held in `read_q` / `write_q`.
+    read_bytes: std::sync::atomic::AtomicUsize,
+    write_bytes: std::sync::atomic::AtomicUsize,
+    /// Signalled when JS drains `read_q`, so a paused driver resumes reading.
+    drained: tokio::sync::Notify,
+}
+
+/// Most bytes the driver reads ahead of JS. At this point it stops reading
+/// the socket, so TCP flow control pushes back on the peer instead of the
+/// process buffering whatever a fast client sends while JS is busy.
+const UPGRADE_READ_HIGH_WATER: usize = 1024 * 1024;
+
+/// Most bytes JS may have queued for the driver to write. A peer that stops
+/// reading while the app keeps sending (a chat broadcast to a stalled
+/// client) would otherwise grow this without bound; past the limit the
+/// connection is dropped, as WebSocket servers do for slow consumers.
+const UPGRADE_WRITE_HARD_LIMIT: usize = 32 * 1024 * 1024;
+
+/// A write that makes no progress for this long means the peer is gone or
+/// stalled: the connection is closed so it can't hold its firewall slot.
+const UPGRADE_WRITE_STALL: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl UpgradeConn {
+    fn new() -> Self {
+        Self {
+            read_q: Mutex::new(std::collections::VecDeque::new()),
+            write_q: Mutex::new(std::collections::VecDeque::new()),
+            write_wake: tokio::sync::Notify::new(),
+            data_wake: tokio::sync::Notify::new(),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            aborted: std::sync::atomic::AtomicBool::new(false),
+            read_bytes: std::sync::atomic::AtomicUsize::new(0),
+            write_bytes: std::sync::atomic::AtomicUsize::new(0),
+            drained: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+enum UpgradeTake {
+    Data(Vec<u8>),
+    Eof,
+    Empty,
+}
+
+/// Takes up to `max` bytes from the front of the read queue. When JS asks for
+/// less than the chunk holds, the rest stays queued, in order (it used to be
+/// dropped), and the driver is woken if it had paused for lack of room.
+fn take_upgrade_read(c: &UpgradeConn, max: usize) -> UpgradeTake {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut q = c.read_q.lock().unwrap();
+    match q.pop_front() {
+        Some(UpgradeRead::Data(mut bytes)) => {
+            if bytes.len() > max {
+                let rest = bytes.split_off(max);
+                q.push_front(UpgradeRead::Data(rest));
+            }
+            drop(q);
+            c.read_bytes.fetch_sub(bytes.len(), Relaxed);
+            c.drained.notify_one();
+            UpgradeTake::Data(bytes)
+        }
+        Some(UpgradeRead::Eof) => UpgradeTake::Eof,
+        None if c.closed.load(Relaxed) => UpgradeTake::Eof,
+        None => UpgradeTake::Empty,
+    }
+}
+
+/// Queues `bytes` for the driver to write. Returns false (and aborts the
+/// connection) when the peer has not read for so long that the queue would
+/// pass [`UPGRADE_WRITE_HARD_LIMIT`].
+fn queue_upgrade_write(conn: &UpgradeConn, bytes: Vec<u8>) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = bytes.len();
+    if conn.write_bytes.fetch_add(n, Relaxed) + n > UPGRADE_WRITE_HARD_LIMIT {
+        conn.write_bytes.fetch_sub(n, Relaxed);
+        conn.aborted.store(true, Relaxed);
+        conn.closed.store(true, Relaxed);
+        conn.write_wake.notify_one();
+        return false;
+    }
+    conn.write_q.lock().unwrap().push_back(bytes);
+    conn.write_wake.notify_one();
+    true
+}
+
+enum UpgradeRead {
+    Data(Vec<u8>),
+    Eof,
+}
+
+/// An upgrade request waiting for JS, like `ReadyRequest` but for the
+/// `upgrade` event. Carries the bytes already read past the headers (`head`)
+/// so the first thing the WS library sees is exactly what the client sent.
+struct UpgradeRequest {
+    parsed: ParsedRequest,
+    conn_id: u32,
+    remote: IpAddr,
+    head: Vec<u8>,
+}
+
+type UpgradeQueue = Arc<Mutex<HashMap<u32, std::collections::VecDeque<UpgradeRequest>>>>;
+type UpgradeRegistry = Arc<Mutex<HashMap<u32, Arc<UpgradeConn>>>>;
+
+/// Whether `parsed` is an HTTP upgrade request (any `Upgrade:` target — the
+/// `ws` library filters for `websocket` itself).
+fn is_upgrade_request(parsed: &ParsedRequest) -> bool {
+    let conn_upgrade = parsed.headers.iter().any(|(k, v)| {
+        k == "connection"
+            && v.to_ascii_lowercase()
+                .split(',')
+                .any(|tok| tok.trim() == "upgrade")
+    });
+    conn_upgrade && parsed.headers.iter().any(|(k, _)| k == "upgrade")
+}
+
+/// The task that owns an upgraded stream for its lifetime: pushes every byte
+/// read into `read_q`, drains JS-side writes from `write_q`, and on
+/// EOF/error/close pushes `Eof` and releases the firewall slot. The bytes the
+/// http parser had already read past the headers (`head`) are NOT replayed
+/// here: they travel in the `upgrade` event, as in Node, and the `ws` library
+/// unshifts them itself. Runs until the peer or JS closes the socket.
+fn spawn_upgrade_driver<S>(
+    mut stream: S,
+    ip: IpAddr,
+    conn_id: u32,
+    conn: Arc<UpgradeConn>,
+    upgrades: UpgradeRegistry,
+    fw: Arc<Option<Arc<Firewall>>>,
+) -> tokio::task::JoinHandle<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use std::sync::atomic::Ordering::Relaxed;
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        let push_eof = || {
+            conn.read_q.lock().unwrap().push_back(UpgradeRead::Eof);
+            conn.data_wake.notify_one();
+        };
+
+        let mut buf = [0u8; 16_384];
+        'io: loop {
+            // Flush what JS wrote first — also when it has already asked to
+            // close: `socket.end(data)` is write-then-close, and the last
+            // frame (a WebSocket close echo) must not be lost to the close.
+            if conn.aborted.load(Relaxed) {
+                conn.write_q.lock().unwrap().clear();
+                break;
+            }
+            loop {
+                let next = conn.write_q.lock().unwrap().pop_front();
+                let Some(bytes) = next else { break };
+                let len = bytes.len();
+                let written =
+                    tokio::time::timeout(UPGRADE_WRITE_STALL, stream.write_all(&bytes)).await;
+                conn.write_bytes.fetch_sub(len, Relaxed);
+                if !matches!(written, Ok(Ok(()))) {
+                    push_eof();
+                    conn.closed.store(true, Relaxed);
+                    break 'io;
+                }
+            }
+            if conn.closed.load(Relaxed) {
+                break;
+            }
+            // Past the high-water mark stop reading until JS drains: TCP
+            // flow control then slows the peer instead of us buffering it.
+            let paused = conn.read_bytes.load(Relaxed) >= UPGRADE_READ_HIGH_WATER;
+            tokio::select! {
+                _ = conn.write_wake.notified() => {}
+                _ = conn.drained.notified(), if paused => {}
+                r = stream.read(&mut buf), if !paused => match r {
+                    Ok(0) | Err(_) => {
+                        push_eof();
+                        break;
+                    }
+                    Ok(n) => {
+                        conn.read_bytes.fetch_add(n, Relaxed);
+                        conn.read_q
+                            .lock()
+                            .unwrap()
+                            .push_back(UpgradeRead::Data(buf[..n].to_vec()));
+                        conn.data_wake.notify_one();
+                    }
+                },
+            }
+        }
+
+        // Send the FIN (and a TLS close_notify) rather than just dropping.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), stream.shutdown()).await;
+        upgrades.lock().unwrap().remove(&conn_id);
+        if let Some(firewall) = fw.as_ref().as_ref() {
+            firewall.on_disconnect(ip);
+        }
+    })
 }
 
 /// Binds a listening socket like `std::net::TcpListener::bind` (same name
@@ -668,9 +908,8 @@ const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30)
 /// fires (Slowloris/RUDY), a response times out, or the stream errors — the
 /// `conns` entry and firewall connection accounting are cleaned up on exit.
 #[allow(clippy::too_many_arguments)]
-async fn handle_connection<R, W>(
-    read_half: R,
-    mut writer: W,
+async fn handle_connection<S>(
+    stream: S,
     ip: IpAddr,
     server_id: u32,
     hdr_timeout: std::time::Duration,
@@ -685,12 +924,14 @@ async fn handle_connection<R, W>(
     conn_nid: Arc<Mutex<u32>>,
     fw: Arc<Option<Arc<Firewall>>>,
     ready: ReadyQueue,
+    upgrades: UpgradeRegistry,
+    upgrades_q: UpgradeQueue,
     wake: Arc<tokio::sync::Notify>,
 ) where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let mut reader = BufReader::new(read_half);
+    let (mut read_half, mut writer) = tokio::io::split(stream);
+    let mut reader = BufReader::new(&mut read_half);
 
     let conn_id = {
         let mut n = conn_nid.lock().unwrap();
@@ -772,6 +1013,41 @@ async fn handle_connection<R, W>(
             }
         }
 
+        // HTTP `Upgrade` (WebSocket): hand the raw duplex socket to JS instead
+        // of answering the request — `ws` (npm) performs the 101 handshake and
+        // drives the frames itself. The bytes already read past the headers go
+        // out as `head` so the client's first WS frame arrives intact.
+        if is_upgrade_request(&parsed) {
+            let head = reader.buffer().to_vec();
+            drop(reader);
+            let conn = Arc::new(UpgradeConn::new());
+            upgrades.lock().unwrap().insert(conn_id, conn.clone());
+            spawn_upgrade_driver(
+                read_half.unsplit(writer),
+                ip,
+                conn_id,
+                conn,
+                upgrades,
+                fw.clone(),
+            );
+            upgrades_q
+                .lock()
+                .unwrap()
+                .entry(server_id)
+                .or_default()
+                .push_back(UpgradeRequest {
+                    parsed,
+                    conn_id,
+                    remote: req_ip,
+                    head,
+                });
+            wake.notify_one();
+            conns.lock().unwrap().remove(&conn_id);
+            // return, not break: the firewall slot now belongs to the driver,
+            // which releases it when the upgrade socket closes.
+            return;
+        }
+
         requests_served += 1;
 
         let conn_hdr = parsed
@@ -834,9 +1110,12 @@ pub fn inject_http_server(
     let next_conn_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(1));
     let fw: Arc<Option<Arc<Firewall>>> = Arc::new(firewall);
     let ready: ReadyQueue = Arc::new(Mutex::new(HashMap::new()));
+    let upgrades: UpgradeRegistry = Arc::new(Mutex::new(HashMap::new()));
+    let upgrades_q: UpgradeQueue = Arc::new(Mutex::new(HashMap::new()));
     let wake = Arc::new(tokio::sync::Notify::new());
     scope.set_slot(HttpDispatch {
         ready: ready.clone(),
+        upgrades: upgrades_q.clone(),
         wake: wake.clone(),
         handlers: HashMap::new(),
     });
@@ -850,6 +1129,8 @@ pub fn inject_http_server(
             conns: conns.clone(),
             conn_nid: next_conn_id.clone(),
             ready: ready.clone(),
+            upgrades: upgrades.clone(),
+            upgrades_q: upgrades_q.clone(),
             wake: wake.clone(),
             nid: next_server_id.clone(),
             fw: fw.clone(),
@@ -934,6 +1215,8 @@ pub fn inject_http_server(
                                 let conn_nid = ctx.conn_nid.clone();
                                 let fw = ctx.fw.clone();
                                 let ready = ctx.ready.clone();
+                                let upgrades = ctx.upgrades.clone();
+                                let upgrades_q = ctx.upgrades_q.clone();
                                 let wake = ctx.wake.clone();
                                 tokio::spawn(async move {
                                     loop {
@@ -1007,6 +1290,8 @@ pub fn inject_http_server(
                                         let ready2 = ready.clone();
                                         let wake2 = wake.clone();
                                         let tls2 = tls.clone();
+                                        let upgrades2 = upgrades.clone();
+                                        let upgrades_q2 = upgrades_q.clone();
                                         tokio::spawn(async move {
                                             // TLS: handshake first, bounded by
                                             // the header timeout so a client
@@ -1025,10 +1310,8 @@ pub fn inject_http_server(
                                                     }
                                                     return;
                                                 };
-                                                let (r, w) = tokio::io::split(tls_stream);
                                                 handle_connection(
-                                                    r,
-                                                    w,
+                                                    tls_stream,
                                                     ip,
                                                     id,
                                                     hdr_timeout,
@@ -1043,15 +1326,15 @@ pub fn inject_http_server(
                                                     conn_nid2,
                                                     fw2,
                                                     ready2,
+                                                    upgrades2,
+                                                    upgrades_q2,
                                                     wake2,
                                                 )
                                                 .await;
                                                 return;
                                             }
-                                            let (r, w) = stream.into_split();
                                             handle_connection(
-                                                r,
-                                                w,
+                                                stream,
                                                 ip,
                                                 id,
                                                 hdr_timeout,
@@ -1066,6 +1349,8 @@ pub fn inject_http_server(
                                                 conn_nid2,
                                                 fw2,
                                                 ready2,
+                                                upgrades2,
+                                                upgrades_q2,
                                                 wake2,
                                             )
                                             .await;
@@ -1157,6 +1442,175 @@ pub fn inject_http_server(
             scope,
             V8String::new(scope, "__httpAcceptPoll").unwrap().into(),
             http_accept_fn.into(),
+        );
+    }
+
+    // ── Upgrade (WebSocket) bridge ───────────────────────────────────────────
+    // The upgrade socket lives in a shared registry between the V8 thread (the
+    // natives below) and the driver task on a tokio thread. Read/write are
+    // queue-based, exactly like the `net` module's pollable sockets.
+    {
+        let ctx_ptr = native_ctx.leak(HttpUpgradeCtx {
+            upgrades: upgrades.clone(),
+            upgrades_q: upgrades_q.clone(),
+        });
+        let external = v8::External::new(scope, ctx_ptr);
+
+        let http_upgrade_poll_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpUpgradeCtx)
+                };
+                let server_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let popped = ctx
+                    .upgrades_q
+                    .lock()
+                    .unwrap()
+                    .get_mut(&server_id)
+                    .and_then(|q| q.pop_front());
+
+                match popped {
+                    // [connId, remoteAddress, head(Uint8Array), method, url, [k0,v0,...]]
+                    Some(r) => {
+                        let p = &r.parsed;
+                        let flat: Vec<v8::Local<v8::Value>> = p
+                            .headers
+                            .iter()
+                            .flat_map(|(k, v)| [k, v])
+                            .map(|x| V8String::new(scope, x).unwrap().into())
+                            .collect();
+                        let headers = v8::Array::new_with_elements(scope, &flat);
+                        let head =
+                            crate::builtins::v8_compat::uint8array_from_bytes(scope, &r.head);
+                        let items: [v8::Local<v8::Value>; 6] = [
+                            v8::Integer::new_from_unsigned(scope, r.conn_id).into(),
+                            V8String::new(scope, &r.remote.to_string()).unwrap().into(),
+                            head.into(),
+                            V8String::new(scope, &p.method).unwrap().into(),
+                            V8String::new(scope, &p.path).unwrap().into(),
+                            headers.into(),
+                        ];
+                        rv.set(v8::Array::new_with_elements(scope, &items).into());
+                    }
+                    None => rv.set(v8::null(scope).into()),
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpUpgradePoll").unwrap().into(),
+            http_upgrade_poll_fn.into(),
+        );
+
+        let upgrade_read_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpUpgradeCtx)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let max_bytes: usize = args
+                    .get(1)
+                    .uint32_value(scope)
+                    .unwrap_or(16_384)
+                    .min(65_536) as usize;
+
+                let conn = ctx.upgrades.lock().unwrap().get(&conn_id).cloned();
+                match conn {
+                    None => {
+                        let err = js_code_err(scope, "EOF", "upgrade socket closed");
+                        rv.set(err);
+                    }
+                    Some(c) => match take_upgrade_read(&c, max_bytes) {
+                        UpgradeTake::Data(bytes) => {
+                            let result =
+                                crate::builtins::v8_compat::uint8array_from_bytes(scope, &bytes);
+                            rv.set(result.into());
+                        }
+                        UpgradeTake::Eof => {
+                            let err = js_code_err(scope, "EOF", "connection closed");
+                            rv.set(err);
+                        }
+                        UpgradeTake::Empty => {
+                            let err = js_code_err(scope, "EAGAIN", "no data available");
+                            rv.set(err);
+                        }
+                    },
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__upgradeRead").unwrap().into(),
+            upgrade_read_fn.into(),
+        );
+
+        let upgrade_write_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpUpgradeCtx)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let bytes = crate::builtins::v8_compat::js_value_to_bytes(scope, args.get(1));
+                let conn = ctx.upgrades.lock().unwrap().get(&conn_id).cloned();
+                match conn {
+                    Some(c) if !c.closed.load(std::sync::atomic::Ordering::Relaxed) => {
+                        if queue_upgrade_write(&c, bytes) {
+                            rv.set(v8::undefined(scope).into());
+                        } else {
+                            let err = js_code_err(
+                                scope,
+                                "EPIPE",
+                                "upgrade socket write buffer is full (the peer is not reading)",
+                            );
+                            rv.set(err);
+                        }
+                    }
+                    _ => {
+                        let err = js_code_err(scope, "EPIPE", "upgrade socket closed");
+                        rv.set(err);
+                    }
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__upgradeWrite").unwrap().into(),
+            upgrade_write_fn.into(),
+        );
+
+        let upgrade_close_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpUpgradeCtx)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                if let Some(c) = ctx.upgrades.lock().unwrap().remove(&conn_id) {
+                    c.closed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    c.write_wake.notify_one();
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__upgradeClose").unwrap().into(),
+            upgrade_close_fn.into(),
         );
     }
 
@@ -2588,5 +3042,157 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(ParseError::Respond(501, _))));
+    }
+
+    // ── upgrade bridge ────────────────────────────────────────────────────
+
+    fn test_upgrade() -> (Arc<UpgradeConn>, UpgradeRegistry) {
+        let conn = Arc::new(UpgradeConn::new());
+        let registry: UpgradeRegistry = Arc::new(Mutex::new(HashMap::new()));
+        registry.lock().unwrap().insert(7, conn.clone());
+        (conn, registry)
+    }
+
+    fn loopback_ip() -> IpAddr {
+        "127.0.0.1".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn upgrade_driver_stops_reading_when_js_does_not_drain() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (server_end, mut peer) = tokio::io::duplex(64 * 1024);
+        let (conn, registry) = test_upgrade();
+        spawn_upgrade_driver(
+            server_end,
+            loopback_ip(),
+            7,
+            conn.clone(),
+            registry,
+            Arc::new(None),
+        );
+        // A fast peer: 16 MiB, while JS never reads.
+        let flood = tokio::spawn(async move {
+            let chunk = vec![7u8; 64 * 1024];
+            for _ in 0..256 {
+                if peer.write_all(&chunk).await.is_err() {
+                    return false;
+                }
+            }
+            true
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let queued = conn.read_bytes.load(Relaxed);
+        assert!(
+            queued <= UPGRADE_READ_HIGH_WATER + 16 * 1024,
+            "read ahead of JS must stop at the high-water mark, queued {queued} bytes"
+        );
+        assert!(
+            !flood.is_finished(),
+            "the peer's write must be held back by TCP flow control, not absorbed"
+        );
+        // JS starts reading: everything arrives, in the end.
+        let drain = async {
+            let mut total = 0usize;
+            while total < 256 * 64 * 1024 {
+                match take_upgrade_read(&conn, 65_536) {
+                    UpgradeTake::Data(b) => total += b.len(),
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(1)).await,
+                }
+            }
+            total
+        };
+        let total = tokio::time::timeout(std::time::Duration::from_secs(20), drain)
+            .await
+            .expect("draining the queue must let the peer finish");
+        assert_eq!(total, 256 * 64 * 1024);
+        assert!(flood.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn upgrade_driver_flushes_writes_queued_before_close() {
+        use tokio::io::AsyncReadExt;
+        let (server_end, mut peer) = tokio::io::duplex(64 * 1024);
+        let (conn, registry) = test_upgrade();
+        let driver = spawn_upgrade_driver(
+            server_end,
+            loopback_ip(),
+            7,
+            conn.clone(),
+            registry,
+            Arc::new(None),
+        );
+        // What `socket.end(frame)` does: write, then close right away.
+        assert!(queue_upgrade_write(&conn, b"closing frame".to_vec()));
+        conn.closed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        conn.write_wake.notify_one();
+
+        let mut got = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            peer.read_to_end(&mut got),
+        )
+        .await
+        .expect("the driver must close the connection")
+        .unwrap();
+        assert_eq!(
+            got, b"closing frame",
+            "the last write must not be lost to the close"
+        );
+        driver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn upgrade_write_overflow_drops_the_connection_instead_of_buffering() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (server_end, _peer) = tokio::io::duplex(1024); // a peer that never reads
+        let (conn, registry) = test_upgrade();
+        let driver = spawn_upgrade_driver(
+            server_end,
+            loopback_ip(),
+            7,
+            conn.clone(),
+            registry.clone(),
+            Arc::new(None),
+        );
+        let chunk = vec![1u8; 1024 * 1024];
+        let mut accepted = 0usize;
+        while queue_upgrade_write(&conn, chunk.clone()) {
+            accepted += chunk.len();
+            assert!(
+                accepted <= UPGRADE_WRITE_HARD_LIMIT,
+                "queue grew past its limit"
+            );
+        }
+        assert!(conn.aborted.load(Relaxed) && conn.closed.load(Relaxed));
+        tokio::time::timeout(std::time::Duration::from_secs(5), driver)
+            .await
+            .expect("an aborted connection must not wait for a peer that never reads")
+            .unwrap();
+        assert!(
+            registry.lock().unwrap().is_empty(),
+            "the registry entry is released"
+        );
+    }
+
+    #[test]
+    fn upgrade_read_keeps_the_rest_of_a_chunk_that_js_did_not_ask_for() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let conn = UpgradeConn::new();
+        conn.read_bytes.store(10, Relaxed);
+        conn.read_q
+            .lock()
+            .unwrap()
+            .push_back(UpgradeRead::Data(b"0123456789".to_vec()));
+        let take = |max| match take_upgrade_read(&conn, max) {
+            UpgradeTake::Data(b) => b,
+            _ => panic!("expected data"),
+        };
+        assert_eq!(take(4), b"0123");
+        assert_eq!(conn.read_bytes.load(Relaxed), 6);
+        assert_eq!(take(4), b"4567");
+        assert_eq!(take(4), b"89");
+        assert_eq!(conn.read_bytes.load(Relaxed), 0);
+        assert!(matches!(take_upgrade_read(&conn, 4), UpgradeTake::Empty));
     }
 }

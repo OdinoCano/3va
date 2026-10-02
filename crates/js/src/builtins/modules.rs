@@ -3393,6 +3393,128 @@ pub fn inject_require(
                 });
             };
 
+            // Duplex socket handed to `server.on('upgrade', (req, socket, head))`
+            // for an HTTP `Upgrade` (WebSocket). Backed by the http layer's own
+            // queue bridge (__upgradeRead/__upgradeWrite/__upgradeClose), with
+            // the same pollable shape as net.Socket — the `ws` library drives
+            // the 101 handshake and WebSocket frames over it.
+            function UpgradeSocket(opts) {
+                if (!(this instanceof UpgradeSocket)) return new UpgradeSocket(opts);
+                opts = opts || {};
+                Duplex.call(this, opts);
+                this._connId = (typeof opts.fd === 'number') ? opts.fd : null;
+                this.destroyed = false;
+                this.connecting = false;
+                this.remoteAddress = undefined;
+                this.remotePort = undefined;
+                this._pollTimer = null;
+                this._unshifted = null;
+                // Born paused, like a Node socket: nothing is read until a
+                // consumer attaches a 'data' listener or calls resume() (see
+                // below). Reading from the start lost whatever arrived before
+                // the application got around to calling ws.handleUpgrade().
+            }
+            util.inherits(UpgradeSocket, Duplex);
+
+            // resume()/pause() start and stop the native read poll. Paused, the
+            // bytes stay in the native queue, which stops reading from the
+            // network at its high-water mark: real backpressure.
+            UpgradeSocket.prototype.resume = function() {
+                Duplex.prototype.resume.call(this);
+                if (this._connId !== null) this._startPoll();
+                return this;
+            };
+            UpgradeSocket.prototype.pause = function() {
+                Duplex.prototype.pause.call(this);
+                this._stopPoll();
+                return this;
+            };
+            // The shared Readable.unshift emits 'data' on the spot, which loses
+            // the bytes when no listener is attached yet — and `ws` unshifts the
+            // upgrade `head` just before attaching its listener. Keep them and
+            // deliver them first, in order, once reading starts.
+            UpgradeSocket.prototype.unshift = function(chunk) {
+                if (chunk == null || chunk.length === 0) return this;
+                (this._unshifted = this._unshifted || []).unshift(chunk);
+                return this;
+            };
+
+            // Reads are polled: 1 ms while data is flowing, 5 ms once idle. A
+            // chain of timeouts, not an interval that is cleared and recreated
+            // on every step: the engine keeps the callback of a cleared
+            // interval, so recreating one every millisecond leaked a closure
+            // per step, and re-arming after a 'data' listener destroyed the
+            // socket (ws does, on a bad frame) left a timer nobody could
+            // cancel — the process then never exited.
+            UpgradeSocket.prototype._startPoll = function() {
+                var self = this;
+                if (self._pollTimer || self.destroyed) return;
+                var idleTicks = 0;
+                var step = function() {
+                    self._pollTimer = null;
+                    if (self.destroyed || self._connId === null) return;
+                    if (self._unshifted) {
+                        var pending = self._unshifted;
+                        self._unshifted = null;
+                        for (var pi = 0; pi < pending.length; pi++) self.push(Buffer.from(pending[pi]));
+                        if (self.destroyed || self._connId === null) return;
+                    }
+                    var chunk = __upgradeRead(self._connId, 65536);
+                    if (chunk instanceof Uint8Array) {
+                        idleTicks = 0;
+                        self.push(Buffer.from(chunk));
+                    } else if (chunk instanceof Error && chunk.code === 'EAGAIN') {
+                        idleTicks += 1;
+                    } else if (chunk instanceof Error && chunk.code === 'EOF') {
+                        self.push(null);
+                        return;
+                    } else {
+                        self.emit('error', chunk instanceof Error ? chunk : new Error(String(chunk)));
+                        self.destroy();
+                        return;
+                    }
+                    // A 'data' listener may have destroyed the socket.
+                    if (self.destroyed || self._connId === null) return;
+                    self._pollTimer = setTimeout(step, idleTicks < 8 ? 1 : 5);
+                };
+                self._pollTimer = setTimeout(step, 1);
+            };
+            UpgradeSocket.prototype._stopPoll = function() {
+                if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
+            };
+
+            UpgradeSocket.prototype._write = function(chunk, encoding, cb) {
+                if (this._connId === null) { cb(new Error('Upgrade socket is not connected')); return; }
+                var data = (chunk instanceof Uint8Array) ? chunk : new TextEncoder().encode(String(chunk));
+                var result = __upgradeWrite(this._connId, data);
+                if (result === undefined) cb(); else cb(_netErr(result));
+            };
+
+            UpgradeSocket.prototype.destroy = function(err) {
+                this._stopPoll();
+                if (this._connId !== null) { __upgradeClose(this._connId); this._connId = null; }
+                this.destroyed = true;
+                return Duplex.prototype.destroy.call(this, err);
+            };
+            UpgradeSocket.prototype.end = function(chunk, encoding, cb) {
+                var self = this;
+                return Duplex.prototype.end.call(this, chunk, encoding, function(err) {
+                    self.destroy();
+                    if (cb) cb(err);
+                });
+            };
+            UpgradeSocket.prototype.setNoDelay = function() { return this; };
+            UpgradeSocket.prototype.setTimeout = function(ms, cb) {
+                if (typeof cb === 'function') this.once('timeout', cb);
+                return this;
+            };
+            UpgradeSocket.prototype.setKeepAlive = function() { return this; };
+            UpgradeSocket.prototype.address = function() {
+                return { address: this.remoteAddress || '0.0.0.0', port: this.remotePort || 0, family: this.remoteAddress && this.remoteAddress.indexOf(':') !== -1 ? 'IPv6' : 'IPv4' };
+            };
+            UpgradeSocket.prototype.ref = function() { return this; };
+            UpgradeSocket.prototype.unref = function() { return this; };
+
             function Server(opts, connListener) {
                 if (!(this instanceof Server)) return new Server(opts, connListener);
                 EventEmitter.call(this);
@@ -3839,7 +3961,7 @@ pub fn inject_require(
                 // Called by the event loop (http_server.rs dispatch_ready) as
                 // soon as a connection task queues a parsed request — no
                 // polling interval, so no latency floor between arrivals.
-                __httpSetHandler(self._id, function() {
+__httpSetHandler(self._id, function() {
                     try {
                     // At most 64 per call: the event loop runs microtasks
                     // between batches, so a burst doesn't keep hundreds of
@@ -3875,13 +3997,42 @@ pub fn inject_require(
                             queueMicrotask(function() {
                                 // Deliver through push() (not a bare emit)
                                 // so req.setEncoding() is honored: push()
-                                // runs the chunk through the stream's
+                                // renders the chunk through the stream's
                                 // StringDecoder and flushes any trailing
                                 // incomplete sequence before 'end'.
                                 if (req._body) req.push(typeof Buffer !== 'undefined' ? Buffer.from(req._body) : req._body);
                                 req.push(null);
                             });
                         })(req);
+                    }
+                    // HTTP `Upgrade` (WebSocket): hand the raw duplex socket
+                    // to the `'upgrade'` listener, exactly like Node — the
+                    // `ws` library performs the 101 handshake and drives the
+                    // frames itself. Upgrades and requests share this handler
+                    // call so one event-loop wake serves both.
+                    var _u, _un = 0;
+                    while (_un++ < 64 && (_u = __httpUpgradePoll(self._id)) !== null && _u !== undefined) {
+                        // _u = [connId, remoteAddress, head(Uint8Array), method, url, flatHeaders]
+                        var _usock = new UpgradeSocket({ fd: _u[0] });
+                        _usock.remoteAddress = _u[1];
+                        if (self._tls) _usock.encrypted = true;
+                        var _ureq = new httpIncomingMessage(_usock);
+                        _ureq.method = _u[3];
+                        _ureq.url = _u[4];
+                        var _uflat = _u[5], _urh = {};
+                        for (var _ui = 0; _ui < _uflat.length; _ui += 2) _urh[_uflat[_ui]] = _uflat[_ui + 1];
+                        _ureq.headers = _urh;
+                        var _rk2 = Object.keys(_urh), _ura = new Array(_rk2.length * 2);
+                        for (var _uj = 0; _uj < _rk2.length; _uj++) { _ura[2 * _uj] = _rk2[_uj]; _ura[2 * _uj + 1] = _urh[_rk2[_uj]]; }
+                        _ureq.rawHeaders = _ura;
+                        var _uhead = _u[2] instanceof Uint8Array ? _u[2] : new Uint8Array(_u[2] || 0);
+                        if (self.listenerCount('upgrade') > 0) {
+                            self.emit('upgrade', _ureq, _usock, _uhead);
+                        } else {
+                            // No upgrade listener: close the raw socket so it
+                            // can't sit open holding a firewall slot.
+                            _usock.destroy();
+                        }
                     }
                     } catch(e) { console.error('[3va-http] request handler threw:', e && (e.stack || e.message || e)); }
                 });
