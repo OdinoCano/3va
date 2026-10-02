@@ -1225,3 +1225,25 @@ async fn fetch_rejects_with_an_error_object() {
         "true|Network access denied. Run with --allow-net=example.com:443"
     );
 }
+
+// An interval cleared from inside its own callback used to be put back in the
+// callback registry right after the call, so it stayed there for good (and a
+// re-armed poll leaked one entry per step).
+#[tokio::test]
+async fn interval_cleared_in_its_own_callback_leaves_no_registry_entry() {
+    let mut e = engine().await;
+    e.eval(
+        "var __ticks = 0;
+         var t = setInterval(function() { __ticks++; if (__ticks === 3) clearInterval(t); }, 1);
+         var u = setInterval(function() { clearInterval(u); }, 1);",
+    )
+    .await
+    .unwrap();
+    e.run_event_loop().await.unwrap();
+    assert_eq!(e.eval_to_string("String(__ticks)").await.unwrap(), "3");
+    let left = e
+        .eval_to_string("String(Object.keys(globalThis.__timerCallbacks).length)")
+        .await
+        .unwrap();
+    assert_eq!(left, "0", "registry entries left behind");
+}
