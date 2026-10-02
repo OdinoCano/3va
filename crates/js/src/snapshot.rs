@@ -111,8 +111,51 @@ fn store(path: &std::path::Path, blob: &[u8]) {
     };
     let _ = std::fs::create_dir_all(dir);
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    if std::fs::write(&tmp, blob).is_ok() && std::fs::rename(&tmp, path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    if std::fs::write(&tmp, blob).is_ok() {
+        if std::fs::rename(&tmp, path).is_ok() {
+            prune(dir, KEEP_SNAPSHOTS);
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// How many snapshots stay in the cache directory. Each one belongs to a
+/// single executable (path, size, mtime), so every rebuild or upgrade leaves
+/// the previous one behind; a few are kept so that two installed versions used
+/// in turn don't rebuild each other's on every run.
+const KEEP_SNAPSHOTS: usize = 4;
+
+/// Keeps the `keep` most recently written snapshots in `dir` and removes the
+/// rest, plus temporary files of builds that were interrupted over a day ago.
+/// Best effort: a file that can't be removed is left for the next time, and a
+/// process that loses a snapshot to this simply builds it again.
+fn prune(dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let day = std::time::Duration::from_secs(24 * 60 * 60);
+    let now = std::time::SystemTime::now();
+    let mut snapshots = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("bin") => snapshots.push((modified, path)),
+            Some(ext)
+                if ext.starts_with("tmp-")
+                    && now.duration_since(modified).is_ok_and(|age| age > day) =>
+            {
+                let _ = std::fs::remove_file(&path);
+            }
+            _ => {}
+        }
+    }
+    snapshots.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, path) in snapshots.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -175,4 +218,56 @@ pub fn build(scripts: &[(String, String)]) -> anyhow::Result<Vec<u8>> {
         .create_blob(v8::FunctionCodeHandling::Clear)
         .ok_or_else(|| anyhow::anyhow!("snapshot: V8 could not serialize the context"))?;
     Ok(blob.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prune;
+    use std::time::{Duration, SystemTime};
+
+    fn touch(dir: &std::path::Path, name: &str, age: Duration) {
+        let f = std::fs::File::create(dir.join(name)).unwrap();
+        f.set_modified(SystemTime::now() - age).unwrap();
+    }
+
+    #[test]
+    fn prune_keeps_the_newest_snapshots_and_drops_stale_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for (i, name) in ["a", "b", "c", "d", "e", "f"].iter().enumerate() {
+            // "f" is the oldest, "a" the newest.
+            touch(
+                d,
+                &format!("{name}.bin"),
+                Duration::from_secs(60 * (i as u64 + 1)),
+            );
+        }
+        touch(d, "old.tmp-123", Duration::from_secs(3 * 24 * 60 * 60));
+        touch(d, "fresh.tmp-456", Duration::from_secs(5));
+        touch(d, "notes.txt", Duration::from_secs(10 * 24 * 60 * 60));
+
+        prune(d, 4);
+
+        let mut left: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "a.bin",
+                "b.bin",
+                "c.bin",
+                "d.bin",
+                "fresh.tmp-456", // a build may be running right now
+                "notes.txt",     // not ours: never touched
+            ]
+        );
+    }
+
+    #[test]
+    fn prune_on_a_missing_directory_is_a_no_op() {
+        prune(std::path::Path::new("/nonexistent/3va-snapshot-test"), 4);
+    }
 }
