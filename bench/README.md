@@ -112,13 +112,17 @@ below for why. Latest published run:
 
 Two caveats about this run, reported rather than hidden:
 
-- **Startup contradicts the dedicated 32-core bench.** On the dedicated
-  machine 3va and Bun are even (6.5 vs 6.9 ms); on this shared 4-core
-  runner Bun's 3.1 ms beats 3va's 11.6 ms. The shared runner's scheduler
-  noise hits 3va's V8 isolate initialization (creating an isolate per run
-  is the cost the startup snapshot already cut ~2.5×) harder than Bun's
-  precompiled runtime. Both figures are real; they measure different
-  environments.
+- **Startup contradicts the dedicated 32-core bench, and the cause is not
+  known.** On the dedicated machine 3va and Bun are even (7.4 vs 7.3 ms,
+  measured 2026-10-02); on this shared 4-vCPU runner Bun's 3.1 ms is 3.7×
+  faster than 3va's 11.6 ms. What was checked: the optimization applies on
+  CI (3va went from 25.6 ms in the 2.11.0 release run to 11.6 ms, the same
+  ~2.2× as on the dedicated machine, 15.8 → 7.4 ms); pinning both runtimes
+  to 4 CPUs, or to 1, on the dedicated machine leaves them level (8.0 vs
+  8.3 ms with 4 CPUs), so the core count is not the explanation; and
+  Bun itself is 2.3× faster on the CI runner than on the dedicated machine
+  (3.1 vs 7.3 ms) while 3va is 1.6× slower there. Both figures are real;
+  they measure different environments. Open item.
 - **Postgres is not in the CI run.** It needs a live server, which the
   runner does not have, so CI prints the skip note. Run
   `scripts/run-pg-bench.sh` before `bench/run.sh` locally to get those
@@ -209,5 +213,5 @@ policy by accident: a number anyone can regenerate by clicking "Run
 workflow" (or that reruns automatically on a schedule) is more credible
 than one only reproducible on a maintainer's specific machine, even though
 the dedicated-hardware run above has cleaner absolute figures. Re-run it
-yourself, compare against the [linked run](https://github.com/OdinoCano/3va/actions/runs/32180248410)
+yourself, compare against the [linked run](https://github.com/OdinoCano/3va/actions/runs/36927280438)
 above, or diff any two runs in the Actions tab for a regression check.
