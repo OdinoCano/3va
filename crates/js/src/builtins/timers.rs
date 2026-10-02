@@ -321,7 +321,10 @@ pub fn inject_timers(
         globalThis.__fireTimer = function(id) {
             var fn = globalThis.__timerCallbacks[id];
             if (fn) {
-                delete globalThis.__timerCallbacks[id];
+                // An interval's entry stays for as long as it runs, so a
+                // clearInterval() from inside its own callback removes it
+                // for good (re-adding it after the call kept it forever).
+                if (!fn._repeat) delete globalThis.__timerCallbacks[id];
                 fn();
             }
         };
@@ -373,10 +376,8 @@ pub fn inject_timers(
             globalThis.__timerNextId = (globalThis.__timerNextId || 0) + 1;
             var id = globalThis.__timerNextId;
             var intervalMs = Math.floor(+ms) || 0;
-            var wrapper = function() {
-                fn();
-                globalThis.__timerCallbacks[id] = wrapper;
-            };
+            var wrapper = function() { fn(); };
+            wrapper._repeat = true;
             globalThis.__timerCallbacks[id] = wrapper;
             __nativeSetInterval(id, intervalMs);
             return __makeTimerHandle(id, intervalMs, true);
@@ -391,10 +392,8 @@ pub fn inject_timers(
             globalThis.__timerNextId = (globalThis.__timerNextId || 0) + 1;
             var id = globalThis.__timerNextId;
             var intervalMs = Math.floor(+ms) || 0;
-            var wrapper = function() {
-                fn();
-                globalThis.__timerCallbacks[id] = wrapper;
-            };
+            var wrapper = function() { fn(); };
+            wrapper._repeat = true;
             globalThis.__timerCallbacks[id] = wrapper;
             __nativeSetIntervalBackground(id, intervalMs);
             return __makeTimerHandle(id, intervalMs, true);
