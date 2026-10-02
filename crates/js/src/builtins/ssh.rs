@@ -114,7 +114,8 @@ enum HostKeyCheck {
     NeedsVerifier(String),
 }
 
-// Loopback and `--allow-insecure` trust the first key presented, like the
+// Loopback and `--allow-insecure` trust the first key presented when the
+// connect gave no `hostFingerprint`, `knownHosts` or `hostVerifier`, like the
 // plaintext-protocol policy trusts the first hop on this machine. Otherwise
 // the key must match `hostFingerprint`, a `knownHosts` entry, or the
 // `hostVerifier` callback; with none of those, verification fails closed.
@@ -125,7 +126,12 @@ fn host_key_check(
     insecure_allowed: bool,
     pubkey: &russh::keys::ssh_key::PublicKey,
 ) -> HostKeyCheck {
-    if insecure_allowed {
+    let configured =
+        policy.fingerprint.is_some() || policy.known_hosts.is_some() || policy.verifier;
+    // The exemption only covers a connect with no explicit policy: a pin the
+    // caller asked for must hold on loopback too, or a wrong pin is silently
+    // accepted.
+    if insecure_allowed && !configured {
         return HostKeyCheck::Accepted;
     }
     let fingerprint = pubkey.fingerprint(HashAlg::Sha256).to_string();
@@ -171,23 +177,30 @@ fn next_verification_id() -> u32 {
     C.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-// True when `expected` equals `actual` (both are `SHA256:<base64>`), ignoring
-// case, or when `expected` is the bare base64 of `actual` without the prefix.
+// True when `expected` equals `actual` (`SHA256:<base64>`), or is the bare
+// base64 of it. The base64 is case-sensitive (folding case would make a pin
+// match far more keys than the one it names); only the `SHA256:` prefix is
+// not.
 fn fingerprint_matches(expected: &str, actual: &str) -> bool {
-    let expected = expected.trim().to_ascii_lowercase();
-    let actual = actual.to_ascii_lowercase();
-    expected == actual
-        || actual
-            .split_once(':')
-            .is_some_and(|(_, b64)| expected == b64)
+    let Some((_, b64)) = actual.split_once(':') else {
+        return false;
+    };
+    let expected = expected.trim();
+    let expected = match expected.split_once(':') {
+        Some((alg, rest)) if alg.eq_ignore_ascii_case("sha256") => rest,
+        _ => expected,
+    };
+    expected == b64
 }
 
 // known_hosts matching over in-memory content (the JS glue reads the file
 // through the fs permission model and passes it here, so a script can't use
 // this module as a file oracle). Mirrors OpenSSH: comma-separated host
 // patterns, `[host]:port` for non-22 ports, and hashed `|1|salt|hash` lines.
-// Returns Ok(true) on a match, Ok(false) when the host has no usable entry,
-// and Err(()) when a recorded key of the same type differs ("key changed").
+// Returns Ok(true) when any entry for the host matches the key, Ok(false)
+// when the host has no usable entry, and Err(()) when entries of the same key
+// type exist but none matches ("key changed"). A host may list several keys
+// of one type (rotation), so a mismatch only counts once every line is seen.
 fn known_hosts_check(
     host: &str,
     port: u16,
@@ -199,6 +212,7 @@ fn known_hosts_check(
     } else {
         format!("[{host}]:{port}")
     };
+    let mut changed = false;
     for raw_line in content.lines() {
         let line = raw_line.trim_end();
         if line.is_empty() || line.starts_with('#') {
@@ -215,14 +229,12 @@ fn known_hosts_check(
         let Ok(recorded) = russh::keys::parse_public_key_base64(key_b64) else {
             continue;
         };
-        if pubkey.algorithm() == recorded.algorithm() && *pubkey == recorded {
+        if *pubkey == recorded {
             return Ok(true);
         }
-        if pubkey.algorithm() == recorded.algorithm() {
-            return Err(());
-        }
+        changed |= pubkey.algorithm() == recorded.algorithm();
     }
-    Ok(false)
+    if changed { Err(()) } else { Ok(false) }
 }
 
 fn known_hosts_hostname_matches(host: &str, pattern: &str) -> bool {
@@ -1115,7 +1127,7 @@ pub fn inject_ssh(
                             return;
                         }
                         Promise.resolve(decision).then(function(accept) {
-                            __sshVerifyReply(pv.verificationId, accept ? 1 : 0);
+                            __sshVerifyReply(pv.verificationId, accept === true ? 1 : 0);
                             setTimeout(check, 5);
                         }, function(e) {
                             __sshVerifyReply(pv.verificationId, 0);
@@ -1447,8 +1459,13 @@ mod tests {
         // bare base64 without the "SHA256:" prefix
         let bare = fp.split_once(':').unwrap().1;
         assert!(fingerprint_matches(bare, &fp));
-        // case-insensitive
-        assert!(fingerprint_matches(&fp.to_lowercase(), &fp));
+        // the algorithm prefix is case-insensitive, the base64 is not
+        assert!(fingerprint_matches(
+            &fp.replacen("SHA256", "sha256", 1),
+            &fp
+        ));
+        assert!(!fingerprint_matches(&fp.to_lowercase(), &fp));
+        assert!(!fingerprint_matches(&fp.to_uppercase(), &fp));
         // a different key's fingerprint must not match
         assert!(!fingerprint_matches(
             &key_b().fingerprint(HashAlg::Sha256).to_string(),
@@ -1464,6 +1481,45 @@ mod tests {
             host_key_check("example.com", 22, &p, true, &key_a()),
             HostKeyCheck::Accepted
         ));
+    }
+
+    #[test]
+    fn host_key_check_pin_still_applies_on_loopback() {
+        // insecure_allowed (loopback / --allow-insecure) must not override an
+        // explicit pin, known_hosts or verifier.
+        let wrong = policy(
+            Some(&key_b().fingerprint(HashAlg::Sha256).to_string()),
+            None,
+            false,
+        );
+        assert!(matches!(
+            host_key_check("127.0.0.1", 22, &wrong, true, &key_a()),
+            HostKeyCheck::Rejected
+        ));
+        let v = policy(None, None, true);
+        assert!(matches!(
+            host_key_check("127.0.0.1", 22, &v, true, &key_a()),
+            HostKeyCheck::NeedsVerifier(_)
+        ));
+    }
+
+    #[test]
+    fn known_hosts_accepts_any_matching_line_of_the_same_type() {
+        use russh::keys::PublicKeyBase64;
+        let content = format!(
+            "example.com ssh-ed25519 {}\nexample.com ssh-ed25519 {}\n",
+            key_b().public_key_base64(),
+            key_a().public_key_base64()
+        );
+        assert_eq!(
+            known_hosts_check("example.com", 22, &content, &key_a()),
+            Ok(true)
+        );
+        let only_b = format!("example.com ssh-ed25519 {}\n", key_b().public_key_base64());
+        assert_eq!(
+            known_hosts_check("example.com", 22, &only_b, &key_a()),
+            Err(())
+        );
     }
 
     #[test]
