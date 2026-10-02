@@ -3317,25 +3317,44 @@ pub fn inject_require(
             Socket.prototype._startPoll = function() {
                 var self = this;
                 if (self._pollTimer || self.destroyed) return;
-                self._pollTimer = setInterval(function() {
+                // Read is polled, not event-driven: a blocking read would
+                // stall the event loop, so a JS timer asks the non-blocking
+                // native for data. A fixed interval is the worst of both
+                // worlds (a 5 ms idle poll also costs a 5 ms wait per read on
+                // a busy socket), so the interval is adaptive: 1 ms while the
+                // socket is actively exchanging data, backing off to 5 ms
+                // after a stretch of idle polls.
+                var idleTicks = 0;
+                var step = function() {
                     if (self.destroyed || self._connId === null) return;
                     var chunk = __tcpRead(self._connId, 65536);
                     if (chunk instanceof Uint8Array) {
+                        idleTicks = 0;
                         self.push(Buffer.from(chunk));
                     } else if (chunk instanceof Error && chunk.code === 'EAGAIN') {
+                        idleTicks += 1;
                         // no data available yet — keep polling
                     } else if (chunk instanceof Error && chunk.code === 'EOF') {
                         self._stopPoll();
                         self.push(null);
+                        return;
                     } else {
                         self._stopPoll();
                         self.emit('error', _netErr(chunk));
                         self.destroy();
+                        return;
                     }
-                }, 5);
+                    // A 'data' listener may have destroyed the socket; do not
+                    // re-arm then (the timer could never be cancelled).
+                    if (self.destroyed || self._connId === null) { self._pollTimer = null; return; }
+                    self._pollTimer = setTimeout(step, idleTicks < 8 ? 1 : 5);
+                };
+                // A chain of timeouts, not intervals: clearing an interval from
+                // inside its own callback leaks the callback entry in the engine.
+                self._pollTimer = setTimeout(step, 5);
             };
             Socket.prototype._stopPoll = function() {
-                if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+                if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
             };
 
             Socket.prototype._write = function(chunk, encoding, cb) {
@@ -3377,7 +3396,12 @@ pub fn inject_require(
                 if (typeof cb === 'function') this.once('timeout', cb);
                 return this;
             };
-            Socket.prototype.setNoDelay = function() { return this; };
+            Socket.prototype.setNoDelay = function(on) {
+                // Real toggle now (TCP_NODELAY was stuck on anyway, see tcp.rs);
+                // a truthy or absent argument enables it.
+                if (this._connId !== null) __tcpSetNoDelay(this._connId, on === false ? 0 : 1);
+                return this;
+            };
             Socket.prototype.setKeepAlive = function() { return this; };
             Socket.prototype.destroy = function(err) {
                 this._stopPoll();

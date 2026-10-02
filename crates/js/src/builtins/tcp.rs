@@ -37,6 +37,20 @@ impl TcpConn {
             TcpConn::PqTls(s) => s.write_all(data),
         }
     }
+    fn set_nodelay(&self, on: bool) {
+        // Node enables TCP_NODELAY on client sockets by default; without it a
+        // client that writes several small messages back to back (e.g. pg's
+        // Parse/Bind/Execute/Sync) stalls on the Nagle/delayed-ACK interaction
+        // — each write waits for the peer's ~40 ms delayed ACK.
+        let sock = match self {
+            TcpConn::Plain(s) => Some(s),
+            TcpConn::Tls(s) => Some(s.get_ref()),
+            TcpConn::PqTls(s) => Some(&s.sock),
+        };
+        if let Some(s) = sock {
+            let _ = s.set_nodelay(on);
+        }
+    }
     fn shutdown(&mut self) {
         match self {
             TcpConn::Plain(s) => {
@@ -288,6 +302,7 @@ pub fn inject_tcp(
                             rv.set(err);
                             return;
                         }
+                        let _ = stream.set_nodelay(true);
                         let id = alloc_id(pool(), next_id(), TcpConn::Plain(stream));
                         rv.set(v8::Integer::new_from_unsigned(_scope, id).into());
                     }
@@ -349,6 +364,7 @@ pub fn inject_tcp(
                                 rv.set(err);
                                 return;
                             }
+                            let _ = tls.get_ref().set_nodelay(true);
                             let id = alloc_id(pool(), next_id(), TcpConn::Tls(tls));
                             rv.set(v8::Integer::new_from_unsigned(_scope, id).into());
                         }
@@ -485,6 +501,29 @@ pub fn inject_tcp(
             V8String::new(scope, "__tcpSetTimeout").unwrap().into(),
             tcp_set_timeout_fn.into(),
         );
+
+        {
+            let tcp_set_nodelay_fn = Function::new(
+                scope,
+                move |_scope: &mut v8::PinScope,
+                      args: v8::FunctionCallbackArguments,
+                      mut rv: v8::ReturnValue| {
+                    let id = args.get(0).uint32_value(_scope).unwrap_or(0);
+                    let on = args.get(1).uint32_value(_scope).unwrap_or(0) != 0;
+                    let guard = pool().lock().unwrap();
+                    if let Some(conn) = guard.get(&id) {
+                        conn.set_nodelay(on);
+                    }
+                    rv.set(v8::undefined(_scope).into());
+                },
+            )
+            .unwrap();
+            global.set(
+                scope,
+                V8String::new(scope, "__tcpSetNoDelay").unwrap().into(),
+                tcp_set_nodelay_fn.into(),
+            );
+        }
     }
 
     {
@@ -686,6 +725,7 @@ pub fn inject_tcp(
 
                 match result {
                     Ok((stream, group, pq_negotiated)) => {
+                        let _ = stream.sock.set_nodelay(true);
                         let conn_id = alloc_id(pool(), next_id(), TcpConn::PqTls(stream));
                         let json = serde_json::json!({
                             "connId": conn_id,

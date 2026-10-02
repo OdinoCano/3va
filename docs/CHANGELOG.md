@@ -33,6 +33,12 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 - The `imap`, `irc`, `ftp`, `pop3`, `mqtt`, `ssh2` and `webrtc` modules are installed on first use.
 - HTTP and `net` servers listen with a backlog of 1024 (was 128).
 - 4 runtime worker threads and 4 V8 platform threads instead of one of each per core.
+- `crypto.subtle` implements HMAC (`importKey` + `sign`) and PBKDF2 (`importKey` + `deriveBits`); without them node-postgres's SCRAM-SHA-256 auth could connect but never compute the client proof.
+- `net` client sockets set `TCP_NODELAY` (as Node does) and `Socket#setNoDelay()` now actually toggles it. A client writing several small messages back to back (pg's Parse/Bind/Execute/Sync) previously stalled on the Nagle/delayed-ACK interaction — ~40 ms per query. The socket read poll is adaptive (1 ms while the socket is busy, back to 5 ms when idle) instead of a fixed 5 ms.
+
+### Added
+
+- `bench/run.sh` gains Bun's published Postgres workload ("100 rows × 100 queries in flight"), the same node-postgres client on every runtime so the comparison is net/crypto + event loop, not three drivers. It is skipped with a note (not faked) when no server answers on `PGPORT` — `scripts/run-pg-bench.sh` starts the bench's own docker container.
 
 ### Added
 

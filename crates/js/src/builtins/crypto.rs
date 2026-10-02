@@ -1316,7 +1316,11 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                 return new Promise(function(resolve, reject) {
                     try {
                         var r;
-                        if (name === 'ECDSA') {
+                        if (name === 'HMAC' && key && key._alg === 'HMAC') {
+                            // node-postgres's SCRAM signs with an imported HMAC key.
+                            var hash = String(subtleHashName(key.algorithm) || 'SHA-256').toLowerCase().replace('-', '');
+                            r = __cryptoHmac(hash, Array.from(key._raw), bytes);
+                        } else if (name === 'ECDSA') {
                             r = __cryptoEcSignRaw(key._curve, pem, bytes);
                         } else if (name === 'RSA-PSS') {
                             r = __cryptoRsaPssSign(subtleHashName(algorithm), pem, bytes);
@@ -1353,7 +1357,9 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                 var hashMap = { 'SHA-1': 'SHA1', 'SHA-256': 'SHA256', 'SHA-384': 'SHA384', 'SHA-512': 'SHA512' };
                 var normalizedHash = hashMap[algName] || hashName;
                 var hashAlgo = normalizedHash.startsWith('SHA') ? normalizedHash : 'SHA256';
-                var bytes = data instanceof Uint8Array ? Array.from(data) : Array.from(new TextEncoder().encode(String(data)));
+                // Accept Uint8Array, Array, ArrayBuffer or any view: string input
+                // is UTF-8 encoded, as the spec's digest() requires.
+                var bytes = toBytes(data);
                 var result = __cryptoHash(hashAlgo, bytes);
                 return Promise.resolve(new Uint8Array(result));
             },
@@ -1364,6 +1370,23 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                         try {
                             var raw = keyData instanceof Uint8Array ? keyData : new Uint8Array(keyData);
                             resolve({ type: 'secret', extractable: extractable, algorithm: { name: name, length: raw.length * 8 }, usages: usages || [], _raw: raw });
+                        } catch (e) { reject(e); }
+                    });
+                }
+                // HMAC and PBKDF2 keys are the raw bytes plus the named hash;
+                // `sign`/`deriveBits` below run the native HMAC/PBKDF2 on them.
+                if ((name === 'HMAC' || name === 'PBKDF2') && format === 'raw') {
+                    return new Promise(function(resolve, reject) {
+                        try {
+                            var raw = keyData instanceof Uint8Array ? keyData : new Uint8Array(keyData.buffer ? keyData.buffer : keyData);
+                            resolve({
+                                type: 'secret',
+                                extractable: extractable,
+                                algorithm: { name: name, hash: subtleHashName(algorithm) },
+                                usages: usages || [],
+                                _raw: raw,
+                                _alg: name
+                            });
                         } catch (e) { reject(e); }
                     });
                 }
@@ -1406,7 +1429,28 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                     } catch (e) { reject(e); }
                 });
             },
-            deriveBits: function() { return Promise.reject(new Error('Not implemented')); },
+            deriveBits: function(algorithm, baseKey, length) {
+                // PBKDF2 (used by node-postgres SCRAM-SHA-256): derive
+                // `length` bits from the imported password key.
+                var name = (typeof algorithm === 'string' ? algorithm : algorithm.name) || '';
+                if (name === 'PBKDF2' && baseKey && baseKey._alg === 'PBKDF2') {
+                    return new Promise(function(resolve, reject) {
+                        try {
+                            var hash = String(subtleHashName(algorithm) || 'SHA-256').toLowerCase().replace('-', '');
+                            var out = __cryptoPbkdf2Sync(
+                                Array.from(baseKey._raw),
+                                toBytes(algorithm.salt),
+                                algorithm.iterations || 1,
+                                Math.max(1, Math.floor((length || 0) / 8)),
+                                hash
+                            );
+                            if (!(out instanceof Uint8Array)) throw new Error(String(out));
+                            resolve(out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength));
+                        } catch (e) { reject(e); }
+                    });
+                }
+                return Promise.reject(new Error('Not implemented'));
+            },
             deriveKey: function() { return Promise.reject(new Error('Not implemented')); },
             wrapKey: function() { return Promise.reject(new Error('Not implemented')); },
             unwrapKey: function() { return Promise.reject(new Error('Not implemented')); }

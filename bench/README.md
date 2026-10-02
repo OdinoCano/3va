@@ -44,6 +44,20 @@ skipped rather than faked.
   32-core machine: 3va ~63k, Node ~84k, Bun ~138k msgs/s — 3va is behind
   because the upgrade-socket reads are poll-based (a 1 ms JS timer vs an
   event-driven wake), an honest current limitation.
+- **Postgres** — Bun's published "100 rows × 100 queries in flight"
+  workload (`postgres/pg.js`), the same node-postgres (`pg`) client on every
+  runtime, so the comparison is each runtime's net/crypto (SCRAM-SHA-256
+  auth) and event loop. Skipped with a note when no server answers on
+  `PGPORT` (default 55432 — start the bench's own container with
+  `scripts/run-pg-bench.sh`). On 3va, the client needed two fixes to reach
+  this point: WebCrypto `subtle` PBKDF2/HMAC for the SCRAM proof
+  (`crypto.subtle.importKey`/`deriveBits`/`sign`), and `TCP_NODELAY` on the
+  `net` client socket — without it the Nagle/delayed-ACK interaction cost
+  ~40 ms per query. The remaining gap to Node/Bun is the poll-based `net`
+  socket read (a 1 ms JS timer instead of an event-driven epoll wake), which
+  serializes queries at ~460 q/s vs Node's ~7,900 / Bun's ~8,900 on the
+  dedicated 32-core machine. That is an honest current limitation, not a
+  hidden one.
 
 ## Same workloads Bun and Deno publish
 

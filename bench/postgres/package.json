@@ -1,0 +1,9 @@
+{
+  "name": "bench-postgres",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bun's published Postgres workload (100 rows, 100 queries in flight), runnable on 3va/Node/Bun with the same node-postgres client",
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
