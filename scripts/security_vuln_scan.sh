@@ -19,7 +19,7 @@
 #                 supply-chain,outdated,udeps,semgrep,gitleaks,trivy,osv,custom,
 #                 test,clippy,fmt,doc)
 #
-# Exit code: 0 si no hay hallazgos de severidad alta/crítica que bloqueen.
+# Exit code: 0 si ningún escáner reporta [FAIL] ni el custom scan HIGH/CRITICAL.
 
 set -uo pipefail
 
@@ -52,7 +52,18 @@ RUNLOG="$OUT/runlog.txt"
 log() { echo -e "${BLUE}[SCAN]${NC} $1" | tee -a "$RUNLOG"; }
 ok()   { echo -e "${GREEN}[PASS]${NC} $1" | tee -a "$RUNLOG"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$RUNLOG"; }
-fail() { echo -e "${RED}[FAIL]${NC} $1" | tee -a "$RUNLOG"; }
+FAILS=0
+fail() { FAILS=$((FAILS+1)); echo -e "${RED}[FAIL]${NC} $1" | tee -a "$RUNLOG"; }
+
+# Heavy cargo steps (geiger, udeps, clippy, test) run in a memory-capped
+# systemd scope, like the git hooks: uncapped builds got the editor OOM-killed.
+if [ -f "$PROJECT_ROOT/scripts/hook-limits.sh" ]; then
+    . "$PROJECT_ROOT/scripts/hook-limits.sh"
+    hook_limits_init
+    capped() { run_limited env CARGO_BUILD_JOBS="${HOOK_JOBS:-4}" "$@"; }
+else
+    capped() { "$@"; }
+fi
 
 SKIP_FN() { case ",$SKIP," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 
@@ -171,7 +182,7 @@ run_deny() {
 run_geiger() {
     has_and_log cargo-geiger || return
     log "cargo-geiger (inventario de código unsafe)"
-    if timeout 300 cargo geiger --color never >"$OUT/geiger.txt" 2>&1; then
+    if capped timeout 300 cargo geiger --color never >"$OUT/geiger.txt" 2>&1; then
         ok "cargo-geiger completado"
     else
         warn "cargo-geiger: completado con advertencias"
@@ -224,7 +235,7 @@ run_outdated() {
 run_udeps() {
     has_and_log cargo-udeps || return
     log "cargo-udeps (dependencias sin uso → superficie de ataque)"
-    if timeout 300 cargo udeps --color never >"$OUT/udeps.txt" 2>&1; then
+    if capped timeout 300 cargo udeps --color never >"$OUT/udeps.txt" 2>&1; then
         ok "cargo-udeps: sin dependencias muertas"
     else
         warn "cargo-udeps: ver security-reports/udeps.txt"
@@ -330,7 +341,7 @@ run_fmt() {
 run_clippy() {
     SKIP_FN clippy && return
     log "cargo clippy (lints de seguridad)"
-    if timeout 600 cargo clippy --all-targets --all-features -- -D warnings >"$OUT/clippy.txt" 2>&1; then
+    if capped timeout 600 cargo clippy --all-targets --all-features -- -D warnings >"$OUT/clippy.txt" 2>&1; then
         ok "clippy OK"
     else
         local n
@@ -343,7 +354,7 @@ run_clippy() {
 run_test() {
     SKIP_FN test && return
     log "cargo test (suite completa)"
-    if timeout 1200 cargo test --all-features >"$OUT/test.txt" 2>&1; then
+    if capped timeout 1200 cargo test --all-features >"$OUT/test.txt" 2>&1; then
         ok "tests OK"
     else
         local failed
@@ -423,7 +434,12 @@ echo -e "Log de ejecución: $RUNLOG"
 echo ""
 echo "Resumen de advertencias/fallos en: $RUNLOG"
 
-# Exit code: falla solo si hubo hallazgos HIGH/CRITICAL del custom scan
+# Exit code: falla si algún escáner de seguridad reportó [FAIL] (audit, deny,
+# vet, gitleaks, trivy, osv, ...) o si el custom scan tiene HIGH/CRITICAL.
+if [ "$FAILS" -gt 0 ]; then
+    echo -e "${RED}$FAILS escáner(es) con [FAIL]${NC}"
+    exit 1
+fi
 if [ -f "$OUT/custom_summary.txt" ]; then
     crit="$(rg -oP 'custom_scan_critical=\K[0-9]+' "$OUT/custom_summary.txt" || echo 0)"
     high="$(rg -oP 'custom_scan_high=\K[0-9]+' "$OUT/custom_summary.txt" || echo 0)"
