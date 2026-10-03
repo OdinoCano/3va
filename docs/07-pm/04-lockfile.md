@@ -6,6 +6,9 @@ The `3va-lock.json` lockfile ensures reproducible installations, per-package ori
 
 **Key principle:** the lockfile is the source of truth for knowing which version of each package is installed *and from which registry it comes*. This allows `3va update` to respect origins without silent network calls.
 
+`3va install` writes it sorted (stable between runs) and, when the store
+already has every package, installs from it without contacting the registry.
+
 ---
 
 ## 4.2 JSON Format

@@ -6,6 +6,10 @@
 fetches package metadata from the npm registry and walks the full transitive
 dependency tree.  It is designed for correctness, determinism, and performance.
 
+`package.json` is resolved as **one dependency graph**: a transitive or peer
+range can't replace the version a direct dependency asked for, and two
+packages can't race linking the same files.
+
 ## 2.2 Resolution Process
 
 ### 2.2.1 Steps
@@ -80,10 +84,17 @@ The `SemverRange` parser handles all common npm range forms:
 | Tilde | `~1.2.3` | Patch-compatible: `>=1.2.3 <1.3.0` |
 | Comparators | `>1.0.0`, `>=1.0.0`, `<2.0.0`, `<=2.0.0` | Single bound |
 | Compound | `>=1.0.0 <2.0.0` | AND of two ranges |
+| Union | `>=1.2.3 <2.0.0 \|\| >=3.0.0` | Either range |
+| Hyphen | `1.2.3 - 2.3.4` | Inclusive `>=1.2.3 <=2.3.4` |
 | Wildcard | `*`, `` (empty) | Any version |
 | X-range (major) | `1`, `1.x` | Same as `^1.0.0` |
 | X-range (minor) | `1.2`, `1.2.x` | Same as `~1.2.0` |
 | Dist-tags | `latest`, `next`, `beta` | Treated as `*` (any version) |
+
+**Prerelease matching (npm semantics):** a prerelease version matches only when
+the range itself names a prerelease of the same `major.minor.patch`. A plain
+range (`>=5.0.0`, `*`, `latest`) no longer resolves to a nightly build such as
+`7.1.0-dev…`.
 
 ### 2.3.2 Resolution Strategy
 
@@ -172,6 +183,12 @@ or cannot be parsed are skipped with a `tracing::warn!`.
 2. **Lockfile present**: reads exact versions from `3va-lock.json`
 3. **Lockfile absent**: walks `node_modules/` and reads each package's
    `package.json` for the `"version"` field via `read_package_version`
+
+### 2.5.3 Offline install
+
+`3va install` writes `3va-lock.json` (sorted, stable between runs) and, when
+the store already has every package, installs from it **without contacting the
+registry**.
 
 ## 2.6 Cache
 

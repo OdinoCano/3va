@@ -88,6 +88,10 @@ const encrypted = await crypto.subtle.encrypt(
 
 `globalThis.crypto.subtle` is backed by the `vvva_crypto` crate (AES-GCM, SHA-*, HMAC, ECDSA, ECDH).
 
+`crypto.subtle` also implements HMAC (`importKey` + `sign`) and PBKDF2
+(`importKey` + `deriveBits`) — without them node-postgres's SCRAM-SHA-256 auth
+could connect but never compute the client proof.
+
 ---
 
 ### `stream/web` (WHATWG Streams)

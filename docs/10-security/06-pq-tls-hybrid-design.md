@@ -82,8 +82,10 @@ touched:
 - `tls.connect()` / `__tcpConnectTls` — stays on `native-tls`.
 - WebSocket `wss://` (`tungstenite`, `native-tls` feature) — unchanged.
 - gRPC TLS (`tonic`) — unchanged (still on its own classical rustls setup).
-- HTTPS server — doesn't exist (`https.createServer` never terminated TLS;
-  pre-existing gap, unrelated to this change).
+- HTTPS server — was a pre-existing gap (unrelated to this change), since
+  closed separately: `https.createServer({ key, cert })` is now a real TLS
+  listener (TLS 1.2/1.3) and offers the hybrid `X25519MLKEM768` group to
+  clients that support it (see §6.7).
 
 Rewiring every other TLS consumer in the runtime onto a hybrid-PQ-capable
 stack would have meant touching TLS code paths that are in real production
@@ -180,9 +182,11 @@ Protocol: TLSv1.3
 
 ## 6.7 Known limitations (stated, not hidden)
 
-- **Client-only.** No PQ-TLS server — 3va doesn't terminate TLS on the
-  server side at all today; this is a pre-existing gap, not something this
-  change was scoped to fix.
+- **`tls.pqConnect()` is the client path.** Server-side TLS now exists too:
+  `https.createServer({ key, cert })` terminates TLS (TLS 1.2/1.3, the FIPS
+  provider in a `fips` build) and offers the hybrid `X25519MLKEM768` group to
+  clients that support it — but that server path was added separately, not by
+  this change.
 - **One code path.** `tls.connect()`, WebSocket `wss://`, and gRPC TLS stay
   classical. Migrating those wasn't necessary to deliver real PQ-TLS and
   would have meant touching TLS code that's in production use for unrelated
@@ -203,7 +207,9 @@ Protocol: TLSv1.3
 
 ## 6.8 Non-goals
 
-- No PQ-TLS server implementation.
+- No PQ-TLS server was added by *this* change; server-side TLS (with the
+  hybrid group offered to PQ-capable clients) ships via
+  `https.createServer({ key, cert })`.
 - No migration of `tls.connect()`, `wss://`, or gRPC TLS off their existing
   classical stacks.
 - No new `require('crypto').pq` JS API surface.
