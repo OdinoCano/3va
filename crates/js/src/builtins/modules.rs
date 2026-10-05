@@ -5241,6 +5241,10 @@ fn resolve_package_imports(specifier: &str, start_dir: &std::path::Path) -> Opti
     let mut dir = start_dir.to_path_buf();
     loop {
         let pkg_json = dir.join("package.json");
+        // Resolution metadata only: the JSON is parsed for the "imports" map
+        // and never returned to the script. The module this resolves to is
+        // loaded later through the capability-gated `__readFile`, so this
+        // stays ungated like Node's resolver (no --allow-read for import).
         if pkg_json.is_file()
             && let Ok(content) = std::fs::read_to_string(&pkg_json)
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
