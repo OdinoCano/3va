@@ -33,12 +33,32 @@ jobs:
   validate:
     name: Validate release tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Check RELEASE_TAG is SemVer
         shell: bash
         run: |
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
             || { echo "::error::invalid release tag: $RELEASE_TAG"; exit 1; }
+      # Nothing is distributed from a commit whose Security Pipeline did not
+      # finish green: every other job needs `validate`. A dry run (test_only)
+      # builds nothing public, so it is exempt.
+      - name: Require a green Security Pipeline on this commit
+        if: ${{ env.TEST_ONLY != 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          runs=$(gh run list --workflow security.yml --commit "$GITHUB_SHA" \
+                   --json status,conclusion --jq '.[] | "\(.status):\(.conclusion)"')
+          echo "Security Pipeline runs for $GITHUB_SHA:"; echo "${runs:-none}"
+          if [ -z "$runs" ] || echo "$runs" | grep -qv '^completed:success$'; then
+            echo "::error::Security Pipeline is missing, still running or not green for $GITHUB_SHA; fix or wait, then re-run"
+            exit 1
+          fi
 
   # ── Build precompiled binaries ────────────────────────────────────────────────
   build:

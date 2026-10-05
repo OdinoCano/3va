@@ -85,7 +85,7 @@ jobs:
 
   # ── AddressSanitizer + UBSan (scheduled only, nightly) ───────────────────────
   sanitizers:
-    name: Sanitizers (ASan + UBSan)
+    name: Sanitizers (ASan)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
     steps:
@@ -102,6 +102,7 @@ jobs:
       # known rustdoc + -Z sanitizer + -Zbuild-std interaction). The unit and
       # integration tests below are what actually exercise unsafe code paths
       # anyway; doc examples aren't what these gates are for.
+      # No UBSan step: rustc has no `-Z sanitizer=undefined` (the nightly rejects it).
       # LSan can only match `.github/lsan-v8.supp` entries against *symbolized*
       # frames. Without a findable llvm-symbolizer the leak report is raw
       # addresses, nothing matches, and the known v8 `create_annex` leak fails
@@ -124,12 +125,6 @@ jobs:
         run: |
           LSAN_OPTIONS="suppressions=$GITHUB_WORKSPACE/.github/lsan-v8.supp" \
           RUSTFLAGS="-Z sanitizer=address" \
-            cargo +nightly test -Zbuild-std --tests \
-            --target x86_64-unknown-linux-gnu \
-            -p vvva_permissions -p vvva_js
-      - name: UndefinedBehaviorSanitizer
-        run: |
-          RUSTFLAGS="-Z sanitizer=undefined" \
             cargo +nightly test -Zbuild-std --tests \
             --target x86_64-unknown-linux-gnu \
             -p vvva_permissions -p vvva_js

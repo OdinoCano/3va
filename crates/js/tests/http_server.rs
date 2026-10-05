@@ -430,9 +430,13 @@ async fn keep_alive_connection_closed_after_max_requests_per_conn() {
         let _ = stream
             .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             .await;
+        // The server closing is either a clean EOF or, when the 4th request
+        // reached it before it closed (unread data at close → RST), a
+        // connection reset. Both mean "closed"; only a response or a hang is
+        // a failure.
         matches!(
             tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await,
-            Ok(Ok(0))
+            Ok(Ok(0)) | Ok(Err(_))
         )
     })
     .await;
@@ -1345,7 +1349,12 @@ async fn firewall_adaptive_escalation_repeat_offender() {
     // (2026-09-21); doubling again to 4s/8s and widening every sleep below
     // by the same factor fixes that without changing what's asserted.
     let mut e = engine_with_firewall(FirewallConfig {
-        rate_limit_rps: 100,
+        // 1 rps with a burst of 1: the second request must arrive within a
+        // second of the first to be rate-limited. At 100 rps the bucket
+        // refilled every 10 ms, so on a loaded runner request 2 sometimes
+        // arrived late enough to be allowed (CI run 37331323565, "req 2 must
+        // auto-block the IP" got 200).
+        rate_limit_rps: 1,
         rate_limit_burst: 1,
         auto_block_threshold: 1,
         block_duration_secs: 4,
