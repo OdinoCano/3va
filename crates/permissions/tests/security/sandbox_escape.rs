@@ -186,3 +186,50 @@ fn virtual_network_star_wildcard_allows_all() {
     assert!(vnet.is_allowed("evil.com"));
     assert!(vnet.is_allowed("127.0.0.1"));
 }
+
+// ── VULN-ESCAPE-03: VirtualFs escapa del mount a través de un symlink ─────────
+//
+// `VirtualFs::resolve` normaliza `..`/`.` de forma puramente léxica y NO
+// canonicaliza el resultado. Por eso devuelve `<source>/escape/secret`, que
+// *parece* estar dentro del mount, pero al abrirlo el kernel sigue el symlink
+// `escape` y lee/escribe fuera del sandbox. `VirtualFs` es la capa de "sandbox"
+// del crate de permisos; si se usa como frontera de aislamiento, es evadible.
+//
+// Los tests existentes documentan esto como "frontera de responsabilidad"
+// (el OS/FsEnforcer debería canonicalizar). Se marca aquí como vulnerabilidad
+// porque el tipo se presenta como sandbox y la resolución por sí sola no
+// contiene la ruta real. `#[ignore]` porque documenta el escape: pasa hoy.
+
+#[cfg(unix)]
+#[test]
+#[ignore = "VULN-ESCAPE-03: VirtualFs no confina symlinks; el escape ocurre si se usa como sandbox"]
+fn vuln_virtual_fs_symlink_escapes_the_mount() {
+    let temp = TempDir::new().unwrap();
+    let sandbox = temp.path().join("sandbox");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&sandbox).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), "FUERA-DEL-SANDBOX").unwrap();
+
+    // Un symlink dentro del sandbox que apunta fuera.
+    std::os::unix::fs::symlink(&outside, sandbox.join("escape")).unwrap();
+
+    let mut vfs = VirtualFs::new();
+    vfs.mount("/app", &sandbox, true);
+
+    let resolved = vfs.resolve(Path::new("/app/escape/secret.txt")).unwrap();
+
+    // La ruta *parece* confinada...
+    assert!(
+        resolved.starts_with(&sandbox),
+        "VirtualFs ancla la ruta léxicamente al source del mount"
+    );
+
+    // ...pero al operar sobre ella se sigue el symlink y se lee fuera del sandbox.
+    let leaked = std::fs::read_to_string(&resolved).unwrap_or_default();
+    assert_eq!(
+        leaked, "FUERA-DEL-SANDBOX",
+        "VULN-ESCAPE-03: VirtualFs::resolve devolvio una ruta que, al abrirse, \
+         lee fuera del sandbox a traves de un symlink"
+    );
+}

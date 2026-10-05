@@ -60,6 +60,19 @@ pub fn inject_worker_threads_native(scope: &mut PinScope, permissions: Arc<Permi
             let filename = args.get(0).to_rust_string_lossy(scope);
             let worker_data = args.get(1).to_rust_string_lossy(scope);
 
+            if !perms().check(&vvva_permissions::Capability::FileRead(PathBuf::from(
+                &filename,
+            ))) {
+                let msg = v8::String::new(
+                    scope,
+                    &format!("PermissionDenied: read access to {filename}"),
+                )
+                .unwrap();
+                let err = v8::Exception::error(scope, msg);
+                scope.throw_exception(err);
+                return;
+            }
+
             let id = next_worker_id();
             let incoming: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
             let (tx, rx) = std::sync::mpsc::sync_channel::<String>(256);
