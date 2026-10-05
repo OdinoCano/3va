@@ -7,6 +7,10 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+---
+
+## [2.12.0] — 2026-10-05
+
 ### Security
 
 - **`wasmtime` 36.0.16 → 36.0.17** (RUSTSEC-2026-0321, -0322, -0323, published 2026-10-02): WASI preview 0 `poll_oneoff` bypassed fuel limits, a guest without stdio could make the host allocate excessive memory, and `fd_readdir` copied uninitialized padding into guest memory. Affects `3va run` on WebAssembly modules that use WASI.
