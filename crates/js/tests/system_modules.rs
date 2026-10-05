@@ -196,6 +196,80 @@ async fn child_process_node_prefix_alias() {
     assert_eq!(r, "true");
 }
 
+// `process.env` is filtered, but a spawned child gets its own environment copy.
+// Without filtering that copy, `--allow-child-process` alone leaked every host
+// secret (`execFileSync('sh', ['-c', 'echo $SECRET'])`).
+#[tokio::test]
+async fn child_process_does_not_inherit_env_without_grant() {
+    let parent_path = std::env::var("PATH").unwrap_or_default();
+    if parent_path.is_empty() {
+        return;
+    }
+
+    let mut e = engine_with_spawn().await;
+    let denied = e
+        .eval_to_string(
+            r#"require('child_process').execFileSync('sh', ['-c', 'echo -n "$PATH"']).toString()"#,
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        denied.trim(),
+        parent_path.trim(),
+        "child inherited PATH without --allow-env"
+    );
+
+    // Positive control: the granted variable is the one the child receives.
+    let state = PermissionState::new();
+    state.grant(Capability::SpawnProcess);
+    state.grant(Capability::EnvVar("PATH".to_string()));
+    let mut e = JsEngine::new(Arc::new(state)).await.unwrap();
+    let allowed = e
+        .eval_to_string(
+            r#"require('child_process').execFileSync('sh', ['-c', 'echo -n "$PATH"']).toString()"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        allowed.trim(),
+        parent_path.trim(),
+        "EnvVar(PATH) must reach the child"
+    );
+}
+
+// `__spawnCreate` opens a control pipe (its write end becomes the child's fd 3).
+// Its parent-side read end must be close-on-exec, or every later child inherits
+// it and keeps the control pipe open past the worker's exit.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn child_process_does_not_inherit_control_pipe_fd() {
+    let mut e = engine_with_spawn().await;
+    let out = e
+        .eval_to_string(
+            r#"
+            var cp = require('child_process');
+            var held = cp.spawn('sleep', ['3']);
+            var listing = cp.execFileSync('ls', ['-l', '/proc/self/fd']).toString();
+            held.kill();
+            listing
+            "#,
+        )
+        .await
+        .unwrap();
+    for line in out.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let Some(pos) = parts.iter().position(|p| *p == "->") else {
+            continue;
+        };
+        let fd: i32 = parts[pos - 1].parse().unwrap_or(-1);
+        let target = parts.get(pos + 1).copied().unwrap_or("");
+        assert!(
+            fd <= 2 || !target.contains("pipe:"),
+            "child inherited control pipe fd {fd} -> {target}\n{out}"
+        );
+    }
+}
+
 // ── http / https ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
