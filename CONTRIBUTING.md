@@ -23,6 +23,11 @@ cd 3va
 cargo build              # debug build → target/debug/3va
 ```
 
+Add `--with-test262` to `dev-setup.sh` to also download the tc39/test262
+conformance suite into `tests/test262/` (gitignored, pinned to one commit, ~70k
+files). It is only needed for `cargo test --ignored test262`; `bench/run.sh`
+fetches it on demand.
+
 This installs git hooks:
 
 - **pre-commit** runs `cargo fmt --check`, `cargo clippy` and `gitleaks`.

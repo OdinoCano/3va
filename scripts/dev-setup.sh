@@ -42,7 +42,15 @@ for hook in "$HOOKS_SRC"/*; do
     echo "  installed .git/hooks/$name"
 done
 
-# ── 3. Confirm toolchain ─────────────────────────────────────────────────────
+# ── 3. Optional: the ECMAScript conformance suite (~70k files) ───────────────
+# Not needed to build or run the normal tests; only for `cargo test --ignored
+# test262` and bench/run.sh (which downloads it on demand anyway).
+#   ./scripts/dev-setup.sh --with-test262
+if [ "${1:-}" = "--with-test262" ]; then
+    "$REPO_ROOT/scripts/setup-test262.sh"
+fi
+
+# ── 4. Confirm toolchain ─────────────────────────────────────────────────────
 rustup component add rustfmt clippy 2>/dev/null || true
 
 echo ""
