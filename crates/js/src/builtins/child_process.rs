@@ -635,20 +635,21 @@ pub fn inject_child_process(
                 let mut pipe_fds = [-1i32; 2];
                 // SAFETY: `pipe_fds` is a valid, properly sized two-element
                 // array; `pipe` writes exactly two descriptors into it.
-                let ok = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
-                if ok {
-                    // `pipe(2)` returns descriptors without close-on-exec, so
-                    // the parent's read end would leak into every later child
-                    // spawned by this process (and keep the control pipe open
-                    // past the worker's exit). The child's dup2'd fd 3 clears
-                    // its own CLOEXEC explicitly in `pre_exec` below.
-                    for fd in [pipe_fds[0], pipe_fds[1]] {
+                // `pipe2(O_CLOEXEC)` is atomic: with plain `pipe` + `fcntl`, a
+                // concurrent spawn on another thread could fork in between and
+                // inherit the parent's read end. The child's dup2'd fd 3 clears
+                // its own CLOEXEC explicitly in `pre_exec` below.
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                let ok = unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0;
+                // ponytail: no pipe2 on macOS; non-atomic pipe+fcntl leaves a tiny race window
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                let ok = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0 && {
+                    for fd in pipe_fds {
                         // SAFETY: `fd` was just returned by pipe(2) and is open.
-                        unsafe {
-                            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-                        }
+                        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
                     }
-                }
+                    true
+                };
                 (ok, pipe_fds[0], pipe_fds[1])
             };
             #[cfg(not(unix))]
