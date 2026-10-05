@@ -292,6 +292,10 @@ fn resolve_node_module_esm(start_dir: &Path, name: &str) -> PathBuf {
     }
 
     let pkg_json = pkg_dir.join("package.json");
+    // Resolution metadata only (see modules::resolve_package_imports): the
+    // parsed package.json selects an entry path, but its contents are never
+    // handed to the script, and the module source is read later through the
+    // capability-gated `__readFile`. Ungated on purpose, like Node.
     let json = std::fs::read_to_string(&pkg_json)
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
@@ -374,6 +378,7 @@ fn resolve_node_module_esm(start_dir: &Path, name: &str) -> PathBuf {
 }
 
 fn resolve_node_module_entry(pkg_dir: &Path) -> PathBuf {
+    // Same metadata-only read as `resolve_node_module_esm` above.
     let content = std::fs::read_to_string(pkg_dir.join("package.json")).ok();
     let json = content.and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
     if let Some(ref j) = json

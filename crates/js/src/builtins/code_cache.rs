@@ -27,6 +27,31 @@ fn cache_dir() -> Option<std::path::PathBuf> {
     )
 }
 
+/// Creates `dir` (and any missing parents) and forces mode 0700 on Unix, so a
+/// second local user can't plant a symlink or a poisoned cache file in it.
+/// Best-effort: a failure only disables the cache, never the engine start.
+pub(crate) fn ensure_private_dir(dir: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir);
+        // A pre-existing directory keeps its old mode; tighten it, but never
+        // follow a symlink (that would chmod whatever it points at instead).
+        if let Ok(meta) = std::fs::symlink_metadata(dir)
+            && meta.is_dir()
+        {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::create_dir_all(dir);
+    }
+}
+
 fn cache_path(name: &str, source: &str) -> Option<std::path::PathBuf> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     source.hash(&mut hasher);
@@ -162,7 +187,7 @@ pub fn compile_and_run_cached(
         && let Some(cache) = unbound.create_code_cache()
     {
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            ensure_private_dir(dir);
         }
         let _ = std::fs::write(path, &**cache);
     }
@@ -172,4 +197,26 @@ pub fn compile_and_run_cached(
         .run(scope)
         .ok_or_else(|| anyhow::anyhow!("execution error in {name}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_private_dir;
+
+    #[test]
+    fn cache_dir_is_created_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested").join("codecache");
+        ensure_private_dir(&dir);
+        assert!(dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "cache dir should not be group/other accessible"
+            );
+        }
+    }
 }
