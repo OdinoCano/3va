@@ -243,6 +243,13 @@ async fn child_process_does_not_inherit_env_without_grant() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn child_process_does_not_inherit_control_pipe_fd() {
+    // Pipes already open in this process (e.g. a cargo/make jobserver inherited
+    // from the environment, as in git hooks) are not 3va's to close.
+    let preexisting: Vec<String> = std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+        .map(|t| t.to_string_lossy().into_owned())
+        .collect();
     let mut e = engine_with_spawn().await;
     let out = e
         .eval_to_string(
@@ -264,7 +271,7 @@ async fn child_process_does_not_inherit_control_pipe_fd() {
         let fd: i32 = parts[pos - 1].parse().unwrap_or(-1);
         let target = parts.get(pos + 1).copied().unwrap_or("");
         assert!(
-            fd <= 2 || !target.contains("pipe:"),
+            fd <= 2 || !target.contains("pipe:") || preexisting.iter().any(|p| p == target),
             "child inherited control pipe fd {fd} -> {target}\n{out}"
         );
     }
