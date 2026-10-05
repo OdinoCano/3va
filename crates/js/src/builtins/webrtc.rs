@@ -88,6 +88,15 @@ pub fn inject_webrtc(
 ) {
     let context = scope.get_current_context();
     let global = context.global(scope);
+    // TODO(security): WebRTC is currently a pure stub — the native functions
+    // below only manipulate HashMaps and synthesize placeholder SDP; they never
+    // open a socket, so `permissions` is intentionally unused. If this becomes a
+    // real transport, every operation that can reach the network (ICE/STUN/TURN
+    // gathering, `setRemoteDescription` on a real peer connection, data-channel
+    // send) MUST gate on `Capability::Network(host:port)` before dialing, the
+    // same way `tcp.rs`/`fetch.rs`/`dgram.rs` do — including the default STUN
+    // server `stun:stun.l.google.com:19302` created below when no config is
+    // supplied. Do not ship a real implementation with this binding ungated.
     let _perms = permissions;
 
     let create_fn = v8::Function::new(
