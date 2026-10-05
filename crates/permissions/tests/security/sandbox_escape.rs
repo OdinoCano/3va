@@ -192,17 +192,22 @@ fn virtual_network_star_wildcard_allows_all() {
 // `VirtualFs::resolve` normaliza `..`/`.` de forma puramente léxica y NO
 // canonicaliza el resultado. Por eso devuelve `<source>/escape/secret`, que
 // *parece* estar dentro del mount, pero al abrirlo el kernel sigue el symlink
-// `escape` y lee/escribe fuera del sandbox. `VirtualFs` es la capa de "sandbox"
-// del crate de permisos; si se usa como frontera de aislamiento, es evadible.
+// `escape` y lee/escribe fuera del sandbox.
 //
-// Los tests existentes documentan esto como "frontera de responsabilidad"
-// (el OS/FsEnforcer debería canonicalizar). Se marca aquí como vulnerabilidad
-// porque el tipo se presenta como sandbox y la resolución por sí sola no
-// contiene la ruta real. `#[ignore]` porque documenta el escape: pasa hoy.
+// Disposición (revisada): `VirtualFs`/`VirtualNetwork` son código muerto — no
+// tienen ningún caller de runtime (verificado con `rg`), solo tests, el target
+// de fuzz y el re-export del crate. La frontera real es
+// `PermissionState::check` + `vvva_js::builtins::secure_fs`, que sí canonicaliza
+// y ancla las aperturas a un descriptor. Se documenta como no-frontera en
+// `crates/permissions/src/sandbox.rs` (VULN-ESCAPE-03) en vez de reforzar código
+// muerto. Este test queda `#[ignore]`: registra la limitación conocida y no
+// afirma una garantía de confinamiento. Si algún día `VirtualFs` se cablea al
+// runtime, quitar `#[ignore]` e invertirlo a `assert!(se deniega)` tras
+// canonicalizar.
 
 #[cfg(unix)]
 #[test]
-#[ignore = "VULN-ESCAPE-03: VirtualFs no confina symlinks; el escape ocurre si se usa como sandbox"]
+#[ignore = "VULN-ESCAPE-03 documentada: VirtualFs es codigo muerto y no confina symlinks"]
 fn vuln_virtual_fs_symlink_escapes_the_mount() {
     let temp = TempDir::new().unwrap();
     let sandbox = temp.path().join("sandbox");

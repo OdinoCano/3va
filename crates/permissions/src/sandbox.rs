@@ -1,6 +1,29 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 3va contributors
 
+//! Illustrative virtual filesystem / network mounting helpers.
+//!
+//! # ⚠️ This module is not a security boundary
+//!
+//! `VirtualFs` and `VirtualNetwork` are **not wired into the runtime** — no
+//! production caller exists (verified by `rg VirtualFs`/`rg VirtualNetwork`):
+//! only the security test suites, the `fuzz_permission_sandbox` target, and
+//! this crate's re-export reference them. The enforcement path used by the
+//! engine is [`crate::PermissionState::check`] together with
+//! `vvva_js::builtins::secure_fs` (descriptor-pinned, TOCTOU-safe opens).
+//!
+//! `VirtualFs::resolve` does **lexical-only** normalization (`.`/`..`) and does
+//! **not** canonicalize or follow symlinks. A symlink inside a mount
+//! (`/app/escape -> /outside`) therefore yields `<source>/escape/...`, which
+//! *looks* confined but reads/writes outside the mount when opened. This is
+//! tracked as **VULN-ESCAPE-03**; it is documented rather than patched because
+//! the type is dead code and hardening it would duplicate `secure_fs` without
+//! protecting any real call path. Do not use it to gate I/O, and do not treat
+//! its output as confinement.
+//!
+//! Kept for the tests/fuzz target that exercise the lexically-normalizing
+//! behavior and as a reference design.
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
@@ -35,6 +58,12 @@ impl VirtualFs {
         );
     }
 
+    /// Maps a virtual path to a real path under a mount source.
+    ///
+    /// **Not a confinement check.** The result is derived from a lexical
+    /// normalization only (see [`normalize_path`]); it is neither canonicalized
+    /// nor symlink-resolved, so the real target may lie outside `source`. See
+    /// the module-level note (VULN-ESCAPE-03).
     pub fn resolve(&self, path: &Path) -> Result<PathBuf, String> {
         let normalized = normalize_path(path);
 
@@ -49,6 +78,10 @@ impl VirtualFs {
 }
 
 /// Normalizes a path, resolving `.` and `..` without touching the filesystem.
+///
+/// Purely lexical: it neither canonicalizes nor resolves symlinks, so the
+/// result is not guaranteed to stay inside any directory. See the module-level
+/// note (VULN-ESCAPE-03).
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -79,6 +112,9 @@ impl VirtualNetwork {
         self.allowed_hosts.insert(host.to_string());
     }
 
+    /// Host-allowlist check. Not used by the runtime; the enforced equivalent is
+    /// [`crate::PermissionState::check`] with `caps_match`/`host_matches`
+    /// (which also honor ports). See the module-level note.
     pub fn is_allowed(&self, host: &str) -> bool {
         self.allowed_hosts.iter().any(|allowed| {
             if allowed == "*" {

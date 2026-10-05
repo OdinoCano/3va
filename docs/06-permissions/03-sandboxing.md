@@ -168,6 +168,15 @@ pub fn is_safe_path(base: &Path, target: &Path) -> bool {
 }
 ```
 
+> **Nota (VULN-ESCAPE-03).** El `VirtualFs` de este documento es ilustrativo y
+> **no es la frontera de aislamiento real**. `vvva_permissions::sandbox::VirtualFs`
+> es código muerto (sin callers de runtime) y normaliza `.`/`..` solo de forma
+> léxica: no canonicaliza ni resuelve symlinks, así que un symlink dentro del
+> mount puede apuntar fuera. La contención efectiva la aplican
+> `PermissionState::check` (que sí canonicaliza, vía `resolve_physically`) y
+> `vvva_js::builtins::secure_fs` (aperturas ancladas a descriptor, TOCTOU-safe).
+> No uses `VirtualFs` para autorizar I/O.
+
 ## 3.5 Sandboxing de Red
 
 ### 3.5.1 Virtual Network
