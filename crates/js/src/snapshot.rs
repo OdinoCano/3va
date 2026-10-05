@@ -109,7 +109,7 @@ fn store(path: &std::path::Path, blob: &[u8]) {
     let Some(dir) = path.parent() else {
         return;
     };
-    let _ = std::fs::create_dir_all(dir);
+    crate::builtins::code_cache::ensure_private_dir(dir);
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     if std::fs::write(&tmp, blob).is_ok() {
         if std::fs::rename(&tmp, path).is_ok() {

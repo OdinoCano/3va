@@ -354,11 +354,8 @@ pub fn inject_require(
                             transpiled.len(),
                             has_bare
                         );
-                        let _ =
-                            std::fs::write("/tmp/zod_core_transpiled.js", transpiled.as_bytes());
                     }
                     if _mmark_debug {
-                        let _ = std::fs::write("/tmp/mmark_transpiled.js", transpiled.as_bytes());
                         eprintln!(
                             "[MMARK] transpiled len={} has_export={}",
                             transpiled.len(),
@@ -376,22 +373,14 @@ pub fn inject_require(
                             eprintln!("[DEBUG] Bare: {} — {:?}", path_str, ex);
                         }
                         if path_str.contains("chunks/config.js") {
-                            let _ =
-                                std::fs::write("/tmp/config_transpiled.js", transpiled.as_bytes());
                             eprintln!("[DEBUG] Wrote chunks/config.js: {}", path_str);
                         }
                         if path_str.contains("property-information/lib/html.js") {
-                            let _ =
-                                std::fs::write("/tmp/html_transpiled.js", transpiled.as_bytes());
                             eprintln!(
                                 "[DEBUG] Wrote html.js transpiled to /tmp/html_transpiled.js"
                             );
                         }
                         if path_str.contains("micromark-util-character/index.js") {
-                            let _ = std::fs::write(
-                                "/tmp/micromark_transpiled.js",
-                                transpiled.as_bytes(),
-                            );
                             eprintln!(
                                 "[DEBUG] Wrote micromark-util-character transpiled, has_export={}",
                                 transpiled.contains("export ")
@@ -5241,6 +5230,10 @@ fn resolve_package_imports(specifier: &str, start_dir: &std::path::Path) -> Opti
     let mut dir = start_dir.to_path_buf();
     loop {
         let pkg_json = dir.join("package.json");
+        // Resolution metadata only: the JSON is parsed for the "imports" map
+        // and never returned to the script. The module this resolves to is
+        // loaded later through the capability-gated `__readFile`, so this
+        // stays ungated like Node's resolver (no --allow-read for import).
         if pkg_json.is_file()
             && let Ok(content) = std::fs::read_to_string(&pkg_json)
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)

@@ -1420,14 +1420,25 @@ pub fn inject_process(
         crate::builtins::code_cache::bootstrap_js(scope, "process-tail", js_src)?;
     }
 
-    // localStorage backing — reads/writes ~/.local/share/3va/localStorage.json
-    // No permission gate: this is the user's own browser-like data store.
+    // localStorage file backing — reads/writes a user-scoped JSON file under
+    // $XDG_DATA_HOME or ~/.local/share/3va. These are script-callable globals,
+    // so they go through the same deny-by-default capability check as every
+    // other filesystem access. (The in-memory `localStorage` global in
+    // web_globals.rs is intentionally ungated; these natives were never wired
+    // to it, but a script can invoke them directly, so they can't be a hole.)
     set_fn(
         scope,
         globals,
         "__localStorageRead",
         |scope: &mut PinScope, _args: FunctionCallbackArguments, mut rv: ReturnValue| {
-            let p = ls_path();
+            let Some(p) = ls_path() else {
+                rv.set(v8::String::new(scope, "{}").unwrap().into());
+                return;
+            };
+            if !env_perms().check(&Capability::FileRead(p.clone())) {
+                throw_permission_denied(scope, "read", &p);
+                return;
+            }
             let content = std::fs::read_to_string(&p).unwrap_or_else(|_| "{}".to_string());
             rv.set(v8::String::new(scope, &content).unwrap().into());
         },
@@ -1437,10 +1448,16 @@ pub fn inject_process(
         globals,
         "__localStorageSave",
         |scope: &mut PinScope, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let Some(p) = ls_path() else {
+                return;
+            };
+            if !env_perms().check(&Capability::FileWrite(p.clone())) {
+                throw_permission_denied(scope, "write", &p);
+                return;
+            }
             let json = args.get(0).to_rust_string_lossy(scope);
-            let p = ls_path();
             if let Some(parent) = p.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                crate::builtins::code_cache::ensure_private_dir(parent);
             }
             let _ = std::fs::write(&p, json.as_bytes());
         },
@@ -1449,14 +1466,25 @@ pub fn inject_process(
     Ok(())
 }
 
-fn ls_path() -> std::path::PathBuf {
-    std::env::var("3VA_LOCALSTORAGE_PATH")
-        .ok()
+fn throw_permission_denied(scope: &mut PinScope, op: &str, p: &std::path::Path) {
+    let msg = format!(
+        "Permission denied: --allow-{op}={} is required",
+        p.display()
+    );
+    let err_str = v8::String::new(scope, &msg).unwrap();
+    let err = v8::Exception::error(scope, err_str);
+    scope.throw_exception(err);
+}
+
+fn ls_path() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("3VA_LOCALSTORAGE_PATH") {
+        return Some(std::path::PathBuf::from(p));
+    }
+    let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| std::path::PathBuf::from(h).join(".local/share/3va/localStorage.json"))
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/3va-localStorage.json"))
+            std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
+        })?;
+    Some(base.join("3va").join("localStorage.json"))
 }

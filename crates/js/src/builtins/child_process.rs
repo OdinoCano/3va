@@ -52,6 +52,51 @@ fn throw_spawn_denied(scope: &mut PinScope<'_, '_>) {
     scope.throw_exception(err);
 }
 
+/// Restrict a child process's environment to the variables the current script
+/// is allowed to read, mirroring the `process.env` filtering done at injection
+/// time. Without this, a script denied `--allow-env` could still read every
+/// host secret by spawning `sh -c 'env'` and reading the child's stdout.
+///
+/// `check_quiet` is deliberate: building an environment probes every host
+/// variable, and recording each miss would swamp the run's denial summary (the
+/// same reason `process.env` uses it). Executable lookup is unaffected —
+/// `std::process::Command` resolves the program against the *parent's* `PATH`,
+/// not the child's environment.
+fn apply_child_env(cmd: &mut std::process::Command, perms: &PermissionState) {
+    cmd.env_clear();
+    // `vars_os`/`to_str` rather than `vars`: a non-UTF-8 value must not panic
+    // the runtime, and a non-UTF-8 name could never be named in an
+    // `EnvVar("...")` grant anyway.
+    for (key, value) in std::env::vars_os() {
+        if let Some(key) = key.to_str()
+            && perms.check_quiet(&Capability::EnvVar(key.to_string()))
+        {
+            cmd.env(key, value);
+        }
+    }
+}
+
+/// `run` arguments for a forked cluster worker: exactly the parent's granted
+/// capabilities, never a superset. The old hardcoded allow-all set
+/// (`--allow-read --allow-write --allow-net --allow-env --allow-child-process
+/// --allow-ffi` plus `--prof --prof-out /tmp/worker-profile.cpuprofile`) let any
+/// script holding only `--allow-child-process` escalate to full fs/net/env/ffi
+/// by forking, and wrote a profile to a fixed world-writable path.
+///
+/// The entry script is read directly by the loader (like `3va run app.js`),
+/// so no implicit read grant is added here.
+fn worker_run_args(perms: &PermissionState, script_path: &str) -> Vec<String> {
+    let mut args = vec!["run".to_string()];
+    args.extend(
+        perms
+            .list_granted()
+            .iter()
+            .map(vvva_permissions::grant_flag),
+    );
+    args.push(script_path.to_string());
+    args
+}
+
 pub fn has_active_children() -> bool {
     child_table()
         .lock()
@@ -83,6 +128,12 @@ pub fn inject_child_process(
 
     let exec_async_fn = v8::Function::builder(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            // SAFETY: `args.data()` is the `v8::External` installed below from
+            // `native_ctx.leak(permissions)` — a pointer to an
+            // `Arc<PermissionState>` owned by the engine's native-context
+            // registry. It lives for the whole engine lifetime and is never
+            // dropped or mutably aliased, so this shared reference is valid for
+            // the duration of the call.
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
                 &*(ptr as *const Arc<PermissionState>)
@@ -121,6 +172,7 @@ pub fn inject_child_process(
             let result = {
                 let mut c = std::process::Command::new(&cmd);
                 c.args(&args_vec);
+                apply_child_env(&mut c, perms);
                 c.output()
             };
 
@@ -156,6 +208,12 @@ pub fn inject_child_process(
 
     let exec_sync_shell_fn = v8::Function::builder(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            // SAFETY: `args.data()` is the `v8::External` installed below from
+            // `native_ctx.leak(permissions)` — a pointer to an
+            // `Arc<PermissionState>` owned by the engine's native-context
+            // registry. It lives for the whole engine lifetime and is never
+            // dropped or mutably aliased, so this shared reference is valid for
+            // the duration of the call.
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
                 &*(ptr as *const Arc<PermissionState>)
@@ -170,9 +228,12 @@ pub fn inject_child_process(
 
             let shell = if cfg!(windows) { "cmd" } else { "sh" };
             let flag = if cfg!(windows) { "/C" } else { "-c" };
-            let result = std::process::Command::new(shell)
-                .args([flag, command.as_str()])
-                .output();
+            let result = {
+                let mut c = std::process::Command::new(shell);
+                c.args([flag, command.as_str()]);
+                apply_child_env(&mut c, perms);
+                c.output()
+            };
 
             match result {
                 Ok(output) => {
@@ -203,6 +264,12 @@ pub fn inject_child_process(
 
     let spawn_sync_exec_fn = v8::Function::builder(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            // SAFETY: `args.data()` is the `v8::External` installed below from
+            // `native_ctx.leak(permissions)` — a pointer to an
+            // `Arc<PermissionState>` owned by the engine's native-context
+            // registry. It lives for the whole engine lifetime and is never
+            // dropped or mutably aliased, so this shared reference is valid for
+            // the duration of the call.
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
                 &*(ptr as *const Arc<PermissionState>)
@@ -231,7 +298,12 @@ pub fn inject_child_process(
                 return;
             }
 
-            let result = std::process::Command::new(&cmd).args(&args_vec).output();
+            let result = {
+                let mut c = std::process::Command::new(&cmd);
+                c.args(&args_vec);
+                apply_child_env(&mut c, perms);
+                c.output()
+            };
 
             match result {
                 Ok(output) => {
@@ -260,6 +332,12 @@ pub fn inject_child_process(
 
     let exec_shell_async_fn = v8::Function::builder(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            // SAFETY: `args.data()` is the `v8::External` installed below from
+            // `native_ctx.leak(permissions)` — a pointer to an
+            // `Arc<PermissionState>` owned by the engine's native-context
+            // registry. It lives for the whole engine lifetime and is never
+            // dropped or mutably aliased, so this shared reference is valid for
+            // the duration of the call.
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
                 &*(ptr as *const Arc<PermissionState>)
@@ -280,9 +358,10 @@ pub fn inject_child_process(
             let result = {
                 let shell = if cfg!(windows) { "cmd" } else { "sh" };
                 let flag = if cfg!(windows) { "/C" } else { "-c" };
-                std::process::Command::new(shell)
-                    .args([flag, &command])
-                    .output()
+                let mut c = std::process::Command::new(shell);
+                c.args([flag, &command]);
+                apply_child_env(&mut c, perms);
+                c.output()
             };
 
             match result {
@@ -317,6 +396,12 @@ pub fn inject_child_process(
 
     let spawn_with_input_fn = v8::Function::builder(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            // SAFETY: `args.data()` is the `v8::External` installed below from
+            // `native_ctx.leak(permissions)` — a pointer to an
+            // `Arc<PermissionState>` owned by the engine's native-context
+            // registry. It lives for the whole engine lifetime and is never
+            // dropped or mutably aliased, so this shared reference is valid for
+            // the duration of the call.
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
                 &*(ptr as *const Arc<PermissionState>)
@@ -360,12 +445,13 @@ pub fn inject_child_process(
             // native fn — same reasoning, no block_in_place needed.
             let result = (|| {
                 use std::io::Write;
-                let mut child = std::process::Command::new(&cmd)
-                    .args(&args_vec)
+                let mut c = std::process::Command::new(&cmd);
+                c.args(&args_vec)
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()?;
+                    .stderr(std::process::Stdio::piped());
+                apply_child_env(&mut c, perms);
+                let mut child = c.spawn()?;
                 if !stdin_data.is_empty() {
                     if let Some(mut stdin) = child.stdin.take() {
                         let _ = stdin.write_all(stdin_data.as_bytes());
@@ -406,6 +492,12 @@ pub fn inject_child_process(
 
     let spawn_sync_with_stdin_fn = v8::Function::builder(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            // SAFETY: `args.data()` is the `v8::External` installed below from
+            // `native_ctx.leak(permissions)` — a pointer to an
+            // `Arc<PermissionState>` owned by the engine's native-context
+            // registry. It lives for the whole engine lifetime and is never
+            // dropped or mutably aliased, so this shared reference is valid for
+            // the duration of the call.
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
                 &*(ptr as *const Arc<PermissionState>)
@@ -439,13 +531,13 @@ pub fn inject_child_process(
                 return;
             }
 
-            use std::io::Write;
-            let mut child = std::process::Command::new(&cmd)
-                .args(&args_vec)
+            let mut c = std::process::Command::new(&cmd);
+            c.args(&args_vec)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn();
+                .stderr(std::process::Stdio::piped());
+            apply_child_env(&mut c, perms);
+            let mut child = c.spawn();
 
             match child {
                 Ok(ref mut c) => {
@@ -492,6 +584,12 @@ pub fn inject_child_process(
     // ── __spawnCreate(cmd, args) → child_id ──────────────────────────────────
     let spawn_create_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            // SAFETY: `args.data()` is the `v8::External` installed below from
+            // `native_ctx.leak(permissions)` — a pointer to an
+            // `Arc<PermissionState>` owned by the engine's native-context
+            // registry. It lives for the whole engine lifetime and is never
+            // dropped or mutably aliased, so this shared reference is valid for
+            // the duration of the call.
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
                 &*(ptr as *const Arc<PermissionState>)
@@ -535,7 +633,23 @@ pub fn inject_child_process(
             #[cfg(unix)]
             let (pipe_ok, read_fd, write_fd) = {
                 let mut pipe_fds = [-1i32; 2];
-                let ok = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
+                // SAFETY: `pipe_fds` is a valid, properly sized two-element
+                // array; `pipe` writes exactly two descriptors into it.
+                // `pipe2(O_CLOEXEC)` is atomic: with plain `pipe` + `fcntl`, a
+                // concurrent spawn on another thread could fork in between and
+                // inherit the parent's read end. The child's dup2'd fd 3 clears
+                // its own CLOEXEC explicitly in `pre_exec` below.
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                let ok = unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0;
+                // ponytail: no pipe2 on macOS; non-atomic pipe+fcntl leaves a tiny race window
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                let ok = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0 && {
+                    for fd in pipe_fds {
+                        // SAFETY: `fd` was just returned by pipe(2) and is open.
+                        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+                    }
+                    true
+                };
                 (ok, pipe_fds[0], pipe_fds[1])
             };
             #[cfg(not(unix))]
@@ -544,12 +658,22 @@ pub fn inject_child_process(
             #[cfg(unix)]
             let child_result = {
                 use std::os::unix::process::CommandExt;
+                let mut command = std::process::Command::new(&cmd);
+                command
+                    .args(&arg_vec)
+                    .stdin(stdin_mode)
+                    .stdout(stdout_mode)
+                    .stderr(std::process::Stdio::inherit());
+                apply_child_env(&mut command, perms);
+                // SAFETY: `pre_exec` runs in the forked child before exec. Its
+                // closure only calls async-signal-safe libc fns (dup2/close/
+                // fcntl) on descriptors inherited from this same spawn: it
+                // duplicates the pipe write end onto fd 3, closes the pipe's
+                // originals, and clears CLOEXEC on fd 3 so the child keeps the
+                // control channel. It allocates nothing and cannot fail the
+                // exec (always returns Ok).
                 unsafe {
-                    std::process::Command::new(&cmd)
-                        .args(&arg_vec)
-                        .stdin(stdin_mode)
-                        .stdout(stdout_mode)
-                        .stderr(std::process::Stdio::inherit())
+                    command
                         .pre_exec(move || {
                             if pipe_ok && write_fd >= 0 {
                                 // dup write end to fd 3, close originals
@@ -568,16 +692,24 @@ pub fn inject_child_process(
                 }
             };
             #[cfg(not(unix))]
-            let child_result = std::process::Command::new(&cmd)
-                .args(&arg_vec)
-                .stdin(stdin_mode)
-                .stdout(stdout_mode)
-                .stderr(std::process::Stdio::inherit())
-                .spawn();
+            let child_result = {
+                let mut command = std::process::Command::new(&cmd);
+                command
+                    .args(&arg_vec)
+                    .stdin(stdin_mode)
+                    .stdout(stdout_mode)
+                    .stderr(std::process::Stdio::inherit());
+                apply_child_env(&mut command, perms);
+                command.spawn()
+            };
 
             // In the parent: close write end; spawn thread to read from read end.
             #[cfg(unix)]
             if pipe_ok && write_fd >= 0 {
+                // SAFETY: `write_fd` is the open write end returned by the
+                // `pipe(2)` above. It was duplicated into the child (fd 3) and
+                // is not used anywhere else, so closing it here cannot
+                // double-close.
                 unsafe {
                     libc::close(write_fd);
                 }
@@ -633,6 +765,11 @@ pub fn inject_child_process(
                         std::thread::spawn(move || {
                             use std::io::Read;
                             use std::os::unix::io::FromRawFd;
+                            // SAFETY: `read_fd` is the open read end returned
+                            // by the `pipe(2)` above, guarded by
+                            // `pipe_ok && read_fd >= 0`. Ownership is moved
+                            // into this `File`, which closes it exactly once
+                            // when the thread ends; no other path closes it.
                             let mut f = unsafe { std::fs::File::from_raw_fd(read_fd) };
                             let mut tmp = [0u8; 4096];
                             loop {
@@ -799,6 +936,13 @@ pub fn inject_child_process(
                 && !c.exited.load(Ordering::SeqCst)
             {
                 #[cfg(unix)]
+                // SAFETY: `c.pid` came from `Child::id()` and names a live
+                // child. `kill` takes a plain pid, so a child that exits and
+                // whose pid is recycled between the `exited` check and this
+                // call could be signalled instead; the window is inherent to
+                // pid-based signalling (closing it needs pidfd). The
+                // `!exited` check keeps it as a best-effort kill of the child
+                // we spawned, never a deliberate signal to an unrelated pid.
                 unsafe {
                     libc::kill(c.pid as libc::pid_t, libc::SIGKILL);
                 }
@@ -879,6 +1023,12 @@ pub fn inject_child_process(
     // __clusterFork(script_path, worker_id) → worker_id or -1 on error
     let cluster_fork_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            // SAFETY: `args.data()` is the `v8::External` installed below from
+            // `native_ctx.leak(permissions)` — a pointer to an
+            // `Arc<PermissionState>` owned by the engine's native-context
+            // registry. It lives for the whole engine lifetime and is never
+            // dropped or mutably aliased, so this shared reference is valid for
+            // the duration of the call.
             let perms = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
                 &*(ptr as *const Arc<PermissionState>)
@@ -898,22 +1048,11 @@ pub fn inject_child_process(
             let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("3va"));
 
             let mut cmd = std::process::Command::new(&exe);
-            cmd.args([
-                "run",
-                "--allow-read",
-                "--allow-write",
-                "--allow-net",
-                "--allow-env",
-                "--allow-child-process",
-                "--allow-ffi",
-                "--prof",
-                "--prof-out",
-                "/tmp/worker-profile.cpuprofile",
-                &script_path,
-            ])
-            .env("NODE_UNIQUE_ID", worker_id.to_string())
-            .env("NODE_WORKER_ID", worker_id.to_string())
-            .env("CLUSTER_WORKER", "1");
+            cmd.args(worker_run_args(perms, &script_path));
+            apply_child_env(&mut cmd, perms);
+            cmd.env("NODE_UNIQUE_ID", worker_id.to_string())
+                .env("NODE_WORKER_ID", worker_id.to_string())
+                .env("CLUSTER_WORKER", "1");
             for (k, v) in &extra_env {
                 cmd.env(k, v);
             }
@@ -1472,13 +1611,11 @@ pub fn inject_child_process(
                 fork: function(modulePath, args, opts) {
                     if (!Array.isArray(args)) { opts = args || {}; args = []; }
                     opts = opts || {};
-                    var execArgv = opts.execArgv || [];
-                    var execPath = process.execPath || 'node';
-                    var fullArgs = execArgv.concat([modulePath]).concat(args);
-                    var is3va = execPath.indexOf('3va') !== -1;
-                    if (is3va) fullArgs = ['run', '--allow-read', '--allow-write', '--allow-net'].concat(fullArgs);
 
-                    // Use cluster IPC mechanism for fork
+                    // The worker's capabilities are derived natively from the
+                    // parent's grants (see `worker_run_args`); nothing here may
+                    // add flags, or `fork` becomes a privilege-escalation
+                    // primitive.
                     var forkId = ++globalThis.__forkIdCounter || (globalThis.__forkIdCounter = 0);
                     // Pass opts.env as JSON so the child inherits custom env vars
                     var extraEnv = (opts.env && typeof opts.env === 'object') ? opts.env : {};
@@ -1526,4 +1663,53 @@ pub fn inject_child_process(
     let _ = crate::builtins::code_cache::bootstrap_js(scope, "child_process", js_code);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::worker_run_args;
+    use std::path::PathBuf;
+    use vvva_permissions::{Capability, PermissionState};
+
+    // A forked worker must never be handed more than the parent holds: the old
+    // command hardcoded --allow-read/write/net/env/child-process/ffi, so a
+    // script with only --allow-child-process escalated to all of them.
+    #[test]
+    fn worker_inherits_only_the_parents_capabilities() {
+        let perms = PermissionState::new();
+        perms.grant(Capability::SpawnProcess);
+
+        let args = worker_run_args(&perms, "/app/worker.js");
+
+        assert_eq!(args.first().map(String::as_str), Some("run"));
+        assert_eq!(args.last().map(String::as_str), Some("/app/worker.js"));
+        assert!(args.contains(&"--allow-child-process".to_string()));
+        for superset in ["--allow-read", "--allow-write", "--allow-net"] {
+            assert!(
+                !args.iter().any(|a| a.starts_with(superset)),
+                "worker must not gain {superset}: {args:?}"
+            );
+        }
+        assert!(!args.iter().any(|a| a.starts_with("--allow-env")));
+        assert!(!args.iter().any(|a| a.starts_with("--allow-ffi")));
+    }
+
+    #[test]
+    fn worker_argv_carries_grants_and_no_fixed_profile_path() {
+        let perms = PermissionState::new();
+        perms.grant(Capability::FileRead(PathBuf::from("/app")));
+        perms.grant(Capability::EnvVar("NODE_ENV".to_string()));
+
+        let args = worker_run_args(&perms, "/app/worker.js");
+
+        assert!(args.iter().any(|a| a == "--allow-read=/app"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--allow-env=NODE_ENV"), "{args:?}");
+        // ESCAPE-01 class: a fixed, symlink-amplifiable /tmp path must not be
+        // forced on every forked worker.
+        assert!(
+            !args.iter().any(|a| a.contains("worker-profile.cpuprofile")),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|a| a == "--prof"), "{args:?}");
+    }
 }

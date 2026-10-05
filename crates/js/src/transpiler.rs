@@ -811,7 +811,6 @@ pub fn transpile_to_cjs_with_path(source: &str, jsx: bool, file_path: Option<&st
             oxc_out.is_ok(),
             oxc_content.contains("collectErrorMetadata")
         );
-        let _ = std::fs::write("/tmp/utils_oxc_out.js", oxc_content.as_bytes());
     }
     // Debug: check OXC output before consuming oxc_out
     let debug_config_js = source.len() > 50000
@@ -819,16 +818,13 @@ pub fn transpile_to_cjs_with_path(source: &str, jsx: bool, file_path: Option<&st
         && source.contains("import.meta.url");
     if debug_config_js {
         let oxc_ok = oxc_out.is_ok();
-        let oxc_content = oxc_out.as_deref().unwrap_or("ERR");
         let count_replaced = replaced.matches("__vvva_meta_url__").count();
         let count_meta_in_replaced = replaced.matches("import.meta.url").count();
         eprintln!(
             "[DEBUG] transpile_to_cjs: in replaced: __vvva_meta_url__={}, import.meta.url={}, OXC ok={}",
             count_replaced, count_meta_in_replaced, oxc_ok
         );
-        let _ = std::fs::write("/tmp/config_replaced.js", replaced.as_bytes());
         eprintln!("[DEBUG] Wrote replaced to /tmp/config_replaced.js");
-        let _ = std::fs::write("/tmp/config_oxc_out.js", oxc_content.as_bytes());
         eprintln!("[DEBUG] Wrote OXC output to /tmp/config_oxc_out.js");
     }
     let out = oxc_out.unwrap_or_else(|_| {
@@ -866,7 +862,6 @@ pub fn transpile_to_cjs_with_path(source: &str, jsx: bool, file_path: Option<&st
         );
     }
     if is_clack {
-        let _ = std::fs::write("/tmp/clack_transpiled.js", out.as_bytes());
         eprintln!(
             "[CLACK] final out len={} has_import={}",
             out.len(),
@@ -884,14 +879,12 @@ pub fn transpile_to_cjs_with_path(source: &str, jsx: bool, file_path: Option<&st
         out
     };
     if debug_config_js {
-        let _ = std::fs::write("/tmp/config_final.js", out.as_bytes());
         eprintln!(
             "[DEBUG] Wrote final config to /tmp/config_final.js len={}",
             out.len()
         );
     }
     if source.contains("assertWranglerVersion") {
-        let _ = std::fs::write("/tmp/cloudflare_plugin_out.js", out.as_bytes());
         let still_has_tla = out.contains("\nawait ") || out.starts_with("await ");
         eprintln!(
             "[TLA-CF] stripped: still_has_tla={} len={}",
@@ -900,17 +893,12 @@ pub fn transpile_to_cjs_with_path(source: &str, jsx: bool, file_path: Option<&st
         );
     }
     if source.contains("asciiAtext") && source.contains("regexCheck") {
-        let _ = std::fs::write("/tmp/mmark_transpiled.js", out.as_bytes());
         eprintln!(
             "[MMARK] transpiled: has_bare_export={}",
             out.contains("export ")
         );
     }
     if source.contains("vite-plugin-markdown") || source.contains("createMarkdownProcessor") {
-        if out.contains("export ") {
-            let _ = std::fs::write("/tmp/vmd_fail_transpiled.js", out.as_bytes());
-            let _ = std::fs::write("/tmp/vmd_fail_source.js", source.as_bytes());
-        }
         eprintln!(
             "[VMD] transpiled: has_bare_export={} len={}",
             out.contains("export "),
@@ -918,14 +906,12 @@ pub fn transpile_to_cjs_with_path(source: &str, jsx: bool, file_path: Option<&st
         );
     }
     if source.contains("createContentTypesGenerator") {
-        let _ = std::fs::write("/tmp/tg_transpiled.js", out.as_bytes());
         eprintln!(
             "[TG] transpiled: has_bare_export={}",
             out.contains("export ")
         );
     }
     if source.contains("interpreterImpl") {
-        let _ = std::fs::write("/tmp/composable_filters_transpiled.js", out.as_bytes());
         eprintln!(
             "[CF] has_export={} len={}",
             out.contains("export "),
@@ -936,14 +922,12 @@ pub fn transpile_to_cjs_with_path(source: &str, jsx: bool, file_path: Option<&st
         && source.contains("createContainer")
         && !source.contains("createContainerWithAutomaticRestart")
     {
-        let _ = std::fs::write("/tmp/container_transpiled.js", out.as_bytes());
         eprintln!("[CONT] transpiled container.js len={}", out.len());
     }
     let _debug_tg = source.contains("createContentTypesGenerator");
     if _debug_tg {
         let oxc_out2 = try_transpile_inner(&replaced, jsx, true, None);
         let oxc_str = oxc_out2.as_deref().unwrap_or("OXC_FAILED");
-        let _ = std::fs::write("/tmp/tg_oxc_out.js", oxc_str.as_bytes());
         eprintln!(
             "[TG2] OXC ok={} has_export={}",
             oxc_out2.is_ok(),
@@ -1034,7 +1018,6 @@ pub fn transpile_to_cjs_with_path(source: &str, jsx: bool, file_path: Option<&st
         if source.len() > 50000 && source.contains("packages.ts") {
             let after = result.matches("import.meta").count();
             eprintln!("[DEBUG] Second replace_import_meta: after={}", after);
-            let _ = std::fs::write("/tmp/config_final.js", result.as_bytes());
         }
         result
     } else {
@@ -1323,7 +1306,6 @@ pub fn static_esm_to_cjs(source: &str) -> String {
         && source.contains("renderErrorMarkdown");
     let debug_tg = source.contains("createContentTypesGenerator") && source.contains("export {");
     if debug_tg {
-        let _ = std::fs::write("/tmp/tg_sesmtocjs_input.js", source.as_bytes());
         eprintln!(
             "[TG-SESM] INPUT: len={}, has_export_brace={}",
             source.len(),
