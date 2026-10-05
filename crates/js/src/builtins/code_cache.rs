@@ -15,6 +15,7 @@
 //! `CachedData::rejected()`, checked below as a second line of defense).
 
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use v8::script_compiler::{self, CompileOptions, NoCacheReason};
 
 fn cache_dir() -> Option<std::path::PathBuf> {
@@ -186,10 +187,7 @@ pub fn compile_and_run_cached(
     if let Some(path) = &path
         && let Some(cache) = unbound.create_code_cache()
     {
-        if let Some(dir) = path.parent() {
-            ensure_private_dir(dir);
-        }
-        let _ = std::fs::write(path, &**cache);
+        let _ = write_cache_file(path, &cache);
     }
 
     let script = unbound.bind_to_current_context(scope);
@@ -199,9 +197,86 @@ pub fn compile_and_run_cached(
     Ok(())
 }
 
+/// Writes `bytes` to the cache at `path` without following a symlink an
+/// attacker may have planted at that predictable location. The data is written
+/// to a fresh, exclusively-created temp file in the same directory and then
+/// renamed over the target: `rename` replaces a symlink instead of writing
+/// through it, and `create_new` refuses a pre-planted temp path. The file is
+/// created owner-only (0600) so cached bytecode is not exposed to other local
+/// users. Failure is non-fatal — the caller treats the cache as a pure speed
+/// optimization.
+fn write_cache_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    ensure_private_dir(dir);
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    // A concurrent process may already be writing this cache entry; leave it.
+    let Ok(mut file) = opts.open(&tmp) else {
+        return Ok(());
+    };
+    if file.write_all(bytes).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(());
+    }
+    drop(file);
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ensure_private_dir;
+    use super::{ensure_private_dir, write_cache_file};
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_write_does_not_follow_symlink_at_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"SENTINEL").unwrap();
+        let cache = dir.path().join("require-core-deadbeef.v8cache");
+        std::os::unix::fs::symlink(&victim, &cache).unwrap();
+
+        write_cache_file(&cache, b"CACHEDATA").unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"SENTINEL");
+        assert!(
+            !std::fs::symlink_metadata(&cache)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the planted symlink must be replaced by a regular file"
+        );
+        assert_eq!(std::fs::read(&cache).unwrap(), b"CACHEDATA");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_write_refuses_planted_temp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"SENTINEL").unwrap();
+        let cache = dir.path().join("x.v8cache");
+        let tmp = cache.with_extension(format!("tmp-{}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+
+        write_cache_file(&cache, b"CACHEDATA").unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"SENTINEL");
+        assert!(
+            std::fs::symlink_metadata(&cache).is_err(),
+            "a cache entry must not be produced through a planted temp symlink"
+        );
+    }
 
     #[test]
     fn cache_dir_is_created_private() {
