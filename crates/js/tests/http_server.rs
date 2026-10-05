@@ -430,9 +430,13 @@ async fn keep_alive_connection_closed_after_max_requests_per_conn() {
         let _ = stream
             .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             .await;
+        // The server closing is either a clean EOF or, when the 4th request
+        // reached it before it closed (unread data at close → RST), a
+        // connection reset. Both mean "closed"; only a response or a hang is
+        // a failure.
         matches!(
             tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await,
-            Ok(Ok(0))
+            Ok(Ok(0)) | Ok(Err(_))
         )
     })
     .await;
