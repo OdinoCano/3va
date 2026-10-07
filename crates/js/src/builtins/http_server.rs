@@ -545,7 +545,7 @@ fn is_valid_header_value(value: &str) -> bool {
 }
 
 #[derive(Debug)]
-struct ParsedRequest {
+pub struct ParsedRequest {
     method: String,
     path: String,
     headers: Vec<(String, String)>,
@@ -558,7 +558,7 @@ struct ParsedRequest {
 /// framing); `Silent` covers timeouts/EOF/IO where the existing behaviour —
 /// dropping the connection without a response — is kept.
 #[derive(Debug)]
-enum ParseError {
+pub enum ParseError {
     Respond(u16, &'static str),
     // Message kept for tests/diagnostics; production drops the connection
     // without logging, hence dead_code.
@@ -685,7 +685,7 @@ where
     }
 }
 
-async fn parse_request<R>(
+pub async fn parse_request<R>(
     reader: &mut R,
     header_timeout: std::time::Duration,
     body_timeout: std::time::Duration,

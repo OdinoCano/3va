@@ -1,0 +1,1 @@
+:nick!u@h PRIVMSG #chan :hello world

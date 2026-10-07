@@ -125,7 +125,7 @@ fn connect_tcp_with_timeout(
     Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "connect timed out")))
 }
 
-fn encode_remaining_length(len: usize) -> Vec<u8> {
+pub fn encode_remaining_length(len: usize) -> Vec<u8> {
     let mut result = Vec::new();
     let mut x = len;
     loop {
