@@ -62,9 +62,19 @@ impl PackageFetcher {
         // Canonical dest is used to verify no entry escapes the package directory.
         let dest_canonical = std::fs::canonicalize(dest).unwrap_or_else(|_| dest.clone());
         let mut total_declared: u64 = 0;
+        let mut entries_seen: u64 = 0;
 
         for entry in archive.entries()? {
             let mut entry = entry?;
+            // Count every entry before any early `continue`: the byte caps do
+            // not bound a bomb made of millions of zero-byte tar headers.
+            entries_seen += 1;
+            if entries_seen > lim.max_entries {
+                anyhow::bail!(
+                    "package extraction aborted: more than {} entries (possible decompression bomb)",
+                    lim.max_entries
+                );
+            }
             let path = entry.path()?;
 
             // npm tarballs always have a "package/" prefix — strip it.
@@ -352,6 +362,7 @@ mod tests {
         ExtractLimits {
             max_file_bytes: file,
             max_total_bytes: total,
+            max_entries: u64::MAX,
         }
     }
 
@@ -381,6 +392,31 @@ mod tests {
             .unwrap_err();
         assert!(
             err.to_string().contains("total cap"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_aborts_when_entry_count_exceeds_cap() {
+        let entries: Vec<(String, Vec<u8>)> = (0..8)
+            .map(|i| (format!("package/f{i}.txt"), Vec::new()))
+            .collect();
+        let refs: Vec<(&str, Vec<u8>)> = entries
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.clone()))
+            .collect();
+        let tgz = make_tgz(&refs);
+        let dest = tempfile::tempdir().unwrap();
+        let lim = ExtractLimits {
+            max_file_bytes: u64::MAX,
+            max_total_bytes: u64::MAX,
+            max_entries: 4,
+        };
+        let err = test_fetcher()
+            .extract_with_limits(&tgz, &dest.path().to_path_buf(), lim)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("more than 4 entries"),
             "unexpected error: {err}"
         );
     }

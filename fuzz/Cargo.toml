@@ -21,6 +21,26 @@ path = "../crates/permissions"
 [dependencies.vvva_pm]
 path = "../crates/pm"
 
+[dependencies.vvva_js]
+path = "../crates/js"
+
+# The HTTP target drives the real async `parse_request`; the current-thread
+# runtime only needs timers and buffered reads over an in-memory slice.
+[dependencies.tokio]
+version = "1"
+features = ["rt", "time", "io-util"]
+
+[dependencies.serde_json]
+version = "1"
+
+[dependencies.tempfile]
+version = "3"
+
+# Initial seed corpora for the targets added by the 2026-10 audit live in
+# `fuzz/seeds/<target>/` (tracked), because the default `fuzz/corpus/` is
+# gitignored. Use them with:
+#     cargo fuzz run --target x86_64-unknown-linux-gnu <target> fuzz/seeds/<target>
+
 # The fuzz crate is its own workspace (required by cargo-fuzz), so it does
 # not inherit [patch.crates-io] from the root Cargo.toml. Re-declare the
 # same patches so the dependency graph here matches the one the root uses:
@@ -70,6 +90,62 @@ bench = false
 [[bin]]
 name = "fuzz_js_transpiler"
 path = "fuzz_targets/fuzz_js_transpiler.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http_request"
+path = "fuzz_targets/fuzz_http_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pm_tarball"
+path = "fuzz_targets/fuzz_pm_tarball.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pm_package_json"
+path = "fuzz_targets/fuzz_pm_package_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_imap"
+path = "fuzz_targets/fuzz_imap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mqtt"
+path = "fuzz_targets/fuzz_mqtt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_irc"
+path = "fuzz_targets/fuzz_irc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pop3"
+path = "fuzz_targets/fuzz_pop3.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ftp"
+path = "fuzz_targets/fuzz_ftp.rs"
 test = false
 doc = false
 bench = false

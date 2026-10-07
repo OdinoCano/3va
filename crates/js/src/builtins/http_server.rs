@@ -545,7 +545,7 @@ fn is_valid_header_value(value: &str) -> bool {
 }
 
 #[derive(Debug)]
-struct ParsedRequest {
+pub struct ParsedRequest {
     method: String,
     path: String,
     headers: Vec<(String, String)>,
@@ -558,7 +558,7 @@ struct ParsedRequest {
 /// framing); `Silent` covers timeouts/EOF/IO where the existing behaviour —
 /// dropping the connection without a response — is kept.
 #[derive(Debug)]
-enum ParseError {
+pub enum ParseError {
     Respond(u16, &'static str),
     // Message kept for tests/diagnostics; production drops the connection
     // without logging, hence dead_code.
@@ -685,7 +685,7 @@ where
     }
 }
 
-async fn parse_request<R>(
+pub async fn parse_request<R>(
     reader: &mut R,
     header_timeout: std::time::Duration,
     body_timeout: std::time::Duration,
@@ -752,21 +752,57 @@ where
             )));
         }
 
-        if let Some(colon) = trimmed.find(':') {
-            let name = trimmed[..colon].trim().to_lowercase();
-            let value = trimmed[colon + 1..].trim().to_string();
-            match name.as_str() {
-                "content-length" => {
-                    content_length = value.parse::<usize>().unwrap_or(0).min(max_body);
-                    has_content_length = true;
-                    headers.push((name, content_length.to_string()));
+        // RFC 9112 §5: obsolete line folding (a continuation line starting with
+        // SP/HTAB) and whitespace between the field-name and ':' are framing
+        // vectors when an upstream proxy unfolds/parses them differently.
+        if line.starts_with(' ') || line.starts_with('\t') {
+            return Err(ParseError::Respond(400, "Bad Request"));
+        }
+        let Some(colon) = trimmed.find(':') else {
+            return Err(ParseError::Respond(400, "Bad Request"));
+        };
+        let raw_name = &trimmed[..colon];
+        if raw_name.is_empty() || raw_name.bytes().any(|b| b == b' ' || b == b'\t') {
+            return Err(ParseError::Respond(400, "Bad Request"));
+        }
+        let name = raw_name.to_ascii_lowercase();
+        let value = trimmed[colon + 1..].trim().to_string();
+        match name.as_str() {
+            "content-length" => {
+                // A non-digit or overflowing value is a framing error; treating
+                // it as 0 (or as the last of several values) is a request
+                // smuggling vector against an upstream proxy (RFC 9112 §6.3).
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(ParseError::Respond(400, "Bad Request"));
                 }
-                "transfer-encoding" => {
-                    transfer_encoding = Some(value.to_lowercase());
-                    headers.push((name, value));
+                let Ok(parsed) = value.parse::<usize>() else {
+                    return Err(ParseError::Respond(413, "Payload Too Large"));
+                };
+                if has_content_length && parsed != content_length {
+                    return Err(ParseError::Respond(400, "Bad Request"));
                 }
-                _ => headers.push((name, value)),
+                // A body larger than the server accepts must be refused, not
+                // silently truncated: the unread remainder would be parsed as
+                // the next request on the connection.
+                if parsed > max_body {
+                    return Err(ParseError::Respond(413, "Payload Too Large"));
+                }
+                content_length = parsed;
+                has_content_length = true;
+                headers.push((name, content_length.to_string()));
             }
+            "transfer-encoding" => {
+                let lower = value.to_ascii_lowercase();
+                if transfer_encoding
+                    .as_deref()
+                    .is_some_and(|prev| prev != lower)
+                {
+                    return Err(ParseError::Respond(400, "Bad Request"));
+                }
+                transfer_encoding = Some(lower);
+                headers.push((name, value));
+            }
+            _ => headers.push((name, value)),
         }
     }
 
@@ -3042,6 +3078,109 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(ParseError::Respond(501, _))));
+    }
+
+    // ── hostile framing (smuggling) ───────────────────────────────────────
+
+    /// One raw request through `parse_request` with the given body cap.
+    async fn parse_raw(req: &[u8], max_body: usize) -> Result<ParsedRequest, ParseError> {
+        let (listener, mut client) = loopback_pair().await;
+        let req = req.to_vec();
+        tokio::spawn(async move {
+            let _ = client.write_all(&req).await;
+        });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server_stream);
+        parse_request(
+            &mut reader,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            100,
+            16_384,
+            max_body,
+            0,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn invalid_content_length_rejected_with_400() {
+        let result = parse_raw(
+            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5x\r\n\r\n",
+            0,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ParseError::Respond(400, _))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_length_beyond_the_limit_is_refused_not_truncated() {
+        // Declares more than the server accepts: it must be refused (413), not
+        // silently truncated, or the unread tail reframes as a second request.
+        let result = parse_raw(
+            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n",
+            10,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ParseError::Respond(413, _))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_duplicate_content_length_rejected_with_400() {
+        let result = parse_raw(
+            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n",
+            0,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ParseError::Respond(400, _))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn whitespace_before_colon_rejected_with_400() {
+        let result = parse_raw(
+            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length : 5\r\n\r\n",
+            0,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ParseError::Respond(400, _))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn obsolete_line_folding_rejected_with_400() {
+        let result = parse_raw(
+            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            0,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ParseError::Respond(400, _))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_duplicate_transfer_encoding_rejected_with_400() {
+        let result = parse_raw(
+            b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            0,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ParseError::Respond(400, _))),
+            "{result:?}"
+        );
     }
 
     // ── upgrade bridge ────────────────────────────────────────────────────

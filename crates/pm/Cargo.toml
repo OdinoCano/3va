@@ -21,11 +21,9 @@ fips = [
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-toml.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-vvva_permissions = { version = "2.12.0", path = "../permissions" }
 reqwest = { version = "0.12", features = ["json", "gzip"] }
 sha2.workspace = true
 base64.workspace = true

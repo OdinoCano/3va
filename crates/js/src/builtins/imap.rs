@@ -315,7 +315,7 @@ impl ImapStateInner {
     }
 }
 
-fn parse_mailbox_list(response: &[String]) -> Vec<String> {
+pub fn parse_mailbox_list(response: &[String]) -> Vec<String> {
     // Every slice below uses `.get(range)` instead of `line[range]` — a
     // malicious/malformed IMAP server response (e.g. `)` appearing before
     // `(`, or a mailbox name whose bytes land on a UTF-8 char boundary the

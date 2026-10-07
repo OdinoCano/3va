@@ -1,0 +1,2 @@
+* OK LIST completed
+* LIST (\HasNoChildren) "/" "INBOX"
