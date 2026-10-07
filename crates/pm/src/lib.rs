@@ -1798,11 +1798,17 @@ const MAX_TARBALL_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 const MAX_EXTRACTED_FILE_BYTES: u64 = 512 * 1024 * 1024;
 /// Largest combined payload a single tarball may declare.
 const MAX_EXTRACTED_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Largest number of entries any package tarball may contain. The byte caps
+/// above do NOT bound this: gzip packs empty tar headers at ~6 bytes each, so a
+/// 1 GiB download can otherwise materialize hundreds of millions of files and
+/// exhaust the inode table. A real package is four figures at most.
+const MAX_EXTRACTED_ENTRIES: u64 = 100_000;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExtractLimits {
     pub max_file_bytes: u64,
     pub max_total_bytes: u64,
+    pub max_entries: u64,
 }
 
 impl Default for ExtractLimits {
@@ -1810,6 +1816,7 @@ impl Default for ExtractLimits {
         Self {
             max_file_bytes: MAX_EXTRACTED_FILE_BYTES,
             max_total_bytes: MAX_EXTRACTED_TOTAL_BYTES,
+            max_entries: MAX_EXTRACTED_ENTRIES,
         }
     }
 }
@@ -1979,9 +1986,20 @@ fn extract_tarball_with_limits(
     // does not reject those.
     let dest_canonical = std::fs::canonicalize(dest).unwrap_or_else(|_| dest.clone());
     let mut total_declared: u64 = 0;
+    let mut entries_seen: u64 = 0;
 
     for entry in archive.entries()? {
         let mut entry = entry?;
+        // Count every entry — files, dirs and skipped symlinks alike — before
+        // any early `continue`: the per-file/byte caps can't see a bomb made of
+        // millions of zero-byte headers.
+        entries_seen += 1;
+        if entries_seen > lim.max_entries {
+            anyhow::bail!(
+                "package extraction aborted: more than {} entries (possible decompression bomb)",
+                lim.max_entries
+            );
+        }
         let path = entry.path()?;
         // npm tarballs have a leading "package/" directory — skip it
         let cleaned: PathBuf = path.iter().skip(1).collect();
@@ -5661,6 +5679,7 @@ mod tests {
         let lim = ExtractLimits {
             max_file_bytes: 1024,
             max_total_bytes: u64::MAX,
+            max_entries: u64::MAX,
         };
         let err = extract_tarball_with_limits(&tgz, &dest.path().to_path_buf(), lim).unwrap_err();
         assert!(
@@ -5679,12 +5698,41 @@ mod tests {
         let lim = ExtractLimits {
             max_file_bytes: 2048,
             max_total_bytes: 4095,
+            max_entries: u64::MAX,
         };
         let err = extract_tarball_with_limits(&tgz, &dest.path().to_path_buf(), lim).unwrap_err();
         assert!(
             err.to_string().contains("total cap"),
             "unexpected error: {err}"
         );
+    }
+
+    // A decompression bomb of many zero-byte entries passes the byte caps
+    // (their declared total is 0) but must be stopped by the entry cap, or a
+    // small download can exhaust the inode table.
+    #[test]
+    fn extract_tarball_rejects_too_many_entries() {
+        let entries: Vec<(String, Vec<u8>)> = (0..8)
+            .map(|i| (format!("package/f{i}.txt"), Vec::new()))
+            .collect();
+        let refs: Vec<(&str, Vec<u8>)> = entries
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.clone()))
+            .collect();
+        let tgz = make_tgz(&refs);
+        let dest = tempfile::tempdir().unwrap();
+        let lim = ExtractLimits {
+            max_file_bytes: u64::MAX,
+            max_total_bytes: u64::MAX,
+            max_entries: 4,
+        };
+        let err = extract_tarball_with_limits(&tgz, &dest.path().to_path_buf(), lim).unwrap_err();
+        assert!(
+            err.to_string().contains("more than 4 entries"),
+            "unexpected error: {err}"
+        );
+        // The cap keeps the bomb from materializing the rest.
+        assert!(std::fs::read_dir(dest.path()).unwrap().count() <= 4);
     }
 
     #[test]
@@ -5695,6 +5743,7 @@ mod tests {
         let lim = ExtractLimits {
             max_file_bytes: MAX_EXTRACTED_FILE_BYTES,
             max_total_bytes: MAX_EXTRACTED_TOTAL_BYTES,
+            max_entries: MAX_EXTRACTED_ENTRIES,
         };
         extract_tarball_with_limits(&tgz, &dest.path().to_path_buf(), lim).unwrap();
         let written = std::fs::read(dest.path().join("index.js")).unwrap();
