@@ -32,6 +32,8 @@
 //! assert!(verify(&vk, b"wrong", &sig).is_err());
 //! ```
 
+#![forbid(unsafe_code)]
+
 pub mod dsa;
 pub mod hkdf;
 pub mod kem;

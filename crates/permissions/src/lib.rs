@@ -24,6 +24,8 @@
 //! assert!(ps2.check(&Capability::Network("any-host.io".into())));
 //! ```
 
+#![forbid(unsafe_code)]
+
 pub mod audit;
 pub mod capability;
 pub mod enforcement;

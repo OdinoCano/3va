@@ -3,6 +3,8 @@
 
 //! Module bundler — resolves imports, tree-shakes, and code-generates single-file JS/TS bundles.
 
+#![forbid(unsafe_code)]
+
 pub mod generator;
 pub mod resolver;
 pub mod tree_shaker;

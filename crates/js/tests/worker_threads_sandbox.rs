@@ -179,3 +179,45 @@ async fn worker_eval_true_is_not_a_code_execution_path() {
         "eval:true ejecuto codigo sin pasar por FileRead"
     );
 }
+
+// Regresion funcional: el callback de polling del `Worker` usaba `this` (el
+// global dentro de un timer) en vez del Worker, y los `message` del hijo nunca
+// llegaban al padre.
+#[tokio::test]
+async fn worker_message_reaches_parent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (sandbox, _secret, worker, _report) = write_sandbox(tmp.path());
+    std::fs::write(
+        &worker,
+        "require('worker_threads').parentPort.postMessage({ hello: 'parent' });",
+    )
+    .unwrap();
+
+    let state = Arc::new(PermissionState::new());
+    state.grant(Capability::FileRead(sandbox.clone()));
+    let mut engine = JsEngine::new(state).await.unwrap();
+
+    let path = worker.to_string_lossy().replace('\\', "/");
+    engine
+        .eval_to_string(&format!(
+            "globalThis.__got = ''; \
+             var w = new (require('worker_threads').Worker)('{path}'); \
+             w.on('message', function(m) {{ globalThis.__got = JSON.stringify(m); }}); 'started'"
+        ))
+        .await
+        .unwrap();
+
+    for _ in 0..POLLS {
+        engine.idle().await;
+        let _ = engine.pump_timers().await;
+        if engine.eval_to_string("globalThis.__got").await.unwrap() != "" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        engine.eval_to_string("globalThis.__got").await.unwrap(),
+        r#"{"hello":"parent"}"#,
+        "el mensaje del worker no llego al padre"
+    );
+}

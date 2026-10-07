@@ -16,6 +16,8 @@
 //! assert_eq!(rt.pending_task_count(), 0);
 //! ```
 
+#![forbid(unsafe_code)]
+
 pub mod task_queue;
 pub mod timer;
 

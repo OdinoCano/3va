@@ -3,6 +3,8 @@
 
 //! Test framework for 3va — runner, matchers, coverage, and security test utilities.
 
+#![forbid(unsafe_code)]
+
 pub mod coverage;
 pub mod framework;
 pub mod runner;
