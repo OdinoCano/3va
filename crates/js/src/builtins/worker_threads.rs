@@ -4,6 +4,12 @@
 //! Real OS-thread `worker_threads` implementation.
 //!
 //! Each `new Worker(file, { workerData })` spawns an independent OS thread.
+//!
+//! By design `options.eval` is ignored: the first argument is always a path,
+//! gated by `Capability::FileRead`, so `new Worker(code, { eval: true })` does
+//! not open a second code-execution path (it fails the read check instead of
+//! running `code`). `workerData` is `JSON.stringify`-ed by the JS wrapper and
+//! baked into a script as a literal, so it is data, never code.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -78,7 +84,18 @@ pub fn inject_worker_threads_native(scope: &mut PinScope, permissions: Arc<Permi
             let (tx, rx) = std::sync::mpsc::sync_channel::<String>(256);
 
             let in_clone = incoming.clone();
-            let perms_clone = perms();
+            // Hand the worker a *snapshot* of the parent's permissions, not the
+            // parent's `Arc<PermissionState>`. Sharing the Arc meant the worker
+            // and the parent mutated one another: a worker's refusal (which
+            // `prompt_user` writes into `denied`) or interactive grant landed
+            // in the parent's state too, and a grant the parent made after the
+            // worker started silently widened the running worker. A worker also
+            // must not prompt on a background thread while the parent owns the
+            // terminal, so it runs non-interactively (a refused op is denied),
+            // matching a child_process-forked worker.
+            let mut worker_perms = (*perms()).clone();
+            worker_perms.set_interactive(false);
+            let perms_clone = Arc::new(worker_perms);
 
             let handle = std::thread::Builder::new()
                 .name(format!("3va-worker-{}", id))
