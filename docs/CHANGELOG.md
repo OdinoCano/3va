@@ -7,6 +7,21 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+### Security
+
+- **Debug dumps to fixed `/tmp` paths removed** (transpiler and module loader). Requiring a module whose source contained certain markers wrote the transpiled source to a predictable `/tmp` file with no write capability; a symlink planted there turned it into an arbitrary-file overwrite.
+- **`worker_threads`:** `new Worker(file)` now requires `--allow-read` for `file`; a worker gets a snapshot of the parent's permissions (non-interactive) instead of sharing its state. Worker `message` events now reach the parent (they were silently dropped).
+- **`child_process`:** `cluster.fork()` workers no longer start with every `--allow-*` flag (they get exactly the parent's grants); children no longer inherit the host environment without `--allow-env` (granted variables only); the internal control pipe is close-on-exec; the forced `--prof-out /tmp/…` flag was removed.
+- **`localStorage` natives** are gated on `--allow-read`/`--allow-write`, no longer fall back to a world-writable `/tmp` path, and cache directories are created `0700`. The V8 code cache is written through an exclusive temp file plus rename, so a planted symlink is replaced, not followed.
+- **HTTP/1 request parsing** rejects smuggling vectors: non-numeric, oversized (413) or conflicting duplicate `Content-Length`, conflicting duplicate `Transfer-Encoding`, whitespace before `:`, and obsolete line folding.
+- **`3va install`:** a package tarball may contain at most 100,000 entries (decompression-bomb guard).
+- Breaking for embedders: scripts that relied on `cluster.fork()` workers getting full permissions, or on children reading host environment variables without `--allow-env`, must now grant them.
+
+### Changed
+
+- Removed 13 unused dependencies (Cargo.lock 779 → 707 packages); added fuzz targets for the HTTP parser, package tarballs, `package.json` and the IMAP/MQTT/IRC/POP3/FTP parsers.
+- `#![forbid(unsafe_code)]` in the crates that contain no `unsafe`.
+
 ---
 
 ## [2.12.0] — 2026-10-05

@@ -67,6 +67,9 @@ Assets: the user's files and environment secrets, network reach from the user's 
 | Response bodies and protocol parsers | Denial of service via oversized or malformed input | Response-size caps (`fetch` `maxResponseSize`), connect and IO timeouts, and fuzzing of parsers |
 | `3va install` | Malicious package or dependency confusion | No install scripts (R3), SRI and provenance checks, malware scanner, OSV audit, and a lockfile with a `registry` field |
 | HTTP server | Denial of service | Firewall: per-IP connection and rate limits |
+| HTTP/1 request framing | Request smuggling (conflicting or malformed `Content-Length` / `Transfer-Encoding`) | Strict parser: ambiguous framing is rejected with 400/413/501 instead of guessed |
+| `worker_threads`, `cluster`, `child_process` | Privilege escalation through a child that gets more than its parent | Workers run on a non-interactive snapshot of the parent's permissions; forked workers get exactly the parent's grants; children inherit only granted environment variables |
+| Package tarballs | Zip-slip, symlink escape, decompression bomb | Entry paths and links are confined to the package directory; size and entry-count caps are checked before extraction |
 | `3va run <package.json script>` | Unsandboxed delegation | Documented as out of scope; requires explicit consent (`--yes` or a prompt) |
 | Release pipeline | Tampering with binaries | Pinned workflows, least-privilege tokens, validated inputs, cosign signatures, SLSA provenance |
 
@@ -104,4 +107,6 @@ Assets: the user's files and environment secrets, network reach from the user's 
 - Raw `net`/`dgram` sockets and the HTTP *server* aren't covered by the plaintext rule. They are transports that the application chooses to use, and TLS is usually terminated in front of them.
 - The permission model is enforced in-process. It isn't an OS sandbox (no seccomp or namespaces), so a memory-safety bug in V8 or in native code could bypass it.
 - `os` and `process` expose host information read directly from the OS — hostname and MAC addresses (`os.hostname`, `os.networkInterfaces`, from `/sys/class/net/*/address`, `/proc/net/if_inet6`), load average and uptime (`os.loadavg`, `os.uptime`, from `/proc/loadavg`, `/proc/uptime`), and memory (`os.totalmem`/`os.freemem`/`process.memoryUsage`, from `/proc/meminfo`, `/proc/self/status`, `/proc/self/stat`). These reads are **not** gated by a capability, matching Node.js, and are treated as an accepted design decision rather than a sandbox escape. Do not put secrets that a script is not allowed to see anywhere these files expose them; the runtime does not attempt to filter this interface.
+- `VirtualFs`/`VirtualNetwork` (`vvva_permissions::sandbox`) resolve paths lexically and are not a security boundary (no runtime caller; symlinks are not confined). `PermissionState::check` plus `secure_fs` is the real containment.
+- `CHILD_TABLE` and `CLUSTER_TABLE` are process-wide: with several engines in one process, an engine could address another's children by id.
 - The project has one maintainer (see [GOVERNANCE.md](../../GOVERNANCE.md#continuity)).
