@@ -16,7 +16,6 @@ anyhow.workspace = true
 tracing.workspace = true
 regex-lite = "0.1"
 notify = "6.1"
-vvva_pm = { version = "2.12.0", path = "../pm" }
 vvva_js = { version = "2.12.0", path = "../js" }
 oxc_allocator = "0.132.0"
 oxc_parser = "0.132.0"
