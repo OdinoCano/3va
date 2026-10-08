@@ -20,6 +20,13 @@ const SUPPORTED_FEATURES: &[&str] = &["*"];
 // deliberate bump (plus a docs update) whenever one gets fixed.
 const INTL402_KNOWN_FAILURES: usize = 72;
 
+// Non-module `language/` + `built-ins/` failures measured on the pinned test262
+// commit and V8 (2026-10-08). A ratchet, not a goal: the run fails if this
+// number goes UP (a regression), and also if it goes DOWN without this constant
+// being lowered, so progress gets recorded. Update it together with
+// docs/09-testing/06-test262.md.
+const NON_MODULE_KNOWN_FAILURES: usize = 2654;
+
 #[test]
 #[ignore]
 fn test262_language_and_builtins() {
@@ -70,14 +77,15 @@ fn test262_language_and_builtins() {
     );
     println!("intl402 known ICU-data failures (fixed set, see docs/09-testing/06-test262.md): {intl402_failed}");
 
-    // ponytail: aspirational. 3va's plain-script engine still has documented
-    // gaps (direct-eval `arguments` bindings, destructuring evaluation order,
-    // strict-mode syntax checks) so this stays red until those are closed;
-    // the gate exists to catch *new* non-module regressions, not to claim the
-    // suite is green.
+    // The plain-script engine still has documented gaps (direct-eval `arguments`
+    // bindings, destructuring evaluation order, strict-mode syntax checks), so
+    // zero is not reachable yet. Hold the line at the measured baseline instead:
+    // this catches *new* non-module regressions without claiming the suite is green.
     assert_eq!(
-        non_module_failed, 0,
-        "non-module test262 regressions found (see output above)"
+        non_module_failed, NON_MODULE_KNOWN_FAILURES,
+        "non-module test262 failures changed from the {NON_MODULE_KNOWN_FAILURES} baseline \
+         (see output above). More = regression; fewer = progress, so lower \
+         NON_MODULE_KNOWN_FAILURES and update docs/09-testing/06-test262.md"
     );
 
     // intl402 is near-green thanks to V8's native Intl + the shim in

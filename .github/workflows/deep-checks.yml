@@ -1,0 +1,92 @@
+name: Deep checks
+
+# Checks that are too slow or too specialised for every PR:
+#  - test262 regression gate: the `#[ignore]`d `vvva_test` test asserts the
+#    failure baselines (language/built-ins, module-code, intl402). Benchmark
+#    already reports the pass *rate* weekly; this fails when it regresses.
+#  - napi under AddressSanitizer: the ordinary napi tests must be clean, and a
+#    canary (the hostile-addon overflow probe) must still trip ASan — if it does
+#    not, the sanitizer is not actually instrumenting and "clean" means nothing.
+
+on:
+  schedule:
+    - cron: "23 5 * * 1" # weekly, Monday 05:23 UTC
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    # napi is the largest unsafe surface; check it whenever it changes.
+    paths:
+      - "crates/js/src/builtins/napi.rs"
+      - "crates/js/tests/napi_sanitizers.rs"
+      - "crates/js/tests/fixtures/**"
+      - ".github/workflows/deep-checks.yml"
+
+# Least privilege: jobs get a read-only token unless they ask for more.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: deep-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test262:
+    name: test262 regression gate
+    # Not on PRs: ~53k tests. Runs on the weekly schedule and on demand.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The commit is pinned in the script, so the baselines stay comparable.
+      - name: Fetch test262
+        run: bash scripts/setup-test262.sh
+      - name: Run the conformance gate
+        run: cargo test --release -p vvva_test --test test262 -- --ignored --nocapture
+
+  napi-asan:
+    name: napi under AddressSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          # ASan needs the glibc target; musl's static libc is incompatible.
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      # -rdynamic: addons resolve their napi_* symbols against the host binary.
+      # detect_leaks=0: memory *errors* only. Known leaks in napi.rs
+      # (napi_create_int32, napi_load_module, inject_napi) are tracked
+      # separately, see docs/10-security/11-threat-model.md; the V8-internal
+      # create_annex leak is covered by .github/lsan-v8.supp in security.yml.
+      - name: napi tests must be ASan-clean
+        env:
+          RUSTFLAGS: "-Zsanitizer=address -C link-args=-rdynamic"
+          ASAN_OPTIONS: "detect_leaks=0"
+        run: cargo test -p vvva_js --test napi_sanitizers --target x86_64-unknown-linux-gnu
+      # Canary: the probe passes a length far beyond the addon's buffer. ASan
+      # must abort it with heap-buffer-overflow; a pass or any other failure
+      # means the sanitizer is not doing its job.
+      - name: ASan canary must trip
+        env:
+          RUSTFLAGS: "-Zsanitizer=address -C link-args=-rdynamic"
+          ASAN_OPTIONS: "detect_leaks=0"
+        run: |
+          set +e
+          cargo test -p vvva_js --test napi_sanitizers --target x86_64-unknown-linux-gnu \
+            -- --ignored --nocapture > canary.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ] || ! grep -q 'heap-buffer-overflow' canary.log; then
+            echo "::error::ASan canary did not report heap-buffer-overflow (exit $status)"
+            tail -40 canary.log
+            exit 1
+          fi
+          echo "canary tripped as expected"
