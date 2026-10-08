@@ -93,6 +93,10 @@ name = "ffi_module"
 path = "tests/ffi_module.rs"
 
 [[test]]
+name = "napi_sanitizers"
+path = "tests/napi_sanitizers.rs"
+
+[[test]]
 name = "url_globals"
 path = "tests/url_globals.rs"
 
