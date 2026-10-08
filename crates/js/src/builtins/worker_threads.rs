@@ -256,11 +256,10 @@ pub fn inject_worker_threads_native(scope: &mut PinScope, permissions: Arc<Permi
             this._pollInterval = setInterval(function() {
                 var msg;
                 while ((msg = __workerRecv(self._id)) !== null && msg !== undefined) {
-                    try {
-                        this.emit('message', JSON.parse(msg));
-                    } catch(e) {
-                        this.emit('message', msg);
-                    }
+                    var data;
+                    try { data = JSON.parse(msg); } catch(e) { data = msg; }
+                    // `this` is not the Worker inside this timer callback.
+                    self.emit('message', data);
                 }
             }, 16);
         }

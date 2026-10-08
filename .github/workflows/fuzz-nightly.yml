@@ -1,0 +1,89 @@
+name: Nightly fuzz
+
+on:
+  schedule:
+    # 03:17 UTC daily — off the hour to avoid the top-of-hour cron rush.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "Seconds to fuzz each target (600-1800)"
+        required: false
+        default: "900"
+
+# Least privilege: jobs get a read-only token unless they ask for more.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Per-target wall-clock budget: 900 s = 15 min (within the 10-30 min range).
+  MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '900' }}
+  # libFuzzer RSS cap; a runaway input fails the run instead of OOMing the runner.
+  RSS_LIMIT_MB: "4096"
+
+# Cancel a previous run of the same ref to avoid wasted compute.
+concurrency:
+  group: fuzz-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    # Instrumented build + up to MAX_TOTAL_TIME of fuzzing, with headroom.
+    timeout-minutes: 60
+    strategy:
+      # One target crashing must not cancel the others.
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_ftp
+          - fuzz_http_request
+          - fuzz_imap
+          - fuzz_irc
+          - fuzz_js_esm_resolver
+          - fuzz_js_import_meta
+          - fuzz_js_transpiler
+          - fuzz_mqtt
+          - fuzz_permission_sandbox
+          - fuzz_pm_package_json
+          - fuzz_pm_resolver
+          - fuzz_pm_tarball
+          - fuzz_pop3
+          - fuzz_target_1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          # ASAN requires the GNU (glibc) target; musl's static libc is
+          # incompatible with sanitizers.
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Seed the corpus from fuzz/seeds/<target>
+        working-directory: fuzz
+        run: |
+          mkdir -p "corpus/${{ matrix.target }}"
+          if [ -d "seeds/${{ matrix.target }}" ]; then
+            cp -n "seeds/${{ matrix.target }}"/* "corpus/${{ matrix.target }}/" 2>/dev/null || true
+          fi
+      - name: Fuzz ${{ matrix.target }} for ${{ env.MAX_TOTAL_TIME }} s
+        working-directory: fuzz
+        # A crash exits non-zero and fails this matrix job.
+        run: |
+          cargo fuzz run "${{ matrix.target }}" --target x86_64-unknown-linux-gnu -- \
+            -max_total_time="${MAX_TOTAL_TIME}" -rss_limit_mb="${RSS_LIMIT_MB}"
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30

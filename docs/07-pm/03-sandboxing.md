@@ -143,7 +143,8 @@ impl PackageSandbox {
         Ok(())
     }
     fn extract_restricted(&self, tarball: &[u8], dest: &Path) -> Result<()> {
-        // Implemented in PackageFetcher::extract (crates/pm/src/fetcher.rs)
+        // Implemented in extract_tarball_with_limits (crates/pm/src/lib.rs);
+        // the older PackageFetcher::extract is deprecated and unused.
         // Security layers applied to every entry:
         //   1. Strip "package/" npm prefix (all npm tarballs use this root)
         //   2. Reject entries with ".." or absolute path components

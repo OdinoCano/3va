@@ -85,6 +85,11 @@ criteria = "safe-to-deploy"
 version = "1.0.104"
 criteria = "safe-to-deploy"
 
+[[exemptions.arbitrary]]
+version = "1.5.0"
+criteria = "safe-to-deploy"
+notes = "cargo update arbitrary 1.4.2 -> 1.5.0 (minor); diff 12 files, +101/-94 lines; build.rs changed: False; unsafe lines added: 2. FLAGGED for human review."
+
 [[exemptions.argon2]]
 version = "0.6.0"
 criteria = "safe-to-deploy"
@@ -124,6 +129,11 @@ criteria = "safe-to-deploy"
 [[exemptions.async-compression]]
 version = "0.4.44"
 criteria = "safe-to-deploy"
+
+[[exemptions.async-compression]]
+version = "0.4.50"
+criteria = "safe-to-deploy"
+notes = "cargo update async-compression 0.4.44 -> 0.4.50 (patch); diff 13 files, +584/-19 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.async-stream]]
 version = "0.3.6"
@@ -192,6 +202,11 @@ criteria = "safe-to-deploy"
 [[exemptions.bitflags]]
 version = "2.13.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.bitflags]]
+version = "2.13.2"
+criteria = "safe-to-deploy"
+notes = "cargo update bitflags 2.13.1 -> 2.13.2 (patch); diff 8 files, +68/-28 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.blake2]]
 version = "0.11.0"
@@ -289,6 +304,11 @@ criteria = "safe-to-deploy"
 version = "1.4.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.cc]]
+version = "1.6.0"
+criteria = "safe-to-deploy"
+notes = "cargo update cc 1.4.4 -> 1.6.0 (minor); diff 20 files, +1664/-343 lines; build.rs changed: False; unsafe lines added: 3. FLAGGED for human review."
+
 [[exemptions.ccm]]
 version = "0.5.0"
 criteria = "safe-to-deploy"
@@ -296,6 +316,16 @@ criteria = "safe-to-deploy"
 [[exemptions.cfg-if]]
 version = "1.0.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.cfg-if]]
+version = "1.0.5"
+criteria = "safe-to-deploy"
+notes = "cargo update cfg-if 1.0.4 -> 1.0.5 (patch); diff 7 files, +20/-5 lines; build.rs changed: False; unsafe lines added: 0."
+
+[[exemptions.cfg-if]]
+version = "1.0.5"
+criteria = "safe-to-deploy"
+notes = "patch bump 1.0.4 -> 1.0.5; diff is version/docs only"
 
 [[exemptions.cfg_aliases]]
 version = "0.1.1"
@@ -329,17 +359,37 @@ criteria = "safe-to-deploy"
 version = "4.6.6"
 criteria = "safe-to-deploy"
 
+[[exemptions.clap]]
+version = "4.6.7"
+criteria = "safe-to-deploy"
+notes = "cargo update clap 4.6.6 -> 4.6.7 (patch); diff 8 files, +87/-49 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.clap_builder]]
 version = "4.6.6"
 criteria = "safe-to-deploy"
+
+[[exemptions.clap_builder]]
+version = "4.6.7"
+criteria = "safe-to-deploy"
+notes = "cargo update clap_builder 4.6.6 -> 4.6.7 (patch); diff 23 files, +150/-144 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.clap_derive]]
 version = "4.6.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.clap_derive]]
+version = "4.6.7"
+criteria = "safe-to-deploy"
+notes = "cargo update clap_derive 4.6.4 -> 4.6.7 (patch); diff 8 files, +135/-65 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.clap_lex]]
 version = "1.1.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.clap_lex]]
+version = "1.1.1"
+criteria = "safe-to-deploy"
+notes = "cargo update clap_lex 1.1.0 -> 1.1.1 (patch); diff 5 files, +32/-18 lines; build.rs changed: False; unsafe lines added: 1. FLAGGED for human review."
 
 [[exemptions.cmake]]
 version = "0.1.58"
@@ -365,6 +415,11 @@ criteria = "safe-to-deploy"
 version = "0.4.39"
 criteria = "safe-to-deploy"
 
+[[exemptions.compression-codecs]]
+version = "0.4.45"
+criteria = "safe-to-deploy"
+notes = "cargo update compression-codecs 0.4.39 -> 0.4.45 (patch); diff 11 files, +437/-13 lines; build.rs changed: False; unsafe lines added: 5. FLAGGED for human review."
+
 [[exemptions.compression-core]]
 version = "0.4.33"
 criteria = "safe-to-deploy"
@@ -384,6 +439,11 @@ criteria = "safe-to-deploy"
 [[exemptions.core-foundation]]
 version = "0.10.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.core_detect]]
+version = "1.0.0"
+criteria = "safe-to-deploy"
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
 
 [[exemptions.cow-utils]]
 version = "0.1.3"
@@ -421,6 +481,11 @@ criteria = "safe-to-deploy"
 version = "1.5.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.crc32fast]]
+version = "1.5.2"
+criteria = "safe-to-deploy"
+notes = "cargo update crc32fast 1.5.1 -> 1.5.2 (patch); diff 5 files, +39/-21 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.critical-section]]
 version = "1.2.0"
 criteria = "safe-to-deploy"
@@ -429,17 +494,37 @@ criteria = "safe-to-deploy"
 version = "0.5.16"
 criteria = "safe-to-deploy"
 
+[[exemptions.crossbeam-channel]]
+version = "0.5.17"
+criteria = "safe-to-deploy"
+notes = "cargo update crossbeam-channel 0.5.16 -> 0.5.17 (patch); diff 12 files, +111/-47 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.crossbeam-deque]]
 version = "0.8.7"
 criteria = "safe-to-deploy"
+
+[[exemptions.crossbeam-deque]]
+version = "0.8.8"
+criteria = "safe-to-deploy"
+notes = "cargo update crossbeam-deque 0.8.7 -> 0.8.8 (patch); diff 6 files, +85/-51 lines; build.rs changed: True; unsafe lines added: 3. FLAGGED for human review."
 
 [[exemptions.crossbeam-epoch]]
 version = "0.9.8"
 criteria = "safe-to-deploy"
 
+[[exemptions.crossbeam-epoch]]
+version = "0.9.21"
+criteria = "safe-to-deploy"
+notes = "cargo update crossbeam-epoch 0.9.20 -> 0.9.21 (patch); diff 9 files, +62/-33 lines; build.rs changed: True; unsafe lines added: 0. FLAGGED for human review."
+
 [[exemptions.crossbeam-utils]]
 version = "0.8.22"
 criteria = "safe-to-deploy"
+
+[[exemptions.crossbeam-utils]]
+version = "0.8.23"
+criteria = "safe-to-deploy"
+notes = "cargo update crossbeam-utils 0.8.22 -> 0.8.23 (patch); diff 9 files, +46/-23 lines; build.rs changed: True; unsafe lines added: 2. FLAGGED for human review."
 
 [[exemptions.crypto-bigint]]
 version = "0.5.5"
@@ -473,6 +558,11 @@ criteria = "safe-to-deploy"
 version = "0.4.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.ctutils]]
+version = "0.4.3"
+criteria = "safe-to-deploy"
+notes = "cargo update ctutils 0.4.2 -> 0.4.3 (patch); diff 9 files, +38/-42 lines; build.rs changed: False; unsafe lines added: 1. FLAGGED for human review."
+
 [[exemptions.curve25519-dalek]]
 version = "4.1.3"
 criteria = "safe-to-deploy"
@@ -500,6 +590,11 @@ criteria = "safe-to-deploy"
 [[exemptions.der]]
 version = "0.8.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.der]]
+version = "0.8.2"
+criteria = "safe-to-deploy"
+notes = "cargo update der 0.8.1 -> 0.8.2 (patch); diff 8 files, +102/-10 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.der-parser]]
 version = "9.0.0"
@@ -573,6 +668,11 @@ criteria = "safe-to-deploy"
 version = "1.18.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.either]]
+version = "1.19.0"
+criteria = "safe-to-deploy"
+notes = "cargo update either 1.18.0 -> 1.19.0 (minor); diff 5 files, +60/-2 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.elliptic-curve]]
 version = "0.13.8"
 criteria = "safe-to-deploy"
@@ -581,6 +681,11 @@ criteria = "safe-to-deploy"
 version = "0.14.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.encoding_rs]]
+version = "0.8.42"
+criteria = "safe-to-deploy"
+notes = "cargo update encoding_rs 0.8.35 -> 0.8.42 (patch); diff 94 files, +2650/-372251 lines; build.rs changed: True; unsafe lines added: 38. FLAGGED for human review."
+
 [[exemptions.enum_dispatch]]
 version = "0.3.13"
 criteria = "safe-to-deploy"
@@ -588,6 +693,11 @@ criteria = "safe-to-deploy"
 [[exemptions.errno]]
 version = "0.3.14"
 criteria = "safe-to-deploy"
+
+[[exemptions.escape-simd]]
+version = "0.1.0"
+criteria = "safe-to-deploy"
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
 
 [[exemptions.event-listener]]
 version = "5.4.2"
@@ -624,6 +734,11 @@ criteria = "safe-to-deploy"
 [[exemptions.find-msvc-tools]]
 version = "0.1.11"
 criteria = "safe-to-deploy"
+
+[[exemptions.find-msvc-tools]]
+version = "0.1.14"
+criteria = "safe-to-deploy"
+notes = "cargo update find-msvc-tools 0.1.11 -> 0.1.14 (patch); diff 11 files, +174/-167 lines; build.rs changed: False; unsafe lines added: 6. FLAGGED for human review."
 
 [[exemptions.flate2]]
 version = "1.1.10"
@@ -733,6 +848,11 @@ criteria = "safe-to-deploy"
 version = "0.4.19"
 criteria = "safe-to-deploy"
 
+[[exemptions.h2]]
+version = "0.4.20"
+criteria = "safe-to-deploy"
+notes = "cargo update h2 0.4.19 -> 0.4.20 (patch); diff 23 files, +1105/-871 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.hashbrown]]
 version = "0.14.5"
 criteria = "safe-to-deploy"
@@ -749,13 +869,28 @@ criteria = "safe-to-deploy"
 version = "0.26.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.hickory-net]]
+version = "0.26.3"
+criteria = "safe-to-deploy"
+notes = "cargo update hickory-net 0.26.2 -> 0.26.3 (patch); diff 4 files, +65/-33 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.hickory-proto]]
 version = "0.26.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.hickory-proto]]
+version = "0.26.3"
+criteria = "safe-to-deploy"
+notes = "cargo update hickory-proto 0.26.2 -> 0.26.3 (patch); diff 2 files, +123/-3 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.hickory-resolver]]
 version = "0.26.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.hickory-resolver]]
+version = "0.26.3"
+criteria = "safe-to-deploy"
+notes = "cargo update hickory-resolver 0.26.2 -> 0.26.3 (patch); diff 4 files, +18/-10 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.hkdf]]
 version = "0.12.4"
@@ -797,13 +932,28 @@ criteria = "safe-to-deploy"
 version = "0.4.14"
 criteria = "safe-to-deploy"
 
+[[exemptions.hybrid-array]]
+version = "0.4.15"
+criteria = "safe-to-deploy"
+notes = "cargo update hybrid-array 0.4.14 -> 0.4.15 (patch); diff 4 files, +9/-2 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.hyper]]
 version = "1.11.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.hyper]]
+version = "1.12.0"
+criteria = "safe-to-deploy"
+notes = "cargo update hyper 1.11.1 -> 1.12.0 (minor); diff 30 files, +1015/-521 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.hyper-rustls]]
 version = "0.27.9"
 criteria = "safe-to-deploy"
+
+[[exemptions.hyper-rustls]]
+version = "0.27.10"
+criteria = "safe-to-deploy"
+notes = "cargo update hyper-rustls 0.27.9 -> 0.27.10 (patch); diff 7 files, +55/-10 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.hyper-timeout]]
 version = "0.5.2"
@@ -816,6 +966,11 @@ criteria = "safe-to-deploy"
 [[exemptions.hyper-util]]
 version = "0.1.20"
 criteria = "safe-to-deploy"
+
+[[exemptions.hyper-util]]
+version = "0.1.21"
+criteria = "safe-to-deploy"
+notes = "cargo update hyper-util 0.1.20 -> 0.1.21 (patch); diff 42 files, +2763/-463 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.iana-time-zone]]
 version = "0.1.65"
@@ -865,6 +1020,16 @@ criteria = "safe-to-deploy"
 version = "2.3.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.icu_segmenter]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
+
+[[exemptions.icu_segmenter_data]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
+
 [[exemptions.id-arena]]
 version = "2.3.0"
 criteria = "safe-to-deploy"
@@ -884,6 +1049,11 @@ criteria = "safe-to-deploy"
 [[exemptions.indexmap]]
 version = "2.14.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.indexmap]]
+version = "2.14.2"
+criteria = "safe-to-deploy"
+notes = "cargo update indexmap 2.14.1 -> 2.14.2 (patch); diff 5 files, +151/-40 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.inotify]]
 version = "0.9.6"
@@ -916,6 +1086,11 @@ criteria = "safe-to-deploy"
 [[exemptions.ipnet]]
 version = "2.12.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.ipnet]]
+version = "2.12.2"
+criteria = "safe-to-deploy"
+notes = "cargo update ipnet 2.12.1 -> 2.12.2 (patch); diff 5 files, +76/-118 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.is_terminal_polyfill]]
 version = "1.70.2"
@@ -961,9 +1136,19 @@ criteria = "safe-to-deploy"
 version = "0.3.104"
 criteria = "safe-to-deploy"
 
+[[exemptions.js-sys]]
+version = "0.3.106"
+criteria = "safe-to-deploy"
+notes = "cargo update js-sys 0.3.104 -> 0.3.106 (patch); diff 6 files, +406/-13 lines; build.rs changed: False; unsafe lines added: 9. FLAGGED for human review."
+
 [[exemptions.json-escape-simd]]
 version = "3.1.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.json-escape-simd]]
+version = "3.1.2"
+criteria = "safe-to-deploy"
+notes = "cargo update json-escape-simd 3.1.1 -> 3.1.2 (patch); diff 13 files, +48/-2273 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.keccak]]
 version = "0.2.2"
@@ -981,6 +1166,11 @@ criteria = "safe-to-deploy"
 version = "1.1.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.lazy_static]]
+version = "1.5.1"
+criteria = "safe-to-deploy"
+notes = "cargo update lazy_static 1.5.0 -> 1.5.1 (patch); diff 5 files, +59/-25 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.leb128]]
 version = "0.2.7"
 criteria = "safe-to-deploy"
@@ -988,6 +1178,11 @@ criteria = "safe-to-deploy"
 [[exemptions.libc]]
 version = "0.2.189"
 criteria = "safe-to-deploy"
+
+[[exemptions.libc]]
+version = "0.2.190"
+criteria = "safe-to-deploy"
+notes = "cargo update libc 0.2.189 -> 0.2.190 (patch); diff 237 files, +8632/-6152 lines; build.rs changed: True; unsafe lines added: 176. FLAGGED for human review."
 
 [[exemptions.libffi]]
 version = "3.2.0"
@@ -1012,6 +1207,11 @@ criteria = "safe-to-deploy"
 [[exemptions.libredox]]
 version = "0.1.23"
 criteria = "safe-to-deploy"
+
+[[exemptions.libredox]]
+version = "0.1.25"
+criteria = "safe-to-deploy"
+notes = "cargo update libredox 0.1.23 -> 0.1.25 (patch); diff 3 files, +26/-2 lines; build.rs changed: False; unsafe lines added: 1. FLAGGED for human review."
 
 [[exemptions.libsqlite3-sys]]
 version = "0.30.1"
@@ -1093,6 +1293,11 @@ criteria = "safe-to-deploy"
 version = "1.2.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.mio]]
+version = "1.2.4"
+criteria = "safe-to-deploy"
+notes = "cargo update mio 1.2.3 -> 1.2.4 (patch); diff 6 files, +33/-41 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.ml-dsa]]
 version = "0.1.1"
 criteria = "safe-to-deploy"
@@ -1108,6 +1313,11 @@ criteria = "safe-to-deploy"
 [[exemptions.moka]]
 version = "0.12.16"
 criteria = "safe-to-deploy"
+
+[[exemptions.multiversion_no_op]]
+version = "1.0.0"
+criteria = "safe-to-deploy"
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
 
 [[exemptions.munge]]
 version = "0.4.7"
@@ -1337,6 +1547,11 @@ criteria = "safe-to-deploy"
 version = "0.2.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.pageant]]
+version = "0.2.4"
+criteria = "safe-to-deploy"
+notes = "cargo update pageant 0.2.3 -> 0.2.4 (patch); diff 3 files, +16/-13 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.parking_lot]]
 version = "0.12.5"
 criteria = "safe-to-deploy"
@@ -1520,6 +1735,11 @@ criteria = "safe-to-deploy"
 [[exemptions.rand]]
 version = "0.10.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.rand]]
+version = "0.10.3"
+criteria = "safe-to-deploy"
+notes = "cargo update rand 0.10.2 -> 0.10.3 (patch); diff 13 files, +246/-49 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.rand_core]]
 version = "0.10.1"
@@ -1717,6 +1937,11 @@ criteria = "safe-to-deploy"
 version = "1.1.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.rustix]]
+version = "1.1.5"
+criteria = "safe-to-deploy"
+notes = "cargo update rustix 1.1.4 -> 1.1.5 (patch); diff 53 files, +403/-320 lines; build.rs changed: True; unsafe lines added: 2. FLAGGED for human review."
+
 [[exemptions.rustls]]
 version = "0.23.37"
 criteria = "safe-to-deploy"
@@ -1893,6 +2118,11 @@ criteria = "safe-to-deploy"
 version = "1.0.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.siphasher]]
+version = "1.0.4"
+criteria = "safe-to-deploy"
+notes = "cargo update siphasher 1.0.3 -> 1.0.4 (patch); diff 4 files, +230/-9 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.slab]]
 version = "0.4.12"
 criteria = "safe-to-deploy"
@@ -1900,6 +2130,11 @@ criteria = "safe-to-deploy"
 [[exemptions.smallvec]]
 version = "1.16.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.smallvec]]
+version = "1.16.2"
+criteria = "safe-to-deploy"
+notes = "cargo update smallvec 1.16.0 -> 1.16.2 (patch); diff 4 files, +275/-27 lines; build.rs changed: False; unsafe lines added: 8. FLAGGED for human review."
 
 [[exemptions.smawk]]
 version = "0.3.3"
@@ -1924,6 +2159,11 @@ criteria = "safe-to-deploy"
 [[exemptions.spki]]
 version = "0.8.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.spki]]
+version = "0.8.1"
+criteria = "safe-to-deploy"
+notes = "cargo update spki 0.8.0 -> 0.8.1 (patch); diff 5 files, +53/-6 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.sponge-cursor]]
 version = "0.1.0"
@@ -1969,9 +2209,19 @@ criteria = "safe-to-deploy"
 version = "3.0.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.syn]]
+version = "3.0.6"
+criteria = "safe-to-deploy"
+notes = "cargo update syn 3.0.4 -> 3.0.6 (patch); diff 7 files, +70/-18 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.sync_wrapper]]
 version = "1.0.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.synstructure]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+notes = "cargo update synstructure 0.13.2 -> 0.14.0 (minor); diff 4 files, +40/-41 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.system-configuration]]
 version = "0.7.0"
@@ -2013,6 +2263,11 @@ criteria = "safe-to-deploy"
 version = "1.4.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.textwrap]]
+version = "0.16.4"
+criteria = "safe-to-deploy"
+notes = "cargo update textwrap 0.16.2 -> 0.16.4 (patch); diff 23 files, +538/-200 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.thiserror]]
 version = "1.0.69"
 criteria = "safe-to-deploy"
@@ -2021,6 +2276,11 @@ criteria = "safe-to-deploy"
 version = "2.0.20"
 criteria = "safe-to-deploy"
 
+[[exemptions.thiserror]]
+version = "2.0.21"
+criteria = "safe-to-deploy"
+notes = "cargo update thiserror 2.0.20 -> 2.0.21 (patch); diff 17 files, +65/-58 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.thiserror-impl]]
 version = "1.0.69"
 criteria = "safe-to-deploy"
@@ -2028,6 +2288,11 @@ criteria = "safe-to-deploy"
 [[exemptions.thiserror-impl]]
 version = "2.0.20"
 criteria = "safe-to-deploy"
+
+[[exemptions.thiserror-impl]]
+version = "2.0.21"
+criteria = "safe-to-deploy"
+notes = "cargo update thiserror-impl 2.0.20 -> 2.0.21 (patch); diff 3 files, +36/-5 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.thread_local]]
 version = "1.1.10"
@@ -2057,9 +2322,19 @@ criteria = "safe-to-deploy"
 version = "1.12.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.tinyvec]]
+version = "1.13.3"
+criteria = "safe-to-deploy"
+notes = "cargo update tinyvec 1.12.0 -> 1.13.3 (minor); diff 19 files, +789/-20 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.tokio]]
 version = "1.53.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.tokio]]
+version = "1.53.2"
+criteria = "safe-to-deploy"
+notes = "cargo update tokio 1.53.1 -> 1.53.2 (patch); diff 62 files, +1457/-407 lines; build.rs changed: False; unsafe lines added: 8. FLAGGED for human review."
 
 [[exemptions.tokio-macros]]
 version = "2.7.2"
@@ -2068,6 +2343,11 @@ criteria = "safe-to-deploy"
 [[exemptions.tokio-rustls]]
 version = "0.26.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.tokio-rustls]]
+version = "0.26.6"
+criteria = "safe-to-deploy"
+notes = "cargo update tokio-rustls 0.26.4 -> 0.26.6 (patch); diff 17 files, +184/-831 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.tokio-stream]]
 version = "0.1.19"
@@ -2153,9 +2433,19 @@ criteria = "safe-to-deploy"
 version = "1.4.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.unicode-id-start]]
+version = "1.5.0"
+criteria = "safe-to-deploy"
+notes = "cargo update unicode-id-start 1.4.0 -> 1.5.0 (minor); diff 22 files, +744/-585 lines; build.rs changed: False; unsafe lines added: 2. FLAGGED for human review."
+
 [[exemptions.unicode-ident]]
 version = "1.0.24"
 criteria = "safe-to-deploy"
+
+[[exemptions.unicode-ident]]
+version = "1.0.26"
+criteria = "safe-to-deploy"
+notes = "cargo update unicode-ident 1.0.24 -> 1.0.26 (patch); diff 11 files, +606/-563 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.universal-hash]]
 version = "0.5.1"
@@ -2185,6 +2475,11 @@ criteria = "safe-to-deploy"
 version = "1.26.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.uuid]]
+version = "1.27.0"
+criteria = "safe-to-deploy"
+notes = "cargo update uuid 1.26.0 -> 1.27.0 (minor); diff 8 files, +187/-74 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.v8]]
 version = "150.4.0"
 criteria = "safe-to-deploy"
@@ -2209,6 +2504,11 @@ criteria = "safe-to-deploy"
 version = "0.3.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.want]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+notes = "cargo update want 0.3.1 -> 0.3.2 (patch); diff 3 files, +46/-2 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.wasi]]
 version = "0.11.1+wasi-snapshot-preview1"
 criteria = "safe-to-deploy"
@@ -2217,29 +2517,79 @@ criteria = "safe-to-deploy"
 version = "0.2.127"
 criteria = "safe-to-deploy"
 
+[[exemptions.wasm-bindgen]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "cargo update wasm-bindgen 0.2.127 -> 0.2.129 (patch); diff 10 files, +189/-28 lines; build.rs changed: True; unsafe lines added: 3. FLAGGED for human review."
+
 [[exemptions.wasm-bindgen-futures]]
 version = "0.4.77"
 criteria = "safe-to-deploy"
+
+[[exemptions.wasm-bindgen-futures]]
+version = "0.4.79"
+criteria = "safe-to-deploy"
+notes = "cargo update wasm-bindgen-futures 0.4.77 -> 0.4.79 (patch); diff 4 files, +239/-8 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.wasm-bindgen-macro]]
 version = "0.2.127"
 criteria = "safe-to-deploy"
 
+[[exemptions.wasm-bindgen-macro]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "cargo update wasm-bindgen-macro 0.2.127 -> 0.2.129 (patch); diff 4 files, +23/-9 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.wasm-bindgen-macro-support]]
 version = "0.2.127"
 criteria = "safe-to-deploy"
+
+[[exemptions.wasm-bindgen-macro-support]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "cargo update wasm-bindgen-macro-support 0.2.127 -> 0.2.129 (patch); diff 9 files, +3563/-361 lines; build.rs changed: False; unsafe lines added: 14. FLAGGED for human review."
 
 [[exemptions.wasm-bindgen-shared]]
 version = "0.2.127"
 criteria = "safe-to-deploy"
 
+[[exemptions.wasm-bindgen-shared]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "cargo update wasm-bindgen-shared 0.2.127 -> 0.2.129 (patch); diff 5 files, +96/-19 lines; build.rs changed: True; unsafe lines added: 0. FLAGGED for human review."
+
+[[exemptions.wasm-encoder]]
+version = "0.261.0"
+criteria = "safe-to-deploy"
+notes = "cargo update wasm-encoder 0.258.0 -> 0.261.0 (minor); diff 9 files, +175/-74 lines; build.rs changed: False; unsafe lines added: 0."
+
+[[exemptions.wasmparser]]
+version = "0.261.0"
+criteria = "safe-to-deploy"
+notes = "cargo update wasmparser 0.258.0 -> 0.261.0 (minor); diff 28 files, +2776/-648 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.wasmtime-internal-asm-macros]]
 version = "36.0.17"
 criteria = "safe-to-deploy"
 
+[[exemptions.wast]]
+version = "261.0.0"
+criteria = "safe-to-deploy"
+notes = "cargo update wast 258.0.0 -> 261.0.0 (major); diff 20 files, +2126/-1684 lines; build.rs changed: False; unsafe lines added: 0."
+
+[[exemptions.wat]]
+version = "1.261.0"
+criteria = "safe-to-deploy"
+notes = "cargo update wat 1.258.0 -> 1.261.0 (minor); diff 2 files, +4/-7 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.web-sys]]
 version = "0.3.104"
 criteria = "safe-to-deploy"
+
+[[exemptions.web-sys]]
+version = "0.3.106"
+criteria = "safe-to-deploy"
+notes = "cargo update web-sys 0.3.104 -> 0.3.106 (patch); diff 22 files, +293/-69 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.webpki-roots]]
 version = "0.26.11"
@@ -2328,6 +2678,11 @@ criteria = "safe-to-deploy"
 [[exemptions.windows-sys]]
 version = "0.52.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.windows-sys]]
+version = "0.59.0"
+criteria = "safe-to-deploy"
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
 
 [[exemptions.windows-sys]]
 version = "0.60.2"
@@ -2493,13 +2848,28 @@ criteria = "safe-to-deploy"
 version = "0.8.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.yoke-derive]]
+version = "0.8.4"
+criteria = "safe-to-deploy"
+notes = "cargo update yoke-derive 0.8.2 -> 0.8.4 (patch); diff 3 files, +20/-16 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.zerocopy]]
 version = "0.8.56"
 criteria = "safe-to-deploy"
 
+[[exemptions.zerocopy]]
+version = "0.8.62"
+criteria = "safe-to-deploy"
+notes = "cargo update zerocopy 0.8.56 -> 0.8.62 (patch); diff 223 files, +11724/-4287 lines; build.rs changed: True; unsafe lines added: 108. FLAGGED for human review."
+
 [[exemptions.zerocopy-derive]]
 version = "0.8.56"
 criteria = "safe-to-deploy"
+
+[[exemptions.zerocopy-derive]]
+version = "0.8.62"
+criteria = "safe-to-deploy"
+notes = "cargo update zerocopy-derive 0.8.56 -> 0.8.62 (patch); diff 108 files, +32033/-7633 lines; build.rs changed: False; unsafe lines added: 670. FLAGGED for human review."
 
 [[exemptions.zerofrom]]
 version = "0.1.8"
@@ -2509,9 +2879,19 @@ criteria = "safe-to-deploy"
 version = "0.1.7"
 criteria = "safe-to-deploy"
 
+[[exemptions.zerofrom-derive]]
+version = "0.1.8"
+criteria = "safe-to-deploy"
+notes = "cargo update zerofrom-derive 0.1.7 -> 0.1.8 (patch); diff 3 files, +21/-18 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.zeroize]]
 version = "1.9.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.zeroize]]
+version = "1.9.1"
+criteria = "safe-to-deploy"
+notes = "cargo update zeroize 1.9.0 -> 1.9.1 (patch); diff 9 files, +79/-43 lines; build.rs changed: False; unsafe lines added: 2. FLAGGED for human review."
 
 [[exemptions.zeroize_derive]]
 version = "1.5.0"
@@ -2533,6 +2913,11 @@ criteria = "safe-to-deploy"
 version = "0.6.7"
 criteria = "safe-to-deploy"
 
+[[exemptions.zlib-rs]]
+version = "0.6.8"
+criteria = "safe-to-deploy"
+notes = "cargo update zlib-rs 0.6.7 -> 0.6.8 (patch); diff 9 files, +36/-27 lines; build.rs changed: False; unsafe lines added: 0."
+
 [[exemptions.zmij]]
 version = "1.0.23"
 criteria = "safe-to-deploy"
@@ -2549,6 +2934,16 @@ criteria = "safe-to-deploy"
 version = "7.2.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.zstd-safe]]
+version = "7.3.0"
+criteria = "safe-to-deploy"
+notes = "cargo update zstd-safe 7.2.4 -> 7.3.0 (minor); diff 6 files, +53/-193 lines; build.rs changed: False; unsafe lines added: 3. FLAGGED for human review."
+
 [[exemptions.zstd-sys]]
 version = "2.0.16+zstd.1.5.7"
 criteria = "safe-to-deploy"
+
+[[exemptions.zstd-sys]]
+version = "2.1.0+zstd.1.5.7"
+criteria = "safe-to-deploy"
+notes = "cargo update zstd-sys 2.0.16+zstd.1.5.7 -> 2.1.0+zstd.1.5.7 (minor); diff 17 files, +1033/-207 lines; build.rs changed: True; unsafe lines added: 2. FLAGGED for human review."

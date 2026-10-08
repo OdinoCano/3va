@@ -16,7 +16,8 @@ CURRENT_STEP=0
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[PASS]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+WARNINGS=()
+log_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; WARNINGS+=("$1"); }
 log_error() { echo -e "${RED}[FAIL]${NC} $1"; }
 
 step() {
@@ -142,18 +143,24 @@ else
     total_failures=$((total_failures + 1))
 fi
 
-step "6. Cargo Geiger (Unsafe Detection)"
-if ! check_tool cargo-geiger; then
-    install_tool "cargo-geiger" "cargo install cargo-geiger --locked"
-fi
-UNSAFE_COUNT=$(cargo geiger 2>/dev/null | grep -c "unsafe" 2>/dev/null || true)
-if [ "$UNSAFE_COUNT" -eq "0" ]; then
-    log_success "Sin código unsafe (geiger)"
-else
-    log_warning "Detectados $UNSAFE_COUNT usage de unsafe"
-    cargo geiger 2>/dev/null | grep -A5 "unsafe" || true
-    total_warnings=$((total_warnings + 1))
-fi
+step "6. Unsafe en crates propios"
+# First-party crates with no unsafe must say so (forbid(unsafe_code)); the rest
+# are reported. The old check grepped `cargo geiger` output and passed vacuously.
+for dir in crates/*/; do
+    name=$(basename "$dir")
+    n=$(grep -rE '\bunsafe[[:space:]]+(\{|fn|impl|extern|trait)' "$dir/src" 2>/dev/null | wc -l)
+    if [ "$n" -eq 0 ]; then
+        if grep -rqs 'forbid(unsafe_code)' "$dir/src/lib.rs" "$dir/src/main.rs" 2>/dev/null; then
+            log_success "$name: sin unsafe y forbid(unsafe_code)"
+        else
+            log_error "$name: sin unsafe pero falta #![forbid(unsafe_code)]"
+            total_failures=$((total_failures + 1))
+        fi
+    else
+        log_warning "$name: $n usos de unsafe (revisar SAFETY)"
+        total_warnings=$((total_warnings + 1))
+    fi
+done
 
 #######################################
 # NIVEL 2 - SEMGREP (SEGURIDAD SERIA)
@@ -197,12 +204,23 @@ fi
 if check_tool cargo-fuzz && [ -d "fuzz" ]; then
     FUZZ_TARGETS=$(ls fuzz/fuzz_targets/ 2>/dev/null || echo "")
     if [ -n "$FUZZ_TARGETS" ]; then
+        HOST_TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
         for target in $FUZZ_TARGETS; do
-            if PATH="$HOME/.cargo/bin:$PATH" timeout 180 cargo fuzz run "${target%.rs}" -- -max_total_time=15 2>/dev/null; then
+            FUZZ_LOG=$(mktemp)
+            PATH="$HOME/.cargo/bin:$PATH" timeout 180 cargo fuzz run "${target%.rs}" --target "$HOST_TRIPLE" -- -max_total_time=15 >"$FUZZ_LOG" 2>&1
+            rc=$?
+            if [ $rc -eq 0 ]; then
                 log_success "Fuzz $target: OK"
+            elif [ $rc -eq 124 ]; then
+                log_warning "Fuzz $target: timeout (180s, probablemente compilando)"
+            elif grep -q 'libFuzzer: .*\(deadly signal\|timeout\)\|SUMMARY: ' "$FUZZ_LOG"; then
+                log_error "Fuzz $target: CRASH"
+                grep -m3 'SUMMARY\|Test unit written\|artifact' "$FUZZ_LOG"
+                total_failures=$((total_failures + 1))
             else
-                log_warning "Fuzz $target: timeout o error"
+                log_warning "Fuzz $target: no se pudo ejecutar: $(tail -1 "$FUZZ_LOG" | cut -c1-120)"
             fi
+            rm -f "$FUZZ_LOG"
         done
     else
         log_warning "No hay fuzz targets"
@@ -357,10 +375,10 @@ fi
 
 step "16. Integridad de dependencias"
 if check_tool cargo-vet; then
-    if cargo vet 2>/dev/null; then
+    if VET_OUT=$(cargo vet --locked 2>&1); then
         log_success "Cargo vet OK"
     else
-        log_warning "Cargo vet encontró issues"
+        log_warning "Cargo vet --locked falló: $(echo "$VET_OUT" | grep -m1 -E 'Vetting Failed|error' | cut -c1-120)"
     fi
 else
     log_warning "Cargo vet no instalado (recomendado)"
@@ -396,26 +414,22 @@ fi
 
 log_info "=== NIVEL 8: COVERAGE ==="
 
-step "19. Cargo Tarpaulin — Cobertura de tests"
-if ! check_tool cargo-tarpaulin; then
-    install_tool "cargo-tarpaulin" "cargo install cargo-tarpaulin --locked"
-fi
-if check_tool cargo-tarpaulin; then
-    TARP_OUT=$(cargo tarpaulin --skip-clean --out Lcov 2>&1) || true
-    COV_LINE=$(echo "$TARP_OUT" | grep -oP '\d+\.\d+(?=% coverage)' | tail -1 || echo "0")
+step "19. Cobertura de tests (cargo-llvm-cov)"
+# tarpaulin aborted on a SIGILL in a wasm test and wrote no report, so it read 0%
+# (see scripts/coverage.sh). Same measurement as the CI coverage job.
+if check_tool cargo-llvm-cov; then
+    COV_OUT=$(bash scripts/coverage.sh 2>&1) || true
+    COV_LINE=$(echo "$COV_OUT" | awk '$1=="TOTAL" && $NF ~ /%$/ {v=$NF} END{gsub("%","",v); print v}')
     COV_INT=${COV_LINE%%.*}
-    if [ -n "$COV_INT" ] && [ "$COV_INT" -ge 60 ]; then
-        log_success "Tarpaulin: ${COV_LINE}% cobertura (umbral ≥60%)"
-    elif [ -n "$COV_INT" ]; then
-        log_warning "Tarpaulin: ${COV_LINE}% cobertura (por debajo del umbral 60%)"
-        total_warnings=$((total_warnings + 1))
+    if [ -z "$COV_INT" ]; then
+        log_warning "Cobertura: no se pudo leer el porcentaje (cargo llvm-cov falló)"
+    elif [ "$COV_INT" -ge 60 ]; then
+        log_success "Cobertura de líneas: ${COV_LINE}% (umbral ≥60%)"
     else
-        log_warning "Tarpaulin: no se pudo leer el porcentaje de cobertura"
-        total_warnings=$((total_warnings + 1))
+        log_warning "Cobertura de líneas: ${COV_LINE}% (por debajo del umbral 60%)"
     fi
 else
-    log_warning "Tarpaulin no disponible"
-    total_warnings=$((total_warnings + 1))
+    log_warning "cargo-llvm-cov no instalado (cargo install cargo-llvm-cov --locked)"
 fi
 
 #######################################
@@ -481,20 +495,21 @@ echo ""
 echo -e "Failures:  ${RED}$total_failures${NC}"
 echo -e "Warnings:  ${YELLOW}$total_warnings${NC}"
 
-if [ $total_failures -eq 0 ]; then
-    echo -e "\n${GREEN}✓ Pipeline de seguridad PASSED${NC}"
+if [ ${#WARNINGS[@]} -gt 0 ]; then
     echo ""
-    echo "Nivel 1 (Cargo Hardening): PASS"
-    echo "Nivel 2 (Semgrep): PASS"
-    echo "Nivel 3 (Fuzzing): PASS"
-    echo "Nivel 4 (Sanitizers): PASS"
-    echo "Nivel 5 (Security Tests): PASS"
-    echo "Nivel 6 (Supply Chain): PASS"
-    echo "Nivel 7 (CodeQL): PASS"
-    exit 0
-else
+    echo "Advertencias (un WARN significa que ese chequeo NO se verificó o necesita revisión):"
+    for w in "${WARNINGS[@]}"; do echo "  - $w"; done
+fi
+
+if [ $total_failures -ne 0 ]; then
     echo -e "\n${RED}✗ Pipeline de seguridad FAILED${NC}"
     echo ""
     echo "Corrige los errores antes de continuar."
     exit 1
+elif [ "${STRICT:-0}" = "1" ] && [ ${#WARNINGS[@]} -gt 0 ]; then
+    echo -e "\n${RED}✗ STRICT=1: hay advertencias${NC}"
+    exit 1
+else
+    echo -e "\n${GREEN}✓ Sin fallos${NC} (${#WARNINGS[@]} advertencias; STRICT=1 las trata como fallo)"
+    exit 0
 fi

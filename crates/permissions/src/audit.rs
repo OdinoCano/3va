@@ -180,4 +180,18 @@ mod tests {
         assert!(json.contains("PermissionDenied"));
         assert!(json.contains("NetworkAccess"));
     }
+
+    #[test]
+    fn write_to_file_persists_the_log_to_disk() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("audit.json");
+        let mut log = AuditLog::new();
+        log.log_permission_denied("FileRead", "/etc/passwd", "no grant");
+
+        log.write_to_file(&path).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("PermissionDenied"), "{written}");
+        assert!(written.contains("/etc/passwd"), "{written}");
+    }
 }

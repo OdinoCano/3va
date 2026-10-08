@@ -7,12 +7,24 @@ use std::path::PathBuf;
 
 use crate::ExtractLimits;
 
+/// Deprecated: this type has no runtime caller.
+///
+/// The real download path is the CLI/package-manager fetch and the real
+/// extraction path is [`crate::extract_tarball`] (crates/pm/src/lib.rs); this
+/// type's own guards were free to drift from it. It is public API of a crate
+/// published on crates.io (`vvva_pm`), so it is deprecated rather than deleted.
+#[deprecated(
+    since = "2.13.0",
+    note = "unused by the runtime; use crate::extract_tarball for extraction. \
+            Kept only for API compatibility and will be removed in a future major release."
+)]
 pub struct PackageFetcher {
     registry: String,
     _cache_dir: PathBuf,
     client: reqwest::Client,
 }
 
+#[allow(deprecated)] // the deprecated type's own impl still has to compile
 impl PackageFetcher {
     pub fn new(registry: &str, cache_dir: PathBuf) -> Self {
         Self {
@@ -261,6 +273,7 @@ impl PackageCache {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // exercising the deprecated PackageFetcher API
 mod tests {
     use super::*;
 

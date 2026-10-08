@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(unix)]
 extern crate libc;
@@ -13,6 +13,10 @@ use v8::{
 use vvva_permissions::{Capability, PermissionState};
 
 struct StreamChild {
+    /// The engine that spawned this child. The table is process-wide (ids are
+    /// stable across engines), so every accessor must check this before acting
+    /// — otherwise one `JsEngine` can read, write to, or kill another's child.
+    owner: u64,
     stdin: Option<std::process::ChildStdin>,
     stdout_buf: Arc<Mutex<Vec<u8>>>,
     eof: Arc<AtomicBool>,
@@ -21,6 +25,27 @@ struct StreamChild {
     control_buf: Arc<Mutex<Vec<u8>>>,
     control_done: Arc<AtomicBool>,
     pid: u32,
+}
+
+/// Per-engine context passed to the child/cluster closures through a
+/// `v8::External`. v8 callbacks must be zero-sized (rusty_v8 statically
+/// asserts it), so the owning engine's id — and the permissions the fork
+/// entry points re-check — cannot be captured by the closure.
+struct ChildProcessOwner {
+    permissions: Arc<PermissionState>,
+    engine_id: u64,
+}
+
+/// Read the owning engine id out of the `v8::External` installed by
+/// [`inject_child_process`].
+fn owner_engine_id(args: &FunctionCallbackArguments) -> u64 {
+    // SAFETY: `args.data()` is the `ChildProcessOwner` leaked into the engine's
+    // native-context registry; it is alive for the whole engine lifetime and
+    // never dropped or mutably aliased.
+    unsafe {
+        let ptr = args.data().cast::<v8::External>().value();
+        (*(ptr as *const ChildProcessOwner)).engine_id
+    }
 }
 
 /// Maps a single Node `stdio` slot value to a `Stdio`. Only the two modes
@@ -107,6 +132,9 @@ pub fn has_active_children() -> bool {
 
 static CHILD_TABLE: OnceLock<Mutex<HashMap<u32, StreamChild>>> = OnceLock::new();
 static NEXT_CHILD_ID: AtomicU32 = AtomicU32::new(1);
+/// Distinguishes one `JsEngine`'s children from another's in the process-wide
+/// tables below. Ids are handed out per engine at injection time.
+static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn child_table() -> &'static Mutex<HashMap<u32, StreamChild>> {
     CHILD_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -120,11 +148,23 @@ pub fn inject_child_process(
     let context = scope.get_current_context();
     let global = context.global(scope);
 
+    // One id per injected engine. Captured by the accessor closures below so
+    // they only ever act on children this engine spawned.
+    let engine_id = NEXT_ENGINE_ID.fetch_add(1, Ordering::SeqCst);
+
     // Stored once per engine and hand every closure a pointer via
     // v8::External, instead of a process-wide static (which corrupted
     // permission checks across concurrently-running engines/tests).
-    let perms_ptr = native_ctx.leak(permissions);
+    let perms_ptr = native_ctx.leak(permissions.clone());
     let external = v8::External::new(scope, perms_ptr);
+    // v8 callbacks must be zero-sized, so the owning-engine id (and the
+    // permissions for the entry points that still check them) travel in a
+    // second External rather than being captured by the closures.
+    let owner_ptr = native_ctx.leak(ChildProcessOwner {
+        permissions,
+        engine_id,
+    });
+    let owner_external = v8::External::new(scope, owner_ptr);
 
     let exec_async_fn = v8::Function::builder(
         |_scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
@@ -584,16 +624,16 @@ pub fn inject_child_process(
     // ── __spawnCreate(cmd, args) → child_id ──────────────────────────────────
     let spawn_create_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
-            // SAFETY: `args.data()` is the `v8::External` installed below from
-            // `native_ctx.leak(permissions)` — a pointer to an
-            // `Arc<PermissionState>` owned by the engine's native-context
-            // registry. It lives for the whole engine lifetime and is never
-            // dropped or mutably aliased, so this shared reference is valid for
-            // the duration of the call.
-            let perms = unsafe {
+            // SAFETY: `args.data()` is the `v8::External` installed from
+            // `native_ctx.leak(ChildProcessOwner { .. })`; it lives for the
+            // whole engine lifetime and is never dropped or mutably aliased,
+            // so this shared reference is valid for the duration of the call.
+            let ctx = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const Arc<PermissionState>)
+                &*(ptr as *const ChildProcessOwner)
             };
+            let perms = &ctx.permissions;
+            let engine_id = ctx.engine_id;
             if !perms.check(&Capability::SpawnProcess) {
                 throw_spawn_denied(scope);
                 return;
@@ -795,6 +835,7 @@ pub fn inject_child_process(
                     child_table().lock().unwrap().insert(
                         id,
                         StreamChild {
+                            owner: engine_id,
                             stdin,
                             stdout_buf: buf,
                             eof,
@@ -814,7 +855,7 @@ pub fn inject_child_process(
             }
         },
     )
-    .data(external.into())
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -827,9 +868,10 @@ pub fn inject_child_process(
     let spawn_write_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
             let bytes = crate::builtins::v8_compat::js_value_to_bytes(scope, args.get(1));
             let mut table = child_table().lock().unwrap();
-            if let Some(child) = table.get_mut(&id)
+            if let Some(child) = table.get_mut(&id).filter(|c| c.owner == engine_id)
                 && let Some(stdin) = child.stdin.as_mut()
             {
                 let _ = stdin.write_all(&bytes);
@@ -837,6 +879,7 @@ pub fn inject_child_process(
             }
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -849,14 +892,16 @@ pub fn inject_child_process(
     let spawn_end_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
             let mut table = child_table().lock().unwrap();
-            if let Some(child) = table.get_mut(&id) {
+            if let Some(child) = table.get_mut(&id).filter(|c| c.owner == engine_id) {
                 // Closing the pipe is what allows `cat` to flush its stdout
                 // and exit. Drop the stdin handle to send EOF to the child.
                 let _ = child.stdin.take();
             }
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -869,8 +914,9 @@ pub fn inject_child_process(
     let spawn_poll_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
             let table = child_table().lock().unwrap();
-            if let Some(child) = table.get(&id) {
+            if let Some(child) = table.get(&id).filter(|c| c.owner == engine_id) {
                 let mut buf = child.stdout_buf.lock().unwrap();
                 if !buf.is_empty() {
                     let data = buf.drain(..).collect::<Vec<u8>>();
@@ -882,6 +928,7 @@ pub fn inject_child_process(
             }
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -894,11 +941,17 @@ pub fn inject_child_process(
     let spawn_done_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
             let table = child_table().lock().unwrap();
-            let done = table.get(&id).map(child_is_done).unwrap_or(true);
+            let done = table
+                .get(&id)
+                .filter(|c| c.owner == engine_id)
+                .map(child_is_done)
+                .unwrap_or(true);
             rv.set(v8::Boolean::new(scope, done).into());
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -911,14 +964,16 @@ pub fn inject_child_process(
     let spawn_exit_code_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
             let table = child_table().lock().unwrap();
-            if let Some(c) = table.get(&id)
+            if let Some(c) = table.get(&id).filter(|c| c.owner == engine_id)
                 && let Some(code) = *c.exit_code.lock().unwrap()
             {
                 rv.set(v8::Integer::new(scope, code).into());
             }
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -931,25 +986,29 @@ pub fn inject_child_process(
     let spawn_kill_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
             let mut table = child_table().lock().unwrap();
-            if let Some(c) = table.get(&id)
-                && !c.exited.load(Ordering::SeqCst)
-            {
-                #[cfg(unix)]
-                // SAFETY: `c.pid` came from `Child::id()` and names a live
-                // child. `kill` takes a plain pid, so a child that exits and
-                // whose pid is recycled between the `exited` check and this
-                // call could be signalled instead; the window is inherent to
-                // pid-based signalling (closing it needs pidfd). The
-                // `!exited` check keeps it as a best-effort kill of the child
-                // we spawned, never a deliberate signal to an unrelated pid.
-                unsafe {
-                    libc::kill(c.pid as libc::pid_t, libc::SIGKILL);
+            if table.get(&id).is_some_and(|c| c.owner == engine_id) {
+                if let Some(c) = table.get(&id)
+                    && !c.exited.load(Ordering::SeqCst)
+                {
+                    #[cfg(unix)]
+                    // SAFETY: `c.pid` came from `Child::id()` and names a live
+                    // child. `kill` takes a plain pid, so a child that exits and
+                    // whose pid is recycled between the `exited` check and this
+                    // call could be signalled instead; the window is inherent to
+                    // pid-based signalling (closing it needs pidfd). The
+                    // `!exited` check keeps it as a best-effort kill of the child
+                    // we spawned, never a deliberate signal to an unrelated pid.
+                    unsafe {
+                        libc::kill(c.pid as libc::pid_t, libc::SIGKILL);
+                    }
                 }
+                table.remove(&id);
             }
-            table.remove(&id);
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -962,8 +1021,9 @@ pub fn inject_child_process(
     let spawn_poll_ctrl_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
             let table = child_table().lock().unwrap();
-            if let Some(child) = table.get(&id) {
+            if let Some(child) = table.get(&id).filter(|c| c.owner == engine_id) {
                 let mut buf = child.control_buf.lock().unwrap();
                 if !buf.is_empty() {
                     let data = buf.drain(..).collect::<Vec<u8>>();
@@ -975,6 +1035,7 @@ pub fn inject_child_process(
             }
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -987,14 +1048,17 @@ pub fn inject_child_process(
     let spawn_ctrl_done_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
             let table = child_table().lock().unwrap();
             let done = table
                 .get(&id)
+                .filter(|c| c.owner == engine_id)
                 .map(|c| c.control_done.load(Ordering::SeqCst))
                 .unwrap_or(true);
             rv.set(v8::Boolean::new(scope, done).into());
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -1008,6 +1072,8 @@ pub fn inject_child_process(
     use std::process::{Child, ChildStdin};
 
     struct ClusterWorker {
+        /// The engine that forked this worker; see [`StreamChild::owner`].
+        owner: u64,
         child: Child,
         stdin: Option<ChildStdin>,
         stdout_lines: Arc<Mutex<Vec<String>>>,
@@ -1023,16 +1089,16 @@ pub fn inject_child_process(
     // __clusterFork(script_path, worker_id) → worker_id or -1 on error
     let cluster_fork_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
-            // SAFETY: `args.data()` is the `v8::External` installed below from
-            // `native_ctx.leak(permissions)` — a pointer to an
-            // `Arc<PermissionState>` owned by the engine's native-context
-            // registry. It lives for the whole engine lifetime and is never
-            // dropped or mutably aliased, so this shared reference is valid for
-            // the duration of the call.
-            let perms = unsafe {
+            // SAFETY: `args.data()` is the `v8::External` installed from
+            // `native_ctx.leak(ChildProcessOwner { .. })`; it lives for the
+            // whole engine lifetime and is never dropped or mutably aliased,
+            // so this shared reference is valid for the duration of the call.
+            let ctx = unsafe {
                 let ptr = args.data().cast::<v8::External>().value();
-                &*(ptr as *const Arc<PermissionState>)
+                &*(ptr as *const ChildProcessOwner)
             };
+            let perms = &ctx.permissions;
+            let engine_id = ctx.engine_id;
             if !perms.check(&Capability::SpawnProcess) {
                 eprintln!("[__clusterFork] SpawnProcess denied (perms={:?})", perms);
                 rv.set(v8::Integer::new(scope, -1).into());
@@ -1044,6 +1110,19 @@ pub fn inject_child_process(
             let extra_env_json = args.get(2).to_rust_string_lossy(scope);
             let extra_env: std::collections::HashMap<String, String> =
                 serde_json::from_str(&extra_env_json).unwrap_or_default();
+
+            // The worker id comes from the caller and is only unique within one
+            // engine. Refuse to clobber a worker another engine already forked
+            // under the same id, rather than orphaning its child.
+            if cluster_table()
+                .lock()
+                .unwrap()
+                .get(&worker_id)
+                .is_some_and(|w| w.owner != engine_id)
+            {
+                rv.set(v8::Integer::new(scope, -1).into());
+                return;
+            }
 
             let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("3va"));
 
@@ -1094,6 +1173,7 @@ pub fn inject_child_process(
             cluster_table().lock().unwrap().insert(
                 worker_id,
                 ClusterWorker {
+                    owner: engine_id,
                     child,
                     stdin,
                     stdout_lines: lines,
@@ -1104,7 +1184,7 @@ pub fn inject_child_process(
             rv.set(v8::Integer::new_from_unsigned(scope, worker_id).into());
         },
     )
-    .data(external.into())
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -1117,10 +1197,15 @@ pub fn inject_child_process(
     let cluster_send_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let worker_id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
             let msg = args.get(1).to_rust_string_lossy(scope);
 
             let mut table = cluster_table().lock().unwrap();
-            if let Some(ref mut stdin) = table.get_mut(&worker_id).and_then(|w| w.stdin.as_mut()) {
+            if let Some(ref mut stdin) = table
+                .get_mut(&worker_id)
+                .filter(|w| w.owner == engine_id)
+                .and_then(|w| w.stdin.as_mut())
+            {
                 let result = writeln!(stdin, "{}", msg);
                 let _ = stdin.flush();
                 rv.set(v8::Boolean::new(scope, result.is_ok()).into());
@@ -1129,6 +1214,7 @@ pub fn inject_child_process(
             rv.set(v8::Boolean::new(scope, false).into());
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -1141,9 +1227,10 @@ pub fn inject_child_process(
     let cluster_poll_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
             let worker_id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
 
             let table = cluster_table().lock().unwrap();
-            if let Some(worker) = table.get(&worker_id) {
+            if let Some(worker) = table.get(&worker_id).filter(|w| w.owner == engine_id) {
                 let mut lines = worker.stdout_lines.lock().unwrap();
                 if !lines.is_empty() {
                     let line = lines.remove(0);
@@ -1155,6 +1242,7 @@ pub fn inject_child_process(
             rv.set(v8::null(scope).into());
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(
@@ -1167,14 +1255,18 @@ pub fn inject_child_process(
     let cluster_kill_fn = v8::Function::builder(
         |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
             let worker_id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let engine_id = owner_engine_id(&args);
 
             let mut table = cluster_table().lock().unwrap();
-            if let Some(mut worker) = table.remove(&worker_id) {
+            if table.get(&worker_id).is_some_and(|w| w.owner == engine_id)
+                && let Some(mut worker) = table.remove(&worker_id)
+            {
                 let _ = worker.child.kill();
                 let _ = worker.child.wait();
             }
         },
     )
+    .data(owner_external.into())
     .build(scope)
     .unwrap();
     global.set(

@@ -9,9 +9,15 @@
 //! `napi_register_module_v1`, then calls into the addon with a `NapiEnv` it
 //! can use to talk back to V8 through these functions.
 //!
-//! NAPI glue is inherently unsafe FFI. The `unsafe` blocks just add noise
-//! here — callers (native addons) are responsible for passing valid
-//! napi_env / napi_value pointers per the NAPI ABI contract.
+//! NAPI glue is inherently unsafe FFI. A `.node` addon is native code loaded
+//! into the process, so it is trusted the same way the host binary is: it can
+//! already read and write any memory it likes. The host therefore validates
+//! what it cheaply can — notably UTF-8 for the byte strings an addon hands in,
+//! returning `napi_invalid_arg` rather than constructing an invalid `str` —
+//! but it cannot validate pointer provenance or that a caller-supplied length
+//! matches the underlying allocation: the N-API ABI carries neither. Those
+//! remain the addon's responsibility, exactly as in Node. See
+//! `crates/js/tests/napi_sanitizers.rs` for the hostile-addon probes.
 //!
 //! Debug tracing: `NAPI_TRACE` records the most recent ~500 NAPI entrypoints
 //! so that when a callback receives a null pointer it can dump the path that
@@ -254,6 +260,9 @@ unsafe fn get_local<'a>(
     if val.is_null() {
         return None;
     }
+    // SAFETY: `val` is a non-null NapiValue the host produced and stored in
+    // the environment. Provenance is not checkable from a bare pointer under
+    // this ABI (see the module note); a null handle is handled above.
     Some(v8::Local::new(scope, &(*val).global))
 }
 
@@ -288,11 +297,16 @@ macro_rules! napi_scope {
             let mut $cs = cb_ref;
             $body
         } else {
+            // SAFETY: `$env` is the non-null handle the entrypoint already
+            // checked; the environment is owned by the loader and outlives the
+            // call.
             let env_ref: &mut NapiEnv = unsafe { &mut *$env };
             // Reconstruct the real isolate: env stores the `*mut RealIsolate`
             // (stable for the isolate's lifetime), wrapped here per call. A
             // reborrow of the creating scope's internal isolate field would be
             // a dangling stack pointer once that scope has dropped.
+            // SAFETY: `env_ref.isolate` was captured from the live scope in
+            // `napi_load_module` and is stable for the isolate's lifetime.
             let mut isolate = unsafe { v8::Isolate::from_raw_ptr(env_ref.isolate) };
             let mut scope_storage = Box::pin(v8::HandleScope::new(&mut isolate));
             let mut hs = scope_storage.as_mut().init();
@@ -391,7 +405,10 @@ unsafe extern "C" fn napi_create_string_utf8(
     } else {
         std::slice::from_raw_parts(str_ptr as *const u8, len)
     };
-    let s = std::str::from_utf8_unchecked(slice).to_owned();
+    let s = match std::str::from_utf8(slice) {
+        Ok(s) => s.to_owned(),
+        Err(_) => return NAPI_INVALID_ARG,
+    };
     napi_scope!(env, cs, {
         *result = store!(&cs, &mut *env, v8::String::new(&cs, &s).unwrap());
         return NAPI_OK;
@@ -538,7 +555,10 @@ unsafe extern "C" fn napi_create_function(
         } else {
             std::slice::from_raw_parts(name as *const u8, name_len)
         };
-        std::str::from_utf8_unchecked(slice).to_owned()
+        match std::str::from_utf8(slice) {
+            Ok(s) => s.to_owned(),
+            Err(_) => return NAPI_INVALID_ARG,
+        }
     } else {
         String::new()
     };
@@ -2001,7 +2021,10 @@ unsafe extern "C" fn napi_define_class(
         } else {
             std::slice::from_raw_parts(name as *const u8, name_len)
         };
-        std::str::from_utf8_unchecked(slice).to_owned()
+        match std::str::from_utf8(slice) {
+            Ok(s) => s.to_owned(),
+            Err(_) => return NAPI_INVALID_ARG,
+        }
     } else {
         String::new()
     };
@@ -2169,6 +2192,9 @@ unsafe extern "C" fn napi_queue_async_work(_e: NapiEnvHandle, w: NapiAsyncWork) 
     NAPI_INFLIGHT_ASYNC.fetch_add(1, Ordering::SeqCst);
     std::thread::spawn(move || {
         if let Some(exec) = exec {
+            // SAFETY: `exec`/`ctx` are the boxed execute + data pointers the
+            // addon passed to napi_create_async_work; they stay owned by this
+            // work item until the completion runs.
             unsafe { exec(ctx.env, ctx.data) };
         }
         if cancelled.load(Ordering::SeqCst) {
@@ -2183,8 +2209,12 @@ unsafe extern "C" fn napi_queue_async_work(_e: NapiEnvHandle, w: NapiAsyncWork) 
             NAPI_ASYNC_COMPLETIONS
                 .lock()
                 .unwrap()
-                .push_back(Box::new(move || unsafe {
-                    complete(ctx.env, NAPI_OK, ctx.data);
+                .push_back(Box::new(move || {
+                    // SAFETY: same execute/data pair, still owned by this work
+                    // item; the completion runs on the V8 thread.
+                    unsafe {
+                        complete(ctx.env, NAPI_OK, ctx.data);
+                    }
                     NAPI_INFLIGHT_ASYNC.fetch_sub(1, Ordering::SeqCst);
                 }));
         } else {
@@ -2527,14 +2557,14 @@ unsafe extern "C" fn napi_fatal_error(
     _message_len: usize,
 ) {
     let msg = if _message.is_null() {
-        "fatal error"
+        "fatal error".to_string()
     } else {
         let slice = if _message_len == usize::MAX {
             CStr::from_ptr(_message).to_bytes()
         } else {
             std::slice::from_raw_parts(_message as *const u8, _message_len)
         };
-        std::str::from_utf8_unchecked(slice)
+        String::from_utf8_lossy(slice).into_owned()
     };
     eprintln!("napi_fatal_error: {}", msg);
     std::process::abort();
@@ -2723,6 +2753,9 @@ fn napi_bridge_callback(
     mut rv: ReturnValue,
 ) {
     napi_trace!("napi_bridge_callback");
+    // SAFETY: `args.data()` is the `v8::External` this callback was built with
+    // in napi_create_function / napi_define_class, wrapping a `NapiBridge`
+    // allocated by the loader and alive for the callback's duration.
     unsafe {
         let data = args.data().cast::<v8::External>().value();
         let bridge = &*(data as *const NapiBridge);
@@ -2779,6 +2812,9 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
         return Err(format!("FFI access denied. Run with --allow-ffi={}", path));
     }
 
+    // SAFETY: dlopen'ing the addon is the point of the FFI capability, which
+    // was just checked above; `Library` owns the handle for as long as the
+    // environment keeps the `Arc`.
     let lib = unsafe { Library::new(path).map_err(|e| format!("Failed to load {}: {}", path, e))? };
     let lib = Arc::new(lib);
 
@@ -2786,6 +2822,9 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
     // `Isolate` is `#[repr(transparent)]` over `NonNull<RealIsolate>`; the
     // reborrowed address is the scope's internal field, so read the real
     // isolate pointer it wraps instead of storing that (dangling) field addr.
+    // SAFETY: `Isolate` is `#[repr(transparent)]` over `NonNull<RealIsolate>`,
+    // so the leading pointer-sized field is the real isolate the scope wraps;
+    // it stays alive because `scope` is borrowed for the call.
     let isolate_ptr: *mut v8::RealIsolate =
         unsafe { *(isolate as *const v8::Isolate as *const *mut v8::RealIsolate) };
 
@@ -2802,6 +2841,9 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
     });
     let env_ptr = Box::into_raw(env);
 
+    // SAFETY: `env_ptr` was just boxed and is not freed until the environment
+    // is torn down; `scope`/`ctx` are live for the duration of the call. The
+    // addon entrypoint below is the one unsafe boundary that trusts native code.
     unsafe {
         let cs = v8::ContextScope::new(scope, ctx);
 

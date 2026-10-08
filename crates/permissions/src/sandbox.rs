@@ -146,6 +146,14 @@ mod tests {
     }
 
     #[test]
+    fn curdir_components_are_dropped_by_normalize_path() {
+        // `Path::components()` normalizes `.` away except at the very start,
+        // so a leading `./` is the only way to exercise the CurDir arm.
+        let normalized = normalize_path(Path::new("./app/x"));
+        assert_eq!(normalized, PathBuf::from("app/x"));
+    }
+
+    #[test]
     fn test_virtual_fs_resolution() {
         let mut vfs = VirtualFs::new();
         vfs.mount("/app", "/var/lib/3va/sandbox1", true);
