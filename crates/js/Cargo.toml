@@ -97,6 +97,10 @@ name = "napi_sanitizers"
 path = "tests/napi_sanitizers.rs"
 
 [[test]]
+name = "engine_scoped_children"
+path = "tests/engine_scoped_children.rs"
+
+[[test]]
 name = "url_globals"
 path = "tests/url_globals.rs"
 
