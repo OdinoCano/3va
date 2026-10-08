@@ -102,6 +102,10 @@ name = "napi_handles"
 path = "tests/napi_handles.rs"
 
 [[test]]
+name = "napi_async"
+path = "tests/napi_async.rs"
+
+[[test]]
 name = "engine_scoped_children"
 path = "tests/engine_scoped_children.rs"
 

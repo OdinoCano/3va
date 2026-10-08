@@ -21,6 +21,7 @@ A collection of small, self-contained projects that demonstrate how to use **3va
 | [11](./11-react-native) | React Native | Run & test the shared TS logic of an RN app | `3va test` |
 | [12](./12-expo) | Expo | Expo helpers + scripts; `3va create expo-app` | `3va run src/index.ts --allow-read=./src` |
 | [13](./13-tauri) | Tauri | Frontend TS toolchain for a Tauri shell (dev/bundle/test) | `3va dev` / `3va bundle` / `3va test` |
+| [14](./14-native-addon) | Native addon | Load a real `.node` addon (bcrypt) via Node-API + `--allow-ffi` | `3va run app.js --allow-ffi ...` |
 
 ## The core idea of 3va
 
