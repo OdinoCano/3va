@@ -20,6 +20,7 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 - Breaking for embedders: scripts that relied on `cluster.fork()` workers getting full permissions, or on children reading host environment variables without `--allow-env`, must now grant them.
 
 ### Changed
+- **N-API addons:** `napi_define_class` and `napi_define_properties` read a `napi_property_descriptor` that lacked the `name` and `method` fields (48 bytes instead of Node's 64), so any array of two or more descriptors was read misaligned (a segfault when loading e.g. `@node-rs/argon2`) and methods, getters/setters and `napi_static` members were ignored. The layout now matches Node-API and all of them, with writable/enumerable/configurable, are defined. Added `napi_get_prototype`, `napi_has_own_property` and `napi_remove_wrap`; `napi_object_expected` and `napi_generic_failure` returned 15 and 8 instead of Node's 2 and 9.
 - **N-API handles are released.** `napi_open/close_handle_scope` and the escapable variants were no-ops and every `napi_create_*` kept a strong V8 root until exit, so an addon creating values in a loop grew without bound. Handles are now released when a native callback returns, when a handle scope closes, and after module init; `napi_escape_handle` keeps its value alive past the escapable scope (a second escape returns `napi_escape_called_twice`).
 
 - Removed 13 unused dependencies (Cargo.lock 779 → 707 packages); added fuzz targets for the HTTP parser, package tarballs, `package.json` and the IMAP/MQTT/IRC/POP3/FTP parsers.
