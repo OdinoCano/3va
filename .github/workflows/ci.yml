@@ -214,3 +214,15 @@ jobs:
         run: |
           cargo llvm-cov --workspace --summary-only | tee coverage.txt
           { echo '```'; cat coverage.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── MSRV: the rust-version declared in [workspace.package] ───────────────────
+  msrv:
+    name: MSRV (1.95.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      # Same rust-cache / librusty_v8.a issue as the test job.
+      - run: test -f target/debug/gn_out/obj/librusty_v8.a || cargo clean -p v8
+      - run: cargo check --workspace

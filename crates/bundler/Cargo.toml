@@ -1,6 +1,7 @@
 [package]
 name = "vvva_bundler"
 version = "2.12.0"
+rust-version.workspace = true
 edition = "2024"
 license = "MIT"
 description = "TypeScript/JavaScript bundler and hot-module-reload dev server for the 3va runtime (oxc-based)"

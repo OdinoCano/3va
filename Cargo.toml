@@ -8,6 +8,14 @@ members = [
     "crates/wasm",
 ]
 
+[workspace.package]
+# Lowest toolchain the whole graph builds with. Forced by oxc-browserslist
+# 3.0.13 (via oxc_compat -> oxc_transformer), whose manifest declares
+# `rust-version = 1.95.0`; 1.94.0 fails with "requires rustc 1.95.0" and
+# 1.95.0 passes `cargo check --workspace`. Keep this in sync with the MSRV CI
+# job. Re-measure with `cargo msrv` or by bisecting rustup toolchains.
+rust-version = "1.95.0"
+
 [workspace.dependencies]
 mimalloc = "0.1"
 tokio = { version = "1.37", features = ["full"] }

@@ -1,6 +1,7 @@
 [package]
 name = "vvva_js"
 version = "2.12.0"
+rust-version.workspace = true
 edition = "2024"
 license = "MIT"
 description = "V8-based JavaScript/TypeScript engine for the 3va runtime — ESM, TypeScript, async/await, NAPI, CDP inspector, profiler"

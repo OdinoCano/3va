@@ -1,6 +1,7 @@
 [package]
 name = "vvva_config"
 version = "2.12.0"
+rust-version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "Project configuration schema and loader for the 3va JavaScript runtime (3va.config.toml / .json)"
