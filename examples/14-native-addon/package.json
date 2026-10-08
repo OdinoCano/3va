@@ -1,0 +1,10 @@
+{
+  "name": "3va-example-native-addon",
+  "version": "1.0.0",
+  "dependencies": {
+    "bcrypt": "^6.0.0"
+  },
+  "3va": {
+    "no-prompt": true
+  }
+}

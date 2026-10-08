@@ -1242,7 +1242,14 @@ impl JsEngine {
             // even while `still_pending` below was reporting real work —
             // exactly the `3va run .../cli.js -- run-android` bug where the
             // whole process exited cleanly mid-Gradle-build.
-            let unlimited = self.server_mode || has_listener() || has_child();
+            // In-flight native async work (napi_queue_async_work) is real pending
+            // work too: it must not be cut off by the iteration cap, or a script
+            // whose only pending thing is e.g. `bcrypt.hash(..., 10)` exits
+            // before its callback ever runs.
+            let unlimited = self.server_mode
+                || has_listener()
+                || has_child()
+                || builtins::napi::has_pending_native_async();
             // Not `has_pending_background_tasks()`: it counts any V8 job
             // (concurrent GC, compiles) and kept processes alive polling for
             // as long as one lingered. Async WebAssembly compiles keep the
@@ -1275,7 +1282,10 @@ impl JsEngine {
                 && wait > std::time::Duration::ZERO
             {
                 sleep_or_wake(wait.min(std::time::Duration::from_millis(50)), &http_wake).await;
-            } else if wait.is_none() && !builtins::napi::has_pending_native_async() {
+            } else if wait.is_none() {
+                // Also while native async work is in flight: skipping the sleep
+                // there made this loop spin at full speed (and burn through the
+                // iteration cap) instead of waiting for the worker thread.
                 sleep_or_wake(std::time::Duration::from_millis(1), &http_wake).await;
             }
         }
