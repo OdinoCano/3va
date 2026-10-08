@@ -15,12 +15,17 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 - **`localStorage` natives** are gated on `--allow-read`/`--allow-write`, no longer fall back to a world-writable `/tmp` path, and cache directories are created `0700`. The V8 code cache is written through an exclusive temp file plus rename, so a planted symlink is replaced, not followed.
 - **HTTP/1 request parsing** rejects smuggling vectors: non-numeric, oversized (413) or conflicting duplicate `Content-Length`, conflicting duplicate `Transfer-Encoding`, whitespace before `:`, and obsolete line folding.
 - **`3va install`:** a package tarball may contain at most 100,000 entries (decompression-bomb guard).
+- **N-API addons:** `napi_create_string_utf8` and `napi_define_class` reject invalid UTF-8 with `napi_invalid_arg` instead of building an unchecked `str`.
+- **`child_process` / `cluster`:** the child and cluster tables are scoped to the engine that created them, so a second engine in the same process can no longer read, write or kill another engine's children.
 - Breaking for embedders: scripts that relied on `cluster.fork()` workers getting full permissions, or on children reading host environment variables without `--allow-env`, must now grant them.
 
 ### Changed
 
 - Removed 13 unused dependencies (Cargo.lock 779 → 707 packages); added fuzz targets for the HTTP parser, package tarballs, `package.json` and the IMAP/MQTT/IRC/POP3/FTP parsers.
 - `#![forbid(unsafe_code)]` in the crates that contain no `unsafe`.
+- MSRV is now declared and tested in CI: Rust 1.95.0 (`rust-version`). Dependencies were refreshed with `cargo update`, with `cargo vet` exemptions recorded per crate.
+- `PackageFetcher` in `vvva_pm` is deprecated (no runtime caller; use the tarball extraction in `3va install`).
+- CI: a weekly test262 baseline gate, a napi AddressSanitizer job with a canary, and a nightly fuzz run of every target. `scripts/security_verify.sh` now reports what it verified (real fuzz runs, per-crate `unsafe` policy, `cargo vet --locked`, llvm-cov coverage); `scripts/coverage.sh` replaces tarpaulin, which read 0%.
 - `3va doctor` now exercises the sandbox for real: with an empty sandbox it runs hostile file read/write, network, process-spawn, worker and `localStorage` operations in a V8 engine and checks each is denied, plus a SHA-256 known-answer test. It exits non-zero when any self-check fails (it exited 0 before) and states that it does not scan the project; use `3va audit` for dependencies.
 
 ---

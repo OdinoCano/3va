@@ -375,10 +375,10 @@ fi
 
 step "16. Integridad de dependencias"
 if check_tool cargo-vet; then
-    if cargo vet 2>/dev/null; then
+    if VET_OUT=$(cargo vet --locked 2>&1); then
         log_success "Cargo vet OK"
     else
-        log_warning "Cargo vet encontró issues"
+        log_warning "Cargo vet --locked falló: $(echo "$VET_OUT" | grep -m1 -E 'Vetting Failed|error' | cut -c1-120)"
     fi
 else
     log_warning "Cargo vet no instalado (recomendado)"
@@ -414,26 +414,22 @@ fi
 
 log_info "=== NIVEL 8: COVERAGE ==="
 
-step "19. Cargo Tarpaulin — Cobertura de tests"
-if ! check_tool cargo-tarpaulin; then
-    install_tool "cargo-tarpaulin" "cargo install cargo-tarpaulin --locked"
-fi
-if check_tool cargo-tarpaulin; then
-    TARP_OUT=$(cargo tarpaulin --skip-clean --out Lcov 2>&1) || true
-    COV_LINE=$(echo "$TARP_OUT" | grep -oP '\d+\.\d+(?=% coverage)' | tail -1 || echo "0")
+step "19. Cobertura de tests (cargo-llvm-cov)"
+# tarpaulin aborted on a SIGILL in a wasm test and wrote no report, so it read 0%
+# (see scripts/coverage.sh). Same measurement as the CI coverage job.
+if check_tool cargo-llvm-cov; then
+    COV_OUT=$(bash scripts/coverage.sh 2>&1) || true
+    COV_LINE=$(echo "$COV_OUT" | awk '$1=="TOTAL" && $NF ~ /%$/ {v=$NF} END{gsub("%","",v); print v}')
     COV_INT=${COV_LINE%%.*}
-    if [ -n "$COV_INT" ] && [ "$COV_INT" -ge 60 ]; then
-        log_success "Tarpaulin: ${COV_LINE}% cobertura (umbral ≥60%)"
-    elif [ -n "$COV_INT" ]; then
-        log_warning "Tarpaulin: ${COV_LINE}% cobertura (por debajo del umbral 60%)"
-        total_warnings=$((total_warnings + 1))
+    if [ -z "$COV_INT" ]; then
+        log_warning "Cobertura: no se pudo leer el porcentaje (cargo llvm-cov falló)"
+    elif [ "$COV_INT" -ge 60 ]; then
+        log_success "Cobertura de líneas: ${COV_LINE}% (umbral ≥60%)"
     else
-        log_warning "Tarpaulin: no se pudo leer el porcentaje de cobertura"
-        total_warnings=$((total_warnings + 1))
+        log_warning "Cobertura de líneas: ${COV_LINE}% (por debajo del umbral 60%)"
     fi
 else
-    log_warning "Tarpaulin no disponible"
-    total_warnings=$((total_warnings + 1))
+    log_warning "cargo-llvm-cov no instalado (cargo install cargo-llvm-cov --locked)"
 fi
 
 #######################################
