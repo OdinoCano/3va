@@ -232,7 +232,93 @@ async fn doctor_checks() -> Vec<(bool, String)> {
         Err(_) => false,
     };
     out.push((v8_ok, "V8 evaluates code (1 + 1 = 2)".to_string()));
+    out.extend(doctor_engine_probes().await);
     out
+}
+
+/// Hostile operations run inside a real engine with an empty sandbox: each must
+/// be denied. These are the paths the 2026-10 audit found open, so `doctor`
+/// exercises them for real rather than asserting them.
+async fn doctor_engine_probes() -> Vec<(bool, String)> {
+    let dir = std::env::temp_dir().join(format!("3va-doctor-probe-{}", std::process::id()));
+    let out = doctor_engine_probes_with(
+        std::sync::Arc::new(vvva_permissions::PermissionState::new()),
+        &dir,
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+/// Same probes under arbitrary permissions; `true` means "denied as expected".
+async fn doctor_engine_probes_with(
+    perms: std::sync::Arc<vvva_permissions::PermissionState>,
+    dir: &std::path::Path,
+) -> Vec<(bool, String)> {
+    let (secret, written, spawned) = (
+        dir.join("secret.js"),
+        dir.join("written.txt"),
+        dir.join("spawned.txt"),
+    );
+    if std::fs::create_dir_all(dir)
+        .and_then(|_| std::fs::write(&secret, "0;"))
+        .is_err()
+    {
+        return vec![(
+            false,
+            "Sandbox probes: temp directory is not writable".to_string(),
+        )];
+    }
+    let js = |p: &std::path::Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
+    let script = format!(
+        r#"(function () {{
+  function denied(f) {{ try {{ f(); return false; }} catch (e) {{ return /ermission|EACCES|denied/i.test(String(e && e.message || e)); }} }}
+  var net = __tcpConnect('127.0.0.1', 9); // returns an Error object when denied
+  return JSON.stringify({{
+    read: denied(function () {{ __fsReadFileSync({secret}); }}),
+    write: denied(function () {{ __fsWriteFileSync({written}, 'x'); }}),
+    net: typeof net !== 'number' && !!net && net.code === 'EACCES',
+    spawn: denied(function () {{ __execSyncShell("touch '" + {spawned} + "'"); }}),
+    worker: denied(function () {{ __workerCreate({secret}, 'null'); }}),
+    storage: denied(function () {{ __localStorageRead(); }}),
+    sha256: require('crypto').createHash('sha256').update('abc').digest('hex')
+  }});
+}})()"#,
+        secret = js(&secret),
+        written = js(&written),
+        spawned = js(&spawned),
+    );
+    let result = match vvva_js::JsEngine::new(perms).await {
+        Ok(mut engine) => engine.eval_to_string(&script).await.ok(),
+        Err(_) => None,
+    };
+    let report: serde_json::Value = result
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_default();
+    let flag = |k: &str| report.get(k).and_then(|v| v.as_bool()) == Some(true);
+    let out = vec![
+        (flag("read"), "Empty sandbox: file read denied"),
+        (
+            flag("write") && !written.exists(),
+            "Empty sandbox: file write denied (nothing written)",
+        ),
+        (flag("net"), "Empty sandbox: network connect denied"),
+        (
+            flag("spawn") && !spawned.exists(),
+            "Empty sandbox: process spawn denied (nothing spawned)",
+        ),
+        (flag("worker"), "Empty sandbox: worker file load denied"),
+        (
+            flag("storage"),
+            "Empty sandbox: localStorage file access denied",
+        ),
+        (
+            report.get("sha256").and_then(|v| v.as_str())
+                == Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+            "SHA-256 known-answer test (\"abc\")",
+        ),
+    ];
+    out.into_iter().map(|(ok, n)| (ok, n.to_string())).collect()
 }
 
 async fn check_system_info() -> anyhow::Result<()> {
@@ -256,11 +342,23 @@ async fn check_system_info() -> anyhow::Result<()> {
     }
 
     println!("\n--- Summary ---");
-    if checks.iter().all(|(ok, _)| *ok) {
-        println!("✓ 3VA is healthy and ready to use.");
+    let passed = checks.iter().filter(|(ok, _)| *ok).count();
+    if passed == checks.len() {
+        println!(
+            "✓ 3VA is healthy and ready to use ({passed}/{} runtime self-checks passed).",
+            checks.len()
+        );
+        println!(
+            "  This does not scan your project or its dependencies; run '3va audit' for that."
+        );
         println!("  Run '3va run <file>' to execute JavaScript securely.");
     } else {
         println!("✗ 3VA reported failing self-checks above — do not assume it is safe.");
+        anyhow::bail!(
+            "{} of {} doctor self-checks failed",
+            checks.len() - passed,
+            checks.len()
+        );
     }
 
     Ok(())
@@ -8514,6 +8612,43 @@ export default Link;
             checks.iter().all(|(ok, _)| *ok),
             "doctor self-checks must pass on a healthy build: {checks:?}"
         );
+    }
+
+    // A probe that cannot fail proves nothing: with the permissions granted, every
+    // "denied" check must flip to false (positive control), and an empty sandbox
+    // must pass them all.
+    #[tokio::test]
+    async fn doctor_probes_detect_an_open_sandbox() {
+        use vvva_permissions::{Capability, PermissionState};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("probe");
+
+        let closed = doctor_engine_probes_with(Arc::new(PermissionState::new()), &dir).await;
+        assert!(
+            closed.iter().all(|(ok, _)| *ok),
+            "empty sandbox: {closed:?}"
+        );
+
+        let open = Arc::new(PermissionState::new());
+        open.grant(Capability::FileRead(dir.clone()));
+        open.grant(Capability::FileWrite(dir.clone()));
+        open.grant(Capability::SpawnProcess);
+        open.grant(Capability::Network("127.0.0.1".to_string()));
+        open.grant(Capability::Network("127.0.0.1:9".to_string()));
+        let res = doctor_engine_probes_with(open, &dir).await;
+        let still_ok = |name: &str| res.iter().any(|(ok, n)| *ok && n.contains(name));
+        for name in [
+            "file read",
+            "file write",
+            "network",
+            "process spawn",
+            "worker",
+        ] {
+            assert!(
+                !still_ok(name),
+                "probe '{name}' did not notice the grant: {res:?}"
+            );
+        }
     }
 
     // ── pack: credentials must never reach a tarball (VULN-02) ────────────────

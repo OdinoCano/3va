@@ -12,8 +12,8 @@ LTS line; see [docs/12-roadmap/02-lts-criteria.md](docs/12-roadmap/02-lts-criter
 
 | Version | Status      | Notes |
 |---------|-------------|-------|
-| 2.11.x  | Current     | Receives security patches until 2.12.0 is released |
-| < 2.11  | Unsupported | No security updates. Upgrade to 2.11.x |
+| 2.12.x  | Current     | Receives security patches until 2.13.0 is released |
+| < 2.12  | Unsupported | No security updates. Upgrade to 2.12.x |
 
 ## Reporting a Vulnerability
 

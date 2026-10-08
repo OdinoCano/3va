@@ -21,6 +21,7 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 - Removed 13 unused dependencies (Cargo.lock 779 → 707 packages); added fuzz targets for the HTTP parser, package tarballs, `package.json` and the IMAP/MQTT/IRC/POP3/FTP parsers.
 - `#![forbid(unsafe_code)]` in the crates that contain no `unsafe`.
+- `3va doctor` now exercises the sandbox for real: with an empty sandbox it runs hostile file read/write, network, process-spawn, worker and `localStorage` operations in a V8 engine and checks each is denied, plus a SHA-256 known-answer test. It exits non-zero when any self-check fails (it exited 0 before) and states that it does not scan the project; use `3va audit` for dependencies.
 
 ---
 
