@@ -62,10 +62,9 @@ jobs:
           targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
       # -rdynamic: addons resolve their napi_* symbols against the host binary.
-      # detect_leaks=0: memory *errors* only. Known leaks in napi.rs
-      # (napi_create_int32, napi_load_module, inject_napi) are tracked
-      # separately, see docs/10-security/11-threat-model.md; the V8-internal
-      # create_annex leak is covered by .github/lsan-v8.supp in security.yml.
+      # detect_leaks=0: memory *errors* only. Handles are now released (see
+      # tests/napi_handles.rs); what remains is one bridge allocation per
+      # napi_create_function, tracked in docs/10-security/11-threat-model.md.
       - name: napi tests must be ASan-clean
         env:
           RUSTFLAGS: "-Zsanitizer=address -C link-args=-rdynamic"

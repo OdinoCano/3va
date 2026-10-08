@@ -53,6 +53,7 @@ type NapiValuetype = i32;
 
 const NAPI_OK: NapiStatus = 0;
 const NAPI_INVALID_ARG: NapiStatus = 1;
+const NAPI_ESCAPE_CALLED_TWICE: NapiStatus = 12;
 const NAPI_GENERIC_FAILURE: NapiStatus = 8;
 const NAPI_OBJECT_EXPECTED: NapiStatus = 15;
 const NAPI_STRING_EXPECTED: NapiStatus = 3;
@@ -73,6 +74,9 @@ struct NapiEnv {
     isolate: *mut v8::RealIsolate,
     context: v8::Global<v8::Context>,
     values: Vec<NapiValue>,
+    /// Values chosen by `napi_escape_handle`, as (scope mark, handle); they
+    /// survive the escapable scope's close and move to its parent.
+    escaped: Vec<(usize, NapiValue)>,
     pending_exception: Option<v8::Global<v8::Value>>,
     cleanup_hooks: Vec<(unsafe extern "C" fn(*mut c_void), *mut c_void)>,
     _library: Option<Arc<Library>>,
@@ -241,6 +245,49 @@ unsafe extern "C" fn napi_module_register(module: *const NapiModule) {
     napi_trace!("napi_module_register");
     if !module.is_null() {
         *std::ptr::addr_of_mut!(NAPI_REGISTERED_MODULE) = Some(std::ptr::read(module));
+    }
+}
+
+/// Number of handles currently alive across every loaded addon environment.
+/// Test hook: lets a test assert that closing a scope or returning from a native
+/// callback really releases what the addon created.
+#[doc(hidden)]
+pub fn live_handle_count() -> usize {
+    let envs = LOADED_ENVS.lock().unwrap();
+    // SAFETY: every entry is a leaked, never-freed `NapiEnv`; the caller is on
+    // the JS thread, the only one that mutates `values`.
+    envs.iter()
+        .map(|e| unsafe { (*(*e as *const NapiEnv)).values.len() })
+        .sum()
+}
+
+/// Every environment created by `napi_load_module`. An environment must live as
+/// long as the addon's function pointers do (the rest of the process), so it is
+/// intentionally never freed; recording it here keeps it reachable instead of
+/// looking like a leak to LeakSanitizer.
+static LOADED_ENVS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// Drop every value stored at index `mark` and above, except those in `keep`
+/// (which are re-pushed, now belonging to the enclosing scope). This is what
+/// closing a N-API handle scope means: without it each `napi_create_*` kept a
+/// strong V8 root and a heap box until the process exited.
+///
+/// # Safety
+/// Handles in the released range must not be used afterwards, exactly as in
+/// Node-API (an addon that does is already invalid there).
+unsafe fn release_values_from(env: &mut NapiEnv, mark: usize, keep: &[NapiValue]) {
+    if mark >= env.values.len() {
+        return;
+    }
+    let tail: Vec<NapiValue> = env.values.drain(mark..).collect();
+    for p in tail {
+        if keep.contains(&p) {
+            env.values.push(p);
+        } else {
+            // SAFETY: `p` came from `Box::into_raw` in `store_value` and was
+            // removed from `env.values`, so this is its only owner.
+            drop(unsafe { Box::from_raw(p) });
+        }
     }
 }
 
@@ -2446,54 +2493,84 @@ unsafe extern "C" fn napi_create_string_latin1(
     })
 }
 
+// A scope token is `values.len() + 1` at open time (non-null, so addons that
+// test for null keep working); closing releases everything stored since.
+fn scope_token(env: &NapiEnv) -> *mut c_void {
+    (env.values.len() + 1) as *mut c_void
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn napi_open_handle_scope(
-    _env: NapiEnvHandle,
-    _result: *mut *mut c_void,
+    env: NapiEnvHandle,
+    result: *mut *mut c_void,
 ) -> NapiStatus {
-    if !_result.is_null() {
-        *_result = std::ptr::dangling_mut::<c_void>();
+    if env.is_null() || result.is_null() {
+        return NAPI_INVALID_ARG;
     }
+    *result = scope_token(&*env);
     NAPI_OK
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn napi_close_handle_scope(
-    _env: NapiEnvHandle,
-    _scope: *mut c_void,
-) -> NapiStatus {
+unsafe extern "C" fn napi_close_handle_scope(env: NapiEnvHandle, scope: *mut c_void) -> NapiStatus {
+    if env.is_null() || scope.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    release_values_from(&mut *env, scope as usize - 1, &[]);
     NAPI_OK
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn napi_open_escapable_handle_scope(
-    _env: NapiEnvHandle,
-    _result: *mut *mut c_void,
+    env: NapiEnvHandle,
+    result: *mut *mut c_void,
 ) -> NapiStatus {
-    if !_result.is_null() {
-        *_result = std::ptr::dangling_mut::<c_void>();
+    if env.is_null() || result.is_null() {
+        return NAPI_INVALID_ARG;
     }
+    *result = scope_token(&*env);
     NAPI_OK
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn napi_close_escapable_handle_scope(
-    _env: NapiEnvHandle,
-    _scope: *mut c_void,
+    env: NapiEnvHandle,
+    scope: *mut c_void,
 ) -> NapiStatus {
+    if env.is_null() || scope.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let env = &mut *env;
+    let mark = scope as usize - 1;
+    let keep: Vec<NapiValue> = env
+        .escaped
+        .iter()
+        .filter(|(m, _)| *m == mark)
+        .map(|(_, v)| *v)
+        .collect();
+    env.escaped.retain(|(m, _)| *m != mark);
+    release_values_from(env, mark, &keep);
     NAPI_OK
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn napi_escape_handle(
-    _env: NapiEnvHandle,
-    _scope: *mut c_void,
+    env: NapiEnvHandle,
+    scope: *mut c_void,
     escapee: NapiValue,
     result: *mut NapiValue,
 ) -> NapiStatus {
-    if !result.is_null() {
-        *result = escapee;
+    if env.is_null() || scope.is_null() || result.is_null() {
+        return NAPI_INVALID_ARG;
     }
+    // Node allows one escape per scope; a second is `napi_escape_called_twice`.
+    let mark = scope as usize - 1;
+    let env = &mut *env;
+    if env.escaped.iter().any(|(m, _)| *m == mark) {
+        return NAPI_ESCAPE_CALLED_TWICE;
+    }
+    env.escaped.push((mark, escapee));
+    *result = escapee;
     NAPI_OK
 }
 
@@ -2770,6 +2847,9 @@ fn napi_bridge_callback(
         let ctx = v8::Local::new(scope, &env_ref.context);
         let cs = v8::ContextScope::new(scope, ctx);
 
+        // Implicit handle scope for this call: everything stored from here on
+        // (args, `this`, whatever the addon creates) is released on return.
+        let call_mark = env_ref.values.len();
         let mut argv_handles: Vec<NapiValue> = Vec::with_capacity(argc);
         for i in 0..argc {
             let arg: v8::Local<v8::Value> = args.get(i as i32);
@@ -2796,6 +2876,7 @@ fn napi_bridge_callback(
             rv.set(local);
         }
         let _ = Box::from_raw(ci_ptr);
+        release_values_from(&mut *bridge.env, call_mark, &[]);
 
         NAPI_CB_SCOPE.with(|s| s.set(std::ptr::null()));
     }
@@ -2835,11 +2916,13 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
         isolate: isolate_ptr,
         context: context_global,
         values: Vec::new(),
+        escaped: Vec::new(),
         pending_exception: None,
         cleanup_hooks: Vec::new(),
         _library: Some(lib.clone()),
     });
     let env_ptr = Box::into_raw(env);
+    LOADED_ENVS.lock().unwrap().push(env_ptr as usize);
 
     // SAFETY: `env_ptr` was just boxed and is not freed until the environment
     // is torn down; `scope`/`ctx` are live for the duration of the call. The
@@ -2850,6 +2933,7 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
         let exports = v8::Object::new(&cs);
         let exports_val: v8::Local<v8::Value> = exports.into();
         let exports_global = v8::Global::new(&cs, exports_val);
+        let init_mark = (*env_ptr).values.len();
         let exports_handle = store_value(&mut *env_ptr, exports_global);
 
         let register_v1: Result<
@@ -2902,6 +2986,10 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
                 }
             }
         };
+
+        // Handles made during module init die with it (N-API semantics); the
+        // exports survive as the `result` Global.
+        release_values_from(&mut *env_ptr, init_mark, &[]);
 
         NAPI_PERMISSIONS.with(|p| p.set(Some(perms)));
         Ok(result)
