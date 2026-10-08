@@ -203,31 +203,31 @@ run_vet() {
 
 run_supply_chain() {
     has_and_log cargo-supply-chain || return
-    log "cargo-supply-chain (crates abandonados / forkeados / sin mantenimiento)"
-    if timeout 120 cargo supply-chain --no-check-crates >"$OUT/supply-chain.txt" 2>&1; then
-        ok "cargo-supply-chain completado"
+    log "cargo-supply-chain (quién puede publicar cada crate de la cadena de suministro)"
+    # Informational only: the tool lists publishers per crate. It does not detect
+    # abandoned or forked crates, so this check never claims "no risky crates".
+    timeout 300 cargo supply-chain publishers >"$OUT/supply-chain.txt" 2>&1
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+        ok "cargo-supply-chain: publishers listados (informativo, ver supply-chain.txt)"
+    elif [ "$rc" -eq 124 ]; then
+        warn "cargo-supply-chain NO terminó en 300s (descarga el volcado de crates.io; prueba 'cargo supply-chain update' antes)"
     else
-        warn "cargo-supply-chain: advertencias"
-    fi
-    local abandoned
-    abandoned="$(rg -ci 'abandoned|fork|unmaintained' "$OUT/supply-chain.txt" || true)"
-    if [ "${abandoned:-0}" -gt 0 ]; then
-        warn "cargo-supply-chain: $abandoned crates marcados como abandonados/forkeados"
-        section "### cargo-supply-chain — crates de riesgo\n\`\`\`\n$(rg -i -B1 -A2 'abandoned|fork|unmaintained' "$OUT/supply-chain.txt" | head -60)\n\`\`\`"
-    else
-        ok "cargo-supply-chain: sin crates de riesgo conocidos"
+        warn "cargo-supply-chain NO se ejecutó (exit $rc): $(rg -m1 '\S' "$OUT/supply-chain.txt" | cut -c1-120)"
     fi
 }
 
 run_outdated() {
     has_and_log cargo-outdated || return
     log "cargo-outdated (dependencias desactualizadas → CVE no parcheados)"
-    if timeout 180 cargo outdated --color never >"$OUT/outdated.txt" 2>&1; then
+    if ! timeout 180 cargo outdated --color never >"$OUT/outdated.txt" 2>&1; then
+        warn "cargo-outdated NO se ejecutó: $(rg -m1 '^error' "$OUT/outdated.txt" | cut -c1-120)"
+    elif rg -q 'All dependencies are up to date' "$OUT/outdated.txt"; then
         ok "cargo-outdated: todo al día"
     else
         local outdated_count
-        outdated_count="$(rg -c '^\S+\s+.*\s+yes' "$OUT/outdated.txt" || echo 0)"
-        warn "cargo-outdated: $outdated_count dependencia(s) desactualizada(s)"
+        outdated_count="$(rg -c '^\S+\s+\S+\s+\S+\s+\S+\s+\S+' "$OUT/outdated.txt" || echo 0)"
+        warn "cargo-outdated: ~$outdated_count dependencia(s) desactualizada(s)"
         section "### cargo-outdated — dependencias desactualizadas\n\`\`\`\n$(head -60 "$OUT/outdated.txt")\n\`\`\`"
     fi
 }
@@ -285,9 +285,12 @@ run_trivy() {
     has trivy && trivy_bin="$(command -v trivy)"
     if [ ! -x "$trivy_bin" ]; then warn "trivy no instalado"; return; fi
     log "trivy (vulnerabilidades en Dockerfile y filesystem)"
-    if "$trivy_bin" fs --scanners vuln,secret,license --severity HIGH,CRITICAL \
+    # --exit-code 1: trivy exits 0 even with findings unless told otherwise, which
+    # made this check pass unconditionally. tests/test262 is a downloaded,
+    # gitignored third-party suite (scripts/setup-test262.sh), not our code.
+    if "$trivy_bin" fs --scanners vuln,secret,license --severity HIGH,CRITICAL --exit-code 1 \
         --no-progress --skip-dirs target --skip-dirs vendor --skip-dirs node_modules \
-        --skip-dirs fuzz --skip-dirs .compatibility --skip-dirs .codegraph \
+        --skip-dirs fuzz --skip-dirs .compatibility --skip-dirs .codegraph --skip-dirs tests/test262 \
         -f table -o "$OUT/trivy.txt" . >/dev/null 2>&1; then
         ok "trivy fs: sin hallazgos HIGH/CRITICAL"
     else
