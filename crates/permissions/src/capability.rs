@@ -1399,4 +1399,158 @@ mod tests {
         assert!(path_covered_by(&real.join("foo.txt"), &link));
         assert!(path_covered_by(&link.join("foo.txt"), &real));
     }
+
+    // ── regression tests for silently-surviving mutants ────────────────────────
+
+    #[test]
+    fn check_quiet_reports_the_same_result_without_recording_denials() {
+        let state = PermissionState::new();
+        state.grant(Capability::EnvVar("PATH".to_string()));
+        assert!(state.check_quiet(&Capability::EnvVar("PATH".to_string())));
+        assert!(!state.check_quiet(&Capability::EnvVar("HOME".to_string())));
+        // check_quiet must not tally anything (that is what check() is for).
+        assert!(state.denials().is_empty());
+    }
+
+    #[test]
+    fn interactive_mode_records_a_denial_when_stdin_is_not_a_terminal() {
+        // With no TTY, prompt_user() declines and records the refusal so the
+        // run summary can report it; it must not silently return false.
+        let mut state = PermissionState::new();
+        state.set_interactive(true);
+        let cap = Capability::Network("example.com".to_string());
+        assert!(!state.check(&cap));
+        assert!(state.denied.read().unwrap().contains(&cap));
+    }
+
+    #[test]
+    fn deny_all_process_blocks_spawn_even_when_granted() {
+        let mut state = PermissionState::new();
+        state.grant(Capability::SpawnProcess);
+        state.deny_all_process();
+        assert!(!state.check(&Capability::SpawnProcess));
+        // deny_all_process is category-scoped: other grants still work.
+        state.grant(Capability::EnvAccess);
+        assert!(state.check(&Capability::EnvAccess));
+    }
+
+    #[test]
+    fn list_granted_returns_a_copy_of_the_grants() {
+        let state = PermissionState::new();
+        assert!(state.list_granted().is_empty());
+        state.grant(Capability::EnvAccess);
+        assert_eq!(state.list_granted(), vec![Capability::EnvAccess]);
+    }
+
+    #[test]
+    fn enable_audit_records_every_check() {
+        let mut state = PermissionState::new();
+        let log = Arc::new(Mutex::new(AuditLog::new()));
+        state.enable_audit(log.clone(), false);
+        state.grant(Capability::EnvAccess);
+        assert!(state.check(&Capability::EnvAccess));
+
+        let events = &log.lock().unwrap().events;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(matches!(
+            events[0],
+            AuditEvent::EnvAccess { allowed: true, .. }
+        ));
+    }
+
+    #[test]
+    fn audit_env_read_logs_reads_unless_denied_only() {
+        let mut state = PermissionState::new();
+        let log = Arc::new(Mutex::new(AuditLog::new()));
+        state.enable_audit(log.clone(), false);
+        state.grant(Capability::EnvAccess);
+        state.audit_env_read("PATH");
+
+        let events = &log.lock().unwrap().events;
+        assert!(matches!(
+            events.as_slice(),
+            [AuditEvent::EnvAccess { variable, allowed: true, .. }] if variable == "PATH"
+        ));
+    }
+
+    #[test]
+    fn audit_env_read_is_silent_in_denied_only_mode() {
+        // A denied read must not be recorded either: `denied_only` means this
+        // hook contributes nothing, it is the audit hook of `learn`, not of
+        // `check`.
+        let mut state = PermissionState::new();
+        let log = Arc::new(Mutex::new(AuditLog::new()));
+        state.enable_audit(log.clone(), true);
+        state.audit_env_read("PATH");
+        assert!(log.lock().unwrap().events.is_empty());
+    }
+
+    #[test]
+    fn clone_copies_rules_and_starts_with_a_fresh_tally() {
+        let state = PermissionState::new();
+        state.grant(Capability::EnvAccess);
+        state.deny(Capability::FileRead(PathBuf::from("/secret")));
+        let clone = state.clone();
+        assert!(clone.check(&Capability::EnvAccess));
+        assert!(!clone.check(&Capability::FileRead(PathBuf::from("/secret"))));
+        assert!(clone.list_granted().contains(&Capability::EnvAccess));
+        // A clone reports only its own denials, not the parent's history.
+        assert!(state.denials().is_empty());
+        assert_eq!(clone.denials().len(), 1);
+    }
+
+    #[test]
+    fn bind_host_returns_the_named_remote_host_when_granted() {
+        // A remote host is not a local bind host: bind_host must return it
+        // unchanged rather than silently remapping it to loopback.
+        let state = PermissionState::new();
+        state.grant(Capability::Network("api.example.com".to_string()));
+        assert_eq!(
+            state.bind_host("api.example.com").as_deref(),
+            Some("api.example.com")
+        );
+    }
+
+    #[test]
+    fn a_bare_ipv6_host_is_never_read_as_host_port() {
+        assert_eq!(split_host_port("fe80::abcd"), ("fe80::abcd", None));
+        assert!(host_matches("fe80::abcd", "fe80::abcd"));
+    }
+
+    #[test]
+    fn split_host_port_treats_a_missing_host_as_no_port() {
+        // `:8080` has no host, so it is a single opaque spec, not host + port.
+        assert_eq!(split_host_port(":8080"), (":8080", None));
+        assert_eq!(split_host_port(""), ("", None));
+    }
+
+    #[test]
+    fn scoped_deny_of_a_resolved_ip_blocks_vetted_addrs() {
+        // The scoped-deny branch of addr_denied must actually deny.
+        let state = PermissionState::new();
+        state.deny_scoped("pkg", Capability::Network("127.0.0.1".to_string()));
+        crate::scope::set_current_scope("pkg");
+        let err = state.vetted_addrs("127.0.0.1", 80).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        crate::scope::set_current_scope(ROOT_SCOPE);
+    }
+
+    #[test]
+    fn a_scoped_deny_only_applies_to_its_own_scope() {
+        // Another package's deny rule must not leak into this scope; the
+        // address stays reachable.
+        let state = PermissionState::new();
+        state.deny_scoped("other-pkg", Capability::Network("127.0.0.1".to_string()));
+        crate::scope::set_current_scope("pkg");
+        assert_eq!(state.vetted_addrs("127.0.0.1", 80).unwrap().len(), 1);
+        crate::scope::set_current_scope(ROOT_SCOPE);
+    }
+
+    #[test]
+    fn refused_bind_hosts_are_deduplicated() {
+        let state = PermissionState::new();
+        assert!(!state.check_bind("example.com"));
+        assert!(!state.check_bind("example.com"));
+        assert_eq!(state.denied_bind_hosts(), vec!["example.com".to_string()]);
+    }
 }

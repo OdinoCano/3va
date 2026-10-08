@@ -71,4 +71,12 @@ mod tests {
         assert!(insecure_ssh_allowed("example.com"));
         set_allow_insecure(false);
     }
+
+    #[test]
+    fn plaintext_denied_message_names_protocol_host_and_opt_in() {
+        let msg = plaintext_denied_message("http", "example.com");
+        assert!(msg.contains("http"), "{msg}");
+        assert!(msg.contains("example.com"), "{msg}");
+        assert!(msg.contains("--allow-insecure"), "{msg}");
+    }
 }

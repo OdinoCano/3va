@@ -170,4 +170,41 @@ mod tests {
         }
         assert_eq!(current_scope(), ROOT_SCOPE);
     }
+
+    // ── regression tests for silently-surviving mutants ────────────────────────
+
+    #[test]
+    fn stack_scopes_uses_the_installed_resolver() {
+        fn resolver() -> Vec<String> {
+            vec!["pkg-a".to_string()]
+        }
+        mark_scoped_rules_active();
+        set_stack_scopes_resolver(Some(resolver));
+        assert_eq!(stack_scopes(), vec!["pkg-a".to_string()]);
+        // package_scopes falls through to the resolver once one is installed.
+        assert!(package_scopes().contains(&"pkg-a".to_string()));
+        set_stack_scopes_resolver(None);
+        assert!(stack_scopes().is_empty());
+    }
+
+    #[test]
+    fn set_inherited_scopes_returns_the_previous_value() {
+        // Clear any residue left on this thread by another test.
+        let _ = set_inherited_scopes(Vec::new());
+        let previous = set_inherited_scopes(vec!["pkg-a".to_string()]);
+        assert!(previous.is_empty());
+        let previous = set_inherited_scopes(Vec::new());
+        assert_eq!(previous, vec!["pkg-a".to_string()]);
+    }
+
+    #[test]
+    fn deny_scopes_excludes_root_and_never_duplicates() {
+        set_current_scope(ROOT_SCOPE);
+        assert!(!deny_scopes().contains(&ROOT_SCOPE.to_string()));
+
+        set_current_scope("pkg");
+        let scopes = deny_scopes();
+        assert_eq!(scopes.iter().filter(|s| *s == "pkg").count(), 1);
+        set_current_scope(ROOT_SCOPE);
+    }
 }

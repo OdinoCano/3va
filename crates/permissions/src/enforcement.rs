@@ -327,4 +327,32 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    #[test]
+    fn net_enforcer_enforces_port_scoped_grants() {
+        // check_connect must ask for `host:port`, otherwise a port-scoped
+        // grant cannot distinguish the allowed service from another port.
+        let state = PermissionState::new();
+        state.grant(Capability::Network("api.example.com:443".to_string()));
+        let enforcer = NetEnforcer::new(state);
+        assert!(enforcer.check_connect("api.example.com", 443).is_ok());
+        assert!(enforcer.check_connect("api.example.com", 8080).is_err());
+    }
+
+    #[test]
+    fn check_url_requires_a_host_and_a_grant() {
+        let state = PermissionState::new();
+        let enforcer = NetEnforcer::new(state);
+        let url = url::Url::parse("http://evil.example.com/").unwrap();
+        assert!(matches!(
+            enforcer.check_url(&url),
+            Err(PermissionError::NetworkDenied { .. })
+        ));
+        // A URL with no host cannot be checked and must fail closed.
+        let no_host = url::Url::parse("mailto:user@example.com").unwrap();
+        assert!(matches!(
+            enforcer.check_url(&no_host),
+            Err(PermissionError::InvalidUrl(_))
+        ));
+    }
 }
