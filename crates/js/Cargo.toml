@@ -106,6 +106,10 @@ name = "napi_async"
 path = "tests/napi_async.rs"
 
 [[test]]
+name = "napi_objects"
+path = "tests/napi_objects.rs"
+
+[[test]]
 name = "engine_scoped_children"
 path = "tests/engine_scoped_children.rs"
 

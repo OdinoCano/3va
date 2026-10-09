@@ -54,8 +54,9 @@ type NapiValuetype = i32;
 const NAPI_OK: NapiStatus = 0;
 const NAPI_INVALID_ARG: NapiStatus = 1;
 const NAPI_ESCAPE_CALLED_TWICE: NapiStatus = 12;
-const NAPI_GENERIC_FAILURE: NapiStatus = 8;
-const NAPI_OBJECT_EXPECTED: NapiStatus = 15;
+const NAPI_GENERIC_FAILURE: NapiStatus = 9;
+const NAPI_OBJECT_EXPECTED: NapiStatus = 2;
+const NAPI_NAME_EXPECTED: NapiStatus = 4;
 const NAPI_STRING_EXPECTED: NapiStatus = 3;
 
 const NAPI_UNDEFINED: NapiValuetype = 0;
@@ -161,15 +162,26 @@ struct TSCallCtx {
 }
 unsafe impl Send for TSCallCtx {}
 
+/// Same layout as Node-API's `napi_property_descriptor` (8 fields, 64 bytes). It
+/// used to omit `name` and `method`, so every element after the first of a
+/// descriptor array was read misaligned, and methods were never seen.
 #[repr(C)]
 struct NapiPropertyDescriptor {
     utf8name: *const c_char,
+    name: NapiValue,
+    method: Option<NapiCallback>,
+    getter: Option<NapiCallback>,
+    setter: Option<NapiCallback>,
     value: NapiValue,
-    getter: Option<unsafe extern "C" fn(NapiEnvHandle, NapiCallbackInfo) -> NapiValue>,
-    setter: Option<unsafe extern "C" fn(NapiEnvHandle, NapiCallbackInfo) -> NapiValue>,
     attributes: i32,
     data: *mut c_void,
 }
+
+// napi_property_attributes
+const NAPI_WRITABLE: i32 = 1;
+const NAPI_ENUMERABLE: i32 = 2;
+const NAPI_CONFIGURABLE: i32 = 4;
+const NAPI_STATIC: i32 = 1 << 10;
 
 thread_local! {
     static NAPI_PERMISSIONS: Cell<Option<Arc<PermissionState>>> = const { Cell::new(None) };
@@ -1315,6 +1327,66 @@ unsafe extern "C" fn napi_set_element(
     })
 }
 
+/// Define one property of a `napi_property_descriptor` on `target`: a method, an
+/// accessor (getter/setter) or a plain value, honouring writable/enumerable/
+/// configurable. The key is `utf8name`, or the `name` value (string or symbol).
+unsafe fn define_napi_property<'s>(
+    cs: &PinScope<'s, '_>,
+    env: NapiEnvHandle,
+    target: v8::Local<'s, v8::Object>,
+    prop: &NapiPropertyDescriptor,
+) -> Result<(), NapiStatus> {
+    let key: v8::Local<v8::Name> = if !prop.utf8name.is_null() {
+        let name = CStr::from_ptr(prop.utf8name)
+            .to_str()
+            .map_err(|_| NAPI_INVALID_ARG)?;
+        v8::String::new(cs, name)
+            .ok_or(NAPI_GENERIC_FAILURE)?
+            .into()
+    } else {
+        let n = get_local(cs, prop.name).ok_or(NAPI_NAME_EXPECTED)?;
+        v8::Local::<v8::Name>::try_from(n).map_err(|_| NAPI_NAME_EXPECTED)?
+    };
+    // Each native function keeps its bridge for as long as the function lives.
+    let make_fn = |cb: NapiCallback| -> Result<v8::Local<'s, v8::Value>, NapiStatus> {
+        let bridge = Box::new(NapiBridge {
+            cb,
+            data: prop.data,
+            env,
+        });
+        let ext = v8::External::new(cs, Box::into_raw(bridge) as *mut c_void);
+        let f = v8::Function::builder(napi_bridge_callback)
+            .data(ext.into())
+            .build(cs)
+            .ok_or(NAPI_GENERIC_FAILURE)?;
+        Ok(f.into())
+    };
+    let writable = prop.attributes & NAPI_WRITABLE != 0;
+    let mut desc = if prop.getter.is_some() || prop.setter.is_some() {
+        let undef: v8::Local<v8::Value> = v8::undefined(cs).into();
+        let g = match prop.getter {
+            Some(cb) => make_fn(cb)?,
+            None => undef,
+        };
+        let st = match prop.setter {
+            Some(cb) => make_fn(cb)?,
+            None => undef,
+        };
+        v8::PropertyDescriptor::new_from_get_set(g, st)
+    } else if let Some(cb) = prop.method {
+        v8::PropertyDescriptor::new_from_value_writable(make_fn(cb)?, writable)
+    } else {
+        let v = get_local(cs, prop.value).ok_or(NAPI_INVALID_ARG)?;
+        v8::PropertyDescriptor::new_from_value_writable(v, writable)
+    };
+    desc.set_enumerable(prop.attributes & NAPI_ENUMERABLE != 0);
+    desc.set_configurable(prop.attributes & NAPI_CONFIGURABLE != 0);
+    match target.define_property(cs, key, &desc) {
+        Some(true) => Ok(()),
+        _ => Err(NAPI_GENERIC_FAILURE),
+    }
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn napi_define_properties(
     env: NapiEnvHandle,
@@ -1337,17 +1409,11 @@ unsafe extern "C" fn napi_define_properties(
         };
         for i in 0..count {
             let prop = &*properties.add(i);
-            if !prop.utf8name.is_null() {
-                let name = CStr::from_ptr(prop.utf8name).to_str().unwrap_or("");
-                let key = v8::String::new(&cs, name).unwrap();
-                if !prop.value.is_null() {
-                    if let Some(val) = get_local(&cs, prop.value) {
-                        obj.set(&cs, key.into(), val);
-                    }
-                }
+            if let Err(st) = define_napi_property(&cs, env, obj, prop) {
+                return st;
             }
         }
-        return NAPI_OK;
+        NAPI_OK
     })
 }
 
@@ -1982,6 +2048,125 @@ unsafe extern "C" fn napi_get_and_clear_last_exception(
 
 // ── Wrap/unwrap + missing NAPI functions ────────────────────────────────────
 
+/// `ToObject` the way Node-API does: `undefined`/`null` give `napi_object_expected`
+/// *without* leaving a pending JS exception (V8's `to_object` throws a TypeError
+/// for them), primitives are boxed.
+fn to_object_or_status<'s>(
+    cs: &PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> Result<v8::Local<'s, v8::Object>, NapiStatus> {
+    if value.is_null_or_undefined() {
+        return Err(NAPI_OBJECT_EXPECTED);
+    }
+    value.to_object(cs).ok_or(NAPI_OBJECT_EXPECTED)
+}
+
+/// `napi_get_prototype`: the object's `[[Prototype]]` (like `Object.getPrototypeOf`).
+#[unsafe(no_mangle)]
+unsafe extern "C" fn napi_get_prototype(
+    env: NapiEnvHandle,
+    object: NapiValue,
+    result: *mut NapiValue,
+) -> NapiStatus {
+    napi_trace!("napi_get_prototype");
+    if env.is_null() || object.is_null() || result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    napi_scope!(env, cs, {
+        let local = match get_local(&cs, object) {
+            Some(v) => v,
+            None => return NAPI_INVALID_ARG,
+        };
+        let obj = match to_object_or_status(&cs, local) {
+            Ok(o) => o,
+            Err(st) => return st,
+        };
+        match obj.get_prototype(&cs) {
+            Some(proto) => {
+                *result = store!(&cs, &mut *env, proto);
+                NAPI_OK
+            }
+            None => NAPI_GENERIC_FAILURE,
+        }
+    })
+}
+
+/// `napi_has_own_property`: own (not inherited) property; `key` must be a string
+/// or symbol (`napi_name_expected` otherwise).
+#[unsafe(no_mangle)]
+unsafe extern "C" fn napi_has_own_property(
+    env: NapiEnvHandle,
+    object: NapiValue,
+    key: NapiValue,
+    result: *mut bool,
+) -> NapiStatus {
+    napi_trace!("napi_has_own_property");
+    if env.is_null() || object.is_null() || key.is_null() || result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    napi_scope!(env, cs, {
+        let obj_local = match get_local(&cs, object) {
+            Some(v) => v,
+            None => return NAPI_INVALID_ARG,
+        };
+        let key_local = match get_local(&cs, key) {
+            Some(v) => v,
+            None => return NAPI_INVALID_ARG,
+        };
+        let obj = match to_object_or_status(&cs, obj_local) {
+            Ok(o) => o,
+            Err(st) => return st,
+        };
+        let name = match v8::Local::<v8::Name>::try_from(key_local) {
+            Ok(n) => n,
+            Err(_) => return NAPI_NAME_EXPECTED,
+        };
+        match obj.has_own_property(&cs, name) {
+            Some(has) => {
+                *result = has;
+                NAPI_OK
+            }
+            None => NAPI_GENERIC_FAILURE,
+        }
+    })
+}
+
+/// `napi_remove_wrap`: returns the pointer given to `napi_wrap` and detaches it
+/// *without* running a finalizer. `napi_invalid_arg` if the object isn't wrapped.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn napi_remove_wrap(
+    env: NapiEnvHandle,
+    js_object: NapiValue,
+    result: *mut *mut c_void,
+) -> NapiStatus {
+    napi_trace!("napi_remove_wrap");
+    if env.is_null() || js_object.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    napi_scope!(env, cs, {
+        let obj_local = match get_local(&cs, js_object) {
+            Some(v) => v,
+            None => return NAPI_INVALID_ARG,
+        };
+        let obj = match to_object_or_status(&cs, obj_local) {
+            Ok(o) => o,
+            Err(st) => return st,
+        };
+        let key = v8::String::new(&cs, "__napi_wrap__").unwrap();
+        let private = v8::Private::for_api(&cs, Some(key));
+        let val = match obj.get_private(&cs, private) {
+            Some(v) if v.is_external() => v,
+            _ => return NAPI_INVALID_ARG,
+        };
+        let ext: v8::Local<v8::External> = val.try_into().unwrap();
+        if !result.is_null() {
+            *result = ext.value();
+        }
+        obj.delete_private(&cs, private);
+        NAPI_OK
+    })
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn napi_wrap(
     env: NapiEnvHandle,
@@ -2094,20 +2279,32 @@ unsafe extern "C" fn napi_define_class(
         if !class_name.is_empty() {
             func.set_name(v8::String::new(&cs, &class_name).unwrap());
         }
-        let proto = v8::Object::new(&cs);
+        // Instance members go on `func.prototype`, `napi_static` ones on the
+        // constructor itself.
+        let proto_key = v8::String::new(&cs, "prototype").unwrap();
+        let proto = match func
+            .get(&cs, proto_key.into())
+            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+        {
+            Some(p) => p,
+            None => {
+                let p = v8::Object::new(&cs);
+                func.set(&cs, proto_key.into(), p.into());
+                p
+            }
+        };
+        let func_obj: v8::Local<v8::Object> = func.into();
         for i in 0..property_count {
             let prop = &*properties.add(i);
-            if !prop.utf8name.is_null() {
-                let name_str = CStr::from_ptr(prop.utf8name).to_str().unwrap_or("");
-                let key = v8::String::new(&cs, name_str).unwrap();
-                if !prop.value.is_null() {
-                    if let Some(val) = get_local(&cs, prop.value) {
-                        proto.set(&cs, key.into(), val);
-                    }
-                }
+            let target = if prop.attributes & NAPI_STATIC != 0 {
+                func_obj
+            } else {
+                proto
+            };
+            if let Err(st) = define_napi_property(&cs, env, target, prop) {
+                return st;
             }
         }
-        func.set_prototype(&cs, proto.into());
         *result = store!(&cs, &mut *env, func);
         NAPI_OK
     })
