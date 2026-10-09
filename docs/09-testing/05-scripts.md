@@ -75,15 +75,26 @@ scripts/security_verify.sh
 
 ### Verification Levels
 
-| Level | Verification | Required Status |
-|-------|--------------|------------------|
-| 1 | Cargo Hardening | fmt, clippy, test, audit, deny, geiger |
+| Level | Verification | What it does |
+|-------|--------------|--------------|
+| 1 | Cargo Hardening | `fmt`, `clippy` (general and security lints), tests, `cargo audit`, `cargo deny`, and a per-crate `unsafe` policy |
 | 2 | Semgrep | Custom security rules |
-| 3 | Fuzzing | Parser and package manager |
-| 4 | Sanitizers | ASAN, UBSAN |
-| 5 | Security Tests | path_traversal, sandbox_escape, etc. |
-| 6 | Supply Chain | Cargo.lock, cargo vet |
-| 7 | CodeQL | GitHub Advanced Security |
+| 3 | Fuzzing | Every target in `fuzz/fuzz_targets/` for 15 s each, built with `--target <host triple>`; a crash is a FAIL |
+| 4 | Sanitizers | AddressSanitizer and LeakSanitizer (a WARN when the nightly toolchain or `rust-src` is missing; `rustc` has no UBSan) |
+| 5 | Security Tests | path_traversal, sandbox_escape, capability bypass, enforcement boundary, permissions ↔ JS engine, CLI ↔ `PermissionState`, package manager |
+| 6 | Supply Chain | `Cargo.lock` present and `cargo vet --locked` |
+| 7 | CodeQL | Workflow configured; Dependabot can read `Cargo.lock` |
+| 8 | Coverage | `cargo-llvm-cov` through `scripts/coverage.sh` (WARN under 60% of lines) |
+| 9 | Documentation | `cargo doc` warning count |
+| 10 | Mutation testing | `cargo-mutants` on `vvva_permissions` (WARN when more than 5 mutants survive) |
+
+### Reading the result
+
+A `WARN` means a check did **not** verify what it names or needs a human look; it never counts as a pass. The script exits `0` unless a check `FAIL`ed, and the final summary reprints every warning. Set `STRICT=1` to make any warning fail the run.
+
+- **`unsafe` policy.** A crate with no `unsafe` code must say so with `#![forbid(unsafe_code)]`, otherwise it is a FAIL. Crates that use `unsafe` (`cli`, `config`, `js`, `pm`) are reported with a count, as a WARN, to prompt a `// SAFETY:` review. This replaces an older `cargo geiger` grep that passed vacuously.
+- **Fuzzing.** A target that crashes is a FAIL; one that times out or cannot be built is a WARN carrying the last line of its error (it used to hide stderr and report every target as "timeout o error").
+- **Do not trust a `PASS` you did not read.** `security-reports/` (git-ignored, written locally) once held a `runlog.txt` saying PASS next to a `trivy.txt` listing six CRITICAL findings.
 
 ### Tool Installation
 ```bash
@@ -105,14 +116,34 @@ The script attempts to install missing tools automatically.
 ### Expected Output
 ```
 ══════════════════════════════════════════════════════════
-                    SECURITY SUMMARY                   
+                    RESUMEN DE SEGURIDAD                   
 ══════════════════════════════════════════════════════════
 
 Failures:  0
 Warnings:  X
 
-✓ Security pipeline PASSED
+Advertencias (un WARN significa que ese chequeo NO se verificó o necesita revisión):
+  - ...
+
+✓ Sin fallos (X advertencias; STRICT=1 las trata como fallo)
 ```
+
+### Vulnerability scan (`security_vuln_scan.sh`)
+
+A second script runs the external scanners and writes a consolidated report to `security-reports/` (git-ignored):
+
+```bash
+scripts/security_vuln_scan.sh [--no-update] [--out DIR] [--skip audit,deny,...]
+```
+
+It covers `cargo audit`, `cargo deny`, `cargo geiger`, `cargo vet`, `cargo supply-chain` (publishers, informational), `cargo outdated`, `cargo udeps`, Semgrep, gitleaks, trivy, osv-scanner and a custom pattern scan, plus `fmt`, `clippy` and the test suite. Without `--no-update` it also installs or upgrades those tools globally. A tool that did not run is reported as a `WARN` ("NO se ejecutó"), never as a pass. trivy runs with `--exit-code 1`, skips the downloaded `tests/test262` suite, and reads `trivy-secret.yaml`, which allows only the fake token that the tests of `crates/pm/src/secrets.rs` use as sample input.
+
+### Scheduled and on-demand checks
+
+Two GitHub workflows cover what is too slow for every pull request:
+
+- `.github/workflows/deep-checks.yml`: the **test262 baseline gate** (weekly and on demand; `NON_MODULE_KNOWN_FAILURES` and `INTL402_KNOWN_FAILURES` in `crates/test/tests/test262.rs`; more failures is a regression, fewer means lower the constant), and **N-API under AddressSanitizer** (weekly, on demand and on pull requests that touch `napi.rs`) with a canary that must trip `heap-buffer-overflow`, otherwise the sanitizer is not instrumenting.
+- `.github/workflows/fuzz-nightly.yml` (daily): every fuzz target, see `docs/10-security/04-fuzzing.md`.
 
 ---
 

@@ -171,7 +171,7 @@ nix run "github:OdinoCano/3va?dir=dist/nix"
 
 ### Build from source
 
-Requires Rust 1.85+ (stable, via [rustup](https://rustup.rs)), a C/C++ toolchain, and network access on the first build to download the prebuilt V8 library. FIPS builds also need Go and CMake. See [CONTRIBUTING.md § Prerequisites](CONTRIBUTING.md#prerequisites).
+Requires Rust 1.95+ (stable; this is the declared MSRV, `rust-version` in `Cargo.toml`, checked by a CI job), via [rustup](https://rustup.rs)), a C/C++ toolchain, and network access on the first build to download the prebuilt V8 library. FIPS builds also need Go and CMake. See [CONTRIBUTING.md § Prerequisites](CONTRIBUTING.md#prerequisites).
 
 ```bash
 git clone https://github.com/OdinoCano/3va.git
@@ -472,7 +472,7 @@ REPL with permission management. Inside the session: `.allow-read=PATH`, `.allow
 ### Other commands
 
 ```bash
-3va doctor          # environment health check
+3va doctor          # runtime self-checks (sandbox, V8, crypto); exits 1 if any fails
 3va --accessible    # EN 301 549 mode: no ANSI, no animations, screen-reader friendly
 ```
 

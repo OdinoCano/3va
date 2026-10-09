@@ -295,6 +295,13 @@ const { execSync } = require('child_process');
 const output = execSync('ls -la', { encoding: 'utf8' });
 ```
 
+### 4.5.2 What a child process inherits
+
+- **Environment.** A child receives only the variables the parent is allowed to read: all of them with `--allow-env`, only the named ones with `--allow-env=PATH,HOME`, and none without the flag. It no longer inherits the host's environment wholesale, so a script without `--allow-env` cannot read a secret by running `sh -c 'echo $SECRET'`. Grant `PATH` explicitly if the child needs it.
+- **File descriptors.** The runtime's internal control pipes are close-on-exec; a child never inherits them.
+- **`cluster.fork()`.** The worker process runs with exactly the permissions the parent holds (the flags are derived from the parent's granted set, not a fixed full set) and needs `--allow-child-process`.
+- **Scope.** The child/cluster handles are tied to the engine that created them; another engine in the same process cannot read, write or kill them.
+
 ## 4.6 Process Permissions
 
 ### 4.6.1 Related Permission Flags

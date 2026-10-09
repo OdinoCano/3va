@@ -48,7 +48,7 @@ When `--concurrency` is `0`, the runtime uses the number of logical CPUs (same d
 | **I/O, timers, networking** | Tokio work-stealing pool (multi-threaded) |
 | **JS evaluation** | Single-threaded per `JsEngine` instance |
 | **Test runner** | One OS thread + `JsEngine` per test file (controlled by `--concurrency`) |
-| **`worker_threads` (JS API)** | Each `new Worker(file)` spawns a real OS thread with its own `JsEngine` and Tokio runtime; message passing via `std::sync::mpsc` |
+| **`worker_threads` (JS API)** | Each `new Worker(file)` spawns a real OS thread with its own `JsEngine` and Tokio runtime, running on a non-interactive snapshot of the parent's permissions (`file` must be readable); message passing via `std::sync::mpsc` |
 | **File watching** (`3va dev`, `3va test --watch`) | Dedicated OS thread via `std::thread::spawn` |
 | **Package resolver** | `tokio::spawn` per uncached package (batch fetch) |
 

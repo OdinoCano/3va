@@ -78,8 +78,8 @@ The AI MUST verify that any API it references, documents, or generates actually 
 | `crypto.createCipheriv()` / `createDecipheriv()` | **Real** — AES-128-GCM and AES-256-GCM streaming encryption/decryption | `builtins/crypto.rs` |
 | `crypto.generateKeyPair()` / `generateKeyPairSync()` | **Real** — asymmetric RSA and EC key pair generation | `builtins/crypto.rs` |
 | `crypto.createPrivateKey()` / `createPublicKey()` / `createSecretKey()` | **Real** — imports PEM keys into compatible KeyObject wrappers | `builtins/crypto.rs` |
-| `worker_threads` | **Real** — each `new Worker(file)` spawns a real OS thread with its own `JsEngine`; `postMessage` passes JSON via `std::sync::mpsc`; `SharedArrayBuffer`/`Atomics` are **not supported** (non-goal: isolated heaps) | `builtins/worker_threads.rs` |
-| `cluster` | **Real** — single-process emulation; `isPrimary: true`, `fork()` returns a mock `ClusterWorker` that emits `online`/`exit` so `if (cluster.isPrimary)` guards work | `builtins/modules.rs` |
+| `worker_threads` | **Real** — each `new Worker(file)` spawns a real OS thread with its own `JsEngine` on a non-interactive snapshot of the parent's permissions (`file` needs `--allow-read`; `{ eval: true }` is ignored); `postMessage` passes JSON via `std::sync::mpsc` and reaches the parent's `message` listeners; `SharedArrayBuffer`/`Atomics` are **not supported** (non-goal: isolated heaps) | `builtins/worker_threads.rs` |
+| `cluster` | **Real** — `fork()` starts a worker process (`__clusterFork`) that runs the same script with exactly the parent's granted permissions (derived from `PermissionState::list_granted`, never a fixed full set); needs `--allow-child-process`; messages come back through `__clusterPoll`; `isPrimary` is `!process.env.CLUSTER_WORKER` | `builtins/modules.rs` |
 | `http2` | **Partial stub** — client API backed by `__fetchAsync`; no real HTTP/2 framing | `builtins/modules.rs` |
 | `events` | **Real** — full `EventEmitter` class (prependListener, rawListeners, etc.) | `builtins/modules.rs` |
 | `stream` | **JS implementation** — `Readable`/`Writable`/`Transform` | `builtins/modules.rs` |
@@ -95,7 +95,7 @@ The AI MUST verify that any API it references, documents, or generates actually 
 | `ReadableStream` / `WritableStream` / `TransformStream` | **Real** — WinterCG pull model | `builtins/modules.rs` |
 | `FileReader` | **Real** — `readAsText`, `readAsDataURL`, `readAsArrayBuffer`, `abort` | `builtins/modules.rs` |
 | `ffi` (native libs) | **Real** — loads shared libraries via `dlopen`; requires `--allow-ffi=<path>` | `builtins/ffi.rs` |
-| `napi` (`.node` addons) | **Real** — ~30 NAPI v8 functions; `require('./addon.node')` delegates to `__napiRequire`; requires `--allow-ffi` | `builtins/napi.rs` |
+| `napi` (`.node` addons) | **Real** — 109 exported `napi_*` functions (Node-API 8); `require('./addon.node')` goes through `__napiLoad` and `process.dlopen` through `__napiRequire`; requires `--allow-ffi`; handles are released when a native callback returns or a handle scope closes; classes and properties use Node's 64-byte `napi_property_descriptor` (methods, accessors, statics); in-flight async work keeps the event loop alive | `builtins/napi.rs` |
 
 ### 2.2 APIs That THROW — Never Suggest These as Working
 
@@ -155,7 +155,8 @@ The following globals are implementation details injected by Rust builtins. The 
 - `__netListen`, `__netAcceptAsync`, `__netWrite`, `__netClose` — used by `net.createServer()`
 - `__tcpConnect`, `__tcpConnectTls`, `__tcpRead`, `__tcpWrite`, `__tcpClose` — used by `net.connect()` / `tls.connect()`
 - `__fsReadFileSync`, `__fsWriteFileSync`, `__fsStatSync`, `__fsMkdirSync`, etc. — used by `fs`
-- `__napiRequire(path)` — used by `require('./addon.node')` (NAPI loader); do not call directly
+- `__napiLoad(path)` — used by `require('./addon.node')` (NAPI loader); do not call directly
+- `__napiRequire(path)` — used by `process.dlopen`; do not call directly
 
 ---
 
@@ -281,8 +282,8 @@ cargo test
 # Documentation (no broken links or missing docs on pub items)
 cargo doc --no-deps --document-private-items 2>&1 | grep -c "^warning:" || true
 
-# Coverage gate (run via scripts/security_verify.sh)
-cargo tarpaulin --out Lcov --skip-clean
+# Coverage (cargo-llvm-cov, per crate and workspace; tarpaulin aborted on a SIGILL in a wasm test and read 0%)
+bash scripts/coverage.sh
 
 # Mutation testing (spot-check critical paths)
 cargo mutants -p vvva_permissions -p vvva_js

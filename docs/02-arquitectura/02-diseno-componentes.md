@@ -56,7 +56,7 @@ The command line interface, implemented with `clap`. Parses arguments and routes
 | `dev` | Dev server with HMR | `3va dev --port 3000` |
 | `audit` | Security audit | `3va audit --deny` |
 | `sandbox` | Interactive REPL | `3va sandbox` |
-| `doctor` | Environment check | `3va doctor` |
+| `doctor` | Runtime self-checks (sandbox, V8, crypto) | `3va doctor` |
 
 ### 2.2.3 Permission Flags
 

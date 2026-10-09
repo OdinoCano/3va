@@ -25,7 +25,12 @@ if (isMainThread) {
 
 **Shared Memory Limitation:** Since V8 runs in isolated OS threads with independent heaps, `SharedArrayBuffer` and `Atomics` (sharing raw memory directly between workers) are **not supported** and are declared a *Non-Goal* for v2.0.0. All data sharing must go through message passing.
 
-**Permission model:** Workers inherit a read-only copy of the parent's `PermissionState`. The parent cannot grant new permissions to a worker after creation. Optionally, a parent can restrict a worker further during instantiation by passing a restricted permission map in the `Worker` constructor option keys.
+**Permission model:** A worker runs on a **snapshot** of the parent's `PermissionState`, taken when the worker is created, and it is **non-interactive**: it never prompts on the terminal. Grants and denials made later by the parent do not reach a running worker, and nothing the worker is denied appears in the parent's state. There is no per-`Worker` option to restrict it further yet (the constructor reads only `workerData`).
+
+- `new Worker(file)` needs read access to `file`: `--allow-read` must cover it, otherwise the call throws `PermissionDenied`. `{ eval: true }` is ignored: the first argument is always treated as a path, so a string of code is never executed.
+- `workerData` is serialized with `JSON.stringify` and injected as data, never as code.
+- Messages from the worker (`parentPort.postMessage`) are delivered to the parent's `worker.on('message', ...)`; this used to be silently dropped.
+- Inside the worker, `fs`, network and `child_process` are denied unless the parent already had those grants (see `crates/js/tests/worker_threads_sandbox.rs`).
 
 ---
 

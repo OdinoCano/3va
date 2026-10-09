@@ -7,7 +7,7 @@ the project is run is described in [GOVERNANCE.md](GOVERNANCE.md).
 
 ## Prerequisites
 
-- Rust stable, 1.85 or newer (the workspace uses edition 2024), installed with [rustup](https://rustup.rs), plus the `rustfmt` and `clippy` components
+- Rust stable, 1.95 or newer (the declared MSRV: `rust-version` in `Cargo.toml`, checked by a CI job; the workspace uses edition 2024), installed with [rustup](https://rustup.rs), plus the `rustfmt` and `clippy` components
 - A C/C++ toolchain: `build-essential` on Debian/Ubuntu, Xcode Command Line Tools on macOS, or MSVC Build Tools on Windows
 - `git`
 - Network access on the first build: the `v8` crate downloads a prebuilt static V8 library

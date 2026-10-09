@@ -32,7 +32,7 @@
 | Sandbox REPL | ✅ | Multi-line; `.help`/`.clear`/`.allow-read=`/`.allow-write=`/`.allow-net=`/`.allow-env`/`.permissions`; `exit`/`quit` to leave; TTY detection |
 | Development server (`dev`) | ✅ | `--port`/`--host`/`--open`/`--public-dir`; HMR via SSE (`/__hmr`); HMR client injection; static files; SPA fallback; rebuild with 300 ms debounce |
 | CDP Inspector (`--inspect`) | ✅ | WebSocket CDP server; `debugger;` rewrite; pause via `block_in_place` + `Condvar`; Chrome DevTools / DAP compatible |
-| NAPI module loading (`--allow-ffi`) | ✅ | ~30 NAPI v8 functions; `.node` addons via `require()`; `napi_register_module_v1` ABI |
+| NAPI module loading (`--allow-ffi`) | ✅ | 109 `napi_*` functions (Node-API 8); `.node` addons via `require()` and `process.dlopen`; `napi_register_module_v1` ABI; handle scopes, classes with methods/accessors/statics and async work. Not yet: `napi_wrap` finalizers |
 | WebAssembly (WASM) | ✅ | WASI-compatible; `.wasm` and `.wat` files; full permission integration |
 | Post-quantum cryptography | ✅ | ML-KEM-768 + ML-DSA-65 via `vvva_crypto`; exposed under `require('crypto').pq` |
 | Post-quantum TLS (`__pqTlsConnect`) | ✅ | Hybrid classical TLS + ML-KEM-768; async (non-blocking); `{ connId, pqSharedSecret }` |
@@ -144,8 +144,8 @@ Expanded 2026-08-20: cross-checked against a full runtime-security responsibilit
 | Item | Area | Status |
 |------|------|--------|
 | CRLF sanitization in `res.setHeader()`/`res.writeHead()` | HTTP server | ✅ Implemented (`ERR_INVALID_HTTP_TOKEN`/`ERR_INVALID_CHAR`, enforced in JS layer and native writer; tests in `crates/js/tests/http_server.rs`) |
-| `Transfer-Encoding: chunked` support in request parser | HTTP server | ✅ Implemented (chunked decoding, CL+TE smuggling rejected `400`; tests in `crates/js/tests/http_server.rs`) |
-| Decompression ratio/size cap (`zlib` builtin + PM tarball extraction) | zlib, PM | ✅ Implemented (`MAX_DECOMPRESSED_OUTPUT_BYTES`/`MAX_DECOMPRESSION_RATIO` in `zlib.rs`; `MAX_EXTRACTED_FILE_BYTES`/`MAX_EXTRACTED_TOTAL_BYTES` in `lib.rs`/`fetcher.rs`) |
+| `Transfer-Encoding: chunked` support in request parser | HTTP server | ✅ Implemented (chunked decoding; rejected with `400`/`413`/`501`: Content-Length together with Transfer-Encoding, non-numeric or oversized or conflicting duplicate Content-Length, conflicting duplicate Transfer-Encoding, whitespace before `:`, obsolete line folding, malformed chunk sizes and unsupported transfer codings; tests in `crates/js/tests/http_server.rs` and the `http_server` unit tests) |
+| Decompression ratio/size cap (`zlib` builtin + PM tarball extraction) | zlib, PM | ✅ Implemented (`MAX_DECOMPRESSED_OUTPUT_BYTES`/`MAX_DECOMPRESSION_RATIO` in `zlib.rs`; `MAX_EXTRACTED_FILE_BYTES`/`MAX_EXTRACTED_TOTAL_BYTES`/`MAX_EXTRACTED_ENTRIES` (100,000) in `lib.rs`/`fetcher.rs`) |
 | Response size cap on `fetch()` | fetch | ✅ Implemented (`MAX_RESPONSE_BODY_BYTES` = 512 MiB streaming cap + early `Content-Length` reject; per-call `{ maxResponseSize }` option; tests in `crates/js/tests/fetch_response_cap.rs`) |
 | Connect/read timeouts on MQTT and IMAP client sockets | MQTT, IMAP | ✅ Implemented (`MQTT_CONNECT_TIMEOUT`/`MQTT_IO_TIMEOUT`, `IMAP_CONNECT_TIMEOUT`/`IMAP_IO_TIMEOUT`; per-client `connectTimeout`; tests `connect_tcp_bounded_times_out_against_blackholed_host`, `establish_connection_read_times_out_against_silent_server`, `mqtt_connect_times_out_against_blackholed_host`) |
 | Automatic malware/secrets scan during `3va install` | PM | ✅ Implemented (new downloads scanned after integrity check, before store/link; CRITICAL/HIGH aborts; `--no-scan` opt-out; tests `security_scan_passes_a_clean_package`, `security_scan_aborts_package_with_embedded_aws_key`, `security_scan_respects_skip_flag` in `crates/pm/src/lib.rs`; docs `docs/10-security/01-static-analysis.md`) |

@@ -223,10 +223,10 @@ Opens an interactive JavaScript REPL with isolated permissions.
 | exit / quit / ^D | Exit the sandbox (no leading dot) |
 
 ### 1.3.14 Command: doctor
-Checks the environment and reports missing dependencies or misconfigurations.
+Runs the runtime's own self-checks (permission engine, V8, an empty-sandbox probe, a SHA-256 known-answer test) and exits `1` if any fails. It does not scan your project or its dependencies (use `3va audit`). See [2.7.3 `doctor`](02-comandos.md#273-doctor).
 
 ```
-3va doctor
+3va doctor [--compat]
 ```
 
 ### 1.3.15 Commands: update / reinstall
