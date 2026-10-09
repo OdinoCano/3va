@@ -80,6 +80,13 @@ struct NapiEnv {
     escaped: Vec<(usize, NapiValue)>,
     pending_exception: Option<v8::Global<v8::Value>>,
     cleanup_hooks: Vec<(unsafe extern "C" fn(*mut c_void), *mut c_void)>,
+    /// Finalizers waiting on an object (GC) or on teardown (env destruction).
+    finalizers: Vec<FinalizerEntry>,
+    /// `napi_set_instance_data`: (data, finalize_cb, hint), run at teardown.
+    instance_data: Option<(*mut c_void, Option<NapiFinalizer>, *mut c_void)>,
+    /// Set once teardown has run its finalizers; late callbacks must not fire
+    /// a second time against a dead environment.
+    destroyed: bool,
     _library: Option<Arc<Library>>,
 }
 
@@ -108,6 +115,40 @@ struct NapiBridge {
     cb: NapiCallback,
     data: *mut c_void,
     env: NapiEnvHandle,
+}
+
+/// What a deferred finalizer should do once its object is collected or its
+/// environment is torn down.
+enum FinalizerKind {
+    /// `napi_wrap`: the addon owns both pointers and wants
+    /// `finalize_cb(env, native_object, finalize_hint)`.
+    Wrap {
+        native_object: *mut c_void,
+        finalize_cb: NapiFinalizer,
+        finalize_hint: *mut c_void,
+    },
+    /// `napi_create_function`/`napi_define_*`: free the per-function bridge
+    /// allocation once the JS function is gone (no addon callback).
+    Bridge { bridge: *mut NapiBridge },
+    /// `napi_create_external`/`napi_create_external_buffer`.
+    External {
+        data: *mut c_void,
+        finalize_cb: NapiFinalizer,
+        finalize_hint: *mut c_void,
+    },
+}
+
+/// One finalizer registered against a live V8 object.
+///
+/// The weak callback only flips `ready`; the addon callback is run later, on
+/// the JS thread, by `drain_finalizers` (Node-API never calls a finalizer from
+/// inside the collection that triggered it). `object` must stay alive until the
+/// entry is dropped, because dropping the `Weak` cancels the finalizer — that
+/// is how `napi_remove_wrap` suppresses one without running it.
+struct FinalizerEntry {
+    object: v8::Weak<v8::Value>,
+    kind: FinalizerKind,
+    ready: Arc<AtomicBool>,
 }
 
 struct AsyncWorkInner {
@@ -273,6 +314,25 @@ pub fn live_handle_count() -> usize {
         .sum()
 }
 
+/// Number of `NapiBridge` allocations not yet freed across every environment.
+/// Test hook for the per-`napi_create_function` bridge: it must return to its
+/// baseline once the JS functions are collected (or the environment is torn
+/// down), or an addon creating closures per request leaks without bound.
+#[doc(hidden)]
+pub fn live_bridge_count() -> usize {
+    let envs = LOADED_ENVS.lock().unwrap();
+    // SAFETY: see `live_handle_count`; the only writer is the JS thread.
+    envs.iter()
+        .map(|e| unsafe {
+            (*(*e as *const NapiEnv))
+                .finalizers
+                .iter()
+                .filter(|f| matches!(f.kind, FinalizerKind::Bridge { .. }))
+                .count()
+        })
+        .sum()
+}
+
 /// Every environment created by `napi_load_module`. An environment must live as
 /// long as the addon's function pointers do (the rest of the process), so it is
 /// intentionally never freed; recording it here keeps it reachable instead of
@@ -308,6 +368,38 @@ unsafe fn store_value(env: &mut NapiEnv, global: v8::Global<v8::Value>) -> NapiV
     let ptr = Box::into_raw(inner);
     env.values.push(ptr);
     ptr
+}
+
+/// Attach a deferred finalizer to `object`. The weak callback only sets the
+/// entry's `ready` flag; the action itself (addon callback or bridge free) runs
+/// from `drain_finalizers`/`teardown_isolate`, never inside GC.
+///
+/// # Safety
+/// `env` must be a live environment; `object` must be a handle from its
+/// isolate and already inside a handle scope.
+unsafe fn register_object_finalizer(
+    env: &mut NapiEnv,
+    object: v8::Local<v8::Value>,
+    kind: FinalizerKind,
+) {
+    let ready = Arc::new(AtomicBool::new(false));
+    let flag = ready.clone();
+    // SAFETY: `env.isolate` is the isolate that created `object`; the caller is
+    // inside a scope for it. The closure captures only an `Arc`, so it stays
+    // 'static and never touches addon memory.
+    let mut isolate = unsafe { v8::Isolate::from_raw_ptr(env.isolate) };
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        &mut isolate,
+        object,
+        Box::new(move || {
+            flag.store(true, Ordering::SeqCst);
+        }),
+    );
+    env.finalizers.push(FinalizerEntry {
+        object: weak,
+        kind,
+        ready,
+    });
 }
 
 /// Pull a Local<Value> out of a stored NapiValue using the current scope's
@@ -623,8 +715,8 @@ unsafe extern "C" fn napi_create_function(
     };
     napi_scope!(env, cs, {
         let bridge = Box::new(NapiBridge { cb, data, env });
-        let bridge_ptr = Box::into_raw(bridge) as *mut c_void;
-        let external = v8::External::new(&cs, bridge_ptr);
+        let bridge_ptr = Box::into_raw(bridge);
+        let external = v8::External::new(&cs, bridge_ptr as *mut c_void);
         match v8::Function::builder(napi_bridge_callback)
             .data(external.into())
             .build(&cs)
@@ -633,6 +725,13 @@ unsafe extern "C" fn napi_create_function(
                 if !fn_name.is_empty() {
                     f.set_name(v8::String::new(&cs, &fn_name).unwrap());
                 }
+                // Free the bridge when the function is collected; until then
+                // the External's pointer must stay valid for napi_bridge_callback.
+                register_object_finalizer(
+                    &mut *env,
+                    f.into(),
+                    FinalizerKind::Bridge { bridge: bridge_ptr },
+                );
                 *result = store!(&cs, &mut *env, f);
                 return NAPI_OK;
             }
@@ -700,8 +799,8 @@ unsafe extern "C" fn napi_create_external_buffer(
     env: NapiEnvHandle,
     size: usize,
     data: *mut c_void,
-    _fcb: Option<NapiFinalizer>,
-    _fhint: *mut c_void,
+    fcb: Option<NapiFinalizer>,
+    fhint: *mut c_void,
     result: *mut NapiValue,
 ) -> NapiStatus {
     napi_trace!("napi_create_external_buffer");
@@ -719,6 +818,17 @@ unsafe extern "C" fn napi_create_external_buffer(
         }
         let ab = v8::ArrayBuffer::with_backing_store(&cs, &backing.make_shared());
         let buf = v8::Uint8Array::new(&cs, ab, 0, size).unwrap();
+        if let Some(cb) = fcb {
+            register_object_finalizer(
+                &mut *env,
+                buf.into(),
+                FinalizerKind::External {
+                    data,
+                    finalize_cb: cb,
+                    finalize_hint: fhint,
+                },
+            );
+        }
         *result = store!(&cs, &mut *env, buf);
         return NAPI_OK;
     })
@@ -728,8 +838,8 @@ unsafe extern "C" fn napi_create_external_buffer(
 unsafe extern "C" fn napi_create_external(
     env: NapiEnvHandle,
     data: *mut c_void,
-    _fcb: Option<NapiFinalizer>,
-    _fhint: *mut c_void,
+    fcb: Option<NapiFinalizer>,
+    fhint: *mut c_void,
     result: *mut NapiValue,
 ) -> NapiStatus {
     napi_trace!("napi_create_external");
@@ -737,7 +847,19 @@ unsafe extern "C" fn napi_create_external(
         return NAPI_INVALID_ARG;
     }
     napi_scope!(env, cs, {
-        *result = store!(&cs, &mut *env, v8::External::new(&cs, data));
+        let ext = v8::External::new(&cs, data);
+        if let Some(cb) = fcb {
+            register_object_finalizer(
+                &mut *env,
+                ext.into(),
+                FinalizerKind::External {
+                    data,
+                    finalize_cb: cb,
+                    finalize_hint: fhint,
+                },
+            );
+        }
+        *result = store!(&cs, &mut *env, ext);
         return NAPI_OK;
     })
 }
@@ -1354,12 +1476,19 @@ unsafe fn define_napi_property<'s>(
             data: prop.data,
             env,
         });
-        let ext = v8::External::new(cs, Box::into_raw(bridge) as *mut c_void);
+        let bridge_ptr = Box::into_raw(bridge);
+        let ext = v8::External::new(cs, bridge_ptr as *mut c_void);
         let f = v8::Function::builder(napi_bridge_callback)
             .data(ext.into())
             .build(cs)
             .ok_or(NAPI_GENERIC_FAILURE)?;
-        Ok(f.into())
+        let fv: v8::Local<'s, v8::Value> = f.into();
+        // SAFETY: `env` is the live environment whose isolate built this
+        // function; the borrowed handle outlives the call.
+        unsafe {
+            register_object_finalizer(&mut *env, fv, FinalizerKind::Bridge { bridge: bridge_ptr });
+        }
+        Ok(fv)
     };
     let writable = prop.attributes & NAPI_WRITABLE != 0;
     let mut desc = if prop.getter.is_some() || prop.setter.is_some() {
@@ -2162,6 +2291,10 @@ unsafe extern "C" fn napi_remove_wrap(
         if !result.is_null() {
             *result = ext.value();
         }
+        // Drop the matching Weak: Node-API's `napi_remove_wrap` detaches
+        // without running the finalizer, and a dropped Weak cancels its
+        // finalizer before it can fire.
+        (*env).finalizers.retain(|e| e.object != obj_local);
         obj.delete_private(&cs, private);
         NAPI_OK
     })
@@ -2172,8 +2305,8 @@ unsafe extern "C" fn napi_wrap(
     env: NapiEnvHandle,
     js_object: NapiValue,
     native_object: *mut c_void,
-    _finalize_cb: Option<NapiFinalizer>,
-    _finalize_hint: *mut c_void,
+    finalize_cb: Option<NapiFinalizer>,
+    finalize_hint: *mut c_void,
     result: *mut NapiValue,
 ) -> NapiStatus {
     napi_trace!("napi_wrap");
@@ -2189,9 +2322,30 @@ unsafe extern "C" fn napi_wrap(
             Some(o) => o,
             None => return NAPI_INVALID_ARG,
         };
-        let ext = v8::External::new(&cs, native_object);
         let key = v8::String::new(&cs, "__napi_wrap__").unwrap();
-        obj.set_private(&cs, v8::Private::for_api(&cs, Some(key)), ext.into());
+        let private = v8::Private::for_api(&cs, Some(key));
+        // Node-API allows one wrap per object. `get_private` yields `undefined`
+        // (not `None`) for an absent key, so test the value's type: a wrap is
+        // always an `External` holding the native pointer.
+        if obj
+            .get_private(&cs, private)
+            .is_some_and(|v| v.is_external())
+        {
+            return NAPI_INVALID_ARG;
+        }
+        let ext = v8::External::new(&cs, native_object);
+        obj.set_private(&cs, private, ext.into());
+        if let Some(cb) = finalize_cb {
+            register_object_finalizer(
+                &mut *env,
+                obj_local,
+                FinalizerKind::Wrap {
+                    native_object,
+                    finalize_cb: cb,
+                    finalize_hint,
+                },
+            );
+        }
         if !result.is_null() {
             *result = store!(&cs, &mut *env, ext);
         }
@@ -2267,8 +2421,8 @@ unsafe extern "C" fn napi_define_class(
             data,
             env,
         });
-        let bridge_ptr = Box::into_raw(bridge) as *mut c_void;
-        let external = v8::External::new(&cs, bridge_ptr);
+        let bridge_ptr = Box::into_raw(bridge);
+        let external = v8::External::new(&cs, bridge_ptr as *mut c_void);
         let func = match v8::Function::builder(napi_bridge_callback)
             .data(external.into())
             .build(&cs)
@@ -2279,6 +2433,12 @@ unsafe extern "C" fn napi_define_class(
         if !class_name.is_empty() {
             func.set_name(v8::String::new(&cs, &class_name).unwrap());
         }
+        // The constructor's bridge is freed when the class function is collected.
+        register_object_finalizer(
+            &mut *env,
+            func.into(),
+            FinalizerKind::Bridge { bridge: bridge_ptr },
+        );
         // Instance members go on `func.prototype`, `napi_static` ones on the
         // constructor itself.
         let proto_key = v8::String::new(&cs, "prototype").unwrap();
@@ -3000,22 +3160,39 @@ unsafe extern "C" fn napi_adjust_external_memory(
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn napi_set_instance_data(
-    _env: NapiEnvHandle,
-    _data: *mut c_void,
-    _finalize_cb: Option<NapiFinalizer>,
-    _finalize_hint: *mut c_void,
+    env: NapiEnvHandle,
+    data: *mut c_void,
+    finalize_cb: Option<NapiFinalizer>,
+    finalize_hint: *mut c_void,
 ) -> NapiStatus {
+    napi_trace!("napi_set_instance_data");
+    if env.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let env_ref = &mut *env;
+    // Node-API runs the previous finalizer when the data is replaced.
+    if let Some((old_data, Some(old_cb), old_hint)) =
+        env_ref
+            .instance_data
+            .replace((data, finalize_cb, finalize_hint))
+    {
+        old_cb(env, old_data, old_hint);
+    }
     NAPI_OK
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn napi_get_instance_data(
-    _env: NapiEnvHandle,
+    env: NapiEnvHandle,
     result: *mut *mut c_void,
 ) -> NapiStatus {
-    if !result.is_null() {
-        *result = std::ptr::null_mut();
+    napi_trace!("napi_get_instance_data");
+    if env.is_null() || result.is_null() {
+        return NAPI_INVALID_ARG;
     }
+    *result = (*env)
+        .instance_data
+        .map_or(std::ptr::null_mut(), |(data, _, _)| data);
     NAPI_OK
 }
 
@@ -3116,6 +3293,9 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
         escaped: Vec::new(),
         pending_exception: None,
         cleanup_hooks: Vec::new(),
+        finalizers: Vec::new(),
+        instance_data: None,
+        destroyed: false,
         _library: Some(lib.clone()),
     });
     let env_ptr = Box::into_raw(env);
@@ -3195,6 +3375,145 @@ fn napi_load_module(scope: &mut PinScope, path: &str) -> Result<v8::Global<v8::V
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
+/// Run a collected/torn-down finalizer's action. Never called from inside a GC.
+///
+/// # Safety
+/// `kind`'s pointers were registered by the addon for `env`; the environment is
+/// alive (not destroyed) whenever an addon callback is invoked.
+unsafe fn run_finalizer(env: NapiEnvHandle, kind: FinalizerKind) {
+    match kind {
+        FinalizerKind::Wrap {
+            native_object,
+            finalize_cb,
+            finalize_hint,
+        } => {
+            if !env.is_null() && !(*env).destroyed {
+                finalize_cb(env, native_object, finalize_hint);
+            }
+        }
+        FinalizerKind::External {
+            data,
+            finalize_cb,
+            finalize_hint,
+        } => {
+            if !env.is_null() && !(*env).destroyed {
+                finalize_cb(env, data, finalize_hint);
+            }
+        }
+        FinalizerKind::Bridge { bridge } => {
+            // SAFETY: the box came from Box::into_raw in napi_create_function /
+            // napi_define_*; this is its only owner once the entry is taken.
+            drop(unsafe { Box::from_raw(bridge) });
+        }
+    }
+}
+
+/// Remove and return every finalizer whose object has been collected, across
+/// all live environments. The `LOADED_ENVS` lock is released before the caller
+/// runs anything, so an addon finalizer that loads a module can't deadlock.
+fn take_ready_finalizers() -> Vec<(NapiEnvHandle, FinalizerKind)> {
+    let mut ready = Vec::new();
+    let envs = LOADED_ENVS.lock().unwrap();
+    for &e in envs.iter() {
+        // SAFETY: `e` is a leaked, never-freed environment; the JS thread is
+        // the only thread that mutates it.
+        let env = unsafe { &mut *(e as *mut NapiEnv) };
+        if env.destroyed {
+            continue;
+        }
+        let pending = std::mem::take(&mut env.finalizers);
+        let mut kept = Vec::with_capacity(pending.len());
+        for entry in pending {
+            if entry.ready.load(Ordering::SeqCst) {
+                ready.push((e as NapiEnvHandle, entry.kind));
+            } else {
+                kept.push(entry);
+            }
+        }
+        env.finalizers = kept;
+    }
+    ready
+}
+
+/// Run every finalizer whose object has been collected. Called from
+/// `drain_async_completions`, i.e. on the JS thread outside GC.
+pub fn drain_finalizers() {
+    loop {
+        let batch = take_ready_finalizers();
+        if batch.is_empty() {
+            break;
+        }
+        for (env, kind) in batch {
+            // SAFETY: entries were registered by the addon for a live env.
+            unsafe { run_finalizer(env, kind) };
+        }
+    }
+}
+
+/// Run the finalizers whose objects are still alive, once, before `isolate` is
+/// disposed. Called from `JsEngine::drop`. The environment is never freed (the
+/// addon library must outlive its function pointers), so afterwards it is only
+/// marked destroyed to keep a late weak callback from touching addon memory.
+pub fn teardown_isolate(isolate: &v8::Isolate) {
+    // `Isolate` is `#[repr(transparent)]` over `NonNull<RealIsolate>`; read the
+    // wrapped pointer the same way `napi_load_module` does.
+    let key = unsafe { *(isolate as *const v8::Isolate as *const *mut v8::RealIsolate) };
+    let mut addon = Vec::new();
+    let mut bridges = Vec::new();
+    {
+        let envs = LOADED_ENVS.lock().unwrap();
+        for &e in envs.iter() {
+            // SAFETY: see `take_ready_finalizers`.
+            let env = unsafe { &mut *(e as *mut NapiEnv) };
+            if env.isolate != key || env.destroyed {
+                continue;
+            }
+            for entry in std::mem::take(&mut env.finalizers) {
+                match entry.kind {
+                    FinalizerKind::Bridge { bridge } => bridges.push(bridge),
+                    FinalizerKind::Wrap {
+                        native_object,
+                        finalize_cb,
+                        finalize_hint,
+                    } => addon.push((
+                        e as NapiEnvHandle,
+                        native_object,
+                        finalize_cb,
+                        finalize_hint,
+                    )),
+                    FinalizerKind::External {
+                        data,
+                        finalize_cb,
+                        finalize_hint,
+                    } => addon.push((e as NapiEnvHandle, data, finalize_cb, finalize_hint)),
+                }
+            }
+            if let Some((data, Some(cb), hint)) = env.instance_data.take() {
+                addon.push((e as NapiEnvHandle, data, cb, hint));
+            }
+        }
+    }
+    for bridge in bridges {
+        // SAFETY: unique owner, as in run_finalizer.
+        drop(unsafe { Box::from_raw(bridge) });
+    }
+    for (env, data, cb, hint) in addon {
+        // SAFETY: `env`'s addon library is kept alive by `_library`, and the
+        // isolate is still valid here (it is disposed only after Drop returns).
+        unsafe { cb(env, data, hint) };
+    }
+    // Late weak callbacks must not call addon memory now; mark every env of
+    // this isolate dead.
+    let envs = LOADED_ENVS.lock().unwrap();
+    for &e in envs.iter() {
+        // SAFETY: see above.
+        let env = unsafe { &mut *(e as *mut NapiEnv) };
+        if env.isolate == key {
+            env.destroyed = true;
+        }
+    }
+}
+
 /// Run native async-work/threadsafe completions on the main V8 thread.
 /// Called from `run_event_loop`; each callback builds its own scope via
 /// `napi_scope!`, so no caller scope is required.
@@ -3206,6 +3525,8 @@ pub fn drain_async_completions() {
             None => break,
         }
     }
+    // Node-API finalizers are deferred out of GC and run here, on the JS thread.
+    drain_finalizers();
 }
 
 pub fn inject_napi(

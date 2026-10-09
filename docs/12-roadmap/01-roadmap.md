@@ -32,7 +32,7 @@
 | Sandbox REPL | ✅ | Multi-line; `.help`/`.clear`/`.allow-read=`/`.allow-write=`/`.allow-net=`/`.allow-env`/`.permissions`; `exit`/`quit` to leave; TTY detection |
 | Development server (`dev`) | ✅ | `--port`/`--host`/`--open`/`--public-dir`; HMR via SSE (`/__hmr`); HMR client injection; static files; SPA fallback; rebuild with 300 ms debounce |
 | CDP Inspector (`--inspect`) | ✅ | WebSocket CDP server; `debugger;` rewrite; pause via `block_in_place` + `Condvar`; Chrome DevTools / DAP compatible |
-| NAPI module loading (`--allow-ffi`) | ✅ | 109 `napi_*` functions (Node-API 8); `.node` addons via `require()` and `process.dlopen`; `napi_register_module_v1` ABI; handle scopes, classes with methods/accessors/statics and async work. Not yet: `napi_wrap` finalizers |
+| NAPI module loading (`--allow-ffi`) | ✅ | 109 `napi_*` functions (Node-API 8); `.node` addons via `require()` and `process.dlopen`; `napi_register_module_v1` ABI; handle scopes, classes with methods/accessors/statics, async work, and `napi_wrap`/`napi_set_instance_data` finalizers run on GC and at environment teardown |
 | WebAssembly (WASM) | ✅ | WASI-compatible; `.wasm` and `.wat` files; full permission integration |
 | Post-quantum cryptography | ✅ | ML-KEM-768 + ML-DSA-65 via `vvva_crypto`; exposed under `require('crypto').pq` |
 | Post-quantum TLS (`__pqTlsConnect`) | ✅ | Hybrid classical TLS + ML-KEM-768; async (non-blocking); `{ connId, pqSharedSecret }` |

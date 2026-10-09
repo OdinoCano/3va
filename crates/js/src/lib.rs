@@ -586,6 +586,11 @@ async fn sleep_or_wake(d: std::time::Duration, wake: &Option<Arc<tokio::sync::No
 impl Drop for JsEngine {
     fn drop(&mut self) {
         caller_scope::uninstall(&self.isolate);
+        // Run Node-API finalizers for objects still alive and free the
+        // per-function bridges, before the isolate is disposed (a disposed
+        // isolate can no longer call into the addon). Environments that were
+        // never torn down keep the addon library loaded, so this is safe.
+        builtins::napi::teardown_isolate(&self.isolate);
     }
 }
 
