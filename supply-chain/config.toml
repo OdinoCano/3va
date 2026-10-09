@@ -88,7 +88,7 @@ criteria = "safe-to-deploy"
 [[exemptions.arbitrary]]
 version = "1.5.0"
 criteria = "safe-to-deploy"
-notes = "cargo update arbitrary 1.4.2 -> 1.5.0 (minor); diff 12 files, +101/-94 lines; build.rs changed: False; unsafe lines added: 2. FLAGGED for human review."
+notes = "cargo update arbitrary 1.4.2 -> 1.5.0 (minor); diff 12 files, +101/-94 lines; build.rs changed: False; unsafe lines added: 2. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): 2 unsafe lines (array init); no build.rs; no process/network/fs added."
 
 [[exemptions.argon2]]
 version = "0.6.0"
@@ -307,7 +307,7 @@ criteria = "safe-to-deploy"
 [[exemptions.cc]]
 version = "1.6.0"
 criteria = "safe-to-deploy"
-notes = "cargo update cc 1.4.4 -> 1.6.0 (minor); diff 20 files, +1664/-343 lines; build.rs changed: False; unsafe lines added: 3. FLAGGED for human review."
+notes = "cargo update cc 1.4.4 -> 1.6.0 (minor); diff 20 files, +1664/-343 lines; build.rs changed: False; unsafe lines added: 3. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build tool: spawning the C compiler is its purpose. Added Command::new('cc') and a fcntl on the stderr pipe; no network; no new dependencies."
 
 [[exemptions.ccm]]
 version = "0.5.0"
@@ -389,7 +389,7 @@ criteria = "safe-to-deploy"
 [[exemptions.clap_lex]]
 version = "1.1.1"
 criteria = "safe-to-deploy"
-notes = "cargo update clap_lex 1.1.0 -> 1.1.1 (patch); diff 5 files, +32/-18 lines; build.rs changed: False; unsafe lines added: 1. FLAGGED for human review."
+notes = "cargo update clap_lex 1.1.0 -> 1.1.1 (patch); diff 5 files, +32/-18 lines; build.rs changed: False; unsafe lines added: 1. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): 1 unsafe (from_encoded_bytes_unchecked, same contract as before); no build.rs."
 
 [[exemptions.cmake]]
 version = "0.1.58"
@@ -418,7 +418,7 @@ criteria = "safe-to-deploy"
 [[exemptions.compression-codecs]]
 version = "0.4.45"
 criteria = "safe-to-deploy"
-notes = "cargo update compression-codecs 0.4.39 -> 0.4.45 (patch); diff 11 files, +437/-13 lines; build.rs changed: False; unsafe lines added: 5. FLAGGED for human review."
+notes = "cargo update compression-codecs 0.4.39 -> 0.4.45 (patch); diff 11 files, +437/-13 lines; build.rs changed: False; unsafe lines added: 5. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): 5 unsafe lines for uninitialised output buffers. Adds an optional `mbrotli` dependency that is not in Cargo.lock (feature off)."
 
 [[exemptions.compression-core]]
 version = "0.4.33"
@@ -443,7 +443,7 @@ criteria = "safe-to-deploy"
 [[exemptions.core_detect]]
 version = "1.0.0"
 criteria = "safe-to-deploy"
-notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): New. no_std CPU feature detection, 1142 lines, 7 unsafe; no build.rs, no dependencies, no fs/net/process. Publisher thomcc (2020, ~10M downloads). Pulled in only by encoding_rs 0.8.42."
 
 [[exemptions.cow-utils]]
 version = "0.1.3"
@@ -506,7 +506,7 @@ criteria = "safe-to-deploy"
 [[exemptions.crossbeam-deque]]
 version = "0.8.8"
 criteria = "safe-to-deploy"
-notes = "cargo update crossbeam-deque 0.8.7 -> 0.8.8 (patch); diff 6 files, +85/-51 lines; build.rs changed: True; unsafe lines added: 3. FLAGGED for human review."
+notes = "cargo update crossbeam-deque 0.8.7 -> 0.8.8 (patch); diff 6 files, +85/-51 lines; build.rs changed: True; unsafe lines added: 3. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build.rs only reads TARGET to detect the x86_64-unknown-linux-gnutsan target; 3 unsafe fns in the internal buffer."
 
 [[exemptions.crossbeam-epoch]]
 version = "0.9.8"
@@ -515,7 +515,7 @@ criteria = "safe-to-deploy"
 [[exemptions.crossbeam-epoch]]
 version = "0.9.21"
 criteria = "safe-to-deploy"
-notes = "cargo update crossbeam-epoch 0.9.20 -> 0.9.21 (patch); diff 9 files, +62/-33 lines; build.rs changed: True; unsafe lines added: 0. FLAGGED for human review."
+notes = "cargo update crossbeam-epoch 0.9.20 -> 0.9.21 (patch); diff 9 files, +62/-33 lines; build.rs changed: True; unsafe lines added: 0. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build.rs only reads TARGET to detect the tsan target; no unsafe added."
 
 [[exemptions.crossbeam-utils]]
 version = "0.8.22"
@@ -524,7 +524,7 @@ criteria = "safe-to-deploy"
 [[exemptions.crossbeam-utils]]
 version = "0.8.23"
 criteria = "safe-to-deploy"
-notes = "cargo update crossbeam-utils 0.8.22 -> 0.8.23 (patch); diff 9 files, +46/-23 lines; build.rs changed: True; unsafe lines added: 2. FLAGGED for human review."
+notes = "cargo update crossbeam-utils 0.8.22 -> 0.8.23 (patch); diff 9 files, +46/-23 lines; build.rs changed: True; unsafe lines added: 2. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build.rs only reads TARGET to detect the tsan target; 2 unsafe lines in sharded_lock."
 
 [[exemptions.crypto-bigint]]
 version = "0.5.5"
@@ -561,7 +561,7 @@ criteria = "safe-to-deploy"
 [[exemptions.ctutils]]
 version = "0.4.3"
 criteria = "safe-to-deploy"
-notes = "cargo update ctutils 0.4.2 -> 0.4.3 (patch); diff 9 files, +38/-42 lines; build.rs changed: False; unsafe lines added: 1. FLAGGED for human review."
+notes = "cargo update ctutils 0.4.2 -> 0.4.3 (patch); diff 9 files, +38/-42 lines; build.rs changed: False; unsafe lines added: 1. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): adds #![forbid(unsafe_code)]; no build.rs."
 
 [[exemptions.curve25519-dalek]]
 version = "4.1.3"
@@ -684,7 +684,7 @@ criteria = "safe-to-deploy"
 [[exemptions.encoding_rs]]
 version = "0.8.42"
 criteria = "safe-to-deploy"
-notes = "cargo update encoding_rs 0.8.35 -> 0.8.42 (patch); diff 94 files, +2650/-372251 lines; build.rs changed: True; unsafe lines added: 38. FLAGGED for human review."
+notes = "cargo update encoding_rs 0.8.35 -> 0.8.42 (patch); diff 94 files, +2650/-372251 lines; build.rs changed: True; unsafe lines added: 38. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build.rs only sets a cfg via rustversion. New dependencies: multiversion_no_op (no-op proc macro, 6 lines, same author), rustversion (already in tree), scopeguard. Edition 2024; ~36 unsafe lines (SIMD); the diff removes ~372k lines of test data. Pulled in by reqwest and wasmtime."
 
 [[exemptions.enum_dispatch]]
 version = "0.3.13"
@@ -697,7 +697,7 @@ criteria = "safe-to-deploy"
 [[exemptions.escape-simd]]
 version = "0.1.0"
 criteria = "safe-to-deploy"
-notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): New. SIMD JSON/HTML escaping, 2188 lines, 83 unsafe (intrinsics); no build.rs, no dependencies, no fs/net/process. Publisher Brooooooklyn (napi-rs; also json-escape-simd). Published 2026-09-12, ~81k downloads. Pulled in via json-escape-simd by oxc_sourcemap."
 
 [[exemptions.event-listener]]
 version = "5.4.2"
@@ -738,7 +738,7 @@ criteria = "safe-to-deploy"
 [[exemptions.find-msvc-tools]]
 version = "0.1.14"
 criteria = "safe-to-deploy"
-notes = "cargo update find-msvc-tools 0.1.11 -> 0.1.14 (patch); diff 11 files, +174/-167 lines; build.rs changed: False; unsafe lines added: 6. FLAGGED for human review."
+notes = "cargo update find-msvc-tools 0.1.11 -> 0.1.14 (patch); diff 11 files, +174/-167 lines; build.rs changed: False; unsafe lines added: 6. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): Windows only: links LoadLibraryA from kernel32; 6 unsafe lines; no network."
 
 [[exemptions.flate2]]
 version = "1.1.10"
@@ -1023,12 +1023,12 @@ criteria = "safe-to-deploy"
 [[exemptions.icu_segmenter]]
 version = "2.3.0"
 criteria = "safe-to-deploy"
-notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): New. Published by the unicode-org icu4x team. Pulled in via textwrap by oxc-miette."
 
 [[exemptions.icu_segmenter_data]]
 version = "2.3.0"
 criteria = "safe-to-deploy"
-notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): New. Data crate published by the unicode-org icu4x team (sffc). Pulled in via icu_segmenter."
 
 [[exemptions.id-arena]]
 version = "2.3.0"
@@ -1139,7 +1139,7 @@ criteria = "safe-to-deploy"
 [[exemptions.js-sys]]
 version = "0.3.106"
 criteria = "safe-to-deploy"
-notes = "cargo update js-sys 0.3.104 -> 0.3.106 (patch); diff 6 files, +406/-13 lines; build.rs changed: False; unsafe lines added: 9. FLAGGED for human review."
+notes = "cargo update js-sys 0.3.104 -> 0.3.106 (patch); diff 6 files, +406/-13 lines; build.rs changed: False; unsafe lines added: 9. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): wasm-only; 9 extern C declarations; version pinned to the matching wasm-bindgen."
 
 [[exemptions.json-escape-simd]]
 version = "3.1.1"
@@ -1182,7 +1182,7 @@ criteria = "safe-to-deploy"
 [[exemptions.libc]]
 version = "0.2.190"
 criteria = "safe-to-deploy"
-notes = "cargo update libc 0.2.189 -> 0.2.190 (patch); diff 237 files, +8632/-6152 lines; build.rs changed: True; unsafe lines added: 176. FLAGGED for human review."
+notes = "cargo update libc 0.2.189 -> 0.2.190 (patch); diff 237 files, +8632/-6152 lines; build.rs changed: True; unsafe lines added: 176. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build.rs refactors its cfg list (no process, network or file writes seen); the ~175 new unsafe lines are extern declarations."
 
 [[exemptions.libffi]]
 version = "3.2.0"
@@ -1211,7 +1211,7 @@ criteria = "safe-to-deploy"
 [[exemptions.libredox]]
 version = "0.1.25"
 criteria = "safe-to-deploy"
-notes = "cargo update libredox 0.1.23 -> 0.1.25 (patch); diff 3 files, +26/-2 lines; build.rs changed: False; unsafe lines added: 1. FLAGGED for human review."
+notes = "cargo update libredox 0.1.23 -> 0.1.25 (patch); diff 3 files, +26/-2 lines; build.rs changed: False; unsafe lines added: 1. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): 1 `unsafe impl Plain for Rlimit`; Redox OS only."
 
 [[exemptions.libsqlite3-sys]]
 version = "0.30.1"
@@ -1317,7 +1317,7 @@ criteria = "safe-to-deploy"
 [[exemptions.multiversion_no_op]]
 version = "1.0.0"
 criteria = "safe-to-deploy"
-notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): New. proc macro that returns its input unchanged (6 lines); no build.rs, no dependencies, no unsafe. Publisher hsivonen, who also publishes encoding_rs. Pulled in only by encoding_rs 0.8.42."
 
 [[exemptions.munge]]
 version = "0.4.7"
@@ -1940,7 +1940,7 @@ criteria = "safe-to-deploy"
 [[exemptions.rustix]]
 version = "1.1.5"
 criteria = "safe-to-deploy"
-notes = "cargo update rustix 1.1.4 -> 1.1.5 (patch); diff 53 files, +403/-320 lines; build.rs changed: True; unsafe lines added: 2. FLAGGED for human review."
+notes = "cargo update rustix 1.1.4 -> 1.1.5 (patch); diff 53 files, +403/-320 lines; build.rs changed: True; unsafe lines added: 2. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build.rs only removes its own probe artifact from OUT_DIR; no new dependencies."
 
 [[exemptions.rustls]]
 version = "0.23.37"
@@ -2134,7 +2134,7 @@ criteria = "safe-to-deploy"
 [[exemptions.smallvec]]
 version = "1.16.2"
 criteria = "safe-to-deploy"
-notes = "cargo update smallvec 1.16.0 -> 1.16.2 (patch); diff 4 files, +275/-27 lines; build.rs changed: False; unsafe lines added: 8. FLAGGED for human review."
+notes = "cargo update smallvec 1.16.0 -> 1.16.2 (patch); diff 4 files, +275/-27 lines; build.rs changed: False; unsafe lines added: 8. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): retain/drain unsafe rewritten (8 unsafe lines); no build.rs; cargo audit clean for 1.16.2."
 
 [[exemptions.smawk]]
 version = "0.3.3"
@@ -2334,7 +2334,7 @@ criteria = "safe-to-deploy"
 [[exemptions.tokio]]
 version = "1.53.2"
 criteria = "safe-to-deploy"
-notes = "cargo update tokio 1.53.1 -> 1.53.2 (patch); diff 62 files, +1457/-407 lines; build.rs changed: False; unsafe lines added: 8. FLAGGED for human review."
+notes = "cargo update tokio 1.53.1 -> 1.53.2 (patch); diff 62 files, +1457/-407 lines; build.rs changed: False; unsafe lines added: 8. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): 8 unsafe lines in internal sync/list code and a Windows-only `unsafe impl Send`; no new dependencies."
 
 [[exemptions.tokio-macros]]
 version = "2.7.2"
@@ -2436,7 +2436,7 @@ criteria = "safe-to-deploy"
 [[exemptions.unicode-id-start]]
 version = "1.5.0"
 criteria = "safe-to-deploy"
-notes = "cargo update unicode-id-start 1.4.0 -> 1.5.0 (minor); diff 22 files, +744/-585 lines; build.rs changed: False; unsafe lines added: 2. FLAGGED for human review."
+notes = "cargo update unicode-id-start 1.4.0 -> 1.5.0 (minor); diff 22 files, +744/-585 lines; build.rs changed: False; unsafe lines added: 2. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): get_unchecked on a static lookup table (index bounded by construction)."
 
 [[exemptions.unicode-ident]]
 version = "1.0.24"
@@ -2520,7 +2520,7 @@ criteria = "safe-to-deploy"
 [[exemptions.wasm-bindgen]]
 version = "0.2.129"
 criteria = "safe-to-deploy"
-notes = "cargo update wasm-bindgen 0.2.127 -> 0.2.129 (patch); diff 10 files, +189/-28 lines; build.rs changed: True; unsafe lines added: 3. FLAGGED for human review."
+notes = "cargo update wasm-bindgen 0.2.127 -> 0.2.129 (patch); diff 10 files, +189/-28 lines; build.rs changed: True; unsafe lines added: 3. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): wasm-only; build.rs change is a comment typo; version pinned to wasm-bindgen-macro-support/shared =0.2.129."
 
 [[exemptions.wasm-bindgen-futures]]
 version = "0.4.77"
@@ -2547,7 +2547,7 @@ criteria = "safe-to-deploy"
 [[exemptions.wasm-bindgen-macro-support]]
 version = "0.2.129"
 criteria = "safe-to-deploy"
-notes = "cargo update wasm-bindgen-macro-support 0.2.127 -> 0.2.129 (patch); diff 9 files, +3563/-361 lines; build.rs changed: False; unsafe lines added: 14. FLAGGED for human review."
+notes = "cargo update wasm-bindgen-macro-support 0.2.127 -> 0.2.129 (patch); diff 9 files, +3563/-361 lines; build.rs changed: False; unsafe lines added: 14. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): proc macro (3.5k lines added, 14 unsafe in generated code); no network or process access."
 
 [[exemptions.wasm-bindgen-shared]]
 version = "0.2.127"
@@ -2556,7 +2556,7 @@ criteria = "safe-to-deploy"
 [[exemptions.wasm-bindgen-shared]]
 version = "0.2.129"
 criteria = "safe-to-deploy"
-notes = "cargo update wasm-bindgen-shared 0.2.127 -> 0.2.129 (patch); diff 5 files, +96/-19 lines; build.rs changed: True; unsafe lines added: 0. FLAGGED for human review."
+notes = "cargo update wasm-bindgen-shared 0.2.127 -> 0.2.129 (patch); diff 5 files, +96/-19 lines; build.rs changed: True; unsafe lines added: 0. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build.rs hashes this crate's own src/lib.rs and src/tys.rs (reads inside CARGO_MANIFEST_DIR only)."
 
 [[exemptions.wasm-encoder]]
 version = "0.261.0"
@@ -2682,7 +2682,7 @@ criteria = "safe-to-deploy"
 [[exemptions.windows-sys]]
 version = "0.59.0"
 criteria = "safe-to-deploy"
-notes = "new transitive dependency introduced by cargo update (no prior version to diff). FLAGGED for human review."
+notes = "new transitive dependency introduced by cargo update (no prior version to diff). Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): New version 0.59.0. Published by Kenny Kerr (Microsoft); Windows targets only."
 
 [[exemptions.windows-sys]]
 version = "0.60.2"
@@ -2860,7 +2860,7 @@ criteria = "safe-to-deploy"
 [[exemptions.zerocopy]]
 version = "0.8.62"
 criteria = "safe-to-deploy"
-notes = "cargo update zerocopy 0.8.56 -> 0.8.62 (patch); diff 223 files, +11724/-4287 lines; build.rs changed: True; unsafe lines added: 108. FLAGGED for human review."
+notes = "cargo update zerocopy 0.8.56 -> 0.8.62 (patch); diff 223 files, +11724/-4287 lines; build.rs changed: True; unsafe lines added: 108. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build.rs only adds check-cfg lines; the unsafe is the crate's purpose (transmute-based casts)."
 
 [[exemptions.zerocopy-derive]]
 version = "0.8.56"
@@ -2869,7 +2869,7 @@ criteria = "safe-to-deploy"
 [[exemptions.zerocopy-derive]]
 version = "0.8.62"
 criteria = "safe-to-deploy"
-notes = "cargo update zerocopy-derive 0.8.56 -> 0.8.62 (patch); diff 108 files, +32033/-7633 lines; build.rs changed: False; unsafe lines added: 670. FLAGGED for human review."
+notes = "cargo update zerocopy-derive 0.8.56 -> 0.8.62 (patch); diff 108 files, +32033/-7633 lines; build.rs changed: False; unsafe lines added: 670. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): derive macro; the 600+ `unsafe` lines are mostly quoted generated code, not executed at build time."
 
 [[exemptions.zerofrom]]
 version = "0.1.8"
@@ -2891,7 +2891,7 @@ criteria = "safe-to-deploy"
 [[exemptions.zeroize]]
 version = "1.9.1"
 criteria = "safe-to-deploy"
-notes = "cargo update zeroize 1.9.0 -> 1.9.1 (patch); diff 9 files, +79/-43 lines; build.rs changed: False; unsafe lines added: 2. FLAGGED for human review."
+notes = "cargo update zeroize 1.9.0 -> 1.9.1 (patch); diff 9 files, +79/-43 lines; build.rs changed: False; unsafe lines added: 2. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): 1 volatile read as an optimisation barrier; no build.rs."
 
 [[exemptions.zeroize_derive]]
 version = "1.5.0"
@@ -2937,7 +2937,7 @@ criteria = "safe-to-deploy"
 [[exemptions.zstd-safe]]
 version = "7.3.0"
 criteria = "safe-to-deploy"
-notes = "cargo update zstd-safe 7.2.4 -> 7.3.0 (minor); diff 6 files, +53/-193 lines; build.rs changed: False; unsafe lines added: 3. FLAGGED for human review."
+notes = "cargo update zstd-safe 7.2.4 -> 7.3.0 (minor); diff 6 files, +53/-193 lines; build.rs changed: False; unsafe lines added: 3. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): 3 unsafe block-API fns; no build.rs."
 
 [[exemptions.zstd-sys]]
 version = "2.0.16+zstd.1.5.7"
@@ -2946,4 +2946,4 @@ criteria = "safe-to-deploy"
 [[exemptions.zstd-sys]]
 version = "2.1.0+zstd.1.5.7"
 criteria = "safe-to-deploy"
-notes = "cargo update zstd-sys 2.0.16+zstd.1.5.7 -> 2.1.0+zstd.1.5.7 (minor); diff 17 files, +1033/-207 lines; build.rs changed: True; unsafe lines added: 2. FLAGGED for human review."
+notes = "cargo update zstd-sys 2.0.16+zstd.1.5.7 -> 2.1.0+zstd.1.5.7 (minor); diff 17 files, +1033/-207 lines; build.rs changed: True; unsafe lines added: 2. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build.rs adds an optional cmake backend behind a feature; cmake is already in the tree via aws-lc-sys."
