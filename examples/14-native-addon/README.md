@@ -31,5 +31,8 @@ Loads a real native addon, `bcrypt`, through 3va's Node-API (`napi_*`) layer.
 ## Compatibility notes
 
 - Linux and macOS prebuilds ship inside the package, so no compiler is needed.
-- Not every addon works yet. For example `@node-rs/argon2` needs `napi_get_prototype`,
-  `napi_has_own_property` and `napi_remove_wrap`, which 3va does not export.
+- `bcrypt` (node-addon-api) and `@node-rs/argon2` (napi-rs) both load and give the same results as
+  Node, synchronous and asynchronous. Other addons may still hit a Node-API function 3va does not
+  export (an `undefined symbol` error at load time). `napi_wrap` finalizers are not run yet, so
+  native memory that an addon attaches to a JS object with `napi_wrap` is not freed when the object
+  is garbage collected.

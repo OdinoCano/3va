@@ -43,8 +43,8 @@ v1.0.0 established the secure-by-default runtime foundation: permissions, post-q
 
 | Module | v1.0.0 state | v2.0.0 target |
 |--------|-------------|---------------|
-| `cluster` | ✅ Single-process emulation: `isPrimary: true`, `fork()` returns mock workers | |
-| `worker_threads` | Not implemented | `Worker`, `parentPort`, `workerData`, `MessageChannel` |
+| `cluster` | ✅ `fork()` starts a real worker process with the parent's granted permissions; `isPrimary` is `!process.env.CLUSTER_WORKER` | |
+| `worker_threads` | ✅ Implemented in v2.0.0 (real OS threads) | `Worker`, `parentPort`, `workerData`, `MessageChannel`; see `13-v2/02-node-compat-v2.md` |
 | `dgram` | Not implemented | UDP send/receive |
 | `dns` | Stub only | `dns.resolve`, `dns.lookup`, `dns.promises.*` |
 | `readline` | Partial | Full `Interface`, `createInterface`, async iterator |

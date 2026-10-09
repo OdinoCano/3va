@@ -590,14 +590,29 @@ Leaving sandbox...
 
 ### 2.7.3 `doctor`
 
-Checks the health of the runtime and system environment.
+Runs the runtime's own self-checks against the real permission engine and V8, prints the resolved version and the Rust toolchain found in `PATH`, and exits non-zero if any check fails.
 
 **Signature:**
 ```
-3va doctor
+3va doctor [--compat]
 ```
 
-Verifies the binary installation, environment configuration, lock files, and other system requirements. Useful for diagnosing installation or configuration issues.
+**The 11 self-checks** (offline, well under a second):
+
+| Check | What it proves |
+|-------|----------------|
+| Deny-by-default | A fresh `PermissionState` denies access |
+| Path containment | A grant is honored; `..` and symlink escapes out of it are denied |
+| Deny wins over grant | An explicit deny overrides a grant for the same capability |
+| V8 | The engine evaluates code (`1 + 1`) |
+| Empty sandbox (6 checks) | In a real engine with no grants, hostile file read, file write, network connect, process spawn, worker file load and `localStorage` file access are each denied, and nothing was written or spawned |
+| SHA-256 | Known-answer test on `"abc"` |
+
+**Exit code:** `0` when every check passes, `1` when any fails, so it can gate a script or a CI step.
+
+**What it does not do.** It does not scan your project or its dependencies (use `3va audit`), does not check for updates and does not measure `unsafe`. A passing `doctor` means this binary's sandbox behaves as designed on this machine, not that your application is safe.
+
+`--compat` lists the installed packages that ship `preinstall`/`install`/`postinstall` scripts, which 3va never runs unless the package is in `"3va".onlyBuiltDependencies`.
 
 ---
 

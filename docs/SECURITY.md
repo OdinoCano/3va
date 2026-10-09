@@ -123,7 +123,7 @@ semgrep --config .semgrep/rules/ .
 
 ### Level 3 - Fuzzing
 
-3va ships three coverage-guided libFuzzer targets. All targets enforce hard invariants with `assert!` — any violation is a bug.
+3va ships fourteen coverage-guided libFuzzer targets. The three below enforce hard security invariants with `assert!`; the other eleven (HTTP request parser, package tarballs, `package.json`/`.npmrc`, IMAP, MQTT, FTP, IRC, POP3 and the JS transpiler helpers) require that arbitrary input never panics. Any violation is a bug. See `docs/10-security/04-fuzzing.md` for the full table and the nightly run.
 
 | Target | Surface | Key invariants checked |
 |--------|---------|------------------------|
@@ -137,9 +137,9 @@ rustup install nightly
 cargo install cargo-fuzz
 
 # Run a target (Ctrl-C to stop; corpus saved automatically)
-cargo fuzz run fuzz_target_1
-cargo fuzz run fuzz_permission_sandbox
-cargo fuzz run fuzz_pm_resolver
+cargo fuzz run fuzz_target_1 --target x86_64-unknown-linux-gnu
+cargo fuzz run fuzz_permission_sandbox --target x86_64-unknown-linux-gnu
+cargo fuzz run fuzz_pm_resolver --target x86_64-unknown-linux-gnu
 
 # Replay existing corpus without fuzzing
 cargo fuzz run fuzz_permission_sandbox -- -runs=0
@@ -208,7 +208,7 @@ cargo vet
 - Zip Slip: Validate paths in tarballs — implemented (`crates/pm/src/lib.rs`, `extract_tarball`)
 - Symlink escape: Do not follow symlinks without validation — implemented (same function, symlink/hardlink entries are skipped)
 - Unicode normalization: Normalize paths
-- Compression bombs: the `zlib` decompressors abort once output passes `MAX_DECOMPRESSED_OUTPUT_BYTES` (512 MiB) or expansion exceeds `MAX_DECOMPRESSION_RATIO` (4096:1, armed after `RATIO_MIN_INPUT_BYTES` = 256 KiB of input); tarball extraction enforces `MAX_EXTRACTED_FILE_BYTES` (512 MiB) per entry and `MAX_EXTRACTED_TOTAL_BYTES` (2 GiB) cumulative against header-declared sizes before writing (`crates/js/src/builtins/zlib.rs`, `crates/pm/src/lib.rs` `extract_tarball_with_limits`, `crates/pm/src/fetcher.rs`). Verified by `builtins::zlib::tests::*`, `tests::extract_tarball_*`, and `fetcher::tests::extract_*` unit tests.
+- Compression bombs: the `zlib` decompressors abort once output passes `MAX_DECOMPRESSED_OUTPUT_BYTES` (512 MiB) or expansion exceeds `MAX_DECOMPRESSION_RATIO` (4096:1, armed after `RATIO_MIN_INPUT_BYTES` = 256 KiB of input); tarball extraction enforces `MAX_EXTRACTED_FILE_BYTES` (512 MiB) per entry, `MAX_EXTRACTED_TOTAL_BYTES` (2 GiB) cumulative against header-declared sizes before writing, and `MAX_EXTRACTED_ENTRIES` (100,000 entries of any kind, counted before any is skipped, so empty files, directories and links count too) (`crates/js/src/builtins/zlib.rs`, `crates/pm/src/lib.rs` `extract_tarball_with_limits`, `crates/pm/src/fetcher.rs`). Verified by `builtins::zlib::tests::*`, `tests::extract_tarball_*`, and `fetcher::tests::extract_*` unit tests.
 
 ---
 
