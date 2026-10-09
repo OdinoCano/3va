@@ -1058,11 +1058,41 @@ unsafe extern "C" fn napi_get_arraybuffer_info(
     })
 }
 
+/// `napi_typedarray_type` of a typed array, numbered as in Node-API's enum.
+/// `None` for kinds the stable enum has no value for (V8's `Float16Array`).
+fn typedarray_type(v: v8::Local<v8::Value>) -> Option<i32> {
+    Some(if v.is_int8_array() {
+        0
+    } else if v.is_uint8_array() {
+        1
+    } else if v.is_uint8_clamped_array() {
+        2
+    } else if v.is_int16_array() {
+        3
+    } else if v.is_uint16_array() {
+        4
+    } else if v.is_int32_array() {
+        5
+    } else if v.is_uint32_array() {
+        6
+    } else if v.is_float32_array() {
+        7
+    } else if v.is_float64_array() {
+        8
+    } else if v.is_big_int64_array() {
+        9
+    } else if v.is_big_uint64_array() {
+        10
+    } else {
+        return None;
+    })
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn napi_get_typedarray_info(
     env: NapiEnvHandle,
     value: NapiValue,
-    _ty: *mut i32,
+    ty: *mut i32,
     length: *mut usize,
     data: *mut *mut c_void,
     arraybuffer: *mut NapiValue,
@@ -1078,6 +1108,15 @@ unsafe extern "C" fn napi_get_typedarray_info(
             None => return NAPI_INVALID_ARG,
         };
         if let Ok(ta) = v8::Local::<v8::TypedArray>::try_from(local) {
+            if !ty.is_null() {
+                // The out-parameter used to be ignored, so every addon saw 0
+                // (`napi_int8_array`): `@node-rs/argon2` with a `salt` option
+                // failed with "Expected Uint8Array, got Int8Array".
+                match typedarray_type(local) {
+                    Some(t) => *ty = t,
+                    None => return NAPI_INVALID_ARG,
+                }
+            }
             if !length.is_null() {
                 *length = ta.length();
             }

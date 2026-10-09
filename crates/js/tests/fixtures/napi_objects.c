@@ -29,6 +29,8 @@ extern napi_status napi_has_own_property(napi_env, napi_value, napi_value,
 extern napi_status napi_wrap(napi_env, napi_value, void *, void *, void *,
                              napi_value *);
 extern napi_status napi_remove_wrap(napi_env, napi_value, void **);
+extern napi_status napi_get_typedarray_info(napi_env, napi_value, int *, size_t *,
+                                            void **, napi_value *, size_t *);
 extern napi_status napi_unwrap(napi_env, napi_value, void **);
 extern napi_status napi_get_value_int32(napi_env, napi_value, int32_t *);
 extern napi_status napi_create_string_utf8(napi_env, const char *, size_t,
@@ -142,6 +144,22 @@ static napi_value counter_answer(napi_env env, napi_callback_info info) {
   return out;
 }
 
+/* napi_get_typedarray_info: returns type*10000 + length*100 + byte_offset, or the
+ * negated status on error. */
+static napi_value ta_info(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1] = {0}, out = 0;
+  int type = -1;
+  size_t length = 0, offset = 0;
+  napi_get_cb_info(env, info, &argc, argv, 0, 0);
+  napi_status st =
+      napi_get_typedarray_info(env, argv[0], &type, &length, 0, 0, &offset);
+  if (st != 0) return status_value(env, st);
+  napi_create_int32(env, type * 10000 + (int32_t)length * 100 + (int32_t)offset,
+                    &out);
+  return out;
+}
+
 static void export_fn(napi_env env, napi_value exports, const char *name,
                       napi_callback cb) {
   napi_value fn = 0;
@@ -153,6 +171,7 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   export_fn(env, exports, "proto", proto);
   export_fn(env, exports, "own", own);
   export_fn(env, exports, "wrapRemove", wrap_remove);
+  export_fn(env, exports, "taInfo", ta_info);
 
   napi_value kind = 0, cls = 0;
   napi_create_string_utf8(env, "counter", 7, &kind);

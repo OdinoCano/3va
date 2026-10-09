@@ -129,4 +129,49 @@ mod linux {
         )
         .await;
     }
+    // `napi_get_typedarray_info` ignored its type out-parameter, so every addon
+    // saw 0 (`napi_int8_array`). Each constructor must report Node-API's number,
+    // together with the element length and byte offset.
+    #[tokio::test]
+    async fn typedarray_info_reports_the_real_type() {
+        let Some(addon) = build_addon() else {
+            eprintln!("skipping typedarray_info_reports_the_real_type: no C compiler");
+            return;
+        };
+        let perms = Arc::new(PermissionState::new());
+        perms.grant(Capability::FFI(addon.clone()));
+        let mut engine = JsEngine::new(perms).await.unwrap();
+        engine
+            .eval_to_string(&format!(
+                "globalThis.a = require({:?}); 'ok'",
+                addon.to_string_lossy()
+            ))
+            .await
+            .unwrap();
+
+        // type * 10000 + length * 100 + byteOffset, one entry per napi_typedarray_type
+        check(
+            &mut engine,
+            r#"var buf = new ArrayBuffer(64);
+               JSON.stringify([
+                 new Int8Array(buf, 0, 3), new Uint8Array(buf, 1, 4),
+                 new Uint8ClampedArray(buf, 2, 5), new Int16Array(buf, 2, 3),
+                 new Uint16Array(buf, 4, 2), new Int32Array(buf, 8, 2),
+                 new Uint32Array(buf, 8, 3), new Float32Array(buf, 4, 6),
+                 new Float64Array(buf, 8, 2), new BigInt64Array(buf, 8, 2),
+                 new BigUint64Array(buf, 16, 1)
+               ].map(function (t) { return a.taInfo(t); }))"#,
+            "[300,10401,20502,30302,40204,50208,60308,70604,80208,90208,100116]",
+        )
+        .await;
+        // A Node Buffer is a Uint8Array.
+        check(
+            &mut engine,
+            "String(a.taInfo(Buffer.from('abcd')))",
+            "10400",
+        )
+        .await;
+        // Not a typed array: napi_invalid_arg.
+        check(&mut engine, "String(a.taInfo({}))", "-1").await;
+    }
 }
