@@ -3493,14 +3493,16 @@ pub fn teardown_isolate(isolate: &v8::Isolate) {
             }
         }
     }
-    for bridge in bridges {
-        // SAFETY: unique owner, as in run_finalizer.
-        drop(unsafe { Box::from_raw(bridge) });
-    }
+    // Addon finalizers first: one of them may call back into JS, and that call
+    // can go through a function whose bridge is about to be freed.
     for (env, data, cb, hint) in addon {
         // SAFETY: `env`'s addon library is kept alive by `_library`, and the
         // isolate is still valid here (it is disposed only after Drop returns).
         unsafe { cb(env, data, hint) };
+    }
+    for bridge in bridges {
+        // SAFETY: unique owner, as in run_finalizer.
+        drop(unsafe { Box::from_raw(bridge) });
     }
     // Late weak callbacks must not call addon memory now; mark every env of
     // this isolate dead.
