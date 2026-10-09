@@ -218,5 +218,31 @@ mod linux {
             inst_before + 1,
             "teardown must run the napi_set_instance_data finalizer exactly once"
         );
+
+        // ── a finalizer that calls back into JS during teardown ───────────
+        // The called function is addon-created, so it is backed by a NapiBridge.
+        // Teardown must run addon finalizers before freeing the bridges: the other
+        // order reads a freed bridge here (a heap-use-after-free under ASan; in a
+        // normal build it may still appear to work, so the counter is only a
+        // functional check and the ASan job is what catches the regression).
+        let runs_before = counter(&mut engine, "f.callbackRuns()").await;
+        {
+            let perms = Arc::new(PermissionState::new());
+            perms.grant(Capability::FFI(fin.clone()));
+            let mut engine3 = JsEngine::new(perms).await.unwrap();
+            engine3
+                .eval_to_string(&format!(
+                    "const f3 = require({:?}); globalThis.kept3 = f3.wrapCallsJs(); 'ok'",
+                    fin.to_string_lossy()
+                ))
+                .await
+                .unwrap();
+            drop(engine3);
+        }
+        assert_eq!(
+            counter(&mut engine, "f.callbackRuns()").await,
+            runs_before + 1,
+            "a finalizer calling an addon function during teardown must run it once"
+        );
     }
 }

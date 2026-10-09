@@ -21,6 +21,7 @@ typedef void *napi_callback_info;
 typedef int napi_status;
 typedef napi_value (*napi_callback)(napi_env, napi_callback_info);
 typedef void (*napi_finalize)(napi_env, void *, void *);
+typedef void *napi_ref;
 
 extern napi_status napi_create_int32(napi_env, int32_t, napi_value *);
 extern napi_status napi_create_function(napi_env, const char *, size_t,
@@ -36,6 +37,12 @@ extern napi_status napi_wrap(napi_env, napi_value, void *, napi_finalize, void *
 extern napi_status napi_remove_wrap(napi_env, napi_value, void **);
 extern napi_status napi_set_instance_data(napi_env, void *, napi_finalize,
                                           void *);
+extern napi_status napi_create_reference(napi_env, napi_value, uint32_t,
+                                         napi_ref *);
+extern napi_status napi_get_reference_value(napi_env, napi_ref, napi_value *);
+extern napi_status napi_get_undefined(napi_env, napi_value *);
+extern napi_status napi_call_function(napi_env, napi_value, napi_value, size_t,
+                                      const napi_value *, napi_value *);
 
 static int g_wrap_finalized = 0;
 static int g_instance_finalized = 0;
@@ -133,6 +140,47 @@ static napi_value churn_functions(napi_env env, napi_callback_info info) {
   return 0;
 }
 
+/* A finalizer that calls back into JS through a function this addon created.
+ * That function is backed by a NapiBridge; if teardown freed the bridges before
+ * running addon finalizers, this call would read freed memory (ASan reports a
+ * heap-use-after-free). */
+static napi_ref g_callback_ref = 0;
+static int g_callback_runs = 0;
+
+static napi_value callback_target(napi_env env, napi_callback_info info) {
+  (void)env;
+  (void)info;
+  g_callback_runs++;
+  return 0;
+}
+
+static void calling_finalizer(napi_env env, void *data, void *hint) {
+  (void)data;
+  (void)hint;
+  napi_value fn = 0, recv = 0, result = 0;
+  napi_get_reference_value(env, g_callback_ref, &fn);
+  napi_get_undefined(env, &recv);
+  napi_call_function(env, recv, fn, 0, 0, &result);
+}
+
+/* Return a wrapped object whose finalizer calls callback_target at teardown. */
+static napi_value wrap_calls_js(napi_env env, napi_callback_info info) {
+  (void)info;
+  napi_value fn = 0, obj = 0;
+  napi_create_function(env, "target", 6, callback_target, 0, &fn);
+  napi_create_reference(env, fn, 1, &g_callback_ref);
+  napi_create_object(env, &obj);
+  napi_wrap(env, obj, (void *)0x7, calling_finalizer, 0, 0);
+  return obj;
+}
+
+static napi_value callback_runs(napi_env env, napi_callback_info info) {
+  (void)info;
+  napi_value r = 0;
+  napi_create_int32(env, g_callback_runs, &r);
+  return r;
+}
+
 static void export_fn(napi_env env, napi_value exports, const char *name,
                       napi_callback cb) {
   napi_value fn = 0;
@@ -149,5 +197,7 @@ napi_value napi_register_module_v1(napi_env env, napi_value exports) {
   export_fn(env, exports, "setInstance", set_instance);
   export_fn(env, exports, "instanceCounter", instance_counter);
   export_fn(env, exports, "churnFunctions", churn_functions);
+  export_fn(env, exports, "wrapCallsJs", wrap_calls_js);
+  export_fn(env, exports, "callbackRuns", callback_runs);
   return exports;
 }
