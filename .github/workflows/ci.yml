@@ -72,9 +72,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: dtolnay/rust-toolchain@stable
+      # Installed as a binary instead of using EmbarkStudios/cargo-deny-action:
+      # that action builds a Docker image pulled from Docker Hub, which answers
+      # 429 Too Many Requests to the runners' anonymous pulls and failed this
+      # gate on pull requests that touched no dependency. Same approach as the
+      # `vet` job below.
+      - uses: taiki-e/install-action@v2
         with:
-          command: check advisories licenses bans sources
+          tool: cargo-deny
+      - run: cargo deny check advisories licenses bans sources
 
   # FIPS 140-3 build: all crypto/TLS on the AWS-LC FIPS module (docs/10-security/10-fips.md).
   fips:
