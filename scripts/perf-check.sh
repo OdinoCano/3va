@@ -6,7 +6,7 @@
 #   scripts/perf-check.sh --update   # on main, before your change: record
 #   scripts/perf-check.sh            # after your change: compare, exit 1 on regression
 #
-# Needs: hyperfine, oha, jq, curl. BIN_3VA=/path/to/3va to test another binary
+# Needs: hyperfine 1.x (2.0 changed the JSON schema this parses), oha, jq, curl. BIN_3VA=/path/to/3va to test another binary
 # (default target/release/3va). TOL=<percent> sets the noise margin (default 15).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
