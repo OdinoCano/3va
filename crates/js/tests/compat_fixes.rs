@@ -765,3 +765,56 @@ async fn async_webassembly_instantiate_settles() {
     e.run_event_loop().await.unwrap();
     assert_eq!(e.eval_to_string("globalThis.__r").await.unwrap(), "42");
 }
+
+/// util.parseArgs must honour `short` options (-f, -abc, -n 3, -n3), not just tokenise them.
+#[tokio::test]
+async fn util_parse_args_short_options() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"(function(){
+              var o = { f:{type:'boolean',short:'f'}, g:{type:'boolean',short:'g'}, n:{type:'string',short:'n'} };
+              var a = require('util').parseArgs({ args:['-fg','-n','3'], options:o });
+              var b = require('util').parseArgs({ args:['-n3','-f'], options:o });
+              return JSON.stringify([a.values, b.values]);
+            })()"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, r#"[{"f":true,"g":true,"n":"3"},{"n":"3","f":true}]"#);
+}
+
+/// pg / pg-pool call `socket.ref()` / `socket.unref()` on idle connections; a missing method
+/// made every `pg.Pool` query throw `this.stream.ref is not a function`.
+#[tokio::test]
+async fn net_socket_has_ref_and_unref() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            "var n = require('net'); var s = new n.Socket(); \
+             [typeof s.ref, typeof s.unref, s.ref() === s, s.unref() === s].join(',')",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "function,function,true,true");
+}
+
+/// pbkdf2/scrypt must return a Buffer (hex/base64 `toString`), not a bare Uint8Array:
+/// `toString("hex")` on a Uint8Array gives "1,2,3" and broke postgres.js SCRAM auth.
+#[tokio::test]
+async fn pbkdf2_and_scrypt_return_buffers() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            "var c = require('crypto'); \
+             [Buffer.isBuffer(c.pbkdf2Sync('a','b',1,8,'sha256')), \
+              c.pbkdf2Sync('a','b',1,8,'sha256').toString('hex').length, \
+              Buffer.isBuffer(c.scryptSync('a','b',32,{N:1024})), \
+              Buffer.isBuffer(c.createHash('sha256').update('x').digest()), \
+              c.createHmac('sha256','k').update('x').digest().toString('hex').length, \
+              c.scryptSync('a','b',8,{N:1024}).length].join(',')",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true,16,true,true,64,8");
+}

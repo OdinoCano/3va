@@ -59,3 +59,8 @@ async fn importer_of_pending_tla_module_settles_after_it_and_dup_attr_keys_rejec
     assert_eq!(v["logs"], serde_json::json!(["B", "A"])); // A depends on B's pending TLA
     assert_eq!(v["dup"], "SyntaxError"); // duplicate `with` keys stay an early error
 }
+
+#[tokio::test]
+async fn entry_with_only_top_level_await_is_run_as_a_module() {
+    assert_eq!(run_entry("tla_only.js").await, "5"); // no import/export, just `await`
+}

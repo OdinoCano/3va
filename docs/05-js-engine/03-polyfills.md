@@ -438,12 +438,12 @@ FileReader.DONE     // 2
 process.pid              // number — OS PID of the 3va process
 process.platform         // 'linux' | 'darwin' | 'win32' | 'unknown'
 process.arch             // 'x64' | 'arm64' | 'unknown'
-process.version          // '3va/2.0.0'
+process.version          // 'v22.12.0' (Node-compatible; the 3va version is process.versions['3va'])
 
 // Versions (Node-compatible keys for package compatibility checks)
-process.versions.node    // '20.0.0'  — fake, but structurally compatible
-process.versions.v8      // '11.3.244.8-node.20'
-process.versions['3va']  // '2.0.0'
+process.versions.node    // '22.12.0' — Node API level 3va targets, not a real Node
+process.versions.v8      // '12.4.254.21-node.22'
+process.versions['3va']  // the running 3va version (e.g. '2.12.1')
 
 // Working directory
 process.cwd()            // string — real CWD via std::env::current_dir()

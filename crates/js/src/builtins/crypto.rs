@@ -576,7 +576,8 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         return out;
     }
     function encodeBytes(bytes, encoding) {
-        if (!encoding || encoding === 'buffer') return new Uint8Array(bytes);
+        // Node returns a Buffer here; a bare Uint8Array's toString('hex') gives "1,2,3" (broke postgres.js SCRAM).
+        if (!encoding || encoding === 'buffer') return Buffer.from(new Uint8Array(bytes));
         if (encoding === 'hex') {
             // Not bytes.map(...).join('') — on a Uint8Array (what native crypto
             // functions return), .map() coerces the callback's string result
@@ -588,7 +589,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
         }
         if (encoding === 'base64') return base64Encode(bytes, false);
         if (encoding === 'base64url') return base64Encode(bytes, true);
-        return new Uint8Array(bytes);
+        return Buffer.from(new Uint8Array(bytes));
     }
 
     function secureRandomInt(min, max) {
@@ -900,7 +901,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                 try {
                     var raw = __cryptoPbkdf2Sync(pw, s, iterations, keylen, digest);
                     if (typeof raw === 'string') { callback(new Error(raw)); return; }
-                    callback(null, new Uint8Array(raw));
+                    callback(null, Buffer.from(new Uint8Array(raw)));
                 } catch (e) { callback(e); }
             }, 0);
         },
@@ -910,7 +911,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             // Errors come back as a string; wrapping one in Uint8Array would
             // silently hand the caller an empty key.
             if (typeof raw === 'string') throw new Error(raw);
-            return new Uint8Array(raw);
+            return Buffer.from(new Uint8Array(raw));
         },
 
         scrypt: function(password, salt, keylen, options, callback) {
@@ -925,7 +926,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                 try {
                     var raw = __cryptoScryptSync(pw, s, N, r, p, keylen);
                     if (typeof raw === 'string') { callback(new Error(raw)); return; }
-                    callback(null, new Uint8Array(raw));
+                    callback(null, Buffer.from(new Uint8Array(raw)));
                 } catch (e) { callback(e); }
             }, 0);
         },
@@ -937,7 +938,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             var p = options.p || options.parallelization || 1;
             var raw = __cryptoScryptSync(toBytes(password), toBytes(salt), N, r, p, keylen);
             if (typeof raw === 'string') throw new Error(raw);
-            return new Uint8Array(raw);
+            return Buffer.from(new Uint8Array(raw));
         },
 
         createCipheriv: function(algorithm, key, iv, options) {

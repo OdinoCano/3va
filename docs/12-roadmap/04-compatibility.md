@@ -9,11 +9,13 @@
 The percentages below are self-reported estimates, not measured against an
 exhaustive Node.js API conformance suite — treat them as directional, not
 exact. The specific factual sub-claims in the Notes column (which named
-functions exist/are missing) were spot-checked against current code on
-2026-07-13: `ECDH` is still accurate as "missing" in practice — `crypto.subtle.generateKey({name:'ECDH'})`
-generates an EC keypair but `deriveBits`/`deriveKey` (the actual key-exchange
-step) are unimplemented stubs, and there is no classic `crypto.createECDH()`;
-`parseArgs`/`styleText`/`matchesGlob` are confirmed still missing.
+functions exist/are missing) were spot-checked against the 2.12.1 binary on
+2026-10-12: `crypto.subtle.generateKey({name:'ECDH'})` generates an EC keypair but
+`deriveBits`/`deriveKey` (the actual key-exchange step) are unimplemented stubs
+(`Not implemented`); classic `crypto.createECDH()` and `util.styleText` exist;
+`util.parseArgs` exists (short options such as `-f`, `-abc`, `-n 3` are honoured from
+2.12.1; before that they were tokenised but never stored); `path.matchesGlob` is
+still missing.
 
 | Module | Compatibility | Notes |
 |--------|----------------|-------|
@@ -21,7 +23,7 @@ step) are unimplemented stubs, and there is no classic `crypto.createECDH()`;
 | `http` | 99% | Complete |
 | `https` | 95% | Partial TLS |
 | `net` | 95% | Partial Unix sockets |
-| `crypto` | 97% | Modern algorithms; `createSign/Verify`, `generateKeyPair`, `DiffieHellman` (modp2/5/14/15/16); falta ECDH |
+| `crypto` | 97% | Modern algorithms; `createSign/Verify`, `generateKeyPair`, `DiffieHellman` (modp2/5/14/15/16), `createECDH()`; faltan `subtle.deriveBits`/`deriveKey` para ECDH |
 | `stream` | 92% | Streams2 con backpressure real (`highWaterMark`, `drain` event) |
 | `process` | 99% | `memoryUsage`/`cpuUsage` reales en Linux; EventEmitter completo |
 | `buffer` | 100% | Complete |
@@ -30,7 +32,7 @@ step) are unimplemented stubs, and there is no classic `crypto.createECDH()`;
 | `querystring` | 100% | Complete |
 | `path` | 99% | `relative`, `normalize`, `posix`, `win32` correctos; falta `matchesGlob` real |
 | `os` | 99% | `hostname`, `totalmem`, `freemem`, `uptime`, `cpus()` con model/speed/times reales, `networkInterfaces()` vía inotify/`ip addr` |
-| `util` | 95% | `util.types` con 30+ métodos; faltan `parseArgs`, `styleText` |
+| `util` | 95% | `util.types` con 30+ métodos; `parseArgs` y `styleText` presentes |
 | `zlib` | 98% | Async callbacks + sync + Transform streams reales; brotli real vía crate `brotli 7` |
 | `child_process` | 95% | `exec`/`spawn`/`execSync`/`spawnSync` reales; stdin piping vía `stdin.write()`/`stdin.end()` y `spawnSync({input})` |
 

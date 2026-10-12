@@ -1007,7 +1007,12 @@ impl JsEngine {
         let source = std::fs::read_to_string(path)?;
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let is_esm = ext == "mjs" || is_esm_source(&source);
+        // Like Node's module detection, a file whose only module syntax is a top-level
+        // `await` is an ES module. Entry file only: parsing every required CJS file that
+        // mentions `await` would cost startup time.
+        let is_esm = ext == "mjs"
+            || is_esm_source(&source)
+            || (ext != "cjs" && transpiler::has_top_level_await(&source));
         let transpiled: String = if is_esm {
             // Top-level await is handled inside transpile_to_cjs (async IIFE).
             transpiler::transpile_to_cjs(&source, matches!(ext, "tsx" | "jsx"))
@@ -1197,7 +1202,6 @@ impl JsEngine {
         // point — a runaway-timer safety net, not a budget for real work.
         const BOUNDED_MAX_ITERATIONS: usize = 100_000;
         let mut iterations = 0usize;
-        let mut last_heartbeat = std::time::Instant::now();
         let mut busy_since_hint = false;
         // Woken by HTTP connection tasks as soon as a request is parsed, so
         // the sleeps below end early instead of waiting out their timeout.
@@ -1255,22 +1259,6 @@ impl JsEngine {
             }
 
             tokio::task::yield_now().await;
-
-            if last_heartbeat.elapsed() >= std::time::Duration::from_secs(10) {
-                last_heartbeat = std::time::Instant::now();
-                let js_timers = self.timer_manager.pending_count();
-                let js_next = self.timer_manager.next_expiry().map(|d| d.as_millis());
-                let rust_tasks = self.runtime_core.lock().unwrap().pending_task_count();
-                let rust_next = self
-                    .runtime_core
-                    .lock()
-                    .unwrap()
-                    .next_timer_duration()
-                    .map(|d| d.as_millis());
-                eprintln!(
-                    "[heartbeat] js_timers={js_timers} js_next={js_next:?}ms rust_tasks={rust_tasks} rust_next={rust_next:?}ms iter={iterations}"
-                );
-            }
 
             // Recomputed every iteration — a listener/child/server_mode that
             // only becomes true partway through the script (e.g. a CLI that
