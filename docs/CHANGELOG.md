@@ -17,6 +17,7 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 - **`import()` works from classic scripts**, not only from files the transpiler rewrote (it threw `Not supported`).
 - **Import attributes:** `import x from "./a.json" with { type: "json" }` no longer fails with `Cannot use import statement outside a module`; duplicate attribute keys stay an early SyntaxError.
 - **`crypto` hashes, HMACs, `pbkdf2*` and `scrypt*` return a `Buffer`**, not a bare `Uint8Array`: `.toString('hex')` gave `"1,2,3"` and `base64` was wrong, which made postgres.js SCRAM-SHA-256 fail with `SASL_SIGNATURE_MISMATCH`.
+- **`crypto.scrypt`/`scryptSync` accept any `keylen`** (it threw `invalid scrypt params` for `keylen` < 10).
 - **`net.Socket` / `tls.TLSSocket` have `ref()` and `unref()`.** `pg.Pool` calls them on every connection, so each pooled query threw `this.stream.ref is not a function`. `unref()` is a no-op for now: a pool with idle clients keeps the process alive until `pool.end()`.
 - **The event loop no longer prints a `[heartbeat] …` debug line to stderr every 10 seconds** (it polluted the logs of every long-running process).
 - **`util.parseArgs` honours short options** (`-f`, `-abc`, `-n 3`, `-n3`); they were tokenised but never stored in `values`.

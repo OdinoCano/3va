@@ -809,11 +809,12 @@ async fn pbkdf2_and_scrypt_return_buffers() {
             "var c = require('crypto'); \
              [Buffer.isBuffer(c.pbkdf2Sync('a','b',1,8,'sha256')), \
               c.pbkdf2Sync('a','b',1,8,'sha256').toString('hex').length, \
-              Buffer.isBuffer(c.scryptSync('a','b',8)), \
+              Buffer.isBuffer(c.scryptSync('a','b',32,{N:1024})), \
               Buffer.isBuffer(c.createHash('sha256').update('x').digest()), \
-              c.createHmac('sha256','k').update('x').digest().toString('hex').length].join(',')",
+              c.createHmac('sha256','k').update('x').digest().toString('hex').length, \
+              c.scryptSync('a','b',8,{N:1024}).length].join(',')",
         )
         .await
         .unwrap();
-    assert_eq!(r, "true,16,true,true,64");
+    assert_eq!(r, "true,16,true,true,64,8");
 }

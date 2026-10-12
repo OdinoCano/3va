@@ -479,7 +479,9 @@ pub(super) async fn do_scrypt(
             ));
         }
         let log_n = n.ilog2() as u8;
-        let params = scrypt::Params::new(log_n, r, p, keylen)
+        let params = // The `len` argument only matters for PHC strings and is validated to 10..=64: pass the
+        // recommended one, the output length is the buffer's (Node accepts any keylen >= 1).
+        scrypt::Params::new(log_n, r, p, scrypt::Params::RECOMMENDED_LEN)
             .map_err(|e| anyhow::anyhow!("invalid scrypt params: {e}"))?;
         let mut out = vec![0u8; keylen];
         scrypt::scrypt(&password, &salt, &params, &mut out)
@@ -570,7 +572,7 @@ pub(super) fn do_scrypt_sync(
     if n == 0 || (n & (n - 1)) != 0 {
         return Err("N must be a power of 2 greater than 1".into());
     }
-    let params = scrypt::Params::new(n.ilog2() as u8, r, p, keylen)
+    let params = scrypt::Params::new(n.ilog2() as u8, r, p, scrypt::Params::RECOMMENDED_LEN)
         .map_err(|e| format!("invalid scrypt params: {e}"))?;
     let mut out = vec![0u8; keylen];
     scrypt::scrypt(password, salt, &params, &mut out).map_err(|e| format!("scrypt error: {e}"))?;
