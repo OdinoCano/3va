@@ -62,21 +62,21 @@ jobs:
           targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
       # -rdynamic: addons resolve their napi_* symbols against the host binary.
-      # detect_leaks=0: memory *errors* only. Handles are now released (see
-      # tests/napi_handles.rs); what remains is one bridge allocation per
-      # napi_create_function, tracked in docs/10-security/11-threat-model.md.
-      - name: napi tests must be ASan-clean
+      # LSan is on: every `napi_wrap` finalizer and per-function bridge is
+      # released now (see tests/napi_handles.rs); only the vendored `v8` crate's
+      # own per-isolate bookkeeping is suppressed, in .github/lsan-v8.supp.
+      - name: napi tests must be ASan- and LSan-clean
         env:
           RUSTFLAGS: "-Zsanitizer=address -C link-args=-rdynamic"
-          ASAN_OPTIONS: "detect_leaks=0"
-        run: cargo test -p vvva_js --test napi_sanitizers --target x86_64-unknown-linux-gnu
+          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/.github/lsan-v8.supp"
+        run: cargo test -p vvva_js --test napi_sanitizers --test napi_handles --target x86_64-unknown-linux-gnu
       # Canary: the probe passes a length far beyond the addon's buffer. ASan
       # must abort it with heap-buffer-overflow; a pass or any other failure
       # means the sanitizer is not doing its job.
       - name: ASan canary must trip
         env:
           RUSTFLAGS: "-Zsanitizer=address -C link-args=-rdynamic"
-          ASAN_OPTIONS: "detect_leaks=0"
+          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/.github/lsan-v8.supp"
         run: |
           set +e
           cargo test -p vvva_js --test napi_sanitizers --target x86_64-unknown-linux-gnu \

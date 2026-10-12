@@ -17,10 +17,15 @@
 mod linux {
     use std::path::PathBuf;
     use std::process::Command;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use vvva_js::JsEngine;
     use vvva_permissions::{Capability, PermissionState};
+
+    /// Built addons must outlive their temp dir (dlopen keeps the file mapped),
+    /// so hold the guards in a static instead of leaking them: LeakSanitizer
+    /// then sees the allocations as reachable and reports nothing of ours.
+    static ADDON_DIRS: Mutex<Vec<tempfile::TempDir>> = Mutex::new(Vec::new());
 
     /// Compile the hostile addon into a temporary directory. Returns `None`
     /// (and the test skips) when no C compiler is available.
@@ -45,10 +50,10 @@ mod linux {
             return None;
         }
 
-        let out = out.canonicalize().ok()?;
-        // The addon must outlive the TempDir guard; leaking it is fine in a test.
-        std::mem::forget(dir);
-        Some(out)
+        let path = out.canonicalize().ok()?;
+        // The addon must outlive its temp dir; keep the guard reachable.
+        ADDON_DIRS.lock().unwrap().push(dir);
+        Some(path)
     }
 
     #[tokio::test]
