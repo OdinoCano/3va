@@ -335,9 +335,31 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
     let temp_path = temp.path();
 
     // Copy the module body to the temp dir under its original filename.
+    //
+    // `eval_file` auto-detects ESM from the *content* (`is_esm_source`), which
+    // needs an `import`/`export`/dynamic-import to fire. A `flags: [module]`
+    // test whose body is only top-level `await` (e.g. the top-level-await
+    // syntax tests) has none, so it would run as a classic script and V8 would
+    // reject the `await`. The `export {}` marker makes the detection reliable;
+    // the CJS transpiler strips it before V8 ever sees it.
+    // Copy sibling .js files (fixtures + companion tests) into the temp dir.
+    // Must happen *before* writing the module body below: the test file is one
+    // of its own siblings, so this copy would otherwise clobber the `export {}`
+    // marker added below with the unmarked original.
+    copy_module_siblings(path, temp_path);
+
     let module_filename = path.file_name().unwrap();
     let module_path = temp_path.join(module_filename);
-    if let Err(e) = std::fs::write(&module_path, &source) {
+    // Only positive module tests get the marker: `negative: phase: parse`
+    // tests must keep failing in V8's parser exactly as before, and forcing
+    // them through the ESM transpiler (which is lenient about some escapes)
+    // would make them spuriously pass.
+    let module_source = if meta.negative_type.is_none() {
+        format!("export {{}};\n{source}")
+    } else {
+        source.clone()
+    };
+    if let Err(e) = std::fs::write(&module_path, &module_source) {
         return vec![TestResult {
             name: display,
             file: String::new(),
@@ -346,9 +368,6 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
             error: Some(format!("could not write temp module: {e}")),
         }];
     }
-
-    // Copy sibling .js files (fixtures + companion tests) into the temp dir.
-    copy_module_siblings(path, temp_path);
 
     let harness_dir = root.join("harness");
     let harness = build_module_harness(&harness_dir, meta);
