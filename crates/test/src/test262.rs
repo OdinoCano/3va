@@ -72,6 +72,25 @@ impl TestMeta {
     }
 }
 
+/// Renders `s` as a double-quoted JS string literal (escapes `\`, `"` and the
+/// common control characters) — enough for the file paths the runner injects.
+fn js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Extracts the `[a, b, c]` list following `key:` on the same line.
 fn parse_list(line: &str) -> Vec<String> {
     let Some(start) = line.find('[') else {
@@ -543,7 +562,17 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
         let script = build_script(&harness_dir, &meta, &source, strict);
         let start = std::time::Instant::now();
 
+        // Native `import()` from a classic script is handled by the engine's
+        // host callback, which resolves specifiers through the same CJS loader
+        // as the ESM path, relative to `globalThis.__dirname`. Grant read on
+        // the test tree (so `_FIXTURE.js` siblings load) and point `__dirname`
+        // at the test's own directory below, before the body runs.
         let perms = PermissionState::new();
+        // Absolute paths only: the CJS resolver normalizes away leading `..`
+        // components and the permission check matches by path prefix, so a
+        // relative `../../tests/test262/test` here would resolve to nothing.
+        let test_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        perms.grant(Capability::FileRead(test_root.join("test")));
         let mut engine = match JsEngine::new(Arc::new(perms)).await {
             Ok(engine) => engine,
             Err(e) => {
@@ -576,6 +605,28 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
                 error: Some(format!("failed to install $262 agent support: {e}")),
             });
             continue;
+        }
+
+        // Give the script a file identity so its dynamic `import()` resolves
+        // relative to the test itself, like test262's own host does. Evaluated
+        // separately (not prepended) to keep any `"use strict"` prologue first.
+        let test_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(parent) = test_path.parent() {
+            let prelude = format!(
+                "globalThis.__dirname = {}; globalThis.__filename = {};",
+                js_string(&parent.to_string_lossy()),
+                js_string(&test_path.to_string_lossy()),
+            );
+            if let Err(e) = engine.eval(&prelude).await {
+                results.push(TestResult {
+                    file: String::new(),
+                    name,
+                    status: TestStatus::Failed,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!("failed to set test file identity: {e}")),
+                });
+                continue;
+            }
         }
 
         let (status, error) = if meta.is_async() {

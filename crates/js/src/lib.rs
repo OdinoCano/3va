@@ -115,6 +115,42 @@ fn pump_v8_platform_tasks(isolate: &v8::Isolate) {
     }
 }
 
+/// Host hook for native dynamic `import()`.
+///
+/// 3va never uses `v8::Module`: ES modules are transpiled to CommonJS and run
+/// through the `require()` shim in `builtins::modules`. Without this callback
+/// V8 has no way to load the module a script's `import(x)` names, so every
+/// dynamic import from a classic script fails with `Error: Not supported`.
+/// Delegating to the same `globalThis.__importAsync` the transpiled ESM path
+/// uses (which resolves via `requireFrom` and waits for top-level await) makes
+/// `import()` behave identically in scripts and modules.
+///
+/// Set once per isolate at creation; the function is zero-sized and looks the
+/// runtime helper up on the current context's global each call, so it never
+/// captures engine state.
+fn host_import_module_dynamically<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    _host_defined_options: v8::Local<'s, v8::Data>,
+    _resource_name: v8::Local<'s, v8::Value>,
+    specifier: v8::Local<'s, v8::String>,
+    _import_attributes: v8::Local<'s, v8::FixedArray>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let key = v8::String::new(scope, "__importAsync")?;
+    let func = global.get(scope, key.into())?;
+    let func = v8::Local::<v8::Function>::try_from(func).ok()?;
+    let recv: v8::Local<'s, v8::Value> = context.global(scope).into();
+    let arg: v8::Local<'s, v8::Value> = specifier.into();
+    let result = func.call(scope, recv, &[arg])?;
+    if result.is_promise() {
+        // Safe: guarded by `is_promise()`.
+        Some(unsafe { v8::Local::<v8::Promise>::cast_unchecked(result) })
+    } else {
+        None
+    }
+}
+
 /// Realms created via `$262.createRealm()` (see `install_realm_support`),
 /// keyed by index. Stored as isolate embedder data so the registry outlives
 /// any single callback invocation, for as long as the isolate lives.
@@ -654,6 +690,9 @@ impl JsEngine {
             eprintln!("[startup] Isolate::new: {:?}", t1.elapsed());
         }
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+        // Native `import()` support for classic scripts (see the function's
+        // docs). Must be registered before any context/script is created.
+        isolate.set_host_import_module_dynamically_callback(host_import_module_dynamically);
 
         let timer_manager = TimerManager::new();
         let runtime_core = Mutex::new(Runtime::new((*permissions).clone()));
