@@ -969,13 +969,8 @@ impl JsEngine {
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let is_esm = ext == "mjs" || is_esm_source(&source);
-        let has_tla = transpiler::has_top_level_await(&source);
-
-        let transpiled: String = if is_esm && has_tla {
-            // TLA only valid in ESM — wrap transpiled CJS in async IIFE
-            let base_code = transpiler::transpile_to_cjs(&source, matches!(ext, "tsx" | "jsx"));
-            transpiler::wrap_with_async_main(&base_code)
-        } else if is_esm {
+        let transpiled: String = if is_esm {
+            // Top-level await is handled inside transpile_to_cjs (async IIFE).
             transpiler::transpile_to_cjs(&source, matches!(ext, "tsx" | "jsx"))
         } else {
             match ext {

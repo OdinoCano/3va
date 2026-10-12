@@ -406,6 +406,22 @@ pub fn inject_require(
         read_file_fn.unwrap().into(),
     );
 
+    // ── __drainMicrotasks() ───────────────────────────────────────────────────
+    // Lets the synchronous require() loader run a top-level-await module's
+    // microtask-only awaits (e.g. `await import(...)`) to completion before
+    // handing its exports to the importer. No-op when already inside a microtask.
+    let drain_fn = Function::new(
+        scope,
+        |scope: &mut PinScope<'_, '_>, _args: FunctionCallbackArguments, _rv: ReturnValue| {
+            scope.perform_microtask_checkpoint();
+        },
+    );
+    global.set(
+        scope,
+        V8String::new(scope, "__drainMicrotasks").unwrap().into(),
+        drain_fn.unwrap().into(),
+    );
+
     // ── __setCallerScope(name) ────────────────────────────────────────────────
     // Backs the require() wrapper below: right before handing a
     // capability-gated builtin (fs, net, ...) to the module that required it,
@@ -4846,6 +4862,19 @@ __httpSetHandler(self._id, function() {
                 return new Promise(function(resolve, reject) {
                     try {
                         var mod = requireFn(specifier);
+                        // A module with top-level await may still be evaluating
+                        // (real async work): wait for it, then re-read its exports.
+                        var rec = null;
+                        try { rec = globalThis.__loadedModules[requireFn.resolve(specifier)]; } catch (_) {}
+                        if (rec && rec.__tla) {
+                            rec.__tla.then(function() { finish(rec.exports); }, reject);
+                            return;
+                        }
+                        finish(mod);
+                    } catch (e) {
+                        reject(e);
+                    }
+                    function finish(mod) {
                         // ESM interop: CJS modules need a synthetic .default export so that
                         // `import foo from 'cjs-pkg'` and module-runner's importedNames
                         // check finds 'default'. Works for both object exports and function
@@ -4860,8 +4889,6 @@ __httpSetHandler(self._id, function() {
                             }
                         }
                         resolve(mod);
-                    } catch (e) {
-                        reject(e);
                     }
                 });
             };
@@ -5098,6 +5125,15 @@ __httpSetHandler(self._id, function() {
                 var __vvva_import_meta__ = {url: ownMetaUrl, env: globalThis.__vvva_meta_env__, hot: undefined, glob: globalThis.__vvva_meta_glob__, resolve: globalThis.__vvva_meta_resolve__, require: localRequire, dirname: moduleDir, filename: resolved, main: false};
                 var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', '__importAsync', '__vvva_import_meta__', source + '\n//# sourceURL=' + resolved);
                 fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl, localImportAsync, __vvva_import_meta__);
+                if (mod.__tla) {
+                    // Top-level await: run microtask-only awaits to completion so a
+                    // static importer sees full exports. Real async work (timers, I/O)
+                    // stays pending; import() waits on mod.__tla instead.
+                    var tlaState = 0, tlaErr;
+                    mod.__tla.then(function() { tlaState = 1; }, function(e) { tlaState = 2; tlaErr = e; });
+                    __drainMicrotasks();
+                    if (tlaState === 2) throw tlaErr;
+                }
                 mod.loaded = true;
             } catch (e) {
                 delete globalThis.__loadedModules[resolved];
@@ -5134,9 +5170,13 @@ __httpSetHandler(self._id, function() {
         // Entry-point script's own transpiled dynamic `import(x)` calls —
         // required modules get their own per-directory version instead (see
         // localImportAsync in requireFrom), passed as a shadowing parameter.
-        globalThis.__importAsync = __makeImportAsync(function(specifier) {
+        var __entryRequire = function(specifier) {
             return requireFrom(specifier, globalThis.__dirname || undefined);
-        });
+        };
+        __entryRequire.resolve = function(specifier) {
+            return __requireResolve(specifier, globalThis.__dirname || undefined);
+        };
+        globalThis.__importAsync = __makeImportAsync(__entryRequire);
 
     })();
     "#;

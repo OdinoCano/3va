@@ -871,10 +871,11 @@ pub fn transpile_to_cjs_with_path(source: &str, jsx: bool, file_path: Option<&st
     if is_cf_plugin {
         eprintln!("[TLA-CF] static_esm_to_cjs done");
     }
-    // Strip top-level `await` that OXC leaves in place when converting ESM with
-    // top-level await to CJS. V8 rejects `await` at the top level of a script.
-    let out = if out.contains("await") {
-        strip_top_level_await(&out)
+    // OXC leaves top-level `await` in place, which V8 rejects outside an async
+    // function. Run the whole module body in an async IIFE and expose its promise
+    // as `module.__tla` so the loader (and `import()`) can wait for it.
+    let out = if has_top_level_await(source) {
+        format!("module.__tla = (async () => {{\n{out}\n}})();")
     } else {
         out
     };
@@ -1712,6 +1713,24 @@ fn collect_stmt(src: &[u8], start: usize, len: usize) -> (String, usize) {
     (normalised, i)
 }
 
+/// Drops a trailing import-attributes clause (`with { type: "json" }`, or the
+/// older `assert { ... }`) so the module specifier is the last token again.
+fn strip_import_attributes(s: &str) -> &str {
+    let t = s.trim_end().trim_end_matches(';').trim_end();
+    if !t.ends_with('}') {
+        return s;
+    }
+    for kw in ["with", "assert"] {
+        if let Some(p) = t.rfind(kw) {
+            let before = t[..p].trim_end();
+            if t[p + kw.len()..].trim_start().starts_with('{') && before.ends_with(['"', '\'']) {
+                return before;
+            }
+        }
+    }
+    s
+}
+
 fn extract_quoted(s: &str) -> Option<&str> {
     let s = s.trim().trim_end_matches(';').trim();
     if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
@@ -1812,7 +1831,7 @@ fn named_list_to_destructure(inner: &str) -> String {
 fn convert_import(src: &[u8], start: usize, len: usize) -> Option<(String, usize)> {
     let (stmt, end) = collect_stmt(src, start, len);
     let s = stmt.trim();
-    let rest = s.strip_prefix("import")?.trim_start();
+    let rest = strip_import_attributes(s.strip_prefix("import")?.trim_start());
 
     // Side-effect: `import 'mod'` or `import "mod"`
     if rest.starts_with('"') || rest.starts_with('\'') {
@@ -2482,308 +2501,37 @@ pub fn looks_like_jsx(source: &str) -> bool {
     false
 }
 
-/// Heuristic: detect top-level `await` in JavaScript source.
-///
-/// Scans for the `await` keyword outside of block-bodied function scopes by
-/// tracking brace depth.  Returns `true` when `await` appears at brace depth 0
-/// (top level) or depth 1 (inside a class body but outside any method — rare).
-///
-/// Known false positives:
-/// - `async () => await expr` (async arrow with expression body, no braces) —
-///   the `await` sits at depth 0 but is inside an async arrow function.
-///
-/// False positives are harmless: the caller enables `JS_EVAL_FLAG_ASYNC` which
-/// is a no-op when no actual top-level await exists.
-pub fn has_top_level_await(code: &str) -> bool {
-    if !code.contains("await") {
+/// True when `source` has a real top-level `await` / `for await` (not one inside a
+/// function, arrow or class static block). Parsed with oxc, so `if`/`for` blocks
+/// and template strings are handled — a brace-counting scan is not.
+pub fn has_top_level_await(source: &str) -> bool {
+    use oxc_ast::AstKind;
+    if !source.contains("await") {
         return false;
     }
-
-    let bytes = code.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut depth: u32 = 0;
-
-    while i < len {
-        let b = bytes[i];
-
-        if b == b'/' && i + 1 < len {
-            if bytes[i + 1] == b'/' {
-                i += 2;
-                while i < len && bytes[i] != b'\n' {
-                    i += 1;
-                }
-                continue;
-            }
-            if bytes[i + 1] == b'*' {
-                i += 2;
-                while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                i += 2;
-                continue;
-            }
-        }
-
-        if b == b'"' || b == b'\'' || b == b'`' {
-            let q = b;
-            i += 1;
-            while i < len {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == q {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-
-        if b == b'{' {
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if b == b'}' {
-            depth = depth.saturating_sub(1);
-            i += 1;
-            continue;
-        }
-
-        if depth <= 1 && b == b'a' && i + 5 <= len && &bytes[i..i + 5] == b"await" {
-            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-            let after_ok = i + 5 >= len || !is_ident_byte(bytes[i + 5]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-
-        i += 1;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::tsx().with_module(true)).parse();
+    if parsed.panicked {
+        return false;
     }
-
-    false
-}
-
-/// Convert top-level `await` in CJS output to fire-and-forget calls.
-///
-/// OXC's CommonJS transform leaves top-level `await` in place, which is invalid
-/// in CJS (V8 rejects it with "await is only valid in async functions and the top
-/// level bodies of modules").  This pass strips `await ` from expression statements
-/// at the top level (not inside function/arrow/class bodies), making them
-/// fire-and-forget:
-///
-///   `await assertWranglerVersion();`  →  `assertWranglerVersion();`
-///   `const x = await loadCfg();`     →  `const x = loadCfg();` (x is a Promise)
-///
-/// The second form may break callers that use `x` as a resolved value, but
-/// top-level await in ESM is rare and this covers the common validation-only pattern.
-pub fn strip_top_level_await(code: &str) -> String {
-    if !code.contains("await") {
-        return code.to_string();
-    }
-
-    let bytes = code.as_bytes();
-    let len = bytes.len();
-    let mut out = Vec::with_capacity(len);
-    let mut i = 0;
-    // function_depth tracks how many function/arrow/class body braces we're inside.
-    // At depth 0 we're at the module top level.
-    let mut function_depth: i32 = 0;
-    // brace_is_fn: for each open brace, whether it started a function body
-    let mut brace_fn_stack: Vec<bool> = Vec::new();
-    // Track last non-whitespace byte for regex literal detection
-    let mut last_nonws: Option<u8> = None;
-
-    while i < len {
-        let b = bytes[i];
-
-        // Skip line comments
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
-            out.push(b);
-            i += 1;
-            while i < len && bytes[i] != b'\n' {
-                out.push(bytes[i]);
-                i += 1;
-            }
-            continue;
-        }
-        // Skip block comments
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-            out.push(b);
-            out.push(b'*');
-            i += 2;
-            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                out.push(bytes[i]);
-                i += 1;
-            }
-            if i + 1 < len {
-                out.push(bytes[i]);
-                out.push(bytes[i + 1]);
-                i += 2;
-            }
-            continue;
-        }
-        // Regex literal detection — must come before string handling so that `"` inside
-        // a regex (e.g. /pattern = "..."/) is not mistakenly treated as a string opener,
-        // which would cause the scanner to consume `}` tokens that close function bodies.
-        if b == b'/' && i + 1 < len && bytes[i + 1] != b'/' && bytes[i + 1] != b'*' {
-            let is_regex = match last_nonws {
-                Some(c) => !matches!(c,
-                    b')' | b']' | b'"' | b'\'' | b'`' |
-                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$'
-                ),
-                None => true,
-            };
-            if is_regex {
-                out.push(b);
-                i += 1;
-                while i < len {
-                    let rc = bytes[i];
-                    if rc == b'\\' {
-                        out.push(rc);
-                        i += 1;
-                        if i < len {
-                            out.push(bytes[i]);
-                            i += 1;
-                        }
-                        continue;
-                    }
-                    if rc == b'[' {
-                        out.push(rc);
-                        i += 1;
-                        while i < len {
-                            let cc = bytes[i];
-                            if cc == b'\\' {
-                                out.push(cc);
-                                i += 1;
-                                if i < len {
-                                    out.push(bytes[i]);
-                                    i += 1;
-                                }
-                                continue;
-                            }
-                            out.push(cc);
-                            i += 1;
-                            if cc == b']' {
-                                break;
-                            }
-                        }
-                        continue;
-                    }
-                    out.push(rc);
-                    i += 1;
-                    if rc == b'/' {
-                        while i < len && bytes[i].is_ascii_alphabetic() {
-                            out.push(bytes[i]);
-                            i += 1;
-                        }
-                        break;
-                    }
-                    if rc == b'\n' {
-                        break;
-                    }
-                }
-                last_nonws = Some(b'/');
-                continue;
-            }
-        }
-        // Skip strings
-        if b == b'"' || b == b'\'' {
-            let q = b;
-            out.push(b);
-            i += 1;
-            while i < len {
-                let c = bytes[i];
-                out.push(c);
-                i += 1;
-                if c == b'\\' && i < len {
-                    out.push(bytes[i]);
-                    i += 1;
-                } else if c == q {
-                    break;
-                }
-            }
-            last_nonws = Some(q);
-            continue;
-        }
-        // Skip template literals — use consume_template so ${...} braces don't corrupt function_depth.
-        if b == b'`' {
-            out.push(b);
-            i += 1;
-            i = consume_template(bytes, i, len, &mut out);
-            last_nonws = Some(b'`');
-            continue;
-        }
-
-        // Track function bodies — detect function/arrow/class keywords before {
-        if b == b'{' {
-            // Heuristic: check if preceding non-whitespace context suggests a function body.
-            // We look back for `)`, `=>`, or `async` to decide if this opens a function body.
-            // Simple approach: track all braces, mark as function if preceded by ) or =>
-            let is_fn = {
-                let mut j = i.saturating_sub(1);
-                while j > 0
-                    && (bytes[j] == b' '
-                        || bytes[j] == b'\t'
-                        || bytes[j] == b'\n'
-                        || bytes[j] == b'\r')
-                {
-                    j -= 1;
-                }
-                bytes[j] == b')'
-                    || (j >= 1 && bytes[j] == b'>' && bytes[j - 1] == b'=')
-                    || (j >= 4 && &bytes[j - 4..=j] == b"async")
-                    || (j >= 3 && &bytes[j - 3..=j] == b"else")
-            };
-            brace_fn_stack.push(is_fn);
-            if is_fn {
-                function_depth += 1;
-            }
-            out.push(b);
-            i += 1;
-            last_nonws = Some(b'{');
-            continue;
-        }
-        if b == b'}' {
-            if let Some(was_fn) = brace_fn_stack.pop()
-                && was_fn
-            {
-                function_depth = (function_depth - 1).max(0);
-            }
-            out.push(b);
-            i += 1;
-            last_nonws = Some(b'}');
-            continue;
-        }
-
-        // Detect top-level `await`
-        if b == b'a' && i + 5 <= len && &bytes[i..i + 5] == b"await" {
-            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-            let after_ok = i + 5 >= len || !is_ident_byte(bytes[i + 5]);
-            if before_ok && after_ok && function_depth == 0 {
-                i += 5;
-                while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
-                    i += 1;
-                }
-                continue;
-            }
-        }
-
-        // Update last_nonws
-        match b {
-            b' ' | b'\t' | b'\n' | b'\r' => {}
-            _ => {
-                last_nonws = Some(b);
-            }
-        }
-        out.push(b);
-        i += 1;
-    }
-
-    String::from_utf8_lossy(&out).into_owned()
+    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+    let nodes = semantic.nodes();
+    nodes.iter().any(|node| {
+        let is_await = match node.kind() {
+            AstKind::AwaitExpression(_) => true,
+            AstKind::ForOfStatement(f) => f.r#await,
+            _ => false,
+        };
+        is_await
+            && !nodes.ancestor_kinds(node.id()).any(|k| {
+                matches!(
+                    k,
+                    AstKind::Function(_)
+                        | AstKind::ArrowFunctionExpression(_)
+                        | AstKind::StaticBlock(_)
+                )
+            })
+    })
 }
 
 pub fn wrap_esm_with_tla(code: &str) -> String {
@@ -2906,15 +2654,6 @@ pub fn wrap_esm_with_tla(code: &str) -> String {
             .join(", "),
         output
     )
-}
-
-pub fn wrap_with_async_main(code: &str) -> String {
-    format!("(async () => {{ {code} }})()")
-}
-
-#[inline]
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
 // ── Source map storage & retrieval ─────────────────────────────────────────
