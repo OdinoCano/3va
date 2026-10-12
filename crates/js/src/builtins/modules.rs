@@ -4841,6 +4841,11 @@ __httpSetHandler(self._id, function() {
     let require_js = r#"
     (function() {
         globalThis.__loadedModules = globalThis.__loadedModules || {};
+        // `import()` must return a promise whose constructor is the intrinsic
+        // %Promise% even after user code replaces `globalThis.Promise`
+        // (test262 language/expressions/dynamic-import/returns-promise.js), so
+        // capture the real constructor before any script gets to reassign it.
+        var __RealPromise = globalThis.Promise;
         // Mirrors the Rust-side thread-local scope (vvva_permissions::scope)
         // so wrapped builtins can read/restore the *previous* scope on their
         // own (see __wrapForScope below) without a round-trip native getter.
@@ -4859,7 +4864,7 @@ __httpSetHandler(self._id, function() {
         // already get in convert_import() (transpiler.rs).
         function __makeImportAsync(requireFn) {
             return function(specifier) {
-                return new Promise(function(resolve, reject) {
+                return new __RealPromise(function(resolve, reject) {
                     try {
                         var mod = requireFn(specifier);
                         // A module with top-level await may still be evaluating
@@ -4996,11 +5001,11 @@ __httpSetHandler(self._id, function() {
         }
         function __waitTla(rec, seen) {
             seen = seen || [];
-            if (seen.indexOf(rec) !== -1) return Promise.resolve();
+            if (seen.indexOf(rec) !== -1) return __RealPromise.resolve();
             seen.push(rec);
-            var all = [rec.__tla || Promise.resolve()];
+            var all = [rec.__tla || __RealPromise.resolve()];
             (rec.__deps || []).forEach(function(d) { all.push(__waitTla(d, seen)); });
-            return Promise.all(all);
+            return __RealPromise.all(all);
         }
 
         function requireFrom(specifier, dir) {

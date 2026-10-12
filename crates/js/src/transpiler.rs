@@ -1863,6 +1863,137 @@ fn named_list_to_destructure(inner: &str) -> String {
     format!("{{ {} }}", parts.join(", "))
 }
 
+/// Returns the binding pattern of a `const`/`let`/`var` declaration, i.e. the
+/// text before the top-level `=` that introduces the initializer. For
+/// `{ x = await foo } = {}` that is `{ x = await foo }` — the inner `=` lives
+/// at brace depth 1, so only the depth-0 `=` ends the pattern.
+fn top_level_binding_pattern(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth -= 1,
+            b'=' if depth == 0 => {
+                let next = b.get(i + 1).copied().unwrap_or(0);
+                let prev = if i > 0 { b[i - 1] } else { 0 };
+                if next != b'=' && next != b'>' && !matches!(prev, b'=' | b'!' | b'<' | b'>') {
+                    return &s[..i];
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    s
+}
+
+/// Name of an `export default function/class` declaration, or `None` when it
+/// is anonymous (the caller then emits an expression assignment such as
+/// `module.exports["default"] = class extends Base {};`, which is the only
+/// valid form for a name-less class/function).
+fn default_export_decl_name(val: &str) -> Option<String> {
+    let rest = val.trim_start();
+    let rest = rest
+        .strip_prefix("async ")
+        .map(str::trim_start)
+        .unwrap_or(rest);
+    let mut rest = if let Some(r) = rest.strip_prefix("function") {
+        r.trim_start()
+    } else {
+        let r = rest.strip_prefix("class")?;
+        r.trim_start()
+    };
+    // A generator's `*` precedes the optional name.
+    if let Some(r) = rest.strip_prefix('*') {
+        rest = r.trim_start();
+    }
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .collect();
+    if name.is_empty() || name == "extends" || name == "implements" {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Best-effort list of names bound by an object/array binding pattern, used to
+/// re-export a destructuring `export const/let/var`. Handles shorthand
+/// (`{ a }`), rename (`{ a: b }`), defaults (`{ a = 1 }`), nesting, rest and
+/// array patterns; skips property keys (identifiers followed by `:`) and
+/// string-literal keys.
+fn destructuring_binding_names(pattern: &str) -> Vec<String> {
+    let b = pattern.as_bytes();
+    let n = b.len();
+    let mut names = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let c = b[i];
+        if c == b'"' || c == b'\'' {
+            let q = c;
+            i += 1;
+            while i < n {
+                if b[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if b[i] == q {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == b'_' || c == b'$' {
+            let start = i;
+            i += 1;
+            while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$') {
+                i += 1;
+            }
+            let ident = pattern[start..i].to_string();
+            let mut j = i;
+            while j < n && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < n && b[j] == b':' {
+                // `key:` (or `key :`) is a property name; the bound name (if
+                // any) follows after the colon.
+                i = j + 1;
+                continue;
+            }
+            names.push(ident);
+            i = j;
+            if i < n && b[i] == b'=' {
+                // Skip the default initializer so its identifiers aren't
+                // mistaken for bindings (`{ a = foo() }` must not export `foo`).
+                i += 1;
+                let mut depth: i32 = 0;
+                while i < n {
+                    match b[i] {
+                        b'{' | b'[' | b'(' => depth += 1,
+                        b'}' | b']' | b')' => {
+                            if depth == 0 {
+                                break;
+                            }
+                            depth -= 1;
+                        }
+                        b',' if depth == 0 => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    names
+}
+
 fn convert_import(src: &[u8], start: usize, len: usize) -> Option<(String, usize)> {
     let (stmt, end) = collect_stmt(src, start, len);
     let s = stmt.trim();
@@ -1898,8 +2029,10 @@ fn convert_import(src: &[u8], start: usize, len: usize) -> Option<(String, usize
         let named = clause[comma + 1..].trim();
         let tmp = format!("_im_{}", mangle_mod(module));
         let mut out = format!("var {tmp} = require(\"{module}\");\n");
+        // `!= null` guards JSON fixtures whose parsed value is `null` (or a
+        // primitive) before reading `.default` off it.
         out.push_str(&format!(
-            "var {def_name} = ({tmp}.default !== undefined) ? {tmp}.default : {tmp};\n"
+            "var {def_name} = ({tmp} != null && {tmp}.default !== undefined) ? {tmp}.default : {tmp};\n"
         ));
         if let Some(ns) = named.strip_prefix("* as ") {
             out.push_str(&format!("var {} = {tmp};", ns.trim()));
@@ -1936,8 +2069,10 @@ fn convert_import(src: &[u8], start: usize, len: usize) -> Option<(String, usize
         let name = clause.trim();
         let tmp = format!("_im_{}", mangle_mod(module));
         return Some((
+            // `!= null` so a `null`/primitive JSON default doesn't throw on
+            // the property read.
             format!(
-                "var {tmp} = require(\"{module}\");\nvar {name} = ({tmp}.default !== undefined) ? {tmp}.default : {tmp};"
+                "var {tmp} = require(\"{module}\");\nvar {name} = ({tmp} != null && {tmp}.default !== undefined) ? {tmp}.default : {tmp};"
             ),
             end,
         ));
@@ -2092,11 +2227,13 @@ fn convert_export(src: &[u8], start: usize, len: usize) -> Option<(String, usize
             // function's *return value*, called eagerly at module-load time,
             // instead of the function itself. Split on the first `(` and
             // keep the identifier before it instead.
-            let name = val
-                .split_whitespace()
-                .find(|&w| w != "function" && w != "async" && w != "class")
-                .map(|w| w.split('(').next().unwrap_or(w).trim())
-                .filter(|n| !n.is_empty());
+            // Only treat it as a named declaration if an identifier really
+            // follows the `function`/`class` keyword; `export default class
+            // extends Base {}` and `export default function () {}` are
+            // anonymous and must become expression assignments instead (the
+            // old code picked up `extends`/`()` as a "name" and emitted
+            // `module.exports["default"] = extends;`, itself a syntax error).
+            let name = default_export_decl_name(val);
             if let Some(n) = name {
                 return Some((format!("{val}\nmodule.exports[\"default\"] = {n};\n"), end));
             }
@@ -2229,14 +2366,27 @@ fn convert_export(src: &[u8], start: usize, len: usize) -> Option<(String, usize
         return Some((format!("{decl}\nmodule.exports.{name} = {name};\n"), end));
     }
 
-    // export const/let/var name = …
+    // export const/let/var name = …  (also destructuring binding patterns)
     for kw in &["const ", "let ", "var "] {
         if let Some(after_kw) = rest.strip_prefix(kw) {
-            let name = after_kw
+            let decl = s[7..].trim().trim_end_matches(';');
+            let trimmed = after_kw.trim_start();
+            // A destructuring export binds names inside `{ … }`/`[ … ]` rather
+            // than a single identifier; emit the declaration and re-export
+            // every bound name we can identify (the old code returned None,
+            // leaving a bare `export` that V8 rejects).
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                let pattern = top_level_binding_pattern(trimmed);
+                let mut out = format!("{decl};\n");
+                for name in destructuring_binding_names(pattern) {
+                    out.push_str(&format!("module.exports.{name} = {name};\n"));
+                }
+                return Some((out, end));
+            }
+            let name = trimmed
                 .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
                 .next()
                 .filter(|n| !n.is_empty())?;
-            let decl = s[7..].trim().trim_end_matches(';');
             return Some((format!("{decl};\nmodule.exports.{name} = {name};\n"), end));
         }
     }

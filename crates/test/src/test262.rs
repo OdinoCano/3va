@@ -72,6 +72,25 @@ impl TestMeta {
     }
 }
 
+/// Renders `s` as a double-quoted JS string literal (escapes `\`, `"` and the
+/// common control characters) — enough for the file paths the runner injects.
+fn js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Extracts the `[a, b, c]` list following `key:` on the same line.
 fn parse_list(line: &str) -> Vec<String> {
     let Some(start) = line.find('[') else {
@@ -251,10 +270,11 @@ fn build_module_harness(harness_dir: &Path, meta: &TestMeta) -> String {
     out
 }
 
-/// Copies every sibling `.js` file from the test's parent directory into
-/// `dest_dir` (the temp directory).  This covers `_FIXTURE` helpers and
-/// companion test files that other module tests may `import` by relative
-/// path.
+/// Copies the test's sibling files from its parent directory into `dest_dir`
+/// (the temp directory). This covers `_FIXTURE` helpers and companion test
+/// files other module tests `import` by relative path. Besides `.js`, it
+/// carries `_FIXTURE` files (JSON/extension-less text fixtures included) so
+/// `import … with { type: … }` resolves against a real file.
 fn copy_module_siblings(test_path: &Path, dest_dir: &Path) {
     let Some(testdir) = test_path.parent() else {
         return;
@@ -264,7 +284,12 @@ fn copy_module_siblings(test_path: &Path, dest_dir: &Path) {
     };
     for entry in entries.flatten() {
         let p = entry.path();
-        if p.is_file() && p.extension().is_some_and(|e| e == "js") {
+        if !p.is_file() {
+            continue;
+        }
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let is_js = p.extension().is_some_and(|e| e == "js");
+        if is_js || name.contains("_FIXTURE") {
             let _ = std::fs::copy(&p, dest_dir.join(p.file_name().unwrap()));
         }
     }
@@ -316,9 +341,31 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
     let temp_path = temp.path();
 
     // Copy the module body to the temp dir under its original filename.
+    //
+    // `eval_file` auto-detects ESM from the *content* (`is_esm_source`), which
+    // needs an `import`/`export`/dynamic-import to fire. A `flags: [module]`
+    // test whose body is only top-level `await` (e.g. the top-level-await
+    // syntax tests) has none, so it would run as a classic script and V8 would
+    // reject the `await`. The `export {}` marker makes the detection reliable;
+    // the CJS transpiler strips it before V8 ever sees it.
+    // Copy sibling .js files (fixtures + companion tests) into the temp dir.
+    // Must happen *before* writing the module body below: the test file is one
+    // of its own siblings, so this copy would otherwise clobber the `export {}`
+    // marker added below with the unmarked original.
+    copy_module_siblings(path, temp_path);
+
     let module_filename = path.file_name().unwrap();
     let module_path = temp_path.join(module_filename);
-    if let Err(e) = std::fs::write(&module_path, &source) {
+    // Only positive module tests get the marker: `negative: phase: parse`
+    // tests must keep failing in V8's parser exactly as before, and forcing
+    // them through the ESM transpiler (which is lenient about some escapes)
+    // would make them spuriously pass.
+    let module_source = if meta.negative_type.is_none() {
+        format!("export {{}};\n{source}")
+    } else {
+        source.clone()
+    };
+    if let Err(e) = std::fs::write(&module_path, &module_source) {
         return vec![TestResult {
             name: display,
             file: String::new(),
@@ -327,9 +374,6 @@ async fn run_module_case(path: &Path, root: &Path, meta: &TestMeta) -> Vec<TestR
             error: Some(format!("could not write temp module: {e}")),
         }];
     }
-
-    // Copy sibling .js files (fixtures + companion tests) into the temp dir.
-    copy_module_siblings(path, temp_path);
 
     let harness_dir = root.join("harness");
     let harness = build_module_harness(&harness_dir, meta);
@@ -543,7 +587,17 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
         let script = build_script(&harness_dir, &meta, &source, strict);
         let start = std::time::Instant::now();
 
+        // Native `import()` from a classic script is handled by the engine's
+        // host callback, which resolves specifiers through the same CJS loader
+        // as the ESM path, relative to `globalThis.__dirname`. Grant read on
+        // the test tree (so `_FIXTURE.js` siblings load) and point `__dirname`
+        // at the test's own directory below, before the body runs.
         let perms = PermissionState::new();
+        // Absolute paths only: the CJS resolver normalizes away leading `..`
+        // components and the permission check matches by path prefix, so a
+        // relative `../../tests/test262/test` here would resolve to nothing.
+        let test_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        perms.grant(Capability::FileRead(test_root.join("test")));
         let mut engine = match JsEngine::new(Arc::new(perms)).await {
             Ok(engine) => engine,
             Err(e) => {
@@ -576,6 +630,28 @@ async fn run_case(path: &Path, root: &Path, supported_features: &[&str]) -> Vec<
                 error: Some(format!("failed to install $262 agent support: {e}")),
             });
             continue;
+        }
+
+        // Give the script a file identity so its dynamic `import()` resolves
+        // relative to the test itself, like test262's own host does. Evaluated
+        // separately (not prepended) to keep any `"use strict"` prologue first.
+        let test_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(parent) = test_path.parent() {
+            let prelude = format!(
+                "globalThis.__dirname = {}; globalThis.__filename = {};",
+                js_string(&parent.to_string_lossy()),
+                js_string(&test_path.to_string_lossy()),
+            );
+            if let Err(e) = engine.eval(&prelude).await {
+                results.push(TestResult {
+                    file: String::new(),
+                    name,
+                    status: TestStatus::Failed,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!("failed to set test file identity: {e}")),
+                });
+                continue;
+            }
         }
 
         let (status, error) = if meta.is_async() {
