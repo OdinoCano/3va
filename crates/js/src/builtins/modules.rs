@@ -4866,8 +4866,8 @@ __httpSetHandler(self._id, function() {
                         // (real async work): wait for it, then re-read its exports.
                         var rec = null;
                         try { rec = globalThis.__loadedModules[requireFn.resolve(specifier)]; } catch (_) {}
-                        if (rec && rec.__tla) {
-                            rec.__tla.then(function() { finish(rec.exports); }, reject);
+                        if (rec && (rec.__tla || rec.__deps)) {
+                            __waitTla(rec).then(function() { finish(rec.exports); }, reject);
                             return;
                         }
                         finish(mod);
@@ -4984,6 +4984,25 @@ __httpSetHandler(self._id, function() {
             return __scopedModuleCache[cacheKey];
         }
 
+        // Modules currently executing, so a required module with a pending
+        // top-level await is recorded as a dependency of whoever required it;
+        // import() then waits for the whole subgraph (async module graph order).
+        var __loadingStack = [];
+        function __noteTlaDep(rec) {
+            var cur = __loadingStack[__loadingStack.length - 1];
+            if (cur && rec && rec !== cur && rec.__tla) {
+                (cur.__deps = cur.__deps || []).push(rec);
+            }
+        }
+        function __waitTla(rec, seen) {
+            seen = seen || [];
+            if (seen.indexOf(rec) !== -1) return Promise.resolve();
+            seen.push(rec);
+            var all = [rec.__tla || Promise.resolve()];
+            (rec.__deps || []).forEach(function(d) { all.push(__waitTla(d, seen)); });
+            return Promise.all(all);
+        }
+
         function requireFrom(specifier, dir) {
             // Normalize file:// URLs: strip scheme, host, and query/fragment
             if (specifier && specifier.indexOf('file://') === 0) {
@@ -5065,7 +5084,9 @@ __httpSetHandler(self._id, function() {
             }
 
             if (Object.prototype.hasOwnProperty.call(globalThis.__loadedModules, resolved)) {
-                return globalThis.__loadedModules[resolved].exports;
+                var cachedRec = globalThis.__loadedModules[resolved];
+                __noteTlaDep(cachedRec);
+                return cachedRec.exports;
             }
 
 
@@ -5124,7 +5145,13 @@ __httpSetHandler(self._id, function() {
                     : 'file://' + resolved;
                 var __vvva_import_meta__ = {url: ownMetaUrl, env: globalThis.__vvva_meta_env__, hot: undefined, glob: globalThis.__vvva_meta_glob__, resolve: globalThis.__vvva_meta_resolve__, require: localRequire, dirname: moduleDir, filename: resolved, main: false};
                 var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', '__importAsync', '__vvva_import_meta__', source + '\n//# sourceURL=' + resolved);
-                fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl, localImportAsync, __vvva_import_meta__);
+                __loadingStack.push(mod);
+                try {
+                    fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl, localImportAsync, __vvva_import_meta__);
+                } finally {
+                    __loadingStack.pop();
+                }
+                __noteTlaDep(mod);
                 if (mod.__tla) {
                     // Top-level await: run microtask-only awaits to completion so a
                     // static importer sees full exports. Real async work (timers, I/O)

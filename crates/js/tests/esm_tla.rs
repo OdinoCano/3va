@@ -52,3 +52,10 @@ async fn top_level_await_waits_in_imported_and_entry_modules() {
     assert_eq!(v["q"], 1); // export + await import() in functions only (no TLA)
     assert_eq!(v["dynW"], "late"); // import() waits for a timer-paced TLA module
 }
+
+#[tokio::test]
+async fn importer_of_pending_tla_module_settles_after_it_and_dup_attr_keys_rejected() {
+    let v: serde_json::Value = serde_json::from_str(&run_entry("order_entry.mjs").await).unwrap();
+    assert_eq!(v["logs"], serde_json::json!(["B", "A"])); // A depends on B's pending TLA
+    assert_eq!(v["dup"], "SyntaxError"); // duplicate `with` keys stay an early error
+}

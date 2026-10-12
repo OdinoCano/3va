@@ -1723,12 +1723,47 @@ fn strip_import_attributes(s: &str) -> &str {
     for kw in ["with", "assert"] {
         if let Some(p) = t.rfind(kw) {
             let before = t[..p].trim_end();
-            if t[p + kw.len()..].trim_start().starts_with('{') && before.ends_with(['"', '\'']) {
-                return before;
+            let attrs = t[p + kw.len()..].trim_start();
+            if attrs.starts_with('{') && before.ends_with(['"', '\'']) {
+                // Duplicate attribute keys are an early SyntaxError: keep the
+                // clause so the parser still rejects it.
+                let mut keys: Vec<String> = attrs
+                    .trim_matches(|c| c == '{' || c == '}')
+                    .split(',')
+                    .filter_map(|kv| kv.split(':').next())
+                    .map(|k| unescape_unicode(k.trim().trim_matches(|c| c == '"' || c == '\'')))
+                    .filter(|k| !k.is_empty())
+                    .collect();
+                let n = keys.len();
+                keys.sort_unstable();
+                keys.dedup();
+                return if keys.len() == n { before } else { s };
             }
         }
     }
     s
+}
+
+/// Decodes `\uXXXX` escapes (enough to compare attribute keys like `typ\u0065`).
+fn unescape_unicode(k: &str) -> String {
+    let mut out = String::new();
+    let mut rest = k;
+    while let Some(i) = rest.find("\\u") {
+        out.push_str(&rest[..i]);
+        let hex = rest.get(i + 2..i + 6).unwrap_or("");
+        match u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[i + 6..];
+            }
+            None => {
+                out.push_str("\\u");
+                rest = &rest[i + 2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn extract_quoted(s: &str) -> Option<&str> {
