@@ -798,3 +798,22 @@ async fn net_socket_has_ref_and_unref() {
         .unwrap();
     assert_eq!(r, "function,function,true,true");
 }
+
+/// pbkdf2/scrypt must return a Buffer (hex/base64 `toString`), not a bare Uint8Array:
+/// `toString("hex")` on a Uint8Array gives "1,2,3" and broke postgres.js SCRAM auth.
+#[tokio::test]
+async fn pbkdf2_and_scrypt_return_buffers() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            "var c = require('crypto'); \
+             [Buffer.isBuffer(c.pbkdf2Sync('a','b',1,8,'sha256')), \
+              c.pbkdf2Sync('a','b',1,8,'sha256').toString('hex').length, \
+              Buffer.isBuffer(c.scryptSync('a','b',8)), \
+              Buffer.isBuffer(c.createHash('sha256').update('x').digest()), \
+              c.createHmac('sha256','k').update('x').digest().toString('hex').length].join(',')",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "true,16,true,true,64");
+}
