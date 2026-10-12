@@ -21,15 +21,26 @@ const SUPPORTED_FEATURES: &[&str] = &["*"];
 const INTL402_KNOWN_FAILURES: usize = 72;
 
 // Non-module `language/` + `built-ins/` failures measured on the pinned test262
-// commit and V8 (2026-10-08). A ratchet, not a goal: the run fails if this
-// number goes UP (a regression), and also if it goes DOWN without this constant
-// being lowered, so progress gets recorded. Update it together with
+// commit and V8, **with TZ=UTC** (2026-10-12). A ratchet, not a goal: the run
+// fails if this number goes UP (a regression), and also if it goes DOWN without
+// this constant being lowered, so progress gets recorded. Update it together with
 // docs/09-testing/06-test262.md.
-const NON_MODULE_KNOWN_FAILURES: usize = 2654;
+//
+// The count depends on the time zone: `built-ins/Date/S15.9.3.1_A5_T1..T6` (12
+// results, sloppy and strict) fail in a non-UTC zone, so the same commit gave
+// 2654 on a laptop in CST and 2642 on the UTC CI runner. The test refuses to run
+// unless TZ=UTC, so the number means the same thing everywhere.
+const NON_MODULE_KNOWN_FAILURES: usize = 2642;
 
 #[test]
 #[ignore]
 fn test262_language_and_builtins() {
+    assert_eq!(
+        std::env::var("TZ").as_deref(),
+        Ok("UTC"),
+        "the Date tests (built-ins/Date/S15.9.3.1_A5_T1..T6) depend on the local time \
+         zone, so the baseline is only valid with TZ=UTC: run `TZ=UTC cargo test ...`"
+    );
     let root = Path::new("../../tests/test262");
     if !root.join("harness").is_dir() {
         eprintln!("tests/test262 not found — run scripts/setup-test262.sh first, skipping");
