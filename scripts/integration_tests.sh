@@ -277,7 +277,8 @@ else
 fi
 
 log_step "6.3 Version output"
-if "$BINARY" --version 2>&1 | grep >/dev/null "0.1.0"; then
+WANT_VERSION=$(grep -m1 '^version = ' "$PROJECT_ROOT/crates/cli/Cargo.toml" | sed 's/version = "\(.*\)"/\1/')
+if "$BINARY" --version 2>&1 | grep -qF "$WANT_VERSION"; then
     log_pass "version: correct"
 else
     log_fail "version: mismatch"

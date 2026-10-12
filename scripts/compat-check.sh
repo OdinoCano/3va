@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-THREEVA_BIN="${THREEVA_BIN:-3va}"
+# The `3va` on PATH is often a stale debug symlink: prefer this checkout's release build.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -z "${THREEVA_BIN:-}" ]; then
+    if [ -x "$ROOT/target/release/3va" ]; then THREEVA_BIN="$ROOT/target/release/3va"; else THREEVA_BIN=3va; fi
+fi
 PACKAGES=(express fastify koa axios lodash dayjs zod jsonwebtoken bcryptjs winston chalk dotenv cors helmet body-parser multer uuid nanoid ioredis mongoose next @nestjs/core @tauri-apps/cli react-native)
 TOTAL=${#PACKAGES[@]}
 PASS=0
