@@ -495,7 +495,7 @@ const { values, positionals } = parseArgs({
 // positionals → ['file.txt']
 ```
 
-Soporta: `--flag`, `--key value`, `--key=value`, `--`, defaults, valores múltiples (`multiple: true`), y el campo `tokens`.
+Soporta: `--flag`, `--key value`, `--key=value`, opciones cortas (`-f`, `-abc`, `-n 3`, `-n3`; desde 2.12.1), `--`, defaults, valores múltiples (`multiple: true`), y el campo `tokens`.
 
 ---
 

@@ -934,8 +934,23 @@ pub fn inject_require(
                             else values[name] = val;
                             tokens.push({ kind: 'option', name: name, rawName: '--' + name, value: typeof val === 'boolean' ? undefined : val, inlineValue: eqIdx !== -1 });
                         } else if (arg.slice(0, 1) === '-' && arg.length > 1) {
-                            var sname = arg.slice(1);
-                            tokens.push({ kind: 'option', name: sname, rawName: '-' + sname, value: undefined, inlineValue: false });
+                            // Short option group: -f, -abc (booleans), -n 3, -n3 (value is the rest).
+                            for (var si = 1; si < arg.length; si++) {
+                                var sch = arg[si];
+                                var lname = Object.keys(options).filter(function(k) { return options[k].short === sch; })[0];
+                                if (lname === undefined && strict) throw new TypeError('Unknown option \'-' + sch + '\'');
+                                var sopt = lname !== undefined ? options[lname] : null;
+                                var skey = lname !== undefined ? lname : sch;
+                                var sval = true, inl = false;
+                                if (sopt && (sopt.type || 'string') !== 'boolean') {
+                                    if (si + 1 < arg.length) { sval = arg.slice(si + 1); inl = true; }
+                                    else sval = (i + 1 < argv.length && argv[i + 1].slice(0, 1) !== '-') ? argv[++i] : '';
+                                    si = arg.length;
+                                }
+                                if (sopt && sopt.multiple) { if (!Array.isArray(values[skey])) values[skey] = []; values[skey].push(sval); }
+                                else values[skey] = sval;
+                                tokens.push({ kind: 'option', name: skey, rawName: '-' + sch, value: sval === true ? undefined : sval, inlineValue: inl });
+                            }
                         } else {
                             if (!allowPositionals && strict) throw new TypeError('Unexpected positional argument \'' + arg + '\'');
                             positionals.push(arg);

@@ -1007,7 +1007,12 @@ impl JsEngine {
         let source = std::fs::read_to_string(path)?;
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let is_esm = ext == "mjs" || is_esm_source(&source);
+        // Like Node's module detection, a file whose only module syntax is a top-level
+        // `await` is an ES module. Entry file only: parsing every required CJS file that
+        // mentions `await` would cost startup time.
+        let is_esm = ext == "mjs"
+            || is_esm_source(&source)
+            || (ext != "cjs" && transpiler::has_top_level_await(&source));
         let transpiled: String = if is_esm {
             // Top-level await is handled inside transpile_to_cjs (async IIFE).
             transpiler::transpile_to_cjs(&source, matches!(ext, "tsx" | "jsx"))

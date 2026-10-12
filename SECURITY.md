@@ -137,10 +137,10 @@ Every release asset ships with:
 - `3va-<tag>.cdx.json`: a CycloneDX 1.5 SBOM, also signed with cosign
 
 ```sh
-sha256sum -c 3va-v2.11.0-x86_64-unknown-linux-gnu.tar.gz.sha256   # integrity
+sha256sum -c 3va-v2.12.1-x86_64-unknown-linux-gnu.tar.gz.sha256   # integrity
 
-cosign verify-blob 3va-v2.11.0-x86_64-unknown-linux-gnu.tar.gz \
-  --bundle 3va-v2.11.0-x86_64-unknown-linux-gnu.tar.gz.bundle \
+cosign verify-blob 3va-v2.12.1-x86_64-unknown-linux-gnu.tar.gz \
+  --bundle 3va-v2.12.1-x86_64-unknown-linux-gnu.tar.gz.bundle \
   --certificate-identity-regexp 'https://github.com/OdinoCano/3va/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -153,9 +153,9 @@ the exact workflow and commit. It can be checked with
 [slsa-verifier](https://github.com/slsa-framework/slsa-verifier):
 
 ```sh
-slsa-verifier verify-artifact 3va-v2.11.0-x86_64-unknown-linux-gnu.tar.gz \
+slsa-verifier verify-artifact 3va-v2.12.1-x86_64-unknown-linux-gnu.tar.gz \
   --provenance-path multiple.intoto.jsonl \
-  --source-uri github.com/OdinoCano/3va --source-tag v2.11.0
+  --source-uri github.com/OdinoCano/3va --source-tag v2.12.1
 ```
 
 ### FIPS 140-3

@@ -765,3 +765,21 @@ async fn async_webassembly_instantiate_settles() {
     e.run_event_loop().await.unwrap();
     assert_eq!(e.eval_to_string("globalThis.__r").await.unwrap(), "42");
 }
+
+/// util.parseArgs must honour `short` options (-f, -abc, -n 3, -n3), not just tokenise them.
+#[tokio::test]
+async fn util_parse_args_short_options() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"(function(){
+              var o = { f:{type:'boolean',short:'f'}, g:{type:'boolean',short:'g'}, n:{type:'string',short:'n'} };
+              var a = require('util').parseArgs({ args:['-fg','-n','3'], options:o });
+              var b = require('util').parseArgs({ args:['-n3','-f'], options:o });
+              return JSON.stringify([a.values, b.values]);
+            })()"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, r#"[{"f":true,"g":true,"n":"3"},{"n":"3","f":true}]"#);
+}

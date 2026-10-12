@@ -7,6 +7,20 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+---
+
+## [2.12.1] — 2026-10-12
+
+### Fixed
+
+- **Top-level `await` waits for its value in ES modules.** `transpile_to_cjs` stripped top-level `await`, so `const x = await import("pg")` left `x` as a Promise and `await` inside a top-level `if`/`for` was a SyntaxError (this broke `db/index.js`-style modules). A module with top-level await now runs as an async body; `import()` and importers wait for it, including for dependencies whose own top-level await is still pending. An entry file whose only module syntax is `await` runs as a module.
+- **`import()` works from classic scripts**, not only from files the transpiler rewrote (it threw `Not supported`).
+- **Import attributes:** `import x from "./a.json" with { type: "json" }` no longer fails with `Cannot use import statement outside a module`; duplicate attribute keys stay an early SyntaxError.
+- **`util.parseArgs` honours short options** (`-f`, `-abc`, `-n 3`, `-n3`); they were tokenised but never stored in `values`.
+- ESM → CJS: `export var/let/const { … }` and `export default class extends …` are re-exported correctly.
+- test262: 3087 → 2501 failing entries (gate `NON_MODULE_KNOWN_FAILURES` 2642 → 2249); the per-group table is in `docs/09-testing/06-test262.md`.
+- Scripts: `integration_tests.sh` and `compat-check.sh` no longer use a stale version/binary; `security_vuln_scan.sh` uses `cargo vet --locked` and default features; new `scripts/test262.sh` and `scripts/debt-report.sh`.
+
 ### Security
 
 - **Debug dumps to fixed `/tmp` paths removed** (transpiler and module loader). Requiring a module whose source contained certain markers wrote the transpiled source to a predictable `/tmp` file with no write capability; a symlink planted there turned it into an arbitrary-file overwrite.
