@@ -193,7 +193,7 @@ run_geiger() {
 run_vet() {
     has_and_log cargo-vet || return
     log "cargo-vet (auditoría de supply chain)"
-    if cargo vet >"$OUT/vet.txt" 2>&1; then
+    if cargo vet --locked >"$OUT/vet.txt" 2>&1; then  # same flags as CI; plain `cargo vet` trips over policy.audit-as-crates-io for workspace crates
         ok "cargo-vet: OK"
     else
         warn "cargo-vet: crates sin auditar — ver security-reports/vet.txt"
@@ -357,11 +357,14 @@ run_clippy() {
 run_test() {
     SKIP_FN test && return
     log "cargo test (suite completa)"
-    if capped timeout 1200 cargo test --all-features >"$OUT/test.txt" 2>&1; then
+    # Default features, like CI: --all-features turns on the FIPS build, where RSA-1024/scrypt
+    # tests fail by design (the FIPS job runs its own subset). --no-fail-fast so one broken
+    # binary does not hide the rest.
+    if capped timeout 1200 cargo test --no-fail-fast >"$OUT/test.txt" 2>&1; then
         ok "tests OK"
     else
         local failed
-        failed="$(rg -oP '\d+(?= failed)' "$OUT/test.txt" | head -1 || echo 0)"
+        failed="$(rg -c '^test .* FAILED$' "$OUT/test.txt" || echo 0)"
         warn "tests: $failed fallido(s) — ver security-reports/test.txt"
         section "### cargo test\n\`\`\`\n$(rg -A2 'failures:|test result: FAILED' "$OUT/test.txt" | head -30)\n\`\`\`"
     fi
