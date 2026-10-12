@@ -39,6 +39,8 @@ fn test262_language_and_builtins() {
     let mut non_module_failed = 0;
     let mut module_failed = 0;
     let mut intl402_failed = 0;
+    // Every failure as "<suite>\t<test>", for TEST262_FAILURES_OUT below.
+    let mut all_failures: Vec<String> = Vec::new();
     for subdir in ["language", "built-ins", "intl402"] {
         let summary = run_suite(root, subdir, SUPPORTED_FEATURES);
         println!(
@@ -57,6 +59,7 @@ fn test262_language_and_builtins() {
             println!("  FAIL {} — {}", f.name, f.error.as_deref().unwrap_or(""));
         }
         for f in &summary.failures {
+            all_failures.push(format!("{subdir}\t{}", f.name));
             // `intl402/` has a small, documented set of remaining ICU-data
             // failures (see the docs) and its own assertion below, so its
             // known gaps don't pollute the language/built-ins gate.
@@ -70,6 +73,15 @@ fn test262_language_and_builtins() {
                 non_module_failed += 1;
             }
         }
+    }
+
+    // Only the first 50 failures of each suite are printed above. Setting
+    // TEST262_FAILURES_OUT writes all of them, sorted, before any assertion can
+    // panic, so two runs (e.g. a laptop and CI) can be compared with `diff`.
+    if let Ok(path) = std::env::var("TEST262_FAILURES_OUT") {
+        all_failures.sort();
+        std::fs::write(&path, all_failures.join("\n") + "\n")
+            .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
     }
 
     println!(
