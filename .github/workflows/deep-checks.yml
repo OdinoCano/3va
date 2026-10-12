@@ -48,7 +48,21 @@ jobs:
       - name: Fetch test262
         run: bash scripts/setup-test262.sh
       - name: Run the conformance gate
+        env:
+          # The baseline is only valid in UTC (the Date tests depend on the local
+          # time zone); the test refuses to run otherwise.
+          TZ: UTC
+          # Full list of failures (the test prints only the first 50 per suite).
+          TEST262_FAILURES_OUT: ${{ github.workspace }}/test262-failures.txt
         run: cargo test --release -p vvva_test --test test262 -- --ignored --nocapture
+      # Also on failure: the list is what you diff against another run.
+      - name: Upload the failure list
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-failures
+          path: test262-failures.txt
+          if-no-files-found: ignore
 
   napi-asan:
     name: napi under AddressSanitizer

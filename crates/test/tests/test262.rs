@@ -21,15 +21,26 @@ const SUPPORTED_FEATURES: &[&str] = &["*"];
 const INTL402_KNOWN_FAILURES: usize = 72;
 
 // Non-module `language/` + `built-ins/` failures measured on the pinned test262
-// commit and V8 (2026-10-08). A ratchet, not a goal: the run fails if this
-// number goes UP (a regression), and also if it goes DOWN without this constant
-// being lowered, so progress gets recorded. Update it together with
+// commit and V8, **with TZ=UTC** (2026-10-12). A ratchet, not a goal: the run
+// fails if this number goes UP (a regression), and also if it goes DOWN without
+// this constant being lowered, so progress gets recorded. Update it together with
 // docs/09-testing/06-test262.md.
-const NON_MODULE_KNOWN_FAILURES: usize = 2654;
+//
+// The count depends on the time zone: `built-ins/Date/S15.9.3.1_A5_T1..T6` (12
+// results, sloppy and strict) fail in a non-UTC zone, so the same commit gave
+// 2654 on a laptop in CST and 2642 on the UTC CI runner. The test refuses to run
+// unless TZ=UTC, so the number means the same thing everywhere.
+const NON_MODULE_KNOWN_FAILURES: usize = 2642;
 
 #[test]
 #[ignore]
 fn test262_language_and_builtins() {
+    assert_eq!(
+        std::env::var("TZ").as_deref(),
+        Ok("UTC"),
+        "the Date tests (built-ins/Date/S15.9.3.1_A5_T1..T6) depend on the local time \
+         zone, so the baseline is only valid with TZ=UTC: run `TZ=UTC cargo test ...`"
+    );
     let root = Path::new("../../tests/test262");
     if !root.join("harness").is_dir() {
         eprintln!("tests/test262 not found — run scripts/setup-test262.sh first, skipping");
@@ -39,6 +50,8 @@ fn test262_language_and_builtins() {
     let mut non_module_failed = 0;
     let mut module_failed = 0;
     let mut intl402_failed = 0;
+    // Every failure as "<suite>\t<test>", for TEST262_FAILURES_OUT below.
+    let mut all_failures: Vec<String> = Vec::new();
     for subdir in ["language", "built-ins", "intl402"] {
         let summary = run_suite(root, subdir, SUPPORTED_FEATURES);
         println!(
@@ -57,6 +70,7 @@ fn test262_language_and_builtins() {
             println!("  FAIL {} — {}", f.name, f.error.as_deref().unwrap_or(""));
         }
         for f in &summary.failures {
+            all_failures.push(format!("{subdir}\t{}", f.name));
             // `intl402/` has a small, documented set of remaining ICU-data
             // failures (see the docs) and its own assertion below, so its
             // known gaps don't pollute the language/built-ins gate.
@@ -70,6 +84,15 @@ fn test262_language_and_builtins() {
                 non_module_failed += 1;
             }
         }
+    }
+
+    // Only the first 50 failures of each suite are printed above. Setting
+    // TEST262_FAILURES_OUT writes all of them, sorted, before any assertion can
+    // panic, so two runs (e.g. a laptop and CI) can be compared with `diff`.
+    if let Ok(path) = std::env::var("TEST262_FAILURES_OUT") {
+        all_failures.sort();
+        std::fs::write(&path, all_failures.join("\n") + "\n")
+            .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
     }
 
     println!(
