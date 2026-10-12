@@ -2029,8 +2029,10 @@ fn convert_import(src: &[u8], start: usize, len: usize) -> Option<(String, usize
         let named = clause[comma + 1..].trim();
         let tmp = format!("_im_{}", mangle_mod(module));
         let mut out = format!("var {tmp} = require(\"{module}\");\n");
+        // `!= null` guards JSON fixtures whose parsed value is `null` (or a
+        // primitive) before reading `.default` off it.
         out.push_str(&format!(
-            "var {def_name} = ({tmp}.default !== undefined) ? {tmp}.default : {tmp};\n"
+            "var {def_name} = ({tmp} != null && {tmp}.default !== undefined) ? {tmp}.default : {tmp};\n"
         ));
         if let Some(ns) = named.strip_prefix("* as ") {
             out.push_str(&format!("var {} = {tmp};", ns.trim()));
@@ -2067,8 +2069,10 @@ fn convert_import(src: &[u8], start: usize, len: usize) -> Option<(String, usize
         let name = clause.trim();
         let tmp = format!("_im_{}", mangle_mod(module));
         return Some((
+            // `!= null` so a `null`/primitive JSON default doesn't throw on
+            // the property read.
             format!(
-                "var {tmp} = require(\"{module}\");\nvar {name} = ({tmp}.default !== undefined) ? {tmp}.default : {tmp};"
+                "var {tmp} = require(\"{module}\");\nvar {name} = ({tmp} != null && {tmp}.default !== undefined) ? {tmp}.default : {tmp};"
             ),
             end,
         ));

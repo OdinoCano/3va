@@ -270,10 +270,11 @@ fn build_module_harness(harness_dir: &Path, meta: &TestMeta) -> String {
     out
 }
 
-/// Copies every sibling `.js` file from the test's parent directory into
-/// `dest_dir` (the temp directory).  This covers `_FIXTURE` helpers and
-/// companion test files that other module tests may `import` by relative
-/// path.
+/// Copies the test's sibling files from its parent directory into `dest_dir`
+/// (the temp directory). This covers `_FIXTURE` helpers and companion test
+/// files other module tests `import` by relative path. Besides `.js`, it
+/// carries `_FIXTURE` files (JSON/extension-less text fixtures included) so
+/// `import … with { type: … }` resolves against a real file.
 fn copy_module_siblings(test_path: &Path, dest_dir: &Path) {
     let Some(testdir) = test_path.parent() else {
         return;
@@ -283,7 +284,12 @@ fn copy_module_siblings(test_path: &Path, dest_dir: &Path) {
     };
     for entry in entries.flatten() {
         let p = entry.path();
-        if p.is_file() && p.extension().is_some_and(|e| e == "js") {
+        if !p.is_file() {
+            continue;
+        }
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let is_js = p.extension().is_some_and(|e| e == "js");
+        if is_js || name.contains("_FIXTURE") {
             let _ = std::fs::copy(&p, dest_dir.join(p.file_name().unwrap()));
         }
     }
