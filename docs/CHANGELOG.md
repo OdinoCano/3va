@@ -16,6 +16,7 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 - **Top-level `await` waits for its value in ES modules.** `transpile_to_cjs` stripped top-level `await`, so `const x = await import("pg")` left `x` as a Promise and `await` inside a top-level `if`/`for` was a SyntaxError (this broke `db/index.js`-style modules). A module with top-level await now runs as an async body; `import()` and importers wait for it, including for dependencies whose own top-level await is still pending. An entry file whose only module syntax is `await` runs as a module.
 - **`import()` works from classic scripts**, not only from files the transpiler rewrote (it threw `Not supported`).
 - **Import attributes:** `import x from "./a.json" with { type: "json" }` no longer fails with `Cannot use import statement outside a module`; duplicate attribute keys stay an early SyntaxError.
+- **`net.Socket` / `tls.TLSSocket` have `ref()` and `unref()`.** `pg.Pool` calls them on every connection, so each pooled query threw `this.stream.ref is not a function`. `unref()` is a no-op for now: a pool with idle clients keeps the process alive until `pool.end()`.
 - **The event loop no longer prints a `[heartbeat] …` debug line to stderr every 10 seconds** (it polluted the logs of every long-running process).
 - **`util.parseArgs` honours short options** (`-f`, `-abc`, `-n 3`, `-n3`); they were tokenised but never stored in `values`.
 - ESM → CJS: `export var/let/const { … }` and `export default class extends …` are re-exported correctly.

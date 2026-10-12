@@ -3423,6 +3423,10 @@ pub fn inject_require(
                 return this;
             };
             Socket.prototype.setKeepAlive = function() { return this; };
+            // ponytail: no-ops — pg-pool/pg call socket.ref()/unref() on idle clients; unref() does not
+            // yet release the event loop (a pool with idle clients keeps the process alive until pool.end()).
+            Socket.prototype.ref = function() { return this; };
+            Socket.prototype.unref = function() { return this; };
             Socket.prototype.destroy = function(err) {
                 this._stopPoll();
                 if (this._connId !== null) { __tcpClose(this._connId); this._connId = null; }
@@ -3687,6 +3691,8 @@ pub fn inject_require(
             TLSSocket.prototype.setTimeout = Socket.prototype.setTimeout;
             TLSSocket.prototype.setNoDelay = Socket.prototype.setNoDelay;
             TLSSocket.prototype.setKeepAlive = Socket.prototype.setKeepAlive;
+            TLSSocket.prototype.ref = Socket.prototype.ref;
+            TLSSocket.prototype.unref = Socket.prototype.unref;
 
             function tlsConnect(port, host, opts, cb) {
                 if (typeof host === 'object' && host !== null) { cb = opts; opts = host; host = (opts && opts.host) || 'localhost'; }

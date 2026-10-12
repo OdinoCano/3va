@@ -578,8 +578,8 @@ support still negotiates a normal classical connection (check
 `socket.pqNegotiated`/`socket.negotiatedGroup` to see which happened).
 
 **Known limits, stated plainly:**
-- **Client-only** — 3va has no TLS server termination at all (`https.createServer`
-  doesn't terminate TLS), so there's no PQ-TLS server side either.
+- `tls.pqConnect()` is the client-side API. Since 2.12, `https.createServer({ key, cert })`
+  terminates TLS itself and offers the hybrid `X25519MLKEM768` group to clients that support it.
 - Only this one client path gets the hybrid PQ group; `tls.connect()`,
   WebSocket `wss://`, and gRPC TLS remain classical.
 - `require('crypto').pq` (standalone ML-KEM-768/ML-DSA-65 for JS, backed by
@@ -601,7 +601,7 @@ for the full design, prior-art comparison, and real third-party interop test res
 - **Bundler**: `--source-map` and `--split` are not implemented; the CLI rejects them with an error. `--minify` does not rename identifiers. Tree shaking is not yet applied to the multi-file graph.
 - **Dev server HMR**: full-page reload only, not granular per-module hot replacement.
 - **`package.json` permissions section**: `3va permissions suggest`/`learn` don't yet write directly into `package.json` — that's planned but manual editing is required today.
-- **Post-quantum TLS**: real in-handshake hybrid PQ-TLS (RFC 10024) is client-only, one code path (`tls.pqConnect()`); no PQ-TLS server, and `wss://`/gRPC TLS remain classical. See [Post-Quantum Cryptography](#post-quantum-cryptography).
+- **Post-quantum TLS**: real in-handshake hybrid PQ-TLS (RFC 10024) has one client code path (`tls.pqConnect()`); `https.createServer()` terminates TLS since 2.12 and offers the hybrid group, while `wss://`/gRPC TLS remain classical. See [Post-Quantum Cryptography](#post-quantum-cryptography).
 
 ---
 

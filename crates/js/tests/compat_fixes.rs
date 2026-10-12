@@ -783,3 +783,18 @@ async fn util_parse_args_short_options() {
         .unwrap();
     assert_eq!(r, r#"[{"f":true,"g":true,"n":"3"},{"n":"3","f":true}]"#);
 }
+
+/// pg / pg-pool call `socket.ref()` / `socket.unref()` on idle connections; a missing method
+/// made every `pg.Pool` query throw `this.stream.ref is not a function`.
+#[tokio::test]
+async fn net_socket_has_ref_and_unref() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            "var n = require('net'); var s = new n.Socket(); \
+             [typeof s.ref, typeof s.unref, s.ref() === s, s.unref() === s].join(',')",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "function,function,true,true");
+}
