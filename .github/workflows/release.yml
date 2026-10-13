@@ -69,12 +69,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux — native and cross via cross Docker image.
+          # Linux — built on ubuntu-22.04 (glibc 2.35) so the binaries run on Debian 12 (2.36)
+          # and newer. ubuntu-latest (24.04) made them require glibc 2.39; the check step
+          # below fails the build if the floor rises above Debian 12 again.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: true
+            os: ubuntu-22.04-arm
           # macos-13 is deprecated (fully unsupported Dec 2025) — long queues.
           # macos-14 (M1) is the current runner. Xcode 15 is pinned explicitly
           # because libffi-sys 2.3.0 (wasmtime dep) fails with Xcode 16's
@@ -91,10 +92,10 @@ jobs:
           # FIPS build is Linux-only. Native arm runner instead of `cross`, since
           # aws-lc-fips-sys needs Go + CMake in the build environment.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             fips: true
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             fips: true
           # Android/Termux (aarch64-linux-android) is intentionally absent:
           # rusty_v8 ships no prebuilt Android binaries, and building V8 from
@@ -147,6 +148,17 @@ jobs:
       - name: Build (native / macOS cross)
         if: ${{ !matrix.cross }}
         run: cargo build --release --locked --target ${{ matrix.target }} --bin 3va ${{ matrix.fips && '--features fips' || '' }}
+
+      - name: Check glibc floor (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          max=$(objdump -T "target/${{ matrix.target }}/release/3va" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "highest glibc symbol: $max"
+          if [ "$(printf '%s\nGLIBC_2.36\n' "$max" | sort -V | tail -1)" != "GLIBC_2.36" ]; then
+            echo "::error::binary needs $max; Debian 12 ships glibc 2.36"
+            exit 1
+          fi
 
       - name: Package binary (Unix)
         if: runner.os != 'Windows'

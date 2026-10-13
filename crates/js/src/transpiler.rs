@@ -2686,6 +2686,24 @@ pub fn looks_like_jsx(source: &str) -> bool {
     false
 }
 
+/// Module specifiers of the top-level `[var x =] require("m");` lines `transpile_to_cjs` produces
+/// for static `import`s. The entry file loads these first so it can wait for a dependency that is
+/// still running a top-level await (see `__esmEntryPreload` in the module loader).
+pub fn esm_top_requires(code: &str) -> Vec<String> {
+    code.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let l = match l.strip_prefix("var ") {
+                Some(rest) => rest.split_once(" = ")?.1.trim_start(),
+                None => l,
+            };
+            let spec = l.strip_prefix("require(\"")?.split_once("\")")?;
+            (spec.1.trim_matches(|c| c == ';' || c == ' ').is_empty() && !spec.0.contains('"'))
+                .then(|| spec.0.to_string())
+        })
+        .collect()
+}
+
 /// True when `source` has a real top-level `await` / `for await` (not one inside a
 /// function, arrow or class static block). Parsed with oxc, so `if`/`for` blocks
 /// and template strings are handled — a brace-counting scan is not.
@@ -2696,7 +2714,8 @@ pub fn has_top_level_await(source: &str) -> bool {
     }
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::tsx().with_module(true)).parse();
-    if parsed.panicked {
+    // Invalid code is not top-level await (e.g. an escaped `\u0061wait` the parser recovers from).
+    if parsed.panicked || !parsed.errors.is_empty() {
         return false;
     }
     let semantic = SemanticBuilder::new().build(&parsed.program).semantic;

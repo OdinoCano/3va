@@ -1425,3 +1425,26 @@ async fn firewall_adaptive_escalation_repeat_offender() {
         "req 7 must be allowed after the escalated block"
     );
 }
+
+/// `on-finished` (used by body-parser / express.json()) reports a request as finished when
+/// `req.socket.readable` is falsy, and body-parser then skips parsing: `req.body` stayed
+/// undefined for every JSON POST. The socket of a live request must be readable.
+#[tokio::test]
+async fn request_socket_is_readable_so_on_finished_does_not_skip_body_parsing() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        http.createServer(function(req, res) {{
+            res.end(String(req.socket.readable) + ',' + String(req.socket.writable));
+        }}).listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+    let resp = drive_until(&mut e, raw_http(port, "POST", "/", "{\"a\":1}")).await;
+    assert_eq!(response_body(&resp), "true,true", "full response:\n{resp}");
+}

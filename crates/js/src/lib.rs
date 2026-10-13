@@ -1030,6 +1030,23 @@ impl JsEngine {
             }
         };
 
+        // ES module entry: load its static imports first and, if one is still waiting on a
+        // top-level await, run the body only once it settles (async module graph).
+        let transpiled = if is_esm {
+            let specs = transpiler::esm_top_requires(&transpiled);
+            if specs.is_empty() {
+                transpiled
+            } else {
+                let list = serde_json::to_string(&specs).unwrap_or_else(|_| "[]".into());
+                format!(
+                    "(function(){{ var __p = globalThis.__esmEntryPreload({list}); \
+                     var __b = function(){{\n{transpiled}\n}}; if (__p) __p.then(__b); else __b(); }})();"
+                )
+            }
+        } else {
+            transpiled
+        };
+
         let code = if self.inspector.is_some() {
             inspector::rewrite_debugger_statements(&transpiled).into_owned()
         } else {

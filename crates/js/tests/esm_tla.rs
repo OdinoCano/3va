@@ -64,3 +64,18 @@ async fn importer_of_pending_tla_module_settles_after_it_and_dup_attr_keys_rejec
 async fn entry_with_only_top_level_await_is_run_as_a_module() {
     assert_eq!(run_entry("tla_only.js").await, "5"); // no import/export, just `await`
 }
+
+/// A module whose static dependency is still running a top-level `await` on a real timer
+/// (db/pg.*.js: `await pool.query(...)` before exporting). The importers must wait for it:
+/// the entry and an intermediate module both read the dependency's exports.
+#[tokio::test]
+async fn static_importer_waits_for_dependency_with_pending_timer_tla() {
+    assert_eq!(run_entry("chain_main.mjs").await, "function 42 function:42");
+}
+
+/// Same, but the entry only reaches the awaiting module through an intermediate one
+/// (index.js -> db/index.js -> db/pg.js): the deferred intermediate must make the entry wait too.
+#[tokio::test]
+async fn entry_waits_through_an_intermediate_deferred_module() {
+    assert_eq!(run_entry("chain_main2.mjs").await, "function:42");
+}

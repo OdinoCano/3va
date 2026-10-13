@@ -1,6 +1,6 @@
 [package]
 name = "vvva_firewall"
-version = "2.12.1"
+version = "2.12.2"
 rust-version.workspace = true
 edition = "2024"
 license = "MIT"
