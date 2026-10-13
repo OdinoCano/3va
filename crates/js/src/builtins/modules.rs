@@ -336,7 +336,12 @@ pub fn inject_require(
                     {
                         source
                     } else if is_esm {
-                        crate::transpiler::transpile_to_cjs(&source, is_jsx)
+                        // Marker (same line, so stack-trace lines don't shift): the JS loader
+                        // evaluates static imports first for ES modules.
+                        format!(
+                            "/*__3va_esm__*/ {}",
+                            crate::transpiler::transpile_to_cjs(&source, is_jsx)
+                        )
                     } else if is_jsx {
                         crate::transpiler::transpile_jsx(&source)
                     } else if path_str.ends_with(".ts")
@@ -4023,6 +4028,11 @@ __httpSetHandler(self._id, function() {
                         var _sock = new EventEmitter();
                         _sock.remoteAddress = raw[3];
                         _sock._connId = raw[2];
+                        // `on-finished` (body-parser, express.json()) treats a request whose
+                        // socket is not `readable` as already finished and skips parsing the
+                        // body: req.body stayed undefined. A live connection is readable/writable.
+                        _sock.readable = true;
+                        _sock.writable = true;
                         // What frameworks read to tell https from http
                         // (Express: req.secure / req.protocol).
                         if (self._tls) _sock.encrypted = true;
@@ -5014,9 +5024,17 @@ __httpSetHandler(self._id, function() {
         // top-level await is recorded as a dependency of whoever required it;
         // import() then waits for the whole subgraph (async module graph order).
         var __loadingStack = [];
+        // Still waiting on its own top-level await, or in an import cycle with a module that is.
+        function __tlaPending(rec, seen) {
+            seen = seen || [];
+            if (!rec || seen.indexOf(rec) !== -1) return false;
+            seen.push(rec);
+            if (rec.__tla && !rec.__tlaDone) return true;
+            return (rec.__cycle || []).some(function(c) { return __tlaPending(c, seen); });
+        }
         function __noteTlaDep(rec) {
             var cur = __loadingStack[__loadingStack.length - 1];
-            if (cur && rec && rec !== cur && rec.__tla) {
+            if (cur && rec && rec !== cur && __tlaPending(rec)) {
                 (cur.__deps = cur.__deps || []).push(rec);
             }
         }
@@ -5026,7 +5044,15 @@ __httpSetHandler(self._id, function() {
             seen.push(rec);
             var all = [rec.__tla || __RealPromise.resolve()];
             (rec.__deps || []).forEach(function(d) { all.push(__waitTla(d, seen)); });
+            (rec.__cycle || []).forEach(function(c) { all.push(__waitTla(c, seen)); });
             return __RealPromise.all(all);
+        }
+
+        // Specifiers of the top-level `[var x =] require("m");` lines of a transpiled ES module.
+        function __esmTopRequires(src) {
+            var out = [], re = /^(?:\/\*__3va_esm__\*\/\s*)?(?:var\s+[^=\n]+=\s*)?require\("([^"\n]+)"\);?[ \t]*$/gm, m;
+            while ((m = re.exec(src)) !== null) out.push(m[1]);
+            return out;
         }
 
         function requireFrom(specifier, dir) {
@@ -5111,6 +5137,14 @@ __httpSetHandler(self._id, function() {
 
             if (Object.prototype.hasOwnProperty.call(globalThis.__loadedModules, resolved)) {
                 var cachedRec = globalThis.__loadedModules[resolved];
+                // Import cycle: cachedRec is still being loaded further up the stack, so every module
+                // above it is in the cycle with it and must finish only after it (async cycles).
+                var cyc = __loadingStack.indexOf(cachedRec);
+                if (cyc !== -1) {
+                    for (var ci = cyc + 1; ci < __loadingStack.length; ci++) {
+                        (__loadingStack[ci].__cycle = __loadingStack[ci].__cycle || []).push(cachedRec);
+                    }
+                }
                 __noteTlaDep(cachedRec);
                 return cachedRec.exports;
             }
@@ -5171,19 +5205,39 @@ __httpSetHandler(self._id, function() {
                     : 'file://' + resolved;
                 var __vvva_import_meta__ = {url: ownMetaUrl, env: globalThis.__vvva_meta_env__, hot: undefined, glob: globalThis.__vvva_meta_glob__, resolve: globalThis.__vvva_meta_resolve__, require: localRequire, dirname: moduleDir, filename: resolved, main: false};
                 var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', '__importAsync', '__vvva_import_meta__', source + '\n//# sourceURL=' + resolved);
-                __loadingStack.push(mod);
-                try {
-                    fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl, localImportAsync, __vvva_import_meta__);
-                } finally {
-                    __loadingStack.pop();
+                // ES modules: evaluate static dependencies first (like ESM linking). If one of
+                // them is still waiting on a top-level await, this module's body must not run
+                // yet: defer it, and expose a promise (mod.__tla) that importers wait on.
+                var esmDeps = source.indexOf('/*__3va_esm__*/') === 0 ? __esmTopRequires(source) : [];
+                if (esmDeps.length) {
+                    __loadingStack.push(mod);
+                    try { esmDeps.forEach(function(d) { localRequire(d); }); } finally { __loadingStack.pop(); }
                 }
+                var runBody = function() {
+                    __loadingStack.push(mod);
+                    try {
+                        fn(mod.exports, mod, localRequire, resolved, moduleDir, ownMetaUrl, localImportAsync, __vvva_import_meta__);
+                    } finally {
+                        __loadingStack.pop();
+                    }
+                };
+                if (mod.__deps && mod.__deps.length) {
+                    var innerTla, finalTla;
+                    Object.defineProperty(mod, '__tla', { configurable: true, get: function() { return finalTla; }, set: function(v) { innerTla = v; } });
+                    finalTla = __RealPromise.all(mod.__deps.map(function(d) { return __waitTla(d, [mod]); }))
+                        .then(function() { runBody(); return innerTla; })
+                        .then(function() { mod.loaded = true; mod.__tlaDone = true; }, function(e) { delete globalThis.__loadedModules[resolved]; throw e; });
+                    __noteTlaDep(mod);
+                    return mod.exports;
+                }
+                runBody();
                 __noteTlaDep(mod);
                 if (mod.__tla) {
                     // Top-level await: run microtask-only awaits to completion so a
                     // static importer sees full exports. Real async work (timers, I/O)
-                    // stays pending; import() waits on mod.__tla instead.
+                    // stays pending; importers defer and import() waits on mod.__tla.
                     var tlaState = 0, tlaErr;
-                    mod.__tla.then(function() { tlaState = 1; }, function(e) { tlaState = 2; tlaErr = e; });
+                    mod.__tla.then(function() { tlaState = 1; mod.__tlaDone = true; }, function(e) { tlaState = 2; tlaErr = e; });
                     __drainMicrotasks();
                     if (tlaState === 2) throw tlaErr;
                 }
@@ -5230,6 +5284,18 @@ __httpSetHandler(self._id, function() {
             return __requireResolve(specifier, globalThis.__dirname || undefined);
         };
         globalThis.__importAsync = __makeImportAsync(__entryRequire);
+
+        // Entry file (ES module): load its static imports first; if any is still waiting on a
+        // top-level await, return a promise the entry body must wait for (null otherwise).
+        globalThis.__esmEntryPreload = function(specs) {
+            var entry = {};
+            __loadingStack.push(entry);
+            try { specs.forEach(function(sp) { __entryRequire(sp); }); } finally { __loadingStack.pop(); }
+            if (entry.__deps && entry.__deps.length) {
+                return __RealPromise.all(entry.__deps.map(function(d) { return __waitTla(d); }));
+            }
+            return null;
+        };
 
     })();
     "#;

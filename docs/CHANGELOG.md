@@ -9,6 +9,21 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [2.12.2] — 2026-10-13
+
+### Fixed
+
+- **A module that statically imports a module still running a top-level `await` now waits for it.** In 2.12.1 only `import()` waited: with `await pool.query(...)` (or any timer/I/O) before the exports of `db/pg.js`, every static importer — including the entry file — ran first and read `undefined` exports (`getReleaseManifest is not a function`). ES modules now evaluate their static imports first and defer their own body until those settle, through intermediate modules and import cycles, as the spec's async module graph does.
+- **`express.json()` / body-parser left `req.body` undefined.** `req.socket.readable` was missing, so `on-finished` reported every request as already finished and body-parser skipped parsing. The socket of a live request is now `readable`/`writable`.
+- Invalid code such as an escaped `\u0061wait` is no longer mistaken for top-level await (it must stay a SyntaxError).
+- test262: 2501 → 2497 failing entries (gate 2249 → 2247).
+
+### Changed
+
+- **Linux release binaries are built on Ubuntu 22.04 (glibc 2.35)** instead of 24.04, so they run on Debian 12 and other glibc ≥ 2.35 systems. The 2.12.1 and earlier binaries required glibc 2.39. The release build fails if a binary needs more than glibc 2.36. The aarch64 build is native (no `cross`).
+
+---
+
 ## [2.12.1] — 2026-10-12
 
 ### Fixed
