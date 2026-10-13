@@ -60,7 +60,8 @@ jobs:
           bun-version: latest
 
       - name: Install benchmark tools
-        run: cargo install hyperfine oha --locked
+        # hyperfine 2.0 changed its --export-json schema (no top-level `mean`), which bench/run.sh parses.
+        run: cargo install hyperfine@1.20.0 oha --locked
 
       - name: Build 3va (release)
         run: cargo build --release -p vvva_cli
