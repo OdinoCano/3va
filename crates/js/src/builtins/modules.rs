@@ -3801,7 +3801,7 @@ pub fn inject_require(
             var HTTP_STATUS_CODES = { '100': 'Continue', '200': 'OK', '201': 'Created', '204': 'No Content', '301': 'Moved Permanently', '302': 'Found', '304': 'Not Modified', '400': 'Bad Request', '401': 'Unauthorized', '403': 'Forbidden', '404': 'Not Found', '405': 'Method Not Allowed', '500': 'Internal Server Error', '502': 'Bad Gateway', '503': 'Service Unavailable' };
 
             // ── IncomingMessage — request bodies are already fully buffered by the
-            // native accept loop (see http_server.rs), so headers/method/url/_body
+            // native accept loop (see http_server.rs), so headers/method/url/body
             // are set synchronously; 'data'/'end' are still emitted async for code
             // that expects to stream a request body.
             var httpIncomingMessage = function(socket) {
@@ -3814,10 +3814,41 @@ pub fn inject_require(
                 this.method = 'GET';
                 this.url = '/';
                 this.headers = {};
-                this._body = '';
                 this.complete = true;
             };
             util.inherits(httpIncomingMessage, Readable);
+            // Server requests deliver their body when something starts consuming the stream
+            // ('data'/'readable' listener, resume(), read(), pipe(), for-await), not right after
+            // the handler returns: middleware that awaits before express.json() attaches its
+            // listeners late and used to miss it. Delivered through push() so setEncoding() is
+            // honored. A request without a body ends as soon as anyone listens for 'end', and
+            // 'end' listeners added after the end still get it once.
+            var kIncomingBody = typeof Symbol === 'function' ? Symbol('3va.incomingBody') : '__3vaIncomingBody';
+            function deliverIncomingBody(req) {
+                var st = req[kIncomingBody];
+                if (!st || st.started) return;
+                st.started = true;
+                queueMicrotask(function() {
+                    if (st.raw) req.push(typeof Buffer !== 'undefined' ? Buffer.from(st.raw) : st.raw);
+                    st.raw = null;
+                    // Set before 'end' is emitted, as in Node: on-finished reads these inside an
+                    // 'end' handler to tell a consumed request (finalhandler then answers at once,
+                    // e.g. the 400 for malformed JSON).
+                    st.ended = true;
+                    req.readable = false;
+                    req.readableEnded = true;
+                    req.push(null);
+                });
+            }
+            httpIncomingMessage.prototype.on = httpIncomingMessage.prototype.addListener = function(ev, fn) {
+                var st = this[kIncomingBody];
+                if (st && ev === 'end' && st.ended) { var self = this; queueMicrotask(function() { fn.call(self); }); return this; }
+                var r = Readable.prototype.on.call(this, ev, fn);
+                if (st && (ev === 'data' || ev === 'readable' || (ev === 'end' && !st.raw))) deliverIncomingBody(this);
+                return r;
+            };
+            httpIncomingMessage.prototype.resume = function() { deliverIncomingBody(this); return Readable.prototype.resume.call(this); };
+            httpIncomingMessage.prototype.read = function(n) { deliverIncomingBody(this); return Readable.prototype.read.call(this, n); };
             httpIncomingMessage.prototype.setTimeout = function() { return this; };
             httpIncomingMessage.prototype.destroy = function() { return this; };
 
@@ -4046,24 +4077,16 @@ __httpSetHandler(self._id, function() {
                         var _rk = Object.keys(_rh), _raw = new Array(_rk.length * 2);
                         for (var _j = 0; _j < _rk.length; _j++) { _raw[2 * _j] = _rk[_j]; _raw[2 * _j + 1] = _rh[_rk[_j]]; }
                         req.rawHeaders = _raw;
-                        req._body = raw[4];
+                        // Body state lives under a Symbol, never `req._body`: body-parser 1.x
+                        // (Express 4) uses `req._body` as its "already parsed" flag. Set before
+                        // the 'request' event so the handler's own listeners see it.
+                        req[kIncomingBody] = { raw: raw[4], started: false, ended: false };
                         var res = new httpServerResponse(req);
                         self.emit('request', req, res);
                         self.emit('connection', req.socket);
-                        (function(req) {
-                            // Microtask: runs once the handler returns and
-                            // has had its chance to attach listeners (push()
-                            // buffers for any that attach later).
-                            queueMicrotask(function() {
-                                // Deliver through push() (not a bare emit)
-                                // so req.setEncoding() is honored: push()
-                                // renders the chunk through the stream's
-                                // StringDecoder and flushes any trailing
-                                // incomplete sequence before 'end'.
-                                if (req._body) req.push(typeof Buffer !== 'undefined' ? Buffer.from(req._body) : req._body);
-                                req.push(null);
-                            });
-                        })(req);
+                        // The raw body stays in this closure, never on `req`: body-parser 1.x
+                        // (Express 4) uses `req._body` as its "already parsed" flag, so a
+                        // property of that name made express.json() skip every request.
                     }
                     // HTTP `Upgrade` (WebSocket): hand the raw duplex socket
                     // to the `'upgrade'` listener, exactly like Node — the

@@ -9,6 +9,18 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [2.12.3] — 2026-10-14
+
+### Fixed
+
+- **`express.json()` still left `req.body` undefined with Express 4 (body-parser 1.x).** The request object carried an internal `_body` property, which body-parser 1.x reads as its "already parsed" flag, so it skipped every request. The raw body now lives under a private Symbol. A JSON `POST` with no body no longer drops the connection (`Buffer.from: unsupported argument type boolean`). Breaking for code that read the undocumented `req._body`: read the request stream instead, as in Node.
+- **Request bodies reach listeners attached late.** The body was emitted right after the handler returned, so middleware that awaited before `express.json()` (auth, rate limiting) made the parser wait forever. The body is now delivered when something consumes the stream (`data`/`readable` listener, `resume()`, `read()`, `pipe()`, `for await`).
+- **A consumed request reports `readable: false` / `readableEnded: true` before `'end'`,** so `finalhandler` answers malformed JSON with `400` instead of leaving the connection open.
+
+Verified against Node with Express 4.22 and 5.3 (with and without async middleware: JSON, empty and missing body, urlencoded, text, malformed JSON), Fastify, Koa and `for await` over the request.
+
+---
+
 ## [2.12.2] — 2026-10-13
 
 ### Fixed

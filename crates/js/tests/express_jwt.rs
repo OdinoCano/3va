@@ -95,12 +95,16 @@ async fn http_auth_end_to_end() {
 
         var _server = http.createServer(function(req, res) {{
             if (req.url === '/login' && req.method === 'POST') {{
-                var data = JSON.parse(req._body || '{{}}');
-                var token = 'tok_' + Math.random().toString(36).slice(2);
-                tokens[token] = {{ user: data.username || 'anonymous', role: 'user' }};
-                globalThis.__lastLoginToken = token;
-                res.writeHead(200, {{ 'Content-Type': 'application/json' }});
-                res.end(JSON.stringify({{ token: token }}));
+                var raw = '';
+                req.on('data', function(c) {{ raw += c; }});
+                req.on('end', function() {{
+                    var data = JSON.parse(raw || '{{}}');
+                    var token = 'tok_' + Math.random().toString(36).slice(2);
+                    tokens[token] = {{ user: data.username || 'anonymous', role: 'user' }};
+                    globalThis.__lastLoginToken = token;
+                    res.writeHead(200, {{ 'Content-Type': 'application/json' }});
+                    res.end(JSON.stringify({{ token: token }}));
+                }});
                 return;
             }}
             if (req.url === '/profile' && req.method === 'GET') {{
