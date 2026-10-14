@@ -452,7 +452,14 @@ pub fn inject_fetch(
         }).then(function(raw) {
             var data = JSON.parse(raw);
             var respHeaders = new Headers(data.headers);
-            return new Response(data.body, {
+            // Non-UTF-8 bodies arrive base64-encoded: hand Response the bytes, not the text.
+            var body = data.body;
+            if (data.binary) {
+                var bin = atob(body), bytes = new Uint8Array(bin.length);
+                for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                body = bytes;
+            }
+            return new Response(body, {
                 status:      data.status,
                 statusText:  data.statusText,
                 headers:     respHeaders,

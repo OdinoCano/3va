@@ -614,3 +614,34 @@ async fn pipeline_file_through_async_generator() {
     let written = std::fs::read_to_string(&out_path).unwrap();
     assert_eq!(written, "hello world\n");
 }
+
+/// The fetch ↔ Node streams bridge: `Readable.fromWeb(response.body)` and binary bodies.
+/// `Response.body` did not exist, so `fromWeb(res.body)` threw even though `fromWeb` did.
+#[tokio::test]
+async fn response_body_is_a_web_stream_and_binary_bodies_keep_their_bytes() {
+    let mut e = engine().await;
+    e.eval_to_string(
+        r#"
+        globalThis.__r = 'pending';
+        (async function() {
+            var Readable = require('stream').Readable, s = '';
+            for await (var c of Readable.fromWeb(new Response('web body').body)) s += Buffer.from(c).toString();
+            var bin = new Response(new Uint8Array([0, 255, 128]));
+            var bytes = Array.from(new Uint8Array(await bin.arrayBuffer())).join(',');
+            globalThis.__r = [s, bytes, (await new Response('xy').blob()).size, String(new Response(null).body)].join('|');
+        })().catch(function(err) { globalThis.__r = 'ERR ' + err.message; });
+        'ok'
+        "#,
+    )
+    .await
+    .unwrap();
+    for _ in 0..50 {
+        e.idle().await;
+        let r = e.eval_to_string("globalThis.__r").await.unwrap();
+        if r != "pending" {
+            assert_eq!(r, "web body|0,255,128|2|null");
+            return;
+        }
+    }
+    panic!("response body test never finished");
+}

@@ -231,6 +231,9 @@ ctr = { workspace = true }
 native-tls = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
+# Bundled Mozilla roots (already in the tree via ureq): HTTPS keeps working where the OS has
+# no CA store, as Node does with its own bundle.
+webpki-roots = "1"
 aws-lc-rs = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true }
 rustls-pemfile = { workspace = true }

@@ -107,6 +107,8 @@ pub(crate) fn pq_tls_client_config_native() -> std::result::Result<Arc<rustls::C
                     .add(cert)
                     .map_err(|e| format!("PQ TLS: bad root cert: {e}"))?;
             }
+            // Node's own bundle, so HTTPS still works in images without ca-certificates.
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             add_extra_ca_certs(&mut roots);
             pq_tls_client_config_from_roots(roots)
         })

@@ -6344,6 +6344,7 @@ dependencies = [
  "vvva_core",
  "vvva_firewall",
  "vvva_permissions",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

@@ -700,14 +700,40 @@ pub fn inject_web_globals(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
             });
             return r;
         };
+        function responseBytes(b) {
+            if (b == null) return new Uint8Array(0);
+            if (b instanceof ArrayBuffer) return new Uint8Array(b);
+            if (ArrayBuffer.isView(b)) return new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+            return new TextEncoder().encode(String(b));
+        }
         Response.prototype.text = function() {
-            var self = this;
-            return Promise.resolve(String(self._body || ''));
+            var b = this._body;
+            return Promise.resolve(b == null ? '' : typeof b === 'string' ? b : new TextDecoder().decode(responseBytes(b)));
         };
         Response.prototype.json = function() {
-            var self = this;
-            return Promise.resolve(JSON.parse(self._body || '{}'));
+            return this.text().then(function(t) { return JSON.parse(t || '{}'); });
         };
+        Response.prototype.arrayBuffer = function() {
+            return Promise.resolve(responseBytes(this._body).slice().buffer);
+        };
+        Response.prototype.blob = function() {
+            var type = this.headers.get('content-type') || '';
+            return Promise.resolve(new Blob([responseBytes(this._body).slice()], { type: type }));
+        };
+        // A web ReadableStream over the (already buffered) body: what Readable.fromWeb() and
+        // `for await (const c of res.body)` consume. ponytail: one chunk, the body is read whole
+        // by the native fetch (capped); stream it chunk by chunk if large downloads need it.
+        Object.defineProperty(Response.prototype, 'body', {
+            configurable: true,
+            get: function() {
+                if (this._body == null) return null;
+                if (!this._stream) {
+                    var bytes = responseBytes(this._body);
+                    this._stream = new ReadableStream({ start: function(c) { if (bytes.length) c.enqueue(bytes); c.close(); } });
+                }
+                return this._stream;
+            }
+        });
         Response.error = function() {
             return new Response(null, { status: 0, statusText: '', type: 'error' });
         };
