@@ -17,6 +17,10 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 - **Request bodies reach listeners attached late.** The body was emitted right after the handler returned, so middleware that awaited before `express.json()` (auth, rate limiting) made the parser wait forever. The body is now delivered when something consumes the stream (`data`/`readable` listener, `resume()`, `read()`, `pipe()`, `for await`).
 - **A consumed request reports `readable: false` / `readableEnded: true` before `'end'`,** so `finalhandler` answers malformed JSON with `400` instead of leaving the connection open.
 
+### Security
+
+- **`rustls` 0.23.45 → 0.23.46** (RUSTSEC-2026-0346, -0347, -0348, -0349, published this week): `Debug` output of TLS 1.2 client session values exposed secrets, buffered application data could reach the outer server after an ECH rejection, Brotli certificate decompression could allocate up to 1 GiB before authentication, and an unauthenticated ServerHello could downgrade later connections from the hybrid post-quantum group to classical key exchange.
+
 Verified against Node with Express 4.22 and 5.3 (with and without async middleware: JSON, empty and missing body, urlencoded, text, malformed JSON), Fastify, Koa and `for await` over the request.
 
 ---
