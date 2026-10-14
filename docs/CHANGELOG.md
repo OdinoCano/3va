@@ -13,6 +13,10 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 Node compatibility gaps reported from a production Express app.
 
+### Security
+
+- **`wasmtime` 36.0.17 → 36.0.18** (RUSTSEC-2026-0352, RUSTSEC-2026-0363): a WASI filesystem sandbox escape when renaming symlinks with trailing slashes, and component-model handle tables capped only per instance. Audits for the new versions are imported from the Bytecode Alliance (`cargo vet`).
+
 ### Added
 
 - `stream.Readable.from`, `Readable.fromWeb` and `Readable.toWeb`; `Response.body` (a web `ReadableStream`), `Response.arrayBuffer()` and `Response.blob()`, so `Readable.fromWeb((await fetch(url)).body)` works. Binary `fetch` bodies keep their bytes (they reached `Response` as base64 text).
