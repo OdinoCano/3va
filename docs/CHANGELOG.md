@@ -9,6 +9,26 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [2.12.4] — 2026-10-14
+
+Node compatibility gaps reported from a production Express app.
+
+### Added
+
+- `stream.Readable.from`, `Readable.fromWeb` and `Readable.toWeb`; `Response.body` (a web `ReadableStream`), `Response.arrayBuffer()` and `Response.blob()`, so `Readable.fromWeb((await fetch(url)).body)` works. Binary `fetch` bodies keep their bytes (they reached `Response` as base64 text).
+- `os.loadavg()`.
+- `fetch` trusts the certificates in `NODE_EXTRA_CA_CERTS`, plus the OS store and the bundled Mozilla roots (so HTTPS also works in images without `ca-certificates`).
+
+### Fixed
+
+- `stream.pipeline` (callback and `stream/promises`) accepts async generator functions as transforms (`TypeError: dst.on is not a function`); the async iterator of a `Readable` no longer drops the last chunk.
+- `fetch` to an `http.createServer` in the same process no longer fails with `Unexpected EOF`: the request runs in the background and the event loop keeps serving.
+- Firewall behind a reverse proxy (`trustedProxies`): `maxConnectionsPerIp` and auto-blocking apply to the client resolved from `X-Forwarded-For`, not to the proxy's IP, so many clients behind one proxy no longer get `503`/`403`. Connections from a trusted proxy count against the global cap from their first request.
+- `firewall.enabled: false` also lifts the 100 MiB body cap and the 30 s body deadline.
+- `${VAR}` in `allow-net`/`allow-env`/`deny-net`/`deny-env` of `package.json` permissions expands like path fields, and an unset variable is reported by name instead of failing later as "Network access denied".
+
+---
+
 ## [2.12.3] — 2026-10-14
 
 ### Fixed
