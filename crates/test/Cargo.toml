@@ -1,6 +1,6 @@
 [package]
 name = "vvva_test"
-version = "2.12.3"
+version = "2.12.4"
 rust-version.workspace = true
 edition = "2021"
 license = "MIT"
@@ -15,8 +15,8 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-vvva_js = { version = "2.12.3", path = "../js" }
-vvva_permissions = { version = "2.12.3", path = "../permissions" }
+vvva_js = { version = "2.12.4", path = "../js" }
+vvva_permissions = { version = "2.12.4", path = "../permissions" }
 tokio.workspace = true
 tempfile.workspace = true
 lazy_static = "1.4"

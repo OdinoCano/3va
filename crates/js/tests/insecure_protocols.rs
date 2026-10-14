@@ -29,7 +29,7 @@ async fn error_of(e: &mut JsEngine, expr: &str) -> String {
 async fn plaintext_to_remote_host_needs_opt_in() {
     let mut e = engine_with_net("192.0.2.1").await;
     for expr in [
-        "__fetchAsync('http://192.0.2.1/', 'GET', '{}', null, undefined)",
+        "__fetchStart('http://192.0.2.1/', 'GET', '{}', null, undefined)",
         "__wsConnect('ws://192.0.2.1/')",
         "__ftpConnect(__ftpCreate(), '192.0.2.1', 21, false)",
     ] {

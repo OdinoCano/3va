@@ -1,6 +1,6 @@
 [package]
 name = "vvva_js"
-version = "2.12.3"
+version = "2.12.4"
 rust-version.workspace = true
 edition = "2024"
 license = "MIT"
@@ -14,7 +14,7 @@ categories = ["api-bindings"]
 tempfile.workspace = true
 tungstenite = { workspace = true }
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
-vvva_firewall = { version = "2.12.3", path = "../firewall" }
+vvva_firewall = { version = "2.12.4", path = "../firewall" }
 rand10 = { package = "rand", version = "0.10" }
 
 [[test]]
@@ -162,6 +162,10 @@ name = "lat_fetch"
 path = "tests/lat_fetch.rs"
 
 [[test]]
+name = "fetch_extra_ca"
+path = "tests/fetch_extra_ca.rs"
+
+[[test]]
 name = "lat_http"
 path = "tests/lat_http.rs"
 
@@ -207,9 +211,9 @@ hmac = { workspace = true }
 rand = { workspace = true }
 pbkdf2 = { workspace = true }
 scrypt = { workspace = true }
-vvva_core = { version = "2.12.3", path = "../core" }
-vvva_firewall = { version = "2.12.3", path = "../firewall" }
-vvva_permissions = { version = "2.12.3", path = "../permissions" }
+vvva_core = { version = "2.12.4", path = "../core" }
+vvva_firewall = { version = "2.12.4", path = "../firewall" }
+vvva_permissions = { version = "2.12.4", path = "../permissions" }
 hex = "0.4"
 base64.workspace = true
 serde.workspace = true
@@ -227,6 +231,9 @@ ctr = { workspace = true }
 native-tls = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
+# Bundled Mozilla roots (already in the tree via ureq): HTTPS keeps working where the OS has
+# no CA store, as Node does with its own bundle.
+webpki-roots = "1"
 aws-lc-rs = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true }
 rustls-pemfile = { workspace = true }

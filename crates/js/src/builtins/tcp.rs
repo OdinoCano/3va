@@ -107,9 +107,45 @@ pub(crate) fn pq_tls_client_config_native() -> std::result::Result<Arc<rustls::C
                     .add(cert)
                     .map_err(|e| format!("PQ TLS: bad root cert: {e}"))?;
             }
+            // Node's own bundle, so HTTPS still works in images without ca-certificates.
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            add_extra_ca_certs(&mut roots);
             pq_tls_client_config_from_roots(roots)
         })
         .clone()
+}
+
+/// Append the trust anchors named by `NODE_EXTRA_CA_CERTS`, mirroring Node's
+/// behavior for the same variable. The file is a PEM bundle (one or more
+/// certificates); a missing or malformed entry is reported and skipped rather
+/// than failing the whole TLS setup, since the remaining roots are still
+/// usable. Without this, a 3va client cannot verify a private CA that Node
+/// trusts, and `fetch()` fails with `UnknownIssuer`.
+fn add_extra_ca_certs(roots: &mut rustls::RootCertStore) {
+    let Ok(path) = std::env::var("NODE_EXTRA_CA_CERTS") else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    let pem = match std::fs::read(&path) {
+        Ok(pem) => pem,
+        Err(e) => {
+            eprintln!("[3va-tls] NODE_EXTRA_CA_CERTS: cannot read {path}: {e}");
+            return;
+        }
+    };
+    let mut reader = std::io::BufReader::new(pem.as_slice());
+    for cert in rustls_pemfile::certs(&mut reader) {
+        match cert {
+            Ok(cert) => {
+                if let Err(e) = roots.add(cert) {
+                    eprintln!("[3va-tls] NODE_EXTRA_CA_CERTS: bad certificate in {path}: {e}");
+                }
+            }
+            Err(e) => eprintln!("[3va-tls] NODE_EXTRA_CA_CERTS: bad PEM in {path}: {e}"),
+        }
+    }
 }
 
 /// Builds a fresh (uncached) config trusting only the given CA PEM — the

@@ -2574,7 +2574,7 @@ criteria = "safe-to-deploy"
 notes = "cargo update wasmparser 0.258.0 -> 0.261.0 (minor); diff 28 files, +2776/-648 lines; build.rs changed: False; unsafe lines added: 0."
 
 [[exemptions.wasmtime-internal-asm-macros]]
-version = "36.0.17"
+version = "36.0.18"
 criteria = "safe-to-deploy"
 
 [[exemptions.wast]]

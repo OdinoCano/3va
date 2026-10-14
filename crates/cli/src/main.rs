@@ -2648,12 +2648,23 @@ fn collect_paths(
         .collect()
 }
 
-fn collect_strings(scope: &serde_json::Value, key: &str) -> Vec<String> {
+/// Net/env entries (`allow-net`, `allow-env`, `deny-net`, `deny-env`) may also
+/// contain `${VAR}` references. They are expanded the same way as path fields
+/// and any variable that is not set is recorded in `missing` so the caller can
+/// warn: an unexpanded `${VAR}` in `allow-net` never matches a real host, and
+/// the eventual failure ("Network access denied") gives no hint that the real
+/// cause is a missing environment variable.
+fn collect_strings_tracked(
+    scope: &serde_json::Value,
+    key: &str,
+    missing: &mut Vec<String>,
+) -> Vec<String> {
     scope[key]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|v| v.as_str().map(String::from))
+        .filter_map(|v| v.as_str())
+        .map(|s| expand_env_vars_tracked(s, missing))
         .collect()
 }
 
@@ -2798,8 +2809,8 @@ fn read_package_json_permissions(start_dir: &std::path::Path) -> ThreeVaPermissi
         let grants = ScopeGrants {
             allow_read: collect_paths(scope, "allow-read", start_dir, &mut missing_vars),
             allow_write: collect_paths(scope, "allow-write", start_dir, &mut missing_vars),
-            allow_net: collect_strings(scope, "allow-net"),
-            allow_env: collect_strings(scope, "allow-env"),
+            allow_net: collect_strings_tracked(scope, "allow-net", &mut missing_vars),
+            allow_env: collect_strings_tracked(scope, "allow-env", &mut missing_vars),
             allow_child_process: scope["allow-child-process"].as_bool() == Some(true),
             allow_ffi: collect_paths(scope, "allow-ffi", start_dir, &mut missing_vars),
             // deny-* gana sobre cualquier allow-* más amplio (p.ej. permitir todo un
@@ -2808,8 +2819,8 @@ fn read_package_json_permissions(start_dir: &std::path::Path) -> ThreeVaPermissi
             // granted, sin importar el orden de inserción.
             deny_read: collect_paths(scope, "deny-read", start_dir, &mut missing_vars),
             deny_write: collect_paths(scope, "deny-write", start_dir, &mut missing_vars),
-            deny_net: collect_strings(scope, "deny-net"),
-            deny_env: collect_strings(scope, "deny-env"),
+            deny_net: collect_strings_tracked(scope, "deny-net", &mut missing_vars),
+            deny_env: collect_strings_tracked(scope, "deny-env", &mut missing_vars),
             deny_ffi: collect_paths(scope, "deny-ffi", start_dir, &mut missing_vars),
             deny_child_process: scope["deny-child-process"].as_bool() == Some(true),
         };
@@ -2847,9 +2858,9 @@ fn read_package_json_permissions(start_dir: &std::path::Path) -> ThreeVaPermissi
     if !missing_vars.is_empty() {
         eprintln!(
             "3va: warning: package.json permissions reference undefined env var(s) {} \
-             — those allow-*/deny-* paths were left as literal \"${{VAR}}\" placeholders \
-             and will not match any real path (denied by default). Set the variable(s) \
-             or run `3va permissions learn` again to regenerate absolute paths.",
+             — those allow-*/deny-* entries were left as literal \"${{VAR}}\" placeholders \
+             and will not match any real host or path (denied by default). Set the \
+             variable(s), or run `3va permissions learn` again to regenerate concrete values.",
             missing_vars.join(", ")
         );
     }
@@ -7976,6 +7987,49 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert_eq!(pkg_permissions.allow_read, vec![expected]);
+    }
+
+    #[test]
+    fn package_json_env_var_expands_in_allow_net() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"3va": {"permissions": {".": {"allow-net": ["${TEST_3VA_API_HOST}"]}}}}"#,
+        )
+        .unwrap();
+
+        // SAFETY: single-threaded w.r.t. this variable name — no other test touches it.
+        unsafe {
+            std::env::set_var("TEST_3VA_API_HOST", "api.example.com");
+        }
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        unsafe {
+            std::env::remove_var("TEST_3VA_API_HOST");
+        }
+
+        assert_eq!(
+            pkg_permissions.allow_net,
+            vec!["api.example.com".to_string()],
+            "a ${{VAR}} in allow-net must expand like a path field"
+        );
+    }
+
+    #[test]
+    fn package_json_undefined_env_var_in_allow_net_stays_literal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"3va": {"permissions": {".": {"allow-net": ["${TEST_3VA_UNSET_API_HOST}"]}}}}"#,
+        )
+        .unwrap();
+
+        let pkg_permissions = read_package_json_permissions(dir.path());
+        // Left literal so it fails closed (never matches a real host) and the
+        // caller emits the "undefined env var" warning naming the variable.
+        assert_eq!(
+            pkg_permissions.allow_net,
+            vec!["${TEST_3VA_UNSET_API_HOST}".to_string()]
+        );
     }
 
     #[test]
