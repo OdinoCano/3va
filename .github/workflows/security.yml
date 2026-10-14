@@ -39,7 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Semgrep
-        run: pip install semgrep
+        # 1.181.0 shipped only an sdist: built from source it lacks semgrep-core ("Failed to find
+        # semgrep-core"). Bump once a release has manylinux wheels again.
+        run: pip install semgrep==1.180.0
       - name: Run Semgrep
         run: |
           if [ -d .semgrep/rules ]; then
