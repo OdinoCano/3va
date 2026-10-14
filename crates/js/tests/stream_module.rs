@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use vvva_js::JsEngine;
-use vvva_permissions::PermissionState;
+use vvva_permissions::{Capability, PermissionState};
 
 async fn engine() -> JsEngine {
     JsEngine::new(Arc::new(PermissionState::new()))
@@ -442,4 +442,175 @@ async fn writable_drain_emitted_after_backpressure() {
         .await
         .unwrap();
     assert_eq!(r, "true");
+}
+
+// ── Readable.from / fromWeb / toWeb and pipeline with async generators ────────
+
+/// Drive the engine (timers + microtasks) until a global expression turns
+/// truthy, or the deadline lapses.
+async fn pump_until(
+    e: &mut JsEngine,
+    done_js: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        let v = e.eval_to_string(done_js).await.unwrap_or_default();
+        if v != "false" && !v.is_empty() {
+            return Some(v);
+        }
+        let _ = e.run_event_loop().await;
+        tokio::task::yield_now().await;
+    }
+    None
+}
+
+#[tokio::test]
+async fn readable_from_sync_iterable() {
+    let mut e = engine().await;
+    let r = eval_async_result(
+        &mut e,
+        r#"
+        var Readable = require('stream').Readable;
+        globalThis.__rfrom = null;
+        Readable.from(['a', 'b', 'c']).on('data', function(c) {
+            globalThis.__rfrom = (globalThis.__rfrom === null ? '' : globalThis.__rfrom) + c;
+        });
+        "#,
+        "globalThis.__rfrom",
+    )
+    .await;
+    assert_eq!(r, "abc");
+}
+
+#[tokio::test]
+async fn readable_from_async_generator() {
+    let mut e = engine().await;
+    let r = eval_async_result(
+        &mut e,
+        r#"
+        var Readable = require('stream').Readable;
+        globalThis.__rfrom = null;
+        async function* gen() { yield 'x'; yield 'y'; }
+        Readable.from(gen()).on('data', function(c) {
+            globalThis.__rfrom = (globalThis.__rfrom === null ? '' : globalThis.__rfrom) + c;
+        });
+        "#,
+        "globalThis.__rfrom",
+    )
+    .await;
+    assert_eq!(r, "xy");
+}
+
+#[tokio::test]
+async fn readable_from_web_and_to_web_roundtrip() {
+    let mut e = engine().await;
+    let r = eval_async_result(
+        &mut e,
+        r#"
+        var Readable = require('stream').Readable;
+        globalThis.__rweb = null;
+        var web = new ReadableStream({
+            start: function(c) { c.enqueue('p'); c.enqueue('q'); c.close(); }
+        });
+        var node = Readable.fromWeb(web);
+        // And the inverse: a Node readable exposed as a web stream.
+        var back = Readable.toWeb(Readable.from(['z']));
+        var first = '';
+        node.on('data', function(c) {
+            globalThis.__rweb = (globalThis.__rweb === null ? '' : globalThis.__rweb) + c;
+        });
+        node.on('end', function() {
+            back.getReader().read().then(function(res) {
+                globalThis.__rweb = globalThis.__rweb + '/' + String(res.value);
+            });
+        });
+        "#,
+        "globalThis.__rweb",
+    )
+    .await;
+    assert_eq!(r, "pq/z");
+}
+
+#[tokio::test]
+async fn readable_from_and_to_web_are_functions() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var R = require('stream').Readable;
+            [typeof R.from, typeof R.fromWeb, typeof R.toWeb].join(',')
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "function,function,function");
+}
+
+#[tokio::test]
+async fn pipeline_with_async_generator_transform() {
+    let mut e = engine().await;
+    let r = eval_async_result(
+        &mut e,
+        r#"
+        var stream = require('stream');
+        var pipeline = require('stream/promises').pipeline;
+        globalThis.__pipe = null;
+        var out = [];
+        var dst = new stream.Writable({ write: function(c, enc, cb) { out.push(String(c)); cb(); } });
+        pipeline(
+            stream.Readable.from(['a', 'b', 'c']),
+            async function*(s) { for await (var c of s) yield String(c).toUpperCase(); },
+            dst
+        ).then(function() { globalThis.__pipe = out.join(''); },
+                function(err) { globalThis.__pipe = 'ERR:' + err.message; });
+        "#,
+        "globalThis.__pipe",
+    )
+    .await;
+    assert_eq!(r, "ABC");
+}
+
+/// The exact shape from the bug report: a file piped through an async
+/// generator transform into another file.
+#[tokio::test]
+async fn pipeline_file_through_async_generator() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("in.txt");
+    let out_path = dir.path().join("out.txt");
+    std::fs::write(&in_path, "hello world\n").unwrap();
+
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(dir.path().to_path_buf()));
+    state.grant(Capability::FileWrite(dir.path().to_path_buf()));
+    let mut e = JsEngine::new(Arc::new(state)).await.unwrap();
+
+    e.eval(&format!(
+        r#"
+        var fs = require('fs');
+        var pipeline = require('stream/promises').pipeline;
+        globalThis.__pfile = null;
+        pipeline(
+            fs.createReadStream({inp:?}),
+            async function*(s) {{ for await (var c of s) yield c; }},
+            fs.createWriteStream({outp:?})
+        ).then(function() {{ globalThis.__pfile = 'ok'; }},
+                function(err) {{ globalThis.__pfile = 'ERR:' + err.message; }});
+        "#,
+        inp = in_path.to_string_lossy(),
+        outp = out_path.to_string_lossy(),
+    ))
+    .await
+    .unwrap();
+
+    let done = pump_until(
+        &mut e,
+        "globalThis.__pfile !== null ? globalThis.__pfile : 'false'",
+        std::time::Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(done.as_deref(), Some("ok"), "pipeline failed");
+
+    let written = std::fs::read_to_string(&out_path).unwrap();
+    assert_eq!(written, "hello world\n");
 }

@@ -162,6 +162,10 @@ name = "lat_fetch"
 path = "tests/lat_fetch.rs"
 
 [[test]]
+name = "fetch_extra_ca"
+path = "tests/fetch_extra_ca.rs"
+
+[[test]]
 name = "lat_http"
 path = "tests/lat_http.rs"
 

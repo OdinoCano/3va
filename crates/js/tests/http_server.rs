@@ -114,6 +114,24 @@ async fn raw_http(port: u16, method: &str, path: &str, body: &str) -> String {
     }
 }
 
+/// Send a `Connection: close` GET with an `X-Forwarded-For` header and return
+/// the response status (0 on transport error/timeout).
+async fn raw_http_xff(port: u16, xff: &str) -> u16 {
+    let mut stream = match TcpStream::connect(format!("127.0.0.1:{port}")).await {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let req = format!(
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Forwarded-For: {xff}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(req.as_bytes()).await.is_err() {
+        return 0;
+    }
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buf)).await;
+    response_status(&String::from_utf8_lossy(&buf))
+}
+
 fn response_status(resp: &str) -> u16 {
     resp.split_whitespace()
         .nth(1)
@@ -1022,6 +1040,169 @@ async fn untrusted_xff_header_is_ignored() {
         addr, "127.0.0.1",
         "spoofed XFF from an untrusted peer must not change remoteAddress"
     );
+}
+
+/// Behind a trusted reverse proxy, the per-IP *connection* cap must count the
+/// real client resolved from `X-Forwarded-For`, not the proxy. Four clients
+/// each opening one connection with a cap of two must all be served; counting
+/// the proxy would reject the third and fourth with 503.
+#[tokio::test]
+async fn trusted_proxy_connection_limit_is_per_client() {
+    let port = free_port();
+    let mut e = engine_with_firewall(FirewallConfig {
+        max_connections_per_ip: 2,
+        max_connections_total: 100,
+        trusted_proxies: vec!["127.0.0.1".to_string()],
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{
+            // Hold each connection open so all four overlap at accept time.
+            setTimeout(function() {{ res.end('ok'); }}, 150);
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    wait_for_port(port).await;
+
+    let (a, b, c, d) = drive_until(&mut e, async move {
+        tokio::join!(
+            raw_http_xff(port, "10.0.0.1"),
+            raw_http_xff(port, "10.0.0.2"),
+            raw_http_xff(port, "10.0.0.3"),
+            raw_http_xff(port, "10.0.0.4"),
+        )
+    })
+    .await;
+
+    assert_eq!(
+        (a, b, c, d),
+        (200, 200, 200, 200),
+        "each forwarded client is under its own per-IP connection cap"
+    );
+}
+
+/// Behind a trusted proxy, rate limiting is accounted against the forwarded
+/// client: the same `X-Forwarded-For` exhausts its own bucket and is then
+/// limited, while a different client keeps its own independent bucket.
+#[tokio::test]
+async fn trusted_proxy_rate_limit_is_per_client() {
+    let port = free_port();
+    let mut e = engine_with_firewall(FirewallConfig {
+        rate_limit_rps: 1,
+        rate_limit_burst: 1,
+        auto_block_threshold: 10_000, // don't auto-block during this test
+        trusted_proxies: vec!["127.0.0.1".to_string()],
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    wait_for_port(port).await;
+
+    let first = drive_until(&mut e, raw_http_xff(port, "10.0.0.1")).await;
+    assert_eq!(first, 200, "first request from client A is allowed");
+
+    let second = drive_until(&mut e, raw_http_xff(port, "10.0.0.1")).await;
+    assert_eq!(
+        second, 429,
+        "client A's burst is exhausted, so its next request is rate limited"
+    );
+
+    let other = drive_until(&mut e, raw_http_xff(port, "10.0.0.2")).await;
+    assert_eq!(
+        other, 200,
+        "client B has its own bucket and must not inherit client A's limit"
+    );
+}
+
+/// `firewall.enabled: false` disables the firewall's protections, including
+/// the body deadline: a body that arrives after `bodyTimeoutMs` must still be
+/// accepted. (With the firewall on, the same request is dropped.)
+#[tokio::test]
+async fn disabled_firewall_lifts_body_timeout() {
+    async fn delayed_post(port: u16) -> u16 {
+        let mut s = match TcpStream::connect(format!("127.0.0.1:{port}")).await {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        let head =
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\nConnection: close\r\n\r\n";
+        if s.write_all(head.as_bytes()).await.is_err() {
+            return 0;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _ = s.write_all(b"hello").await;
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut buf)).await;
+        response_status(&String::from_utf8_lossy(&buf))
+    }
+
+    // Firewall off, with a body timeout far shorter than the client's delay.
+    let port = free_port();
+    let mut e = engine_with_firewall(FirewallConfig {
+        enabled: false,
+        body_timeout_ms: 50,
+        ..FirewallConfig::default()
+    })
+    .await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+    let off = drive_until(&mut e, delayed_post(port)).await;
+    assert_eq!(off, 200, "firewall off must not enforce bodyTimeoutMs");
+
+    // Same request with the firewall on: the stall drops the connection.
+    let port2 = free_port();
+    let mut e2 = engine_with_firewall(FirewallConfig {
+        enabled: true,
+        body_timeout_ms: 50,
+        ..FirewallConfig::default()
+    })
+    .await;
+    e2.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port2,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port2).await;
+    let on = drive_until(&mut e2, delayed_post(port2)).await;
+    assert_ne!(on, 200, "firewall on must enforce bodyTimeoutMs");
 }
 
 /// Verify that once a client exhausts its token-bucket burst, subsequent requests

@@ -484,8 +484,17 @@ impl Firewall {
         let Some(xff) = xff else {
             return peer;
         };
-        let rules: Vec<ProxyRule> = self
-            .config
+        let rules = self.trusted_rules();
+        if rules.is_empty() {
+            return peer;
+        }
+        resolve_forwarded_for(peer, xff, &rules).unwrap_or(peer)
+    }
+
+    /// Parsed `trusted_proxies` entries, skipping (and warning about) invalid
+    /// ones. Used for both connection accounting and `remoteAddress`.
+    fn trusted_rules(&self) -> Vec<ProxyRule> {
+        self.config
             .trusted_proxies
             .iter()
             .filter_map(|s| match ProxyRule::parse(s) {
@@ -495,11 +504,36 @@ impl Firewall {
                     None
                 }
             })
-            .collect();
-        if rules.is_empty() {
-            return peer;
+            .collect()
+    }
+
+    /// True when `ip` is one of the configured reverse proxies. Connection
+    /// accounting for connections accepted from such a peer is deferred until
+    /// the first request's `X-Forwarded-For` reveals the real client, so a
+    /// single proxy fronting many clients isn't mistaken for one abusive IP.
+    pub fn is_trusted_proxy(&self, ip: IpAddr) -> bool {
+        self.trusted_rules().iter().any(|r| r.matches(ip))
+    }
+
+    /// Connection check for a peer that is a trusted reverse proxy. The peer's
+    /// own per-IP count is meaningless here (it fronts many clients), so only
+    /// the blocklist and the global total cap are enforced; the per-client
+    /// limit is applied later via [`Firewall::check_connection`] once the
+    /// first request has been parsed and the real client IP resolved.
+    pub fn check_connection_behind_proxy(&self, peer: IpAddr) -> FirewallDecision {
+        if !self.config.enabled {
+            return FirewallDecision::Allow;
         }
-        resolve_forwarded_for(peer, xff, &rules).unwrap_or(peer)
+        if let Some(decision) = self.check_blocklist(peer) {
+            warn!(ip = %peer, "Firewall: blocked proxy attempted connection");
+            return decision;
+        }
+        let total = *self.conn_total.lock().unwrap();
+        if total >= self.config.max_connections_total {
+            warn!(ip = %peer, total, "Firewall: total connection limit reached");
+            return FirewallDecision::ConnectionLimitReached;
+        }
+        FirewallDecision::Allow
     }
 
     /// Main entry point: call when a new TCP connection is accepted.
@@ -1310,5 +1344,29 @@ mod tests {
             outsider,
             "spoofed XFF from an untrusted client must be ignored"
         );
+    }
+
+    #[test]
+    fn trusted_proxy_is_detected_and_connections_are_not_capped_by_peer() {
+        let fw = Firewall::new(FirewallConfig {
+            max_connections_per_ip: 1,
+            trusted_proxies: vec!["10.0.0.1".to_string(), "10.0.0.0/8".to_string()],
+            ..Default::default()
+        });
+        let proxy: IpAddr = "10.0.0.1".parse().unwrap();
+        let other: IpAddr = "10.1.2.3".parse().unwrap();
+        assert!(fw.is_trusted_proxy(proxy));
+        assert!(fw.is_trusted_proxy(other), "must match the 10/8 CIDR");
+        assert!(!fw.is_trusted_proxy("192.0.2.1".parse().unwrap()));
+
+        // The proxy's own per-IP counter is exhausted…
+        fw.on_connect(proxy);
+        assert!(matches!(
+            fw.check_connection(proxy),
+            FirewallDecision::ConnectionLimitReached
+        ));
+        // …yet a connection from the same proxy still passes the behind-proxy
+        // check, because its per-IP count is deferred to real clients.
+        assert!(fw.check_connection_behind_proxy(proxy).is_allowed());
     }
 }

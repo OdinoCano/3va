@@ -1900,6 +1900,10 @@ pub fn inject_require(
                     totalmem: function() { return __osTotalMem(); },
                     freemem: function() { return __osFreeMem(); },
                     uptime: function() { return __osUptime(); },
+                    // 1/5/15-minute load averages, as in Node. Backed by
+                    // /proc/loadavg on Linux (see process.rs); other platforms
+                    // return [0, 0, 0] rather than throwing.
+                    loadavg: function() { return __osLoadAvg(); },
                     cpus: function() { return JSON.parse(__osCpus()); },
                     availableParallelism: function() {
                         var list = JSON.parse(__osCpus());
@@ -2286,16 +2290,27 @@ pub fn inject_require(
             };
             Readable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
             Readable.prototype[Symbol.asyncIterator] = function() {
-                var self = this, done = false;
+                var self = this;
                 return {
                     next: function() {
+                        // Re-check live state on every call instead of caching a
+                        // `done` flag: a stale 'end' listener left over from an
+                        // earlier pending next() used to flip a shared flag and
+                        // make a buffered final chunk invisible (the async
+                        // generator dropped the last element).
+                        if (self._readableState.buffer.length)
+                            return Promise.resolve({ value: self._readableState.buffer.shift(), done: false });
+                        if (self._readableState.ended)
+                            return Promise.resolve({ done: true });
                         return new Promise(function(resolve) {
-                            if (done) return resolve({ done: true });
-                            if (self._readableState.buffer.length)
-                                return resolve({ value: self._readableState.buffer.shift(), done: false });
-                            if (self._readableState.ended) { done = true; return resolve({ done: true }); }
-                            self.once('data', function(chunk) { resolve({ value: chunk, done: false }); });
-                            self.once('end', function() { done = true; resolve({ done: true }); });
+                            function cleanup() {
+                                self.removeListener('data', onData);
+                                self.removeListener('end', onEnd);
+                            }
+                            function onData(chunk) { cleanup(); resolve({ value: chunk, done: false }); }
+                            function onEnd() { cleanup(); resolve({ done: true }); }
+                            self.once('data', onData);
+                            self.once('end', onEnd);
                         });
                     },
                     return: function() { return Promise.resolve({ done: true }); }
@@ -2543,26 +2558,203 @@ pub fn inject_require(
             Stream.isReadable = function(s) {
                 return !!(s && typeof s.read === 'function' && s._readableState && !s._readableState.ended && !s._readableState.errored);
             };
+
+            // ── Readable.from / fromWeb / toWeb ──────────────────────────────
+            // Standard bridges between Node streams and the Web Streams API
+            // (Readable.from since Node 12.3; fromWeb/toWeb since Node 17).
+            // Without them a `fetch()` response body or any async iterable is
+            // unusable with the rest of the stream module.
+            Readable.from = function(iterable, opts) {
+                if (iterable == null) throw new TypeError('Readable.from: iterable is required');
+                var r = new Readable(opts || {});
+                var objectMode = !!(opts && opts.objectMode);
+                var it;
+                if (typeof iterable[Symbol.asyncIterator] === 'function') {
+                    it = iterable[Symbol.asyncIterator]();
+                } else if (typeof iterable[Symbol.iterator] === 'function') {
+                    it = iterable[Symbol.iterator]();
+                } else {
+                    throw new TypeError('Readable.from: iterable must implement Symbol.iterator or Symbol.asyncIterator');
+                }
+                (async function() {
+                    try {
+                        while (true) {
+                            var res = await it.next();
+                            if (!res || res.done) break;
+                            var chunk = res.value;
+                            if (!objectMode && typeof chunk !== 'string' && !Buffer.isBuffer(chunk)) {
+                                chunk = chunk instanceof Uint8Array ? Buffer.from(chunk) : Buffer.from(String(chunk));
+                            }
+                            r.push(chunk);
+                        }
+                        r.push(null);
+                    } catch (e) {
+                        r.destroy(e);
+                    }
+                })();
+                return r;
+            };
+
+            Readable.fromWeb = function(webStream, opts) {
+                if (webStream == null || typeof webStream.getReader !== 'function') {
+                    throw new TypeError('Readable.fromWeb: expected a web ReadableStream');
+                }
+                var r = new Readable(opts || {});
+                var objectMode = !!(opts && opts.objectMode);
+                var reader = webStream.getReader();
+                (async function() {
+                    try {
+                        while (true) {
+                            var res = await reader.read();
+                            if (!res || res.done) break;
+                            var chunk = res.value;
+                            if (!objectMode && chunk != null && typeof chunk !== 'string' && !Buffer.isBuffer(chunk)) {
+                                chunk = Buffer.from(chunk);
+                            }
+                            r.push(chunk);
+                        }
+                        r.push(null);
+                    } catch (e) {
+                        r.destroy(e);
+                    }
+                })();
+                return r;
+            };
+
+            Readable.toWeb = function(nodeStream) {
+                if (nodeStream == null || typeof nodeStream[Symbol.asyncIterator] !== 'function') {
+                    throw new TypeError('Readable.toWeb: expected a Node readable stream');
+                }
+                var it = nodeStream[Symbol.asyncIterator]();
+                return new ReadableStream({
+                    pull: async function(controller) {
+                        try {
+                            var res = await it.next();
+                            if (res.done) controller.close();
+                            else controller.enqueue(res.value);
+                        } catch (e) {
+                            controller.error(e);
+                        }
+                    },
+                    cancel: function(reason) {
+                        if (typeof nodeStream.destroy === 'function') nodeStream.destroy(reason);
+                    },
+                });
+            };
+
+            // ── pipeline() ───────────────────────────────────────────────────
+            // Shared by stream.pipeline (callback) and stream/promises.pipeline.
+            // Accepts Node streams *and* AsyncIterables, plus async generator
+            // functions / async functions as transforms, exactly like Node ≥13:
+            // a function stage is called with the previous stage's async
+            // iterable and whatever it returns becomes the next stage.
+            function pipelineDrain(w) {
+                return new Promise(function(resolve) { w.once('drain', resolve); });
+            }
+            function pipelineEnd(w) {
+                return new Promise(function(resolve, reject) {
+                    var settled = false;
+                    function ok() { if (!settled) { settled = true; cleanup(); resolve(); } }
+                    function err(e) { if (!settled) { settled = true; cleanup(); reject(e); } }
+                    function cleanup() {
+                        w.removeListener('finish', ok);
+                        w.removeListener('close', ok);
+                        w.removeListener('error', err);
+                    }
+                    w.once('finish', ok);
+                    w.once('close', ok);
+                    w.once('error', err);
+                    w.end();
+                });
+            }
+            function pipelineToAsyncIterable(x) {
+                if (x == null) throw new TypeError('pipeline: stage is null or undefined');
+                if (typeof x[Symbol.asyncIterator] === 'function') return x;
+                if (typeof x[Symbol.iterator] === 'function') {
+                    var it = x[Symbol.iterator]();
+                    var o = {};
+                    o[Symbol.asyncIterator] = function() {
+                        return { next: function() { return Promise.resolve(it.next()); } };
+                    };
+                    return o;
+                }
+                throw new TypeError('pipeline: stage is not an async iterable');
+            }
+            // Feed `source` into a Duplex/Transform and expose its readable side
+            // as the next async iterable.
+            function pipelineThrough(source, transform) {
+                var o = {};
+                o[Symbol.asyncIterator] = function() {
+                    var wiring = (async function() {
+                        try {
+                            for await (var c of source) {
+                                if (transform.write(c) === false) await pipelineDrain(transform);
+                            }
+                            await pipelineEnd(transform);
+                        } catch (e) {
+                            if (typeof transform.destroy === 'function') transform.destroy(e);
+                            else throw e;
+                        }
+                    })();
+                    var it = transform[Symbol.asyncIterator]();
+                    return {
+                        next: function() { return it.next(); },
+                        return: async function() {
+                            if (typeof it.return === 'function') await it.return();
+                            await wiring.catch(function() {});
+                            return { done: true };
+                        },
+                    };
+                };
+                return o;
+            }
+            function pipelineImpl(streams) {
+                return new Promise(function(resolve, reject) {
+                    if (!streams || streams.length < 2) {
+                        reject(new Error('pipeline: need at least 2 streams'));
+                        return;
+                    }
+                    (async function() {
+                        var last = streams.length - 1;
+                        var current = typeof streams[0] === 'function'
+                            ? pipelineToAsyncIterable(streams[0]())
+                            : pipelineToAsyncIterable(streams[0]);
+                        for (var i = 1; i < last; i++) {
+                            var st = streams[i];
+                            if (typeof st === 'function') {
+                                current = pipelineToAsyncIterable(st(current));
+                            } else if (st && typeof st.write === 'function'
+                                       && typeof st[Symbol.asyncIterator] === 'function') {
+                                current = pipelineThrough(current, st);
+                            } else {
+                                current = pipelineToAsyncIterable(st);
+                            }
+                        }
+                        var dest = streams[last];
+                        if (typeof dest === 'function') {
+                            var out = dest(current);
+                            if (out && typeof out.then === 'function') await out;
+                            else if (out && typeof out[Symbol.asyncIterator] === 'function') {
+                                for await (var _d of pipelineToAsyncIterable(out)) { /* drain */ }
+                            }
+                        } else if (dest && typeof dest.write === 'function') {
+                            for await (var chunk of current) {
+                                if (dest.write(chunk) === false) await pipelineDrain(dest);
+                            }
+                            await pipelineEnd(dest);
+                        } else {
+                            for await (var _e of pipelineToAsyncIterable(dest)) { /* drain */ }
+                        }
+                    })().then(resolve, reject);
+                });
+            }
             // callback-based pipeline: pipeline(src, ...transforms, dst, cb) returns dst
             Stream.pipeline = function() {
                 var args = Array.prototype.slice.call(arguments);
                 var cb = typeof args[args.length - 1] === 'function' ? args.pop() : function(err) { if (err) console.error('[3va-pipeline] error:', err); };
-                if (args.length < 2) { cb(new Error('pipeline: need at least 2 streams')); return args[0] || new PassThrough(); }
-                var done = false;
-                function finish(err) { if (!done) { done = true; cb(err || null); } }
-                for (var i = 0; i < args.length - 1; i++) {
-                    (function(src, dst) {
-                        if (src && typeof src.pipe === 'function') {
-                            src.on('error', finish);
-                            if (dst && typeof dst.on === 'function') dst.on('error', finish);
-                            src.pipe(dst);
-                        }
-                    })(args[i], args[i + 1]);
-                }
-                var last = args[args.length - 1];
-                if (last && typeof last.on === 'function') last.on('finish', function() { finish(null); });
-                if (last && typeof last.on === 'function') last.on('end', function() { finish(null); });
-                return last;
+                var ret = args.length ? args[args.length - 1] : new PassThrough();
+                pipelineImpl(args).then(function() { cb(null); }, function(err) { cb(err); });
+                return ret;
             };
             Stream.finished = function(stream, options, cb) {
                 if (typeof options === 'function') { cb = options; options = {}; }
@@ -2598,25 +2790,7 @@ pub fn inject_require(
             (function() {
                 var streamPromises = {
                     pipeline: function() {
-                        var streams = Array.prototype.slice.call(arguments);
-                        return new Promise(function(resolve, reject) {
-                            if (streams.length < 2) { reject(new Error('pipeline: need at least 2 streams')); return; }
-                            var i = 0;
-                            function pump() {
-                                if (i >= streams.length - 1) { resolve(); return; }
-                                var src = streams[i], dst = streams[i + 1];
-                                i++;
-                                if (src && typeof src.pipe === 'function') {
-                                    src.on('error', reject);
-                                    dst.on('error', reject);
-                                    src.pipe(dst, { end: i === streams.length - 1 });
-                                    dst.on('finish', pump);
-                                } else {
-                                    pump();
-                                }
-                            }
-                            pump();
-                        });
+                        return pipelineImpl(Array.prototype.slice.call(arguments));
                     },
                     finished: function(stream, options) {
                         return new Promise(function(resolve, reject) {

@@ -58,20 +58,21 @@ pub fn init() -> anyhow::Result<()> {
 /// `true` when the binary was built with the AWS-LC FIPS module.
 pub const FIPS: bool = cfg!(feature = "fips");
 
-/// ureq agent for fetch/EventSource. ureq's own default is ring, which is not
-/// FIPS-validated, so the `fips` build hands it our rustls config.
+/// ureq agent for fetch/EventSource. ureq's own default trusts only its
+/// bundled webpki roots and ignores `NODE_EXTRA_CA_CERTS`; we install a rustls
+/// config whose roots are the OS trust store plus that variable's PEM bundle,
+/// so a private CA Node trusts is also trusted here. In a `fips` build the same
+/// config carries the FIPS provider (ureq's default ring is not validated).
 pub fn agent_builder() -> ureq::AgentBuilder {
     let builder = ureq::AgentBuilder::new();
-    #[cfg(feature = "fips")]
-    let builder = match super::tcp::pq_tls_client_config_native() {
+    match super::tcp::pq_tls_client_config_native() {
         Ok(cfg) => builder.tls_config(cfg),
         // No roots → every HTTPS request fails verification anyway; surface it there.
         Err(e) => {
             eprintln!("[3va-tls] {e}");
             builder
         }
-    };
-    builder
+    }
 }
 
 #[cfg(feature = "fips")]

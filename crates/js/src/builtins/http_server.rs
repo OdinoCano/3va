@@ -587,15 +587,28 @@ where
     R: AsyncBufRead + Unpin,
 {
     let mut body: Vec<u8> = Vec::new();
-    let deadline = Instant::now() + body_timeout;
+    // `Duration::ZERO` means the body deadline is disabled (firewall off).
+    let deadline = if body_timeout.is_zero() {
+        None
+    } else {
+        Some(Instant::now() + body_timeout)
+    };
     let body_start = Instant::now();
 
     loop {
         let mut size_line = String::new();
-        tokio::time::timeout(body_timeout, reader.read_line(&mut size_line))
-            .await
-            .map_err(|_| ParseError::Silent("timeout: chunk size line stalled".into()))?
-            .map_err(|e| ParseError::Silent(e.to_string()))?;
+        let read_size = if body_timeout.is_zero() {
+            reader
+                .read_line(&mut size_line)
+                .await
+                .map_err(|e| ParseError::Silent(e.to_string()))
+        } else {
+            tokio::time::timeout(body_timeout, reader.read_line(&mut size_line))
+                .await
+                .map_err(|_| ParseError::Silent("timeout: chunk size line stalled".into()))?
+                .map_err(|e| ParseError::Silent(e.to_string()))
+        };
+        read_size?;
         if size_line.is_empty() {
             return Err(ParseError::Silent(
                 "connection closed mid-chunked-body".into(),
@@ -615,10 +628,18 @@ where
             let mut trailer_bytes = 0usize;
             loop {
                 let mut trailer_line = String::new();
-                tokio::time::timeout(body_timeout, reader.read_line(&mut trailer_line))
-                    .await
-                    .map_err(|_| ParseError::Silent("timeout: trailers stalled".into()))?
-                    .map_err(|e| ParseError::Silent(e.to_string()))?;
+                let read_trailer = if body_timeout.is_zero() {
+                    reader
+                        .read_line(&mut trailer_line)
+                        .await
+                        .map_err(|e| ParseError::Silent(e.to_string()))
+                } else {
+                    tokio::time::timeout(body_timeout, reader.read_line(&mut trailer_line))
+                        .await
+                        .map_err(|_| ParseError::Silent("timeout: trailers stalled".into()))?
+                        .map_err(|e| ParseError::Silent(e.to_string()))
+                };
+                read_trailer?;
                 if trailer_line.is_empty() {
                     return Ok(body);
                 }
@@ -638,7 +659,9 @@ where
         let mut remaining = chunk_len;
         let mut buf = vec![0u8; chunk_len.min(16 * 1024)];
         while remaining > 0 {
-            if Instant::now() >= deadline {
+            if let Some(d) = deadline
+                && Instant::now() >= d
+            {
                 return Err(ParseError::Silent(
                     "timeout: body deadline exceeded (RUDY?)".into(),
                 ));
@@ -675,10 +698,18 @@ where
         // Chunk data must be followed by CRLF; consume it via one line read so
         // buffering stays consistent with the next size line.
         let mut crlf = String::new();
-        tokio::time::timeout(body_timeout, reader.read_line(&mut crlf))
-            .await
-            .map_err(|_| ParseError::Silent("timeout: chunk terminator stalled".into()))?
-            .map_err(|e| ParseError::Silent(e.to_string()))?;
+        let read_crlf = if body_timeout.is_zero() {
+            reader
+                .read_line(&mut crlf)
+                .await
+                .map_err(|e| ParseError::Silent(e.to_string()))
+        } else {
+            tokio::time::timeout(body_timeout, reader.read_line(&mut crlf))
+                .await
+                .map_err(|_| ParseError::Silent("timeout: chunk terminator stalled".into()))?
+                .map_err(|e| ParseError::Silent(e.to_string()))
+        };
+        read_crlf?;
         if !crlf.trim_end_matches(['\r', '\n']).is_empty() {
             return Err(ParseError::Respond(400, "Bad Request"));
         }
@@ -829,18 +860,31 @@ where
         .await?
     } else if has_content_length && content_length > 0 {
         let mut body = vec![0u8; content_length];
-        let deadline = Instant::now() + body_timeout;
+        // `Duration::ZERO` means the body deadline is disabled (firewall off).
+        let deadline = if body_timeout.is_zero() {
+            None
+        } else {
+            Some(Instant::now() + body_timeout)
+        };
         let mut received: usize = 0;
         let body_start = Instant::now();
 
         while received < content_length {
-            if Instant::now() >= deadline {
+            if let Some(d) = deadline
+                && Instant::now() >= d
+            {
                 return Err(ParseError::Silent(
                     "timeout: body deadline exceeded (RUDY?)".into(),
                 ));
             }
-            let remaining_deadline = deadline.saturating_duration_since(Instant::now());
-            let chunk_timeout = remaining_deadline.min(std::time::Duration::from_secs(1));
+            // Bound each individual read so a stalled socket doesn't hang the
+            // connection; the overall deadline (when set) is the real cap.
+            let chunk_timeout = match deadline {
+                None => std::time::Duration::from_secs(1),
+                Some(d) => d
+                    .saturating_duration_since(Instant::now())
+                    .min(std::time::Duration::from_secs(1)),
+            };
             let n = tokio::time::timeout(chunk_timeout, reader.read(&mut body[received..]))
                 .await
                 .map_err(|_| ParseError::Silent("timeout: body stalled (RUDY?)".into()))?
@@ -979,6 +1023,19 @@ async fn handle_connection<S>(
     let (resp_tx, mut resp_rx) = mpsc::channel::<PendingResponse>(16);
     conns.lock().unwrap().insert(conn_id, ConnEntry { resp_tx });
 
+    // Connection accounting IP. Normally the peer itself, registered by the
+    // accept loop before this task started. When the peer is a trusted reverse
+    // proxy, the accept loop deliberately does not count the connection against
+    // the proxy's per-IP limit (it fronts every client); instead we defer that
+    // accounting until the first request's `X-Forwarded-For` reveals the real
+    // client, then register the connection against *that* IP.
+    let peer_is_trusted_proxy = fw.as_ref().as_ref().is_some_and(|f| f.is_trusted_proxy(ip));
+    let mut account_ip: Option<IpAddr> = if peer_is_trusted_proxy {
+        None
+    } else {
+        Some(ip)
+    };
+
     // Requests already served on this TCP connection. The first request gets
     // the full `hdr_timeout`; every reused-connection request afterwards is
     // bounded by the shorter `keepalive_timeout` so an idle keep-alive socket
@@ -1033,6 +1090,32 @@ async fn handle_connection<S>(
             })
             .unwrap_or(ip);
 
+        // Trusted-proxy connections were not counted against the peer at
+        // accept time; now that the client IP is known, enforce the per-client
+        // connection cap and register the connection against it.
+        if account_ip.is_none() {
+            if let Some(firewall) = fw.as_ref().as_ref() {
+                match firewall.check_connection(req_ip) {
+                    FirewallDecision::Allow => {
+                        firewall.on_connect(req_ip);
+                        account_ip = Some(req_ip);
+                    }
+                    decision => {
+                        let resp = format!(
+                            "HTTP/1.1 {s} {m}\r\nContent-Length: {l}\r\nConnection: close\r\n\r\n{m}",
+                            s = decision.http_status(),
+                            m = decision.message(),
+                            l = decision.message().len(),
+                        );
+                        let _ = writer.write_all(resp.as_bytes()).await;
+                        break;
+                    }
+                }
+            } else {
+                account_ip = Some(req_ip);
+            }
+        }
+
         if let Some(firewall) = fw.as_ref().as_ref() {
             match firewall.check_request(req_ip) {
                 FirewallDecision::Allow => {}
@@ -1060,7 +1143,7 @@ async fn handle_connection<S>(
             upgrades.lock().unwrap().insert(conn_id, conn.clone());
             spawn_upgrade_driver(
                 read_half.unsplit(writer),
-                ip,
+                account_ip.unwrap_or(ip),
                 conn_id,
                 conn,
                 upgrades,
@@ -1129,8 +1212,12 @@ async fn handle_connection<S>(
     }
 
     conns.lock().unwrap().remove(&conn_id);
-    if let Some(firewall) = fw.as_ref().as_ref() {
-        firewall.on_disconnect(ip);
+    // Only release a slot that was actually counted: a trusted-proxy
+    // connection that dropped before its first request never registered.
+    if let Some(account_ip) = account_ip
+        && let Some(firewall) = fw.as_ref().as_ref()
+    {
+        firewall.on_disconnect(account_ip);
     }
 }
 
@@ -1267,9 +1354,21 @@ pub fn inject_http_server(
                                         };
 
                                         if let Some(firewall) = fw.as_ref().as_ref() {
-                                            match firewall.check_connection(ip) {
+                                            // A trusted reverse proxy fronts many
+                                            // clients: don't count its connections
+                                            // against a single per-IP cap. Defer to
+                                            // the real client IP once parsed.
+                                            let trusted_proxy = firewall.is_trusted_proxy(ip);
+                                            let decision = if trusted_proxy {
+                                                firewall.check_connection_behind_proxy(ip)
+                                            } else {
+                                                firewall.check_connection(ip)
+                                            };
+                                            match decision {
                                                 FirewallDecision::Allow => {
-                                                    firewall.on_connect(ip);
+                                                    if !trusted_proxy {
+                                                        firewall.on_connect(ip);
+                                                    }
                                                 }
                                                 decision => {
                                                     reject_stream(
@@ -1293,20 +1392,44 @@ pub fn inject_http_server(
                                             max_requests_per_conn,
                                         ) = if let Some(firewall) = fw.as_ref().as_ref() {
                                             let c = &firewall.config;
-                                            (
-                                                std::time::Duration::from_millis(
-                                                    c.header_timeout_ms,
-                                                ),
-                                                std::time::Duration::from_millis(c.body_timeout_ms),
-                                                std::time::Duration::from_millis(
-                                                    c.keepalive_timeout_ms,
-                                                ),
-                                                c.max_header_count as usize,
-                                                c.max_header_bytes as usize,
-                                                c.max_body_bytes as usize,
-                                                c.min_body_rate_bps,
-                                                c.max_requests_per_conn,
-                                            )
+                                            if c.enabled {
+                                                (
+                                                    std::time::Duration::from_millis(
+                                                        c.header_timeout_ms,
+                                                    ),
+                                                    std::time::Duration::from_millis(
+                                                        c.body_timeout_ms,
+                                                    ),
+                                                    std::time::Duration::from_millis(
+                                                        c.keepalive_timeout_ms,
+                                                    ),
+                                                    c.max_header_count as usize,
+                                                    c.max_header_bytes as usize,
+                                                    c.max_body_bytes as usize,
+                                                    c.min_body_rate_bps,
+                                                    c.max_requests_per_conn,
+                                                )
+                                            } else {
+                                                // `enabled: false` disables the
+                                                // firewall's protections, including
+                                                // the body size cap and body
+                                                // deadline (Duration::ZERO =
+                                                // disabled; usize::MAX = unlimited).
+                                                (
+                                                    std::time::Duration::from_millis(
+                                                        c.header_timeout_ms,
+                                                    ),
+                                                    std::time::Duration::ZERO,
+                                                    std::time::Duration::from_millis(
+                                                        c.keepalive_timeout_ms,
+                                                    ),
+                                                    c.max_header_count as usize,
+                                                    c.max_header_bytes as usize,
+                                                    usize::MAX,
+                                                    0,
+                                                    c.max_requests_per_conn,
+                                                )
+                                            }
                                         } else {
                                             (
                                                 std::time::Duration::from_secs(10),
@@ -1342,7 +1465,13 @@ pub fn inject_http_server(
                                                 .await;
                                                 let Ok(Ok(tls_stream)) = handshake else {
                                                     if let Some(firewall) = fw2.as_ref().as_ref() {
-                                                        firewall.on_disconnect(ip);
+                                                        // Only release the slot if the
+                                                        // accept loop actually counted
+                                                        // this connection (i.e. the peer
+                                                        // is not a deferred trusted proxy).
+                                                        if !firewall.is_trusted_proxy(ip) {
+                                                            firewall.on_disconnect(ip);
+                                                        }
                                                     }
                                                     return;
                                                 };

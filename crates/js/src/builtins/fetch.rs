@@ -2,8 +2,11 @@
 // Copyright (c) 3va contributors
 
 use base64::Engine as _;
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use v8::{Function, FunctionCallbackArguments, HandleScope, PinScope, ReturnValue};
 use vvva_permissions::{Capability, PermissionState};
 
@@ -134,6 +137,7 @@ fn do_request(
     hdrs_json: String,
     body: Option<String>,
     max_response_size: Option<u64>,
+    perms: Arc<PermissionState>,
 ) -> anyhow::Result<String> {
     let extra_val: serde_json::Value =
         serde_json::from_str(&hdrs_json).unwrap_or(serde_json::Value::Object(Default::default()));
@@ -141,7 +145,7 @@ fn do_request(
 
     let agent = super::tls::agent_builder()
         .redirects(0)
-        .resolver(vetted_resolver(permissions()))
+        .resolver(vetted_resolver(perms))
         .build();
     let mut req = agent.request(&method, &url);
 
@@ -171,9 +175,25 @@ fn do_request(
     Ok(json.to_string())
 }
 
+/// In-flight/completed `fetch()` requests, keyed by id. A request runs on its
+/// own OS thread so the JS event loop stays free to service timers, microtasks,
+/// and — crucially — another `http.createServer()` in the *same* process: the
+/// old synchronous implementation blocked the event loop for the whole
+/// request, so a same-process server could never produce the response and
+/// `fetch` failed with "Unexpected EOF" after the 30 s response timeout.
+/// `None` = still running; `Some` = finished (ok payload or error string).
+type FetchStates = std::sync::Mutex<HashMap<u32, Option<Result<String, String>>>>;
+static FETCH_STATES: OnceLock<FetchStates> = OnceLock::new();
+static FETCH_NEXT_ID: AtomicU32 = AtomicU32::new(1);
+
+fn fetch_states() -> &'static FetchStates {
+    FETCH_STATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 // Per thread, like the other builtins: a process-wide OnceLock kept the first
 // engine's PermissionState forever, so later engines (workers, tests) had
-// their fetch() checked against someone else's grants.
+// their fetch() checked against someone else's grants. V8 function callbacks
+// must be `Copy`, so the Arc can't be captured directly in the closure below.
 thread_local! {
     static INJECT_FETCH_PERMISSIONS: std::cell::RefCell<Option<Arc<PermissionState>>> =
         const { std::cell::RefCell::new(None) };
@@ -186,12 +206,23 @@ fn permissions() -> Arc<PermissionState> {
     })
 }
 
+/// True while any `fetch()` request is still running on its background thread.
+/// The engine event loop uses this to keep pumping (and to lift its iteration
+/// cap) until the in-flight request settles, instead of exiting a script whose
+/// only pending work is a fetch.
+pub fn has_pending() -> bool {
+    fetch_states()
+        .lock()
+        .unwrap()
+        .values()
+        .any(|state| state.is_none())
+}
+
 pub fn inject_fetch(
     scope: &mut v8::ContextScope<HandleScope>,
     permissions_param: Arc<PermissionState>,
 ) -> anyhow::Result<()> {
     INJECT_FETCH_PERMISSIONS.with(|p| *p.borrow_mut() = Some(permissions_param));
-
     let native_fn = Function::new(
         scope,
         move |scope: &mut PinScope<'_, '_>,
@@ -266,30 +297,85 @@ pub fn inject_fetch(
                 return;
             }
 
-            let result = tokio::task::block_in_place(|| {
-                do_request(url, method, hdrs_json, body_opt, max_response_size)
-            });
-
-            match result {
-                Ok(json) => {
-                    rv.set(v8::String::new(scope, &json).unwrap().into());
+            // Dispatch to a background thread and return immediately: the JS
+            // event loop must stay free to deliver this fetch's response when
+            // the server lives in the *same* process, and to run any other
+            // pending timers/promises while the request is in flight.
+            let id = FETCH_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            fetch_states().lock().unwrap().insert(id, None);
+            let perms_for_thread = permissions();
+            std::thread::spawn(move || {
+                let result = do_request(
+                    url,
+                    method,
+                    hdrs_json,
+                    body_opt,
+                    max_response_size,
+                    perms_for_thread,
+                )
+                .map_err(|e| e.to_string());
+                if let Some(slot) = fetch_states().lock().unwrap().get_mut(&id) {
+                    *slot = Some(result);
                 }
-                // Like undici: a network failure rejects with a TypeError.
-                Err(e) => {
-                    let msg = v8::String::new(scope, &e.to_string()).unwrap();
-                    let err = v8::Exception::type_error(scope, msg);
-                    scope.throw_exception(err);
+            });
+            rv.set(v8::Integer::new_from_unsigned(scope, id).into());
+        },
+    );
+
+    // Non-blocking completion poll: undefined while in flight, otherwise a
+    // JSON envelope {"ok":true,"raw":…} or {"ok":false,"error":…}.
+    let poll_fn = Function::new(
+        scope,
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            let state = {
+                let mut states = fetch_states().lock().unwrap();
+                let state = states.get(&id).cloned();
+                if matches!(state, Some(Some(_))) {
+                    states.remove(&id);
+                }
+                state
+            };
+            match state {
+                None | Some(None) => rv.set(v8::undefined(scope).into()),
+                Some(Some(Ok(raw))) => {
+                    let envelope = serde_json::json!({ "ok": true, "raw": raw }).to_string();
+                    rv.set(v8::String::new(scope, &envelope).unwrap().into());
+                }
+                Some(Some(Err(err))) => {
+                    let envelope = serde_json::json!({ "ok": false, "error": err }).to_string();
+                    rv.set(v8::String::new(scope, &envelope).unwrap().into());
                 }
             }
         },
-    );
+    )
+    .unwrap();
+
+    let cancel_fn = Function::new(
+        scope,
+        |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut _rv: ReturnValue| {
+            let id = args.get(0).uint32_value(scope).unwrap_or(0);
+            fetch_states().lock().unwrap().remove(&id);
+        },
+    )
+    .unwrap();
 
     let context = scope.get_current_context();
     let global = context.global(scope);
     global.set(
         scope,
-        v8::String::new(scope, "__fetchAsync").unwrap().into(),
+        v8::String::new(scope, "__fetchStart").unwrap().into(),
         native_fn.unwrap().into(),
+    );
+    global.set(
+        scope,
+        v8::String::new(scope, "__fetchPoll").unwrap().into(),
+        poll_fn.into(),
+    );
+    global.set(
+        scope,
+        v8::String::new(scope, "__fetchCancel").unwrap().into(),
+        cancel_fn.into(),
     );
 
     let js_code = r#"
@@ -325,25 +411,45 @@ pub fn inject_fetch(
             var mrs = Number(options.maxResponseSize);
             if (Number.isFinite(mrs) && mrs >= 0) maxResponseSize = mrs;
         }
-        var pending = new Promise(function(resolve, reject) {
+        return new Promise(function(resolve, reject) {
+            var id;
             try {
-                var result = __fetchAsync(fetchUrl, method, JSON.stringify(headersObj), body, maxResponseSize);
-                resolve(result);
+                id = __fetchStart(fetchUrl, method, JSON.stringify(headersObj), body, maxResponseSize);
             } catch(e) {
                 reject(e);
+                return;
             }
-        });
-
-        if (signal) {
-            var abortPromise = new Promise(function(_, reject) {
+            var settled = false;
+            function fail(e) { if (!settled) { settled = true; reject(e); } }
+            if (signal) {
                 signal.addEventListener('abort', function() {
-                    reject(signal.reason || new Error('AbortError'));
+                    try { __fetchCancel(id); } catch (_) {}
+                    fail(signal.reason || new Error('AbortError'));
                 });
-            });
-            pending = Promise.race([pending, abortPromise]);
-        }
-
-        return pending.then(function(raw) {
+            }
+            function poll() {
+                if (settled) return;
+                var raw;
+                try {
+                    raw = __fetchPoll(id);
+                } catch(e) {
+                    fail(e);
+                    return;
+                }
+                // Still in flight: yield to the event loop (this is what lets a
+                // same-process http.createServer() answer the request) and
+                // check again on the next turn.
+                if (raw === undefined || raw === null) {
+                    setTimeout(poll, 0);
+                    return;
+                }
+                var env = JSON.parse(raw);
+                if (!env.ok) { fail(new TypeError(env.error)); return; }
+                settled = true;
+                resolve(env.raw);
+            }
+            poll();
+        }).then(function(raw) {
             var data = JSON.parse(raw);
             var respHeaders = new Headers(data.headers);
             return new Response(data.body, {

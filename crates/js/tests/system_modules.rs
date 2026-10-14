@@ -503,9 +503,13 @@ async fn os_path_submodules_exist() {
         .eval_to_string(
             r#"
         var os = require('os');
+        var la = os.loadavg();
         String(typeof os.platform() === 'string' &&
                typeof os.arch() === 'string' &&
                typeof os.uptime() === 'number' &&
+               typeof os.loadavg === 'function' &&
+               Array.isArray(la) && la.length === 3 &&
+               la.every(function(n) { return typeof n === 'number' && isFinite(n); }) &&
                Array.isArray(os.cpus()))
     "#,
         )
@@ -1296,7 +1300,7 @@ async fn fetch_rejects_with_an_error_object() {
     let mut e = engine().await;
     let r = e
         .eval_to_string(
-            "(function() { try { __fetchAsync('https://example.com/', 'GET', '{}', null, undefined); } \
+            "(function() { try { __fetchStart('https://example.com/', 'GET', '{}', null, undefined); } \
              catch (err) { return String(err instanceof Error) + '|' + err.message; } })()",
         )
         .await

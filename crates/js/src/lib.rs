@@ -1293,7 +1293,8 @@ impl JsEngine {
             let unlimited = self.server_mode
                 || has_listener()
                 || has_child()
-                || builtins::napi::has_pending_native_async();
+                || builtins::napi::has_pending_native_async()
+                || builtins::fetch::has_pending();
             // Not `has_pending_background_tasks()`: it counts any V8 job
             // (concurrent GC, compiles) and kept processes alive polling for
             // as long as one lingered. Async WebAssembly compiles keep the
@@ -1301,6 +1302,7 @@ impl JsEngine {
             let still_pending = self.timer_manager.has_pending()
                 || self.runtime_core.lock().unwrap().pending_task_count() > 0
                 || builtins::napi::has_pending_native_async()
+                || builtins::fetch::has_pending()
                 || has_listener()
                 || has_child();
             if !still_pending || (!unlimited && iterations >= BOUNDED_MAX_ITERATIONS) {
