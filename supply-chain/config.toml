@@ -1946,6 +1946,11 @@ notes = "cargo update rustix 1.1.4 -> 1.1.5 (patch); diff 53 files, +403/-320 li
 version = "0.23.37"
 criteria = "safe-to-deploy"
 
+[[exemptions.rustls]]
+version = "0.23.46"
+criteria = "safe-to-deploy"
+notes = "cargo update rustls 0.23.45 -> 0.23.46 (patch; fixes RUSTSEC-2026-0346/0347/0348/0349); diff 25 files, +1079/-164 lines (TLS 1.3 client/server, ECH, cert compression limits, Debug redaction, tests); build.rs changed: False; unsafe lines added: 0; no new dependencies, no fs/process/net additions."
+
 [[exemptions.rustls-native-certs]]
 version = "0.7.3"
 criteria = "safe-to-deploy"

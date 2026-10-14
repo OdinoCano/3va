@@ -237,8 +237,9 @@ async fn server_reads_request_body() {
         var http = require('http');
         globalThis.__lastBody = '';
         var _server = http.createServer(function(req, res) {{
-            globalThis.__lastBody = req._body;
-            res.end('received');
+            var b = '';
+            req.on('data', function(c) {{ b += c; }});
+            req.on('end', function() {{ globalThis.__lastBody = b; res.end('received'); }});
         }});
         _server.listen({port}, '127.0.0.1');
         'started'
@@ -805,8 +806,9 @@ async fn chunked_body_decoded_same_as_content_length() {
         var http = require('http');
         globalThis.__lastBody = '';
         var _server = http.createServer(function(req, res) {{
-            globalThis.__lastBody = req._body;
-            res.end('len:' + req._body.length);
+            var b = '';
+            req.on('data', function(c) {{ b += c; }});
+            req.on('end', function() {{ globalThis.__lastBody = b; res.end('len:' + b.length); }});
         }});
         _server.listen({port}, '127.0.0.1');
         'started'
@@ -1447,4 +1449,69 @@ async fn request_socket_is_readable_so_on_finished_does_not_skip_body_parsing() 
     wait_for_port(port).await;
     let resp = drive_until(&mut e, raw_http(port, "POST", "/", "{\"a\":1}")).await;
     assert_eq!(response_body(&resp), "true,true", "full response:\n{resp}");
+}
+
+/// body-parser 1.x (Express 4) treats `req._body` as "already parsed": the request object
+/// must not carry a property of that name, and the body must still arrive on the stream.
+#[tokio::test]
+async fn request_has_no_underscore_body_property_and_still_streams_the_body() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        http.createServer(function(req, res) {{
+            var had = ('_body' in req);
+            req._body = true; // what body-parser does before reading
+            var chunks = '';
+            req.on('data', function(c) {{ chunks += c; }});
+            req.on('end', function() {{ res.end(String(had) + '|' + chunks); }});
+        }}).listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+    let resp = drive_until(&mut e, raw_http(port, "POST", "/", "{\"a\":1}")).await;
+    assert_eq!(
+        response_body(&resp),
+        "false|{\"a\":1}",
+        "full response:\n{resp}"
+    );
+}
+
+/// Middleware that awaits before the body parser (auth, rate limiters) attaches its `data`/`end`
+/// listeners after the handler has returned. The body must still be delivered, and once the
+/// request has ended `readable` is false and a late `end` listener still fires (on-finished /
+/// finalhandler rely on both to answer, e.g. with the 400 for malformed JSON).
+#[tokio::test]
+async fn request_body_is_delivered_to_listeners_attached_later() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        http.createServer(function(req, res) {{
+            setTimeout(function() {{
+                var b = '';
+                req.on('data', function(c) {{ b += c; }});
+                req.on('end', function() {{
+                    var readableInEnd = req.readable;
+                    req.on('end', function() {{ res.end(b + '|' + readableInEnd + '|' + req.readableEnded); }});
+                }});
+            }}, 20);
+        }}).listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+    let resp = drive_until(&mut e, raw_http(port, "POST", "/", "late body")).await;
+    assert_eq!(
+        response_body(&resp),
+        "late body|false|true",
+        "full response:\n{resp}"
+    );
 }
