@@ -43,6 +43,13 @@ cargo clippy        # check lints
 cargo deny check    # check dependencies for CVEs and license issues
 ```
 
+**Changes to the Node API layer** (`http`, `stream`, `Buffer`, `fs`, `net`, `fetch`, module loading)
+follow the verification standard in
+[`docs/09-testing/07-compatibilidad-node.md`](docs/09-testing/07-compatibilidad-node.md): a
+differential test against `node` (client and server in separate processes for networking), the whole
+matrix of the API rather than the reported case, and no compatibility claim without the test behind it.
+test262 does not cover this layer.
+
 **Tests are required.** Every PR that adds functionality or fixes a bug must
 add automated tests covering it: unit tests next to the code, or integration
 tests under `crates/*/tests/`. A PR without tests for new behavior will not be
