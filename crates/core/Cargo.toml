@@ -1,6 +1,6 @@
 [package]
 name = "vvva_core"
-version = "2.12.5"
+version = "2.12.6"
 rust-version.workspace = true
 edition = "2024"
 license = "MIT"
@@ -13,6 +13,6 @@ categories = ["asynchronous"]
 [dependencies]
 tokio.workspace = true
 anyhow.workspace = true
-vvva_permissions = { version = "2.12.5", path = "../permissions" }
+vvva_permissions = { version = "2.12.6", path = "../permissions" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

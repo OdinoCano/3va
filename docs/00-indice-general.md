@@ -35,6 +35,7 @@
 - [03-polyfills.md](05-js-engine/03-polyfills.md) - Polyfills and shims
 - [04-web-apis.md](05-js-engine/04-web-apis.md) - Compatible web APIs
 - [05-node-compat.md](05-js-engine/05-node-compat.md) - Node.js compatibility — EventEmitter, path, os, fs-fd, zlib streams, process
+- [06-http-client-matrix.md](05-js-engine/06-http-client-matrix.md) - Cliente http/https, fetch, net y stream — matriz Node vs 3va
 
 ## Volume 6: Permissions System
 

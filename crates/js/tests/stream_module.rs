@@ -422,26 +422,35 @@ async fn writable_cork_delays_write() {
 #[tokio::test]
 async fn writable_drain_emitted_after_backpressure() {
     let mut e = engine().await;
-    let r = e
-        .eval_to_string(
-            r#"
-            var drained = false;
-            var w = new (require('stream').Writable)({
-                highWaterMark: 4,
-                write: function(c, e, cb) {
-                    cb();
-                }
-            });
-            w.on('drain', function() { drained = true; });
-            var ret = w.write('hello');
-            // drain fires synchronously because _write calls cb immediately
-            // and ret was captured as false before _write
-            String(ret === false && drained === true)
-            "#,
-        )
-        .await
-        .unwrap();
-    assert_eq!(r, "true");
+    e.eval_to_string(
+        r#"
+        globalThis.__drained = false;
+        globalThis.__ret = null;
+        var w = new (require('stream').Writable)({
+            highWaterMark: 4,
+            write: function(c, e, cb) {
+                cb();
+            }
+        });
+        w.on('drain', function() { globalThis.__drained = true; });
+        globalThis.__ret = w.write('hello');
+        "#,
+    )
+    .await
+    .unwrap();
+    // Node emits 'drain' on the next tick, after the caller could attach its
+    // listener. A synchronous emit (the old behaviour, asserted here before)
+    // lost the event for a caller that attached right after write() returned —
+    // which is exactly how a socket/pipeline consumer waits.
+    let pumped = pump_until(
+        &mut e,
+        "globalThis.__drained === true",
+        std::time::Duration::from_secs(2),
+    )
+    .await;
+    assert!(pumped.is_some(), "'drain' never fired");
+    let ret = e.eval_to_string("String(globalThis.__ret)").await.unwrap();
+    assert_eq!(ret, "false");
 }
 
 // ── Readable.from / fromWeb / toWeb and pipeline with async generators ────────

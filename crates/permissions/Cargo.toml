@@ -1,6 +1,6 @@
 [package]
 name = "vvva_permissions"
-version = "2.12.5"
+version = "2.12.6"
 rust-version.workspace = true
 edition = "2024"
 license = "MIT"

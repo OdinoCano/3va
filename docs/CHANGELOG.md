@@ -9,10 +9,92 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
-## [2.12.5] — 2026-10-15
+## [2.12.6] — 2026-10-15
 
-Streaming request bodies and the last Node-compatibility gaps reported from a
-production Express app (`pg`, file uploads, a reverse proxy).
+Client-side HTTP/`fetch`/`net`/`stream` compatibility. 2.12.5 fixed the server
+side of request bodies; reviewing it showed the *client* side — what an app uses
+to call external APIs — had its own gaps, present since 2.12.3. The critical one
+is that `http.request` never framed the body, so axios, got, the AWS/Stripe SDKs
+and anything else built on `http.request` sent no body at all.
+
+### Fixed
+
+- **`http.request` sends the body and frames it.** The request line and the
+  user's headers were written, but never `Content-Length` or
+  `Transfer-Encoding: chunked`, so a Node server read zero body bytes and the
+  bytes the client wrote were left outside the request. A body already complete
+  when the head goes out now gets `Content-Length`; a body still being written
+  (streaming, `flushHeaders()`) gets chunked framing. `write()` after `'connect'`
+  is sent instead of queued forever, `end(chunk)` after `flushHeaders()` is sent,
+  `pipe()` streams, and `setHeader`/`getHeader`/`removeHeader`/`getHeaders` are
+  real. The response is now de-framed (`Content-Length`, `chunked`, read-to-EOF,
+  `1xx`, `101` upgrade, `HEAD`/`204`/`304`) into a real `Readable`
+  `IncomingMessage`, so binary and large responses stream with bounded memory.
+  `abort()`, `AbortSignal`, `timeout`, and a keep-alive `agent` that reuses a
+  socket across requests all work. (Regression: `client_http_matrix.rs`.)
+- **`fetch` keeps binary request bodies.** The body was coerced with
+  `String(options.body)` and passed to Rust as a string, so a `Buffer` became its
+  UTF-8-lossy text (`00ff6869c8` → `00efbfbd6869efbfbd`) and a `Uint8Array`
+  became `"0,255,104,105,200"`. `Buffer`/`Uint8Array`/`ArrayBuffer`/`DataView`
+  now reach `ureq` as bytes via `send_bytes`; `Blob` and `FormData` (multipart
+  with a binary file) are serialised correctly and set the matching
+  `Content-Type` when absent, and `URLSearchParams` sets
+  `application/x-www-form-urlencoded`.
+- **`net.Socket#end()` half-closes instead of destroying.** `end(data)` — and
+  `end()` after a delayed `write()` — closed the connection (`shutdown(Both)`),
+  so a server that answered *after* the client's FIN (the usual net echo
+  pattern) had its bytes thrown away. `end()` now flushes, sends FIN (or a TLS
+  `close_notify`) and keeps the socket readable until the peer closes;
+  `allowHalfOpen` is honoured on client and server. `net.connect({...})` keeps
+  the options (it used to build `new Socket({})`, dropping `allowHalfOpen`).
+- **`Writable`/`Transform`/`Duplex.end(chunk)` writes the chunk first.**
+  `end(chunk)` set `ended` before calling `write(chunk)`, which hit the
+  write-after-end guard: the chunk and the final flush were lost and the process
+  exited 0 with the work still pending. `PassThrough.end(buf)`,
+  `socket.end(data)` and `Transform.end(chunk)` now flow.
+- **`'drain'` is emitted on the next turn, not inside `write()`.** A synchronous
+  `_write` (sockets, `fs`, custom `Writable`s) drained before the caller could
+  attach its listener, so a caller that got `false` from `write()` and waited for
+  `'drain'` stalled forever (this also affected `pipeline`).
+- **`stream.pipeline` propagates a mid-stream error.** An error emitted by a
+  transform was dropped (there was no listener yet), so a failed pipeline
+  reported success. Errors now reject the pipeline and tear it down.
+- **`stream.finished()` calls its callback once.** A `Duplex` emits both `'end'`
+  and `'finish'`, and the callback ran for each.
+- **`Stream.prototype.pipe` is a real `pipe`.** It was a no-op returning `this`,
+  so `combined-stream`/`form-data` (which inherit from the plain `Stream`) never
+  attached a `'data'` listener and every `formData.pipe(req)` sent nothing.
+- **`process` exposes `Symbol.toStringTag === 'process'`**, so
+  `Object.prototype.toString.call(process)` is `[object process]` as in Node.
+  Without it `utils.kindOf(process)` in axios was `"object"`, axios decided the
+  Node `http` adapter was unsupported and silently fell back to its `fetch`
+  adapter — a production app never exercised its HTTP client at all.
+- **`util.types.isAnyArrayBuffer`** exists.
+
+### Changed
+
+- `net.Socket` no longer emits `'close'` when `end()` finishes writing while the
+  read side is still open; it closes once both directions are done, as in Node.
+- `net` `write()` can return `false` where Node returns `true` for a single large
+  write (3va counts the bytes before writing; Node's async `_write` leaves the
+  stream buffer at 0 once libuv accepts it). Both deliver the whole body and
+  `'drain'` is emitted.
+
+### Pending
+
+- `fetch` with a `ReadableStream` body (`duplex: 'half'`) is refused with a clear
+  `TypeError`; `fetch` still buffers the whole body before sending.
+- `got` (ESM `require`/`import` of `@sindresorhus/is`), `node-fetch`
+  (`target.sort is not a function`) and `undici` (`zlib` in `decompress.js`) are
+  blocked by module-loader/`zlib` gaps, not by the HTTP client.
+- The 200 MB `pipe` RSS measurement and the AWS/Stripe SDK mocks were not run.
+
+See `docs/05-js-engine/06-http-client-matrix.md` for the full Node-vs-3va
+matrix and the minimal reproduction of each pending item.
+
+---
+
+## [2.12.5] — 2026-10-15
 
 ### Fixed
 

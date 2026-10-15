@@ -1,7 +1,7 @@
 { lib, stdenv, fetchurl, autoPatchelfHook }:
 
 let
-  version = "2.12.5";
+  version = "2.12.6";
   pname   = "three-va";
 
   assets = {

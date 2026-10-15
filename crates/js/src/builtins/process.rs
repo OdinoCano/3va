@@ -695,6 +695,18 @@ pub fn inject_process(
     };
     let process = existing_process.unwrap_or_else(|| v8::Object::new(scope));
 
+    // `Object.prototype.toString.call(process)` must be `[object process]`,
+    // as in Node (process carries `Symbol.toStringTag`). Without it,
+    // `utils.kindOf(process)` in axios returns "object", the library decides
+    // the Node `http` adapter is unsupported and silently falls back to the
+    // `fetch` adapter — so a production app never exercised its http client at
+    // all.
+    {
+        let sym = v8::Symbol::get_to_string_tag(scope);
+        let tag = v8::String::new(scope, "process").unwrap().into();
+        process.set(scope, sym.into(), tag);
+    }
+
     // Strings and numbers
     set_str(scope, process, "version", "v22.12.0");
     {
@@ -704,7 +716,7 @@ pub fn inject_process(
     }
 
     let versions = v8::Object::new(scope);
-    set_str(scope, versions, "3va", "2.12.5");
+    set_str(scope, versions, "3va", "2.12.6");
     // Expose fake Node.js-compatible version strings so packages checking
     // process.versions.node / process.versions.v8 don't crash.
     set_str(scope, versions, "node", "22.12.0");

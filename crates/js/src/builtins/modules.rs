@@ -977,6 +977,7 @@ pub fn inject_require(
                         isPromise: function(v) { return v && typeof v === 'object' && typeof v.then === 'function'; },
                         isProxy: function(v) { return false; },
                         isArrayBuffer: function(v) { return v instanceof ArrayBuffer; },
+                        isAnyArrayBuffer: function(v) { return v instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && v instanceof SharedArrayBuffer); },
                         isSharedArrayBuffer: function(v) { return typeof SharedArrayBuffer !== 'undefined' && v instanceof SharedArrayBuffer; },
                         isDataView: function(v) { return v instanceof DataView; },
                         isTypedArray: function(v) { return ArrayBuffer.isView(v) && !(v instanceof DataView); },
@@ -2193,7 +2194,36 @@ pub fn inject_require(
 
             function Stream() { EventEmitter.call(this); }
             util.inherits(Stream, EventEmitter);
-            Stream.prototype.pipe = function() { return this; };
+            // Generic pipe for plain `Stream` subclasses (combined-stream /
+            // form-data inherit from Stream directly, not Readable). This used
+            // to be `function() { return this; }` — a no-op — so
+            // `formData.pipe(req)` attached no 'data' listener, the multipart
+            // body was emitted to nobody and the process exited 0 with the
+            // upload still pending. Readable overrides this with the
+            // backpressure-aware version below.
+            Stream.prototype.pipe = function(dest, opts) {
+                var src = this;
+                function ondata(chunk) {
+                    if (!dest || typeof dest.write !== 'function') return;
+                    if (dest.write(chunk) === false && typeof src.pause === 'function') src.pause();
+                }
+                function onend() {
+                    if (!opts || opts.end !== false) {
+                        if (dest && typeof dest.end === 'function') dest.end();
+                    }
+                }
+                function onerror(err) {
+                    if (dest && typeof dest.destroy === 'function') dest.destroy(err);
+                }
+                function ondrain() { if (typeof src.resume === 'function') src.resume(); }
+                src.on('data', ondata);
+                src.once('end', onend);
+                src.once('error', onerror);
+                if (dest && typeof dest.on === 'function') dest.on('drain', ondrain);
+                if (dest && typeof dest.emit === 'function') dest.emit('pipe', src);
+                if (typeof src.resume === 'function' && !(src._readableState && src._readableState.flowing)) src.resume();
+                return dest;
+            };
             function Readable(opts) {
                 Stream.call(this);
                 this.readable = true;
@@ -2446,7 +2476,13 @@ pub fn inject_require(
                     if (cb) cb(null);
                     if (state.needDrain && state.length < state.highWaterMark) {
                         state.needDrain = false;
-                        self.emit('drain');
+                        // Deferred: with a synchronous `_write` (net.Socket, fs,
+                        // custom Writables) onflush runs *inside* write(), before
+                        // the caller can attach its 'drain' listener — emitting
+                        // now lost the event and a caller waiting on it stalled.
+                        // Node emits 'drain' on the next tick for the same reason.
+                        var selfD = self;
+                        (typeof queueMicrotask === 'function' ? queueMicrotask : function(f) { setTimeout(f, 0); })(function() { selfD.emit('drain'); });
                     }
                 }
                 var ret = state.length < state.highWaterMark;
@@ -2463,19 +2499,36 @@ pub fn inject_require(
                 if (typeof encoding === 'function') { cb = encoding; encoding = null; }
                 var self = this;
                 var state = this._writableState;
-                state.ended = true;
+                if (state.ended || state.finished) { if (cb) cb(); return this; }
                 function finish() {
                     if (state.pendingcb > 0) { setTimeout(finish, 0); return; }
                     state.finished = true;
                     self._final(function(err) {
                         if (err) self.emit('error', err);
                         self.emit('finish');
-                        self.emit('close');
+                        // A socket must stay open after end() until its read
+                        // side is done (see Socket._maybeClose), so it opts out
+                        // of the auto-'close' that a plain Writable emits.
+                        if (!self._noAutoClose) self.emit('close');
                         if (cb) cb(err || null);
                     });
                 }
-                if (chunk != null) { this.write(chunk, encoding, function(err) { if (!err) finish(); else if (cb) cb(err); }); }
-                else { finish(); }
+                // The chunk passed to end() is written *before* the stream is
+                // marked ended. Doing it after hit the write-after-end guard:
+                // `PassThrough.end(buf)` and every `socket.end(data)` dropped
+                // both the chunk and the final flush, and the process exited 0
+                // with the work still pending.
+                if (chunk != null) {
+                    this.write(chunk, encoding, function(err) {
+                        if (err) { if (cb) cb(err); return; }
+                        state.ended = true;
+                        finish();
+                    });
+                } else {
+                    state.ended = true;
+                    finish();
+                }
+                return this;
             };
             Writable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
             Writable.prototype.setDefaultEncoding = function() { return this; };
@@ -2540,23 +2593,35 @@ pub fn inject_require(
                 if (typeof encoding === 'function') { cb = encoding; encoding = null; }
                 var self = this;
                 var state = self._writableState;
-                state.ended = true;
+                if (state.ended || state.finished) { if (cb) cb(); return this; }
                 function doFlush() {
                     self._flush(function(err, data) {
                         if (err) { self.emit('error', err); if (cb) cb(err); return; }
                         if (data != null) self.push(data);
                         self._final(function(err2) {
                             if (err2) { self.emit('error', err2); if (cb) cb(err2); return; }
-                            self.push(null);
                             state.finished = true;
+                            self.push(null);
                             self.emit('finish');
-                            self.emit('close');
+                            if (!self._noAutoClose) self.emit('close');
                             if (cb) cb(null);
                         });
                     });
                 }
-                if (chunk != null) { self.write(chunk, encoding, function(err) { if (!err) doFlush(); else if (cb) cb(err); }); }
-                else { doFlush(); }
+                // Same ordering fix as Writable.end: write the final chunk while
+                // the stream still accepts writes. PassThrough.end(buf) used to
+                // lose the chunk entirely.
+                if (chunk != null) {
+                    self.write(chunk, encoding, function(err) {
+                        if (err) { if (cb) cb(err); return; }
+                        state.ended = true;
+                        doFlush();
+                    });
+                } else {
+                    state.ended = true;
+                    doFlush();
+                }
+                return this;
             };
             Transform.prototype._destroy = function(err, callback) {
                 if (err) this.emit('error', err);
@@ -2781,6 +2846,16 @@ pub fn inject_require(
             function pipelineThrough(source, transform) {
                 var o = {};
                 o[Symbol.asyncIterator] = function() {
+                    // Attach an error handler before any write: a transform that
+                    // fails mid-stream emits 'error' synchronously from
+                    // `_transform`'s callback, and without a listener (in 3va
+                    // emit('error') with none is dropped) the failure vanished
+                    // and the pipeline reported success.
+                    var rejectError;
+                    var errorPromise = new Promise(function(_res, rej) { rejectError = rej; });
+                    function onErr(e) { rejectError(e); }
+                    errorPromise.catch(function() {});
+                    transform.once('error', onErr);
                     var wiring = (async function() {
                         try {
                             for await (var c of source) {
@@ -2789,13 +2864,20 @@ pub fn inject_require(
                             await pipelineEnd(transform);
                         } catch (e) {
                             if (typeof transform.destroy === 'function') transform.destroy(e);
-                            else throw e;
+                            throw e;
                         }
                     })();
+                    wiring.catch(function() {});
                     var it = transform[Symbol.asyncIterator]();
                     return {
-                        next: function() { return it.next(); },
+                        next: function() {
+                            return Promise.race([
+                                it.next(),
+                                errorPromise.then(function() { return { done: true }; }, function(e) { throw e; })
+                            ]);
+                        },
                         return: async function() {
+                            transform.removeListener('error', onErr);
                             if (typeof it.return === 'function') await it.return();
                             await wiring.catch(function() {});
                             return { done: true };
@@ -2856,10 +2938,21 @@ pub fn inject_require(
                 if (typeof options === 'function') { cb = options; options = {}; }
                 cb = cb || function() {};
                 if (!stream || typeof stream.on !== 'function') { cb(); return function() {}; }
-                function done(err) { stream.removeListener('end', done); stream.removeListener('finish', done); stream.removeListener('error', done); cb(err); }
-                stream.once('end', function() { done(null); });
-                stream.once('finish', function() { done(null); });
-                stream.once('error', done);
+                var settled = false;
+                function onEnd() { done(null); }
+                function onFinish() { done(null); }
+                function onError(err) { done(err); }
+                function cleanup() {
+                    stream.removeListener('end', onEnd);
+                    stream.removeListener('finish', onFinish);
+                    stream.removeListener('error', onError);
+                }
+                // A Duplex emits both 'end' and 'finish'; without the guard the
+                // callback ran twice (Node calls it exactly once).
+                function done(err) { if (settled) return; settled = true; cleanup(); cb(err); }
+                stream.once('end', onEnd);
+                stream.once('finish', onFinish);
+                stream.once('error', onError);
                 return function() { done(new Error('aborted')); };
             };
             globalThis.__requireCache['stream'] = Stream;
@@ -3605,6 +3698,18 @@ pub fn inject_require(
                 this.remoteAddress = undefined;
                 this.remotePort = undefined;
                 this._pollTimer = null;
+                // Node's default is `allowHalfOpen: false`: when the peer sends
+                // FIN (read EOF) the writable side ends too and the socket
+                // closes. With `true`, the socket stays writable after the peer
+                // half-closes.
+                this._allowHalfOpen = !!(opts.allowHalfOpen);
+                this._readEnded = false;
+                this._writableEnded = false;
+                this._shutdownWrite = false;
+                // Suppresses the `'close'` that Writable.end would otherwise
+                // emit while the read side is still open: a socket closes once,
+                // after both directions are done (see _maybeClose).
+                this._noAutoClose = true;
                 if (this._connId !== null) this._startPoll();
             }
             util.inherits(Socket, Duplex);
@@ -3631,7 +3736,13 @@ pub fn inject_require(
                         // no data available yet — keep polling
                     } else if (chunk instanceof Error && chunk.code === 'EOF') {
                         self._stopPoll();
+                        self._readEnded = true;
                         self.push(null);
+                        // allowHalfOpen === false (Node's default): the peer is
+                        // done, so end our side and close. With true we keep the
+                        // write side open until the application ends it.
+                        if (!self._allowHalfOpen) { self.destroy(); }
+                        else { self._maybeClose(); }
                         return;
                     } else {
                         self._stopPoll();
@@ -3708,10 +3819,31 @@ pub fn inject_require(
                 this.destroyed = true;
                 return Duplex.prototype.destroy.call(this, err);
             };
+            // Close once the read side has ended *and* the write side is done
+            // (or the socket is not allowed to stay half-open). Closing merely
+            // because end() was called would drop every byte the peer sends
+            // afterwards.
+            Socket.prototype._maybeClose = function() {
+                if (this.destroyed) return;
+                if (this._readEnded && (this._writableEnded || this._allowHalfOpen === false)) this.destroy();
+            };
             Socket.prototype.end = function(chunk, encoding, cb) {
+                if (typeof chunk === 'function') { cb = chunk; chunk = null; }
+                if (typeof encoding === 'function') { cb = encoding; encoding = null; }
                 var self = this;
+                if (self._writableEnded) { if (cb) cb(); return this; }
+                self._writableEnded = true;
                 return Duplex.prototype.end.call(this, chunk, encoding, function(err) {
-                    self.destroy();
+                    if (err) { if (cb) cb(err); return; }
+                    // Half-close: the write side is flushed, send FIN (or a TLS
+                    // close_notify) and keep reading. Destroying here — as this
+                    // did — lost every byte a server sent after the client's
+                    // end(), which is the usual net echo pattern.
+                    if (!self.destroyed && self._connId !== null && !self._shutdownWrite) {
+                        self._shutdownWrite = true;
+                        __tcpShutdownWrite(self._connId);
+                    }
+                    self._maybeClose();
                     if (cb) cb(err);
                 });
             };
@@ -3917,10 +4049,15 @@ pub fn inject_require(
 
             function netCreateServer(opts, connListener) { return new Server(opts, connListener); }
             function netConnect(port, host, cb) {
-                var sock = new Socket({});
-                // Allow options object as first arg
-                if (port && typeof port === 'object') return sock.connect(port, host);
-                return sock.connect(port, host, cb);
+                // Options object form keeps `allowHalfOpen` (and the other
+                // Socket options) — the old code always built `new Socket({})`,
+                // so `net.connect({ port, allowHalfOpen: true })` silently lost
+                // the flag.
+                if (port && typeof port === 'object') {
+                    var sock = new Socket(port);
+                    return sock.connect(port, host);
+                }
+                return new Socket({}).connect(port, host, cb);
             }
 
             var __autoSelectFamilyAttemptTimeout = 250;
@@ -4528,7 +4665,79 @@ __httpSetHandler(self._id, function() {
             httpOutgoingMessage.prototype.destroy = function(err) {};
             httpOutgoingMessage.prototype.setTimeout = function(msecs, callback) { return this; };
 
-            // ClientRequest: a real HTTP client request that supports upgrade (WebSocket handshake).
+            // ── Client-side IncomingMessage ──────────────────────────────────
+            // A real Readable: status line, headers and the de-framed body
+            // (Content-Length, chunked, or read-to-EOF). The server's
+            // IncomingMessage is tied to the native request-body reader; a
+            // client response is parsed from the socket here.
+            function ClientIncomingMessage(socket) {
+                Readable.call(this);
+                this.socket = socket;
+                this.connection = socket;
+                this.httpVersion = '1.1';
+                this.httpVersionMajor = 1;
+                this.httpVersionMinor = 1;
+                this.statusCode = 0;
+                this.statusMessage = '';
+                this.headers = {};
+                this.rawHeaders = [];
+                this.complete = false;
+                this.aborted = false;
+            }
+            util.inherits(ClientIncomingMessage, Readable);
+            ClientIncomingMessage.prototype.setTimeout = function(ms, cb) { if (typeof cb === 'function') this.once('timeout', cb); return this; };
+            ClientIncomingMessage.prototype.destroy = function(err) {
+                if (this.socket && typeof this.socket.destroy === 'function') this.socket.destroy();
+                if (err) this.emit('error', err);
+                return this;
+            };
+
+            // Parse one response head (status line + headers). Header names are
+            // lower-cased; duplicates are joined with ", " except set-cookie,
+            // which stays an array, as in Node.
+            function __parseResponseHead(head) {
+                var lines = head.split('\r\n');
+                var m = /^HTTP\/(\d+)\.(\d+)\s+(\d{3})\s?(.*)$/.exec(lines[0] || '');
+                var out = { major: 1, minor: 1, statusCode: 0, statusMessage: '', headers: {}, rawHeaders: [] };
+                if (m) {
+                    out.major = parseInt(m[1], 10);
+                    out.minor = parseInt(m[2], 10);
+                    out.statusCode = parseInt(m[3], 10);
+                    out.statusMessage = m[4] || '';
+                }
+                var lastName = null;
+                for (var i = 1; i < lines.length; i++) {
+                    var line = lines[i];
+                    if (line === '') continue;
+                    if (line.charCodeAt(0) === 9 || line.charCodeAt(0) === 32) {
+                        if (lastName) out.headers[lastName] += ' ' + line.trim();
+                        continue;
+                    }
+                    var ci = line.indexOf(':');
+                    if (ci <= 0) continue;
+                    var name = line.slice(0, ci).trim();
+                    var value = line.slice(ci + 1).trim();
+                    var lk = name.toLowerCase();
+                    out.rawHeaders.push(name, value);
+                    lastName = lk;
+                    if (out.headers[lk] === undefined) out.headers[lk] = value;
+                    else if (lk === 'set-cookie') out.headers[lk] = [].concat(out.headers[lk], value);
+                    else out.headers[lk] = out.headers[lk] + ', ' + value;
+                }
+                return out;
+            }
+
+            function __reqChunkToBuffer(chunk, encoding) {
+                if (Buffer.isBuffer(chunk)) return chunk;
+                if (chunk instanceof Uint8Array) return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+                if (typeof chunk === 'string') return Buffer.from(chunk, encoding || 'utf8');
+                return Buffer.from(String(chunk), encoding || 'utf8');
+            }
+
+            // ClientRequest — a real HTTP client request: string and binary
+            // bodies, several write() + end(), streaming (pipe), chunked vs
+            // Content-Length framing, a de-framing response parser, half-close,
+            // timeouts, abort and keep-alive socket reuse.
             // defaultProtocol is 'https:' when called through the https module:
             // those requests must go over TLS, never a plain TCP socket.
             function ClientRequest(options, callback, defaultProtocol) {
@@ -4537,124 +4746,481 @@ __httpSetHandler(self._id, function() {
                     var u = new URL(options);
                     options = { protocol: u.protocol, hostname: u.hostname, port: parseInt(u.port) || (u.protocol === 'https:' ? 443 : 80), path: u.pathname + u.search };
                 }
+                options = options || {};
                 this._secure = (options.protocol || defaultProtocol || 'http:') === 'https:';
                 this._method = (options.method || 'GET').toUpperCase();
                 this._path = options.path || '/';
                 this._host = options.hostname || options.host || 'localhost';
                 this._port = parseInt(options.port) || (this._secure ? 443 : 80);
+                this.method = this._method;
+                this.path = this._path;
+                this.host = this._host;
                 this._headers = {};
+                this._headerNames = {};
+                this._headerSent = false;
+                this._socket = null;
+                this._connected = false;
+                this._ended = false;
+                this._aborted = false;
+                this._body = [];
+                this._bodyLen = 0;
+                this._encodeChunked = false;
+                this._chunkTerminated = false;
+                this._response = null;
+                this._responseDone = false;
+                this._heardResponse = false;
+                this._omitHost = options.setHost === false;
+                this._parserState = null;
+                this._leftover = null;
+                this._agent = options.agent === undefined ? httpGlobalAgent : (options.agent === false ? null : options.agent);
+                this._keepAliveKey = null;
+                this._timeoutMs = options.timeout || 0;
+                this._timeoutTimer = null;
                 if (options.headers) {
                     var oh = options.headers;
-                    Object.keys(oh).forEach(function(k) { this._headers[k] = oh[k]; }, this);
+                    Object.keys(oh).forEach(function(k) {
+                        this._headers[k.toLowerCase()] = oh[k];
+                        this._headerNames[k.toLowerCase()] = k;
+                    }, this);
                 }
-                this._socket = null;
-                this._ended = false;
-                this._pendingWrite = [];
+                if (options.auth) this.setHeader('Authorization', 'Basic ' + Buffer.from(String(options.auth)).toString('base64'));
                 if (typeof callback === 'function') this.once('response', callback);
+                var self = this;
+                if (options.signal) {
+                    var sig = options.signal;
+                    var onAbort = function() {
+                        var e = new Error('The operation was aborted');
+                        e.code = 'ABORT_ERR';
+                        e.name = 'AbortError';
+                        self.destroy(e);
+                    };
+                    if (sig.aborted) setTimeout(onAbort, 0);
+                    else if (typeof sig.addEventListener === 'function') sig.addEventListener('abort', onAbort);
+                }
             }
             util.inherits(ClientRequest, EventEmitter);
-            ClientRequest.prototype.setHeader = function(k, v) { this._headers[k] = v; return this; };
-            ClientRequest.prototype.getHeader = function(k) {
-                var lk = k.toLowerCase();
-                for (var h in this._headers) { if (h.toLowerCase() === lk) return this._headers[h]; }
+            ClientRequest.prototype.setHeader = function(k, v) {
+                var lk = String(k).toLowerCase();
+                if (this._headerSent) {
+                    var e = new Error('Cannot set headers after they are sent to the client');
+                    e.code = 'ERR_HTTP_HEADERS_SENT';
+                    throw e;
+                }
+                if (v === undefined) { delete this._headers[lk]; delete this._headerNames[lk]; return this; }
+                this._headers[lk] = v;
+                this._headerNames[lk] = String(k);
+                return this;
             };
-            ClientRequest.prototype.removeHeader = function(k) { delete this._headers[k]; return this; };
+            ClientRequest.prototype.getHeader = function(k) { return this._headers[String(k).toLowerCase()]; };
+            ClientRequest.prototype.getHeaders = function() {
+                var out = {};
+                for (var k in this._headers) out[this._headerNames[k] || k] = this._headers[k];
+                return out;
+            };
+            ClientRequest.prototype.removeHeader = function(k) {
+                var lk = String(k).toLowerCase();
+                delete this._headers[lk]; delete this._headerNames[lk];
+                return this;
+            };
             ClientRequest.prototype.setNoDelay = function() { return this; };
             ClientRequest.prototype.setSocketKeepAlive = function() { return this; };
-            ClientRequest.prototype.setTimeout = function(ms, cb) { if (cb) this.once('timeout', cb); return this; };
-            ClientRequest.prototype.write = function(chunk, enc, cb) {
-                this._pendingWrite.push(chunk);
+            ClientRequest.prototype.setTimeout = function(ms, cb) {
+                if (typeof ms === 'function') { cb = ms; ms = 0; }
+                this._timeoutMs = ms;
+                if (typeof cb === 'function') this.once('timeout', cb);
+                return this;
+            };
+            ClientRequest.prototype._clearTimer = function() {
+                if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
+            };
+            ClientRequest.prototype._armTimeout = function() {
+                var self = this;
+                if (self._timeoutMs > 0 && !self._timeoutTimer && !self._responseDone) {
+                    self._timeoutTimer = setTimeout(function() {
+                        self._timeoutTimer = null;
+                        self.emit('timeout');
+                    }, self._timeoutMs);
+                }
+            };
+            ClientRequest.prototype._fail = function(err) {
+                if (this._aborted || this._responseDone) return;
+                this._aborted = true;
+                this._clearTimer();
+                this.emit('error', err);
+                if (this._socket && !this._socket.destroyed) this._socket.destroy();
+            };
+            ClientRequest.prototype.write = function(chunk, encoding, cb) {
+                if (typeof encoding === 'function') { cb = encoding; encoding = 'utf8'; }
+                if (this._ended) {
+                    var err = new Error('write after end');
+                    err.code = 'ERR_STREAM_WRITE_AFTER_END';
+                    this.emit('error', err);
+                    if (cb) cb(err);
+                    return false;
+                }
+                if (chunk === undefined || chunk === null) { if (cb) cb(); return true; }
+                var buf = __reqChunkToBuffer(chunk, encoding);
+                this._bodyLen += buf.length;
+                if (this._headerSent && this._socket) this._sendChunk(buf);
+                else this._body.push(buf);
                 if (cb) cb();
                 return true;
             };
-            ClientRequest.prototype.destroy = function(err) {
-                if (this._socket) this._socket.destroy();
-                return this;
+            ClientRequest.prototype._sendChunk = function(buf) {
+                var socket = this._socket;
+                if (!socket || socket.destroyed) return;
+                if (this._encodeChunked) {
+                    socket.write(Buffer.concat([Buffer.from(buf.length.toString(16) + '\r\n'), buf, Buffer.from('\r\n')]));
+                } else {
+                    socket.write(buf);
+                }
             };
-            ClientRequest.prototype.end = function(chunk, enc, cb) {
-                if (chunk !== undefined && chunk !== null) this._pendingWrite.push(chunk);
-                if (typeof enc === 'function') { cb = enc; }
+            ClientRequest.prototype._flushBody = function() {
+                var body = this._body;
+                this._body = [];
+                for (var i = 0; i < body.length; i++) this._sendChunk(body[i]);
+            };
+            ClientRequest.prototype.end = function(chunk, encoding, cb) {
+                if (typeof chunk === 'function') { cb = chunk; chunk = null; }
+                if (typeof encoding === 'function') { cb = encoding; encoding = null; }
                 if (this._ended) { if (cb) cb(); return this; }
                 this._ended = true;
+                if (chunk !== undefined && chunk !== null) {
+                    var buf = __reqChunkToBuffer(chunk, encoding);
+                    this._bodyLen += buf.length;
+                    // The head may already be out (flushHeaders, or a streaming
+                    // request that already wrote): send the final chunk framed,
+                    // instead of leaving it queued in _body forever.
+                    if (this._headerSent && this._socket) this._sendChunk(buf);
+                    else this._body.push(buf);
+                }
+                this._ensureConnected();
+                this._maybeFinishRequest();
+                if (cb) cb();
+                return this;
+            };
+            ClientRequest.prototype.flushHeaders = function() {
+                this._ensureConnected();
+                if (this._connected) this._sendHead();
+                return this;
+            };
+            ClientRequest.prototype.abort = function() {
+                if (this._aborted) return this;
+                this._aborted = true;
+                this._clearTimer();
+                if (this._socket && !this._socket.destroyed) this._socket.destroy();
+                this.emit('abort');
+                this.emit('close');
+                return this;
+            };
+            ClientRequest.prototype.destroy = function(err) {
+                if (this._aborted) { if (err) this.emit('error', err); return this; }
+                this._aborted = true;
+                this._clearTimer();
+                if (this._socket && !this._socket.destroyed) this._socket.destroy();
+                if (err) this.emit('error', err);
+                this.emit('close');
+                return this;
+            };
+            ClientRequest.prototype._ensureConnected = function() {
+                if (this._socket || this._aborted) return;
                 var self = this;
-
+                this._keepAliveKey = (self._secure ? 'https:' : 'http:') + '//' + self._host + ':' + self._port;
+                var reused = (self._agent && typeof self._agent._getFreeSocket === 'function')
+                    ? self._agent._getFreeSocket(self._keepAliveKey) : null;
+                if (reused) {
+                    self._socket = reused;
+                    self._connected = true;
+                    self._socketErrorHandler = function(err) { self._fail(err); };
+                    reused.on('error', self._socketErrorHandler);
+                    self._attachSocket(reused);
+                    self.emit('socket', reused);
+                    self._sendHead();
+                    self._flushBody();
+                    self._maybeFinishRequest();
+                    self._armTimeout();
+                    return;
+                }
                 var socket = self._secure
                     ? tlsConnect(self._port, self._host, { servername: self._host })
                     : netConnect(self._port, self._host);
                 self._socket = socket;
-
-                socket.once('error', function(err) { self.emit('error', err); });
+                self._socketErrorHandler = function(err) { self._fail(err); };
+                socket.on('error', self._socketErrorHandler);
                 socket.once('connect', function() {
-                    // Build and send the HTTP request headers (deduplicate case-insensitively)
-                    var hostHdr = self._host + (self._port !== 80 && self._port !== 443 ? ':' + self._port : '');
-                    var hdrsLower = { host: hostHdr, connection: 'close' };
-                    var hdrsCase = { host: 'Host', connection: 'Connection' };
-                    Object.keys(self._headers).forEach(function(k) {
-                        var kl = k.toLowerCase();
-                        hdrsLower[kl] = self._headers[k];
-                        hdrsCase[kl] = k;
-                    });
-                    var lines = [self._method + ' ' + self._path + ' HTTP/1.1'];
-                    Object.keys(hdrsLower).forEach(function(kl) { lines.push(hdrsCase[kl] + ': ' + hdrsLower[kl]); });
-                    lines.push('', '');
-                    socket.write(lines.join('\r\n'));
-                    for (var i = 0; i < self._pendingWrite.length; i++) {
-                        socket.write(self._pendingWrite[i]);
-                    }
-                    self._pendingWrite = [];
-
-                    // Parse response headers
-                    var buf = Buffer.alloc(0);
-                    var parsedHeaders = false;
-                    socket.on('data', function onData(chunk) {
-                        if (parsedHeaders) return;
-                        buf = Buffer.concat([buf, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
-                        var idx = -1;
-                        for (var i = 0; i < buf.length - 3; i++) {
-                            if (buf[i] === 13 && buf[i+1] === 10 && buf[i+2] === 13 && buf[i+3] === 10) { idx = i; break; }
-                        }
-                        if (idx === -1) return;
-                        parsedHeaders = true;
-                        socket.removeListener('data', onData);
-                        var tail = buf.slice(idx + 4);
-                        var headerStr = buf.slice(0, idx).toString('ascii');
-                        var lines2 = headerStr.split('\r\n');
-                        var sl = (lines2[0] || '').split(' ');
-                        var statusCode = parseInt(sl[1]) || 0;
-                        var respHeaders = {};
-                        for (var j = 1; j < lines2.length; j++) {
-                            var ci = lines2[j].indexOf(':');
-                            if (ci > 0) {
-                                var rk = lines2[j].slice(0, ci).trim().toLowerCase();
-                                var rv = lines2[j].slice(ci + 1).trim();
-                                respHeaders[rk] = rv;
-                            }
-                        }
-                        var fakeRes = { statusCode: statusCode, headers: respHeaders, httpVersion: '1.1', socket: socket, resume: function() {} };
-                        if (statusCode === 101) {
-                            self.emit('upgrade', fakeRes, socket, tail);
-                        } else {
-                            var _fakeResListeners = {};
-                            fakeRes.on = function(ev, fn) { (_fakeResListeners[ev] = _fakeResListeners[ev] || []).push(fn); return fakeRes; };
-                            fakeRes.once = fakeRes.on;
-                            fakeRes.pipe = function() {};
-                            self.emit('response', fakeRes);
-                            // deliver body and end after listeners are attached
-                            setTimeout(function() {
-                                var dataFns = _fakeResListeners['data'] || [];
-                                if (tail.length) dataFns.forEach(function(fn) { fn(tail); });
-                                // consume remaining socket data
-                                var endFns = _fakeResListeners['end'] || [];
-                                socket.on('data', function(chunk) { dataFns.forEach(function(fn) { fn(chunk); }); });
-                                socket.once('end', function() { endFns.forEach(function(fn) { fn(); }); });
-                                socket.once('error', function() { endFns.forEach(function(fn) { fn(); }); });
-                            }, 0);
-                        }
-                    });
+                    if (self._aborted) return;
+                    self._connected = true;
+                    self.emit('socket', socket);
+                    self._attachSocket(socket);
+                    self._sendHead();
+                    self._flushBody();
+                    self._maybeFinishRequest();
+                    self._armTimeout();
                 });
+            };
+            ClientRequest.prototype._maybeFinishRequest = function() {
+                if (!this._ended || !this._headerSent) return;
+                if (this._encodeChunked && !this._chunkTerminated && this._socket && !this._socket.destroyed) {
+                    this._chunkTerminated = true;
+                    this._socket.write('0\r\n\r\n');
+                }
+            };
+            ClientRequest.prototype._sendHead = function() {
+                if (this._headerSent) return;
+                var socket = this._socket;
+                if (!socket) return;
+                this._headerSent = true;
+                var headers = this._headers;
+                var haveCL = headers['content-length'] !== undefined;
+                var haveTE = headers['transfer-encoding'] !== undefined;
+                // Node decides the framing when the head goes out: a body that
+                // is already complete gets Content-Length; anything still being
+                // written (or flushHeaders() before end()) gets chunked. Without
+                // this the body was written with no framing header at all, so
+                // Node's server never read it as the request body.
+                if (!haveCL && !haveTE) {
+                    if (this._ended) {
+                        headers['content-length'] = String(this._bodyLen);
+                        this._headerNames['content-length'] = 'Content-Length';
+                    } else {
+                        headers['transfer-encoding'] = 'chunked';
+                        this._headerNames['transfer-encoding'] = 'Transfer-Encoding';
+                        this._encodeChunked = true;
+                    }
+                }
+                var lines = [this._method + ' ' + this._path + ' HTTP/1.1'];
+                if (headers['host'] === undefined && !this._omitHost) {
+                    var hostHdr = this._host + ((this._port !== 80 && this._port !== 443) ? ':' + this._port : '');
+                    lines.push('Host: ' + hostHdr);
+                }
+                if (headers['connection'] === undefined) {
+                    lines.push('Connection: ' + (this._agent && this._agent.keepAlive ? 'keep-alive' : 'close'));
+                }
+                var self = this;
+                Object.keys(headers).forEach(function(lk) {
+                    var name = self._headerNames[lk] || lk;
+                    var val = headers[lk];
+                    if (Array.isArray(val)) { for (var i = 0; i < val.length; i++) lines.push(name + ': ' + val[i]); }
+                    else lines.push(name + ': ' + val);
+                });
+                lines.push('', '');
+                socket.write(lines.join('\r\n'));
+            };
+            ClientRequest.prototype._attachSocket = function(socket) {
+                var self = this;
+                if (socket._detachHttpParser) socket._detachHttpParser();
+                var st = {
+                    headBuf: Buffer.alloc(0), headersDone: false,
+                    mode: null, remaining: 0,
+                    cstate: 'size', csize: 0, pending: Buffer.alloc(0),
+                    res: null,
+                };
+                self._parserState = st;
+                function onData(chunk) {
+                    if (self._parserState !== st) return;
+                    if (!Buffer.isBuffer(chunk)) chunk = Buffer.from(chunk);
+                    if (!st.headersDone) {
+                        st.headBuf = Buffer.concat([st.headBuf, chunk]);
+                        var idx = st.headBuf.indexOf('\r\n\r\n');
+                        if (idx < 0) return;
+                        var head = st.headBuf.slice(0, idx).toString('latin1');
+                        var rest = st.headBuf.slice(idx + 4);
+                        st.headersDone = true;
+                        self._onHeaders(__parseResponseHead(head), rest);
+                        return;
+                    }
+                    self._consumeBody(chunk);
+                }
+                function onEnd() { self._onSocketEnd(); }
+                st.onData = onData;
+                st.onEnd = onEnd;
+                socket.on('data', onData);
+                socket.once('end', onEnd);
+                socket._httpParserState = st;
+            };
+            Socket.prototype._detachHttpParser = function() {
+                var st = this._httpParserState;
+                if (!st) return;
+                this.removeListener('data', st.onData);
+                this.removeListener('end', st.onEnd);
+                this._httpParserState = null;
+            };
+            ClientRequest.prototype._onHeaders = function(parsed, rest) {
+                var self = this;
+                var socket = self._socket;
+                var res = new ClientIncomingMessage(socket);
+                res.httpVersionMajor = parsed.major;
+                res.httpVersionMinor = parsed.minor;
+                res.httpVersion = parsed.major + '.' + parsed.minor;
+                res.statusCode = parsed.statusCode;
+                res.statusMessage = parsed.statusMessage;
+                res.headers = parsed.headers;
+                res.rawHeaders = parsed.rawHeaders;
+                self._response = res;
 
-                if (cb) cb();
-                return this;
+                if (parsed.statusCode === 101) {
+                    self._clearTimer();
+                    self._heardResponse = true;
+                    if (socket._detachHttpParser) socket._detachHttpParser();
+                    self._parserState = null;
+                    res.upgrade = true;
+                    self.emit('upgrade', res, socket, rest);
+                    return;
+                }
+                // 1xx informational (other than 101): keep reading the real head.
+                if (parsed.statusCode >= 100 && parsed.statusCode < 200) {
+                    self._parserState.headersDone = false;
+                    self._parserState.headBuf = rest || Buffer.alloc(0);
+                    self._parserState.onData(Buffer.alloc(0));
+                    return;
+                }
+                self._heardResponse = true;
+                self._clearTimer();
+                var te = res.headers['transfer-encoding'];
+                var cl = res.headers['content-length'];
+                var noBody = self._method === 'HEAD' || parsed.statusCode === 204 || parsed.statusCode === 304;
+                if (noBody) self._parserState.mode = 'none';
+                else if (te && /(^|,)\s*chunked\s*(,|$)/i.test(String(te))) { self._parserState.mode = 'chunked'; self._parserState.cstate = 'size'; }
+                else if (cl !== undefined && /^\d+$/.test(String(cl).trim())) { self._parserState.mode = 'length'; self._parserState.remaining = parseInt(String(cl).trim(), 10); }
+                else self._parserState.mode = 'eof';
+                self.emit('response', res);
+                if (rest && rest.length) self._consumeBody(rest);
+                else self._checkResponseComplete();
+            };
+            ClientRequest.prototype._checkResponseComplete = function() {
+                var st = this._parserState;
+                if (!st || !this._response) return;
+                if (st.mode === 'none' || (st.mode === 'length' && st.remaining <= 0)) this._finishResponse();
+            };
+            ClientRequest.prototype._consumeBody = function(chunk) {
+                var st = this._parserState;
+                var res = this._response;
+                if (!st || !res) return;
+                if (st.mode === 'none') return;
+                if (st.mode === 'length') {
+                    if (st.remaining <= 0) { this._finishResponse(); return; }
+                    if (chunk.length > st.remaining) {
+                        var take = st.remaining;
+                        res.push(chunk.slice(0, take));
+                        st.remaining = 0;
+                        this._leftover = chunk.slice(take);
+                        this._finishResponse();
+                        return;
+                    }
+                    st.remaining -= chunk.length;
+                    res.push(chunk);
+                    if (st.remaining <= 0) this._finishResponse();
+                    return;
+                }
+                if (st.mode === 'eof') { res.push(chunk); return; }
+                if (st.mode === 'chunked') this._feedChunked(chunk, res);
+            };
+            ClientRequest.prototype._feedChunked = function(chunk, res) {
+                var st = this._parserState;
+                st.pending = st.pending.length ? Buffer.concat([st.pending, chunk]) : chunk;
+                var guard = 0;
+                while (guard++ < 1000000) {
+                    if (st.cstate === 'size') {
+                        var nl = st.pending.indexOf('\r\n');
+                        if (nl < 0) return;
+                        var line = st.pending.slice(0, nl).toString('latin1');
+                        var semi = line.indexOf(';');
+                        if (semi >= 0) line = line.slice(0, semi);
+                        var size = parseInt(line.trim(), 16);
+                        if (!(size >= 0)) { this._fail(new Error('Invalid chunk size')); return; }
+                        st.pending = st.pending.slice(nl + 2);
+                        if (size === 0) { st.cstate = 'trailers'; }
+                        else { st.csize = size; st.cstate = 'data'; }
+                    } else if (st.cstate === 'data') {
+                        if (st.pending.length < st.csize) return;
+                        res.push(st.pending.slice(0, st.csize));
+                        st.pending = st.pending.slice(st.csize);
+                        st.cstate = 'data_crlf';
+                    } else if (st.cstate === 'data_crlf') {
+                        if (st.pending.length < 2) return;
+                        st.pending = st.pending.slice(2);
+                        st.cstate = 'size';
+                    } else if (st.cstate === 'trailers') {
+                        if (st.pending.length >= 2 && st.pending[0] === 13 && st.pending[1] === 10) {
+                            st.pending = st.pending.slice(2);
+                            st.cstate = 'done';
+                        } else {
+                            var nlnl = st.pending.indexOf('\r\n\r\n');
+                            if (nlnl < 0) return;
+                            st.pending = st.pending.slice(nlnl + 4);
+                            st.cstate = 'done';
+                        }
+                    } else {
+                        this._leftover = st.pending;
+                        st.pending = Buffer.alloc(0);
+                        this._finishResponse();
+                        return;
+                    }
+                    if (st.cstate === 'done') {
+                        this._leftover = st.pending;
+                        st.pending = Buffer.alloc(0);
+                        this._finishResponse();
+                        return;
+                    }
+                }
+            };
+            ClientRequest.prototype._finishResponse = function() {
+                var res = this._response;
+                if (!res || res.complete) return;
+                res.complete = true;
+                res.readableEnded = true;
+                this._responseDone = true;
+                this._clearTimer();
+                var socket = this._socket;
+                if (socket) {
+                    if (this._socketErrorHandler) { socket.removeListener('error', this._socketErrorHandler); this._socketErrorHandler = null; }
+                    if (socket._detachHttpParser) socket._detachHttpParser();
+                    var connHdr = String(res.headers['connection'] || '').toLowerCase();
+                    var keepAlive = res.httpVersionMinor === 0 ? connHdr === 'keep-alive' : connHdr !== 'close';
+                    keepAlive = keepAlive && !this._aborted && !socket.destroyed;
+                    // Release the socket *before* ending the response: the next
+                    // request is usually created from this stream's 'end'
+                    // handler, and returning it after that made the agent hand
+                    // out a fresh connection instead of reusing this one.
+                    if (keepAlive && this._agent && typeof this._agent._returnSocket === 'function') {
+                        this._agent._returnSocket(this._keepAliveKey, socket);
+                    } else if (!socket.destroyed) {
+                        socket.destroy();
+                    }
+                }
+                res.push(null);
+                this.emit('close');
+            };
+            ClientRequest.prototype._onSocketEnd = function() {
+                var st = this._parserState;
+                if (!this._heardResponse) {
+                    if (!this._aborted) this._fail(new Error('socket hang up'));
+                    return;
+                }
+                var res = this._response;
+                if (!res || res.complete) return;
+                if (st && st.mode === 'chunked' && st.cstate !== 'done') {
+                    this._fail(new Error('Premature close'));
+                    return;
+                }
+                this._finishResponse();
+            };
+
+            httpAgent.prototype._getFreeSocket = function(key) {
+                if (!this.keepAlive) return null;
+                var list = this.freeSockets[key];
+                while (list && list.length) {
+                    var s = list.pop();
+                    if (s && !s.destroyed && !(s._readableState && s._readableState.ended) && !(s._writableState && s._writableState.ended)) return s;
+                    if (s && !s.destroyed) s.destroy();
+                }
+                return null;
+            };
+            httpAgent.prototype._returnSocket = function(key, socket) {
+                if (!this.keepAlive || !socket || socket.destroyed) { if (socket && !socket.destroyed) socket.destroy(); return; }
+                var list = (this.freeSockets[key] = this.freeSockets[key] || []);
+                if (list.length >= (this.maxFreeSockets || 256)) { socket.destroy(); return; }
+                list.push(socket);
             };
 
             function httpRequest(options, callback) { return new ClientRequest(options, callback); }

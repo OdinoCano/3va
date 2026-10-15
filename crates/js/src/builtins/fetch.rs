@@ -135,7 +135,8 @@ fn do_request(
     url: String,
     method: String,
     hdrs_json: String,
-    body: Option<String>,
+    body_str: Option<String>,
+    body_bytes: Option<Vec<u8>>,
     max_response_size: Option<u64>,
     perms: Arc<PermissionState>,
 ) -> anyhow::Result<String> {
@@ -160,8 +161,10 @@ fn do_request(
     }
     req = req.set("User-Agent", "3va/0.1");
 
-    let resp_result = if let Some(b) = body {
-        req.send_string(&b)
+    let resp_result = if let Some(bytes) = body_bytes {
+        req.send_bytes(&bytes)
+    } else if let Some(s) = body_str {
+        req.send_string(&s)
     } else {
         req.call()
     };
@@ -236,11 +239,20 @@ pub fn inject_fetch(
             };
             let method = args.get(1).to_rust_string_lossy(scope);
             let hdrs_json = args.get(2).to_rust_string_lossy(scope);
-            let body_opt = if args.get(3).is_undefined() || args.get(3).is_null() {
-                None
-            } else {
-                Some(args.get(3).to_rust_string_lossy(scope))
-            };
+            // The body arrives either as a JS string or as a Uint8Array. It
+            // used to be coerced to a string unconditionally
+            // (`String(options.body)` in JS plus `to_rust_string_lossy` here),
+            // so a Buffer became its UTF-8-lossy text and a typed array became
+            // "0,255,..." — every binary POST body was corrupted.
+            let body_val = args.get(3);
+            let (body_str, body_bytes): (Option<String>, Option<Vec<u8>>) =
+                if body_val.is_undefined() || body_val.is_null() {
+                    (None, None)
+                } else if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(body_val) {
+                    (None, Some(super::v8_compat::uint8array_to_vec(scope, arr)))
+                } else {
+                    (Some(body_val.to_rust_string_lossy(scope)), None)
+                };
             // Optional per-call cap (undici names this `maxResponseSize`).
             // Only lowering the default is honored: a script cannot raise the
             // runtime-wide ceiling through this option.
@@ -309,7 +321,8 @@ pub fn inject_fetch(
                     url,
                     method,
                     hdrs_json,
-                    body_opt,
+                    body_str,
+                    body_bytes,
                     max_response_size,
                     perms_for_thread,
                 )
@@ -379,6 +392,65 @@ pub fn inject_fetch(
     );
 
     let js_code = r#"
+    function __fetchHasHeader(headersObj, name) {
+        var lk = name.toLowerCase();
+        for (var k in headersObj) { if (k.toLowerCase() === lk) return true; }
+        return false;
+    }
+    function __fetchEncodeMultipart(fd) {
+        var boundary = '----3vaFormBoundary' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        var entries = [];
+        if (fd && fd._entries) entries = fd._entries;
+        else if (fd && typeof fd.forEach === 'function') fd.forEach(function(v, k) { entries.push({ name: k, value: v }); });
+        var chain = Promise.resolve();
+        var parts = [];
+        entries.forEach(function(e) {
+            chain = chain.then(function() {
+                var name = String(e.name).replace(/"/g, '%22');
+                var value = e.value;
+                var head = '--' + boundary + '\r\nContent-Disposition: form-data; name="' + name + '"';
+                var BlobCtor = globalThis.Blob;
+                if (BlobCtor && value instanceof BlobCtor) {
+                    var fn = value.name || e.filename || 'blob';
+                    var ct = value.type || 'application/octet-stream';
+                    head += '; filename="' + String(fn).replace(/"/g, '%22') + '"\r\nContent-Type: ' + ct;
+                    return value.arrayBuffer().then(function(ab) {
+                        parts.push(Buffer.concat([Buffer.from(head + '\r\n\r\n'), Buffer.from(new Uint8Array(ab)), Buffer.from('\r\n')]));
+                    });
+                }
+                parts.push(Buffer.from(head + '\r\n\r\n' + String(value) + '\r\n'));
+            });
+        });
+        return chain.then(function() {
+            parts.push(Buffer.from('--' + boundary + '--\r\n'));
+            return { value: Buffer.concat(parts), contentType: 'multipart/form-data; boundary=' + boundary };
+        });
+    }
+    // BodyInit → (string | Uint8Array) + the Content-Type Node would infer.
+    // The old code did `String(options.body)`, so a Buffer became its UTF-8
+    // lossy text and a Uint8Array became "0,255,104,105,200": every binary
+    // body was corrupted before it ever left the process.
+    function __fetchNormalizeBody(b) {
+        return Promise.resolve().then(function() {
+            if (b === undefined || b === null) return { value: undefined, contentType: null };
+            if (typeof b === 'string') return { value: b, contentType: null };
+            var USP = globalThis.URLSearchParams;
+            if (USP && b instanceof USP) return { value: b.toString(), contentType: 'application/x-www-form-urlencoded;charset=UTF-8' };
+            if (b instanceof ArrayBuffer) return { value: new Uint8Array(b), contentType: null };
+            if (ArrayBuffer.isView(b)) return { value: new Uint8Array(b.buffer, b.byteOffset, b.byteLength), contentType: null };
+            var BlobCtor = globalThis.Blob;
+            if (BlobCtor && b instanceof BlobCtor) {
+                return b.arrayBuffer().then(function(ab) { return { value: new Uint8Array(ab), contentType: b.type || null }; });
+            }
+            var FDCtor = globalThis.FormData;
+            if (FDCtor && b instanceof FDCtor) return __fetchEncodeMultipart(b);
+            var RSCtor = globalThis.ReadableStream;
+            if (RSCtor && b instanceof RSCtor) {
+                return { error: new TypeError("fetch: a ReadableStream request body is not supported by 3va yet") };
+            }
+            return { value: String(b), contentType: null };
+        });
+    }
     globalThis.fetch = function(input, options) {
         if (input && typeof input === 'object' && typeof input.url === 'string') {
             var req = input;
@@ -391,7 +463,6 @@ pub fn inject_fetch(
 
         var method  = (options.method  || 'GET').toUpperCase();
         var signal  = options.signal || null;
-        var body    = (options.body != null) ? String(options.body) : undefined;
 
         var hdrs = options.headers;
         var headersObj = {};
@@ -411,44 +482,51 @@ pub fn inject_fetch(
             var mrs = Number(options.maxResponseSize);
             if (Number.isFinite(mrs) && mrs >= 0) maxResponseSize = mrs;
         }
-        return new Promise(function(resolve, reject) {
-            var id;
-            try {
-                id = __fetchStart(fetchUrl, method, JSON.stringify(headersObj), body, maxResponseSize);
-            } catch(e) {
-                reject(e);
-                return;
+        return __fetchNormalizeBody(options.body).then(function(prep) {
+            if (prep && prep.error) throw prep.error;
+            var body = prep ? prep.value : undefined;
+            if (prep && prep.contentType && !__fetchHasHeader(headersObj, 'content-type')) {
+                headersObj['content-type'] = prep.contentType;
             }
-            var settled = false;
-            function fail(e) { if (!settled) { settled = true; reject(e); } }
-            if (signal) {
-                signal.addEventListener('abort', function() {
-                    try { __fetchCancel(id); } catch (_) {}
-                    fail(signal.reason || new Error('AbortError'));
-                });
-            }
-            function poll() {
-                if (settled) return;
-                var raw;
+            return new Promise(function(resolve, reject) {
+                var id;
                 try {
-                    raw = __fetchPoll(id);
+                    id = __fetchStart(fetchUrl, method, JSON.stringify(headersObj), body, maxResponseSize);
                 } catch(e) {
-                    fail(e);
+                    reject(e);
                     return;
                 }
-                // Still in flight: yield to the event loop (this is what lets a
-                // same-process http.createServer() answer the request) and
-                // check again on the next turn.
-                if (raw === undefined || raw === null) {
-                    setTimeout(poll, 0);
-                    return;
+                var settled = false;
+                function fail(e) { if (!settled) { settled = true; reject(e); } }
+                if (signal) {
+                    signal.addEventListener('abort', function() {
+                        try { __fetchCancel(id); } catch (_) {}
+                        fail(signal.reason || new Error('AbortError'));
+                    });
                 }
-                var env = JSON.parse(raw);
-                if (!env.ok) { fail(new TypeError(env.error)); return; }
-                settled = true;
-                resolve(env.raw);
-            }
-            poll();
+                function poll() {
+                    if (settled) return;
+                    var raw;
+                    try {
+                        raw = __fetchPoll(id);
+                    } catch(e) {
+                        fail(e);
+                        return;
+                    }
+                    // Still in flight: yield to the event loop (this is what lets a
+                    // same-process http.createServer() answer the request) and
+                    // check again on the next turn.
+                    if (raw === undefined || raw === null) {
+                        setTimeout(poll, 0);
+                        return;
+                    }
+                    var env = JSON.parse(raw);
+                    if (!env.ok) { fail(new TypeError(env.error)); return; }
+                    settled = true;
+                    resolve(env.raw);
+                }
+                poll();
+            });
         }).then(function(raw) {
             var data = JSON.parse(raw);
             var respHeaders = new Headers(data.headers);
