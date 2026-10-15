@@ -66,6 +66,28 @@ impl TcpConn {
             }
         }
     }
+
+    /// Close only the write half (`Socket.end()`): the peer sees a FIN (or a
+    /// TLS `close_notify`) but the connection stays readable, so a server that
+    /// answers *after* the client's end is still heard. `shutdown()` above
+    /// closes both directions, which is what `destroy()` uses.
+    fn shutdown_write(&mut self) {
+        match self {
+            TcpConn::Plain(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
+            TcpConn::Tls(s) => {
+                // rustls: send close_notify and flush; the underlying TCP
+                // write side is not torn down, so reads keep working.
+                let _ = s.shutdown();
+            }
+            TcpConn::PqTls(s) => {
+                s.conn.send_close_notify();
+                let _ = s.conn.complete_io(&mut s.sock);
+                let _ = s.sock.shutdown(std::net::Shutdown::Write);
+            }
+        }
+    }
 }
 
 fn js_err<'s>(scope: &mut PinScope<'s, '_>, msg: &str) -> v8::Local<'s, v8::Value> {
@@ -581,6 +603,31 @@ pub fn inject_tcp(
             scope,
             V8String::new(scope, "__tcpClose").unwrap().into(),
             tcp_close_fn.into(),
+        );
+    }
+
+    {
+        // Half-close: flush whatever is queued, then shut down only the write
+        // side. The pooled connection stays in the table so reads keep working
+        // until the peer closes (or the JS side destroys the socket).
+        let tcp_shutdown_write_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let id_arg = args.get(0);
+                let id = id_arg.uint32_value(_scope).unwrap_or(0);
+                if let Some(conn) = pool().lock().unwrap().get_mut(&id) {
+                    conn.shutdown_write();
+                }
+                rv.set(v8::undefined(_scope).into());
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__tcpShutdownWrite").unwrap().into(),
+            tcp_shutdown_write_fn.into(),
         );
     }
 
