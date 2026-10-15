@@ -60,6 +60,15 @@ Top-level (outside `permissions`):
 | Field | Type | Equivalent CLI flag |
 |---|---|---|
 | `no-prompt` | `bool` | `--no-prompt` |
+| `no-delegate` | `bool` | `--no-delegate` |
+| `allow-insecure` | `bool` | `--allow-insecure` |
+
+`allow-insecure` opta por protocolos en claro (`http://`, `ws://`, FTP/IMAP/… sin
+TLS) hacia hosts que no son loopback. Es el equivalente en el manifiesto del flag
+global `--allow-insecure`. A diferencia del flag —que se consume en el proceso del
+CLI que lanza el comando— esta clave la lee el `3va run` que ejecuta el script, así
+que sobrevive al salto de proceso de `3va start` / `3va restart` (supervisor y app
+son procesos distintos). Sigue requiriendo el `--allow-net` correspondiente.
 
 ---
 

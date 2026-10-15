@@ -9,6 +9,37 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [2.12.5] — 2026-10-15
+
+Streaming request bodies and the last Node-compatibility gaps reported from a
+production Express app (`pg`, file uploads, a reverse proxy).
+
+### Fixed
+
+- **Request bodies are streamed, not buffered, and reach JS as `Buffer`.** The whole body was read into a `Vec<u8>`, converted with `String::from_utf8_lossy` and handed to JS as one V8 string: any non-UTF-8 byte became U+FFFD (a 5-byte binary POST arrived as 13 bytes), a 50 MB upload grew RSS to ~1.4 GiB, and at ~300 MB `V8String::new(...).unwrap()` panicked and killed the process. The body now streams from the connection task in 64 KiB chunks through a 1 MiB per-request pipe with backpressure, pulled by `IncomingMessage` as it is consumed, so memory no longer grows with the upload size and there is no size-dependent `unwrap()`. The deferred-delivery contract of 2.12.3 (body delivered when the stream is consumed, `readable`/`readableEnded` set before `'end'`) is preserved. `maxBodyBytes`/`bodyTimeoutMs` and RUDY checks still apply; `firewall.enabled: false` still means no cap.
+- **`Readable.from` / `Readable.fromWeb` / `pipeline` emit `Buffer`, not `Uint8Array`.** `Buffer.isBuffer` returned `true` for any `Uint8Array`, so the conversion guards in both bridges were dead code and `s += chunk` produced `"104,105"` instead of `"hi"`. `Buffer.isBuffer` now matches Node (only actual Buffers) and `crypto`'s `sign`, `createCipheriv`/`createDecipheriv` (`update`/`final`/`getAuthTag`), `publicEncrypt`/`privateDecrypt` and `KeyObject.export({ format: 'der' })` return `Buffer`s.
+- **`stream.pipeline` no longer stalls after the first chunk** with a synchronous destination (`fs.createWriteStream`, a custom `Writable`): `write()` can return `false` and have already emitted `'drain'` before the pipeline attached its listener, so it waited forever. The drain wait now checks whether the stream is already drained.
+- **`stream.Readable.pause()` actually pauses, and the high-water mark is enforced in bytes.** `push()` emitted `'data'` even while the stream was paused, and the watermark counted buffered *chunks*; a library that paused the request while it flushed a part to disk (`formidable`) lost most of the upload (`1040678` bytes of a `1048576`-byte file). Paused chunks are now buffered and flushed by `resume()`, and the watermark is measured in bytes as in Node.
+- **`Buffer.prototype.latin1Slice` (and the other internal `*Slice` helpers) exist.** `busboy`/`dicer` — and therefore `multer` and any `multipart/form-data` upload — call `chunk.latin1Slice(start, end)` while scanning boundaries; without it every upload failed with `chunk.latin1Slice is not a function`. `asciiSlice`, `utf8Slice`, `ucs2Slice`, `utf16leSlice`, `hexSlice`, `base64Slice` and `base64urlSlice` are added too.
+- **`3va --allow-insecure start` / `restart` / `start --attach` propagate the flag to the app.** The supervisor spawns `3va run` as a separate process and never forwarded the global flags, so `fetch('http://…')` inside the app failed with "Insecure protocol HTTP … disabled" even though the flag was passed to the CLI. `--allow-insecure` (and `--verbose`) now reach both `3va __supervise` and the `3va run` it spawns, and survive `3va restart`. A new `"3va": { "allow-insecure": true }` key in `package.json` declares the opt-in with the project, so it works without the flag too.
+- **A trusted reverse proxy is never auto-blocked.** Requests from a `trustedProxies` peer without `X-Forwarded-For` were attributed to the proxy's own IP; exceeding the limits put the *proxy* on the blocklist (`403 Forbidden`, "blocked proxy") and with it every client behind it. Such requests are now rate-limited (`429`) and counted only against the global connection cap; the proxy is never blocklisted and recovers when the bucket refills. Limits still apply to the client resolved from `X-Forwarded-For`.
+- **A top-level `fetch()` that rejects no longer lets the process exit 0.** An unhandled rejection is reported and now makes the process exit non-zero, as Node does by default; previously a TLS failure in a top-level fetch was logged and swallowed while the process still exited 0. A `fetch()` still in flight keeps the event loop alive (already the case).
+
+### Changed
+
+- **Request handlers run as soon as the request head is parsed, before the body
+  is received** — the same as Node, and a direct consequence of streaming the
+  body. A handler that never reads the request body can answer immediately; a
+  stalled or abusive body is still dropped by the firewall (the connection is
+  closed) even though the handler was invoked.
+- **`Buffer.isBuffer()` is Node-compatible**: it is `true` only for actual `Buffer`s, not for every `Uint8Array`. Code (or a test) that relied on the old behaviour must check `x instanceof Uint8Array` instead.
+- HTTP/1 request parsing no longer turns a stray blank line (an empty request line at EOF on a keep-alive connection) into a phantom request delivered to the app.
+- Native error messages built for JS are escaped, so a message that embeds client-influenced text can no longer break out of its string literal.
+
+Verified against Node 24 on the body/stream/framework matrix (raw `http`, `for await`, `pipeline`, multer/busboy/formidable, Express 4/5, Fastify, Koa) — see the PR. Not reproduced: the report that a top-level `fetch()` to a private CA "neither resolves nor rejects"; it settles correctly with and without `NODE_EXTRA_CA_CERTS`, but the exit-code divergence above was real and is fixed.
+
+---
+
 ## [2.12.4] — 2026-10-14
 
 Node compatibility gaps reported from a production Express app.

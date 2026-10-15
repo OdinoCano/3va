@@ -1,6 +1,6 @@
 [package]
 name = "vvva_wasm"
-version = "2.12.4"
+version = "2.12.5"
 rust-version.workspace = true
 edition = "2024"
 license = "MIT"
@@ -13,7 +13,7 @@ categories = ["wasm"]
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
-vvva_permissions = { version = "2.12.4", path = "../permissions" }
+vvva_permissions = { version = "2.12.5", path = "../permissions" }
 wasmtime = { workspace = true, features = ["async"] }
 wasmtime-wasi = { workspace = true }
 wat = { workspace = true }

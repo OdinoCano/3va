@@ -1565,11 +1565,16 @@ pub fn inject_fs(
                 }
             };
             var _onOrig = this.on.bind(this);
+            this._autoStarted = false;
             this.on = function(event, fn) {
                 _onOrig(event, fn);
-                if (event === 'data' && !this._readableState.flowing) {
-                    this._readableState.flowing = true;
-                    this._read(65536);
+                // Start reading on the first 'data' listener. Track our own
+                // flag rather than `flowing`: attaching a 'data' listener now
+                // sets `flowing` synchronously (Node-compatible), so the old
+                // `!flowing` test was never true and the stream never opened.
+                if (event === 'data' && !this._autoStarted && !this._done) {
+                    this._autoStarted = true;
+                    this._read(this._readableState.highWaterMark || 65536);
                 }
                 return this;
             };

@@ -295,7 +295,12 @@ Reglas de resolución (implementadas en `resolve_forwarded_for`, `crates/firewal
 - Si todas las entradas son proxies de confianza, gana la más a la izquierda (el hop más profundo de la cadena).
 - Sin header o sin resolución → se usa el peer address tal cual.
 
-Verificado por los tests `xff_ignored_when_peer_not_trusted`, `xff_resolves_client_behind_trusted_proxy`, `firewall_client_ip_uses_xff_only_through_trusted_proxies` (`crates/firewall`) y los e2e `trusted_proxy_forwards_client_ip_to_remote_address`, `untrusted_xff_header_is_ignored` (`crates/js/tests/http_server.rs`).
+**Un proxy de confianza nunca se autobloquea.** Como está delante de *todos* los clientes, meter su IP en la blocklist dejaría fuera a todo el mundo. Por eso:
+
+- Los límites por cliente (conexiones y rate limit) se aplican a la **IP resuelta** del cliente, no a la del proxy.
+- Si el proxy de confianza manda requests **sin** `X-Forwarded-For`, no hay cliente al que atribuirlas: se cuentan solo contra el tope global de conexiones y se rate-limitan contra el bucket del proxy, pero **nunca** se le añade a la blocklist (la decisión es `429 Rate Limited`, no `403 Blocked`). Tras rellenarse el bucket, el proxy vuelve a servir con normalidad.
+
+Verificado por los tests `xff_ignored_when_peer_not_trusted`, `xff_resolves_client_behind_trusted_proxy`, `firewall_client_ip_uses_xff_only_through_trusted_proxies`, `trusted_proxy_is_rate_limited_but_never_auto_blocked`, `untrusted_client_is_still_auto_blocked`, `unattributed_proxy_connection_counts_only_globally` (`crates/firewall`) y los e2e `trusted_proxy_forwards_client_ip_to_remote_address`, `untrusted_xff_header_is_ignored`, `trusted_proxy_without_xff_is_rate_limited_not_blocked` (`crates/js/tests/http_server.rs`).
 
 ---
 

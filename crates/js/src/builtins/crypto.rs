@@ -774,11 +774,11 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                     var ecCurves = ['P-256', 'P-384'];
                     for (var c = 0; c < ecCurves.length; c++) {
                         var r = __cryptoEcSign(ecCurves[c], pem, all);
-                        if (r instanceof Uint8Array) return outputEncoding ? encodeBytes(Array.from(r), outputEncoding) : r;
+                        if (r instanceof Uint8Array) return outputEncoding ? encodeBytes(Array.from(r), outputEncoding) : Buffer.from(r);
                     }
                     var r2 = __cryptoRsaSign(digestAlg, pem, all);
                     if (typeof r2 === 'string') throw new Error(r2);
-                    return outputEncoding ? encodeBytes(Array.from(r2), outputEncoding) : r2;
+                    return outputEncoding ? encodeBytes(Array.from(r2), outputEncoding) : Buffer.from(r2);
                 }
             };
         },
@@ -809,11 +809,11 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             var ecCurves = ['P-256', 'P-384'];
             for (var c = 0; c < ecCurves.length; c++) {
                 var r = __cryptoEcSign(ecCurves[c], pem, bytes);
-                if (r instanceof Uint8Array) return r;
+                if (r instanceof Uint8Array) return Buffer.from(r);
             }
             var r2 = __cryptoRsaSign(digestAlg, pem, bytes);
             if (typeof r2 === 'string') throw new Error(r2);
-            return r2;
+            return Buffer.from(r2);
         },
         verify: function(algorithm, data, key, signature) {
             var digestAlg = String(algorithm || 'sha256').replace(/^RSA-/i, '');
@@ -977,10 +977,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                         } else if (outputEncoding === 'base64') {
                             return btoa(String.fromCharCode.apply(null, out));
                         }
-                        return out;
+                        return Buffer.from(out);
                     }
                     chunks.push(bytes);
-                    return new Uint8Array(0);
+                    return Buffer.alloc(0);
                 },
                 final: function(outputEncoding) {
                     var all = [];
@@ -990,13 +990,13 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                     if (isGcm) {
                         result = __cryptoAesGcmEncrypt(keyBytes.length, Array.from(keyBytes), Array.from(ivBytes), all, Array.from(aad));
                         var ct = new Uint8Array(result.slice(0, result.length - 16));
-                        self._tag = new Uint8Array(result.slice(result.length - 16));
+                        self._tag = Buffer.from(result.slice(result.length - 16));
                         if (outputEncoding === 'hex') {
                             return Array.from(ct).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
                         } else if (outputEncoding === 'base64') {
                             return btoa(String.fromCharCode.apply(null, ct));
                         }
-                        return ct;
+                        return Buffer.from(ct);
                     } else {
                         result = __cryptoCipherOneShot(alg, Array.from(keyBytes), Array.from(ivBytes), all, true);
                         var out = new Uint8Array(result);
@@ -1005,10 +1005,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                         } else if (outputEncoding === 'base64') {
                             return btoa(String.fromCharCode.apply(null, out));
                         }
-                        return out;
+                        return Buffer.from(out);
                     }
                 },
-                getAuthTag: function() { return self._tag || new Uint8Array(16); }
+                getAuthTag: function() { return Buffer.from(self._tag || new Uint8Array(16)); }
             };
             return self;
         },
@@ -1050,10 +1050,10 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                         } else if (outputEncoding === 'base64') {
                             return btoa(String.fromCharCode.apply(null, out));
                         }
-                        return out;
+                        return Buffer.from(out);
                     }
                     chunks.push(bytes);
-                    return new Uint8Array(0);
+                    return Buffer.alloc(0);
                 },
                 final: function(outputEncoding) {
                     var all = [];
@@ -1070,7 +1070,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                         } else if (outputEncoding === 'base64') {
                             return btoa(String.fromCharCode.apply(null, out));
                         }
-                        return out;
+                        return Buffer.from(out);
                     } else {
                         result = __cryptoCipherOneShot(alg, Array.from(keyBytes), Array.from(ivBytes), all, false);
                         var out = new Uint8Array(result);
@@ -1079,7 +1079,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                         } else if (outputEncoding === 'base64') {
                             return btoa(String.fromCharCode.apply(null, out));
                         }
-                        return out;
+                        return Buffer.from(out);
                     }
                 }
             };
@@ -1105,7 +1105,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                 var b64 = pem.replace(/-----[^-]+-----/g,'').replace(/\s/g,'');
                 var bin = atob(b64), bytes = new Uint8Array(bin.length);
                 for (var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
-                return bytes;
+                return Buffer.from(bytes);
             };
             return obj;
         },
@@ -1128,14 +1128,14 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
                 var b64 = pem.replace(/-----[^-]+-----/g,'').replace(/\s/g,'');
                 var bin = atob(b64), bytes = new Uint8Array(bin.length);
                 for (var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
-                return bytes;
+                return Buffer.from(bytes);
             };
             return obj;
         },
 
         createSecretKey: function(key, encoding) {
             var bytes = key instanceof Uint8Array ? key : new Uint8Array(toBytes(key));
-            return new crypto.KeyObject('secret', { symmetricKeySize: bytes.length, export: function() { return bytes; } });
+            return new crypto.KeyObject('secret', { symmetricKeySize: bytes.length, export: function() { return Buffer.from(bytes); } });
         },
 
         publicEncrypt: function(opts, data) {
@@ -1143,7 +1143,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             if (key && key.type === 'private') key = key._pem;
             var result = __cryptoRsaSign('sha256', String(key), toBytes(data));
             if (typeof result === 'string') throw new Error(result);
-            return new Uint8Array(result);
+            return Buffer.from(result);
         },
 
         privateDecrypt: function(opts, data) {
@@ -1151,7 +1151,7 @@ pub fn inject_crypto(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::R
             if (key && key.type === 'private') key = key._pem;
             var result = __cryptoRsaSign('sha256', String(key), toBytes(data));
             if (typeof result === 'string') throw new Error(result);
-            return new Uint8Array(result);
+            return Buffer.from(result);
         },
 
         generateKeyPair: function(type, opts, callback) {

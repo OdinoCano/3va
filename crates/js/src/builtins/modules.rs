@@ -2197,7 +2197,7 @@ pub fn inject_require(
             function Readable(opts) {
                 Stream.call(this);
                 this.readable = true;
-                this._readableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, buffer: [], ended: false, flowing: false };
+                this._readableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, buffer: [], ended: false, _endEmitted: false, flowing: false };
                 if (opts && typeof opts.read === 'function') this._read = opts.read;
                 // Node: { encoding: 'utf8' } in the constructor is equivalent
                 // to calling setEncoding() — 'data' events carry decoded
@@ -2215,25 +2215,76 @@ pub fn inject_require(
                 _ensureEvents(this);
                 if (!this._events[ev]) this._events[ev] = [];
                 this._events[ev].push(fn);
-                if (ev === 'data' && !this._readableState.flowing && !this._readableState._resumeScheduled) {
-                    this._readableState._resumeScheduled = true;
-                    var self = this;
-                    setTimeout(function() {
-                        self._readableState._resumeScheduled = false;
-                        if (!self._readableState.flowing) self.resume();
-                    }, 0);
+                var state = this._readableState;
+                // Attaching a 'data' listener switches the stream to flowing
+                // mode and flushes anything buffered while it was paused.
+                // Synchronous (Node resumes on the next tick) so a push right
+                // after the attach is delivered in the same turn, which is the
+                // ordering almost all code — and the stream tests — rely on.
+                if (ev === 'data') {
+                    if (!state.flowing) state.flowing = true;
+                    this._flushIfFlowing();
+                    this._maybeEnd();
+                    // Also schedule a real resume(): streams that start I/O
+                    // from resume() (fs.ReadStream._read, UpgradeSocket's poll)
+                    // need it, and it must not run re-entrantly inside `on`.
+                    if (!state._resumeScheduled) {
+                        state._resumeScheduled = true;
+                        var self = this;
+                        setTimeout(function() {
+                            state._resumeScheduled = false;
+                            self.resume();
+                        }, 0);
+                    }
                 }
                 return this;
             };
             Readable.prototype.read = function(n) {
                 if (!this._readableState.flowing) this._read(n || 0);
                 var buf = this._readableState.buffer.splice(0);
+                this._readableState.length = 0;
+                this._maybeEnd();
                 if (!buf.length) return null;
                 // With setEncoding() the buffer holds decoded strings.
                 if (typeof buf[0] === 'string') return buf.join('');
                 return Buffer.concat ? Buffer.concat(buf) : buf[0];
             };
+            // Byte length of a buffered chunk (a count in objectMode). Used to
+            // enforce highWaterMark in bytes, the way Node does — counting
+            // buffered *chunks* made the watermark unreachable with 64 KiB chunks.
+            function _chunkBytes(chunk) {
+                if (typeof chunk === 'string') return chunk.length;
+                return (chunk && typeof chunk.length === 'number') ? chunk.length : 1;
+            }
+            // Deliver buffered chunks to 'data' listeners while the stream is
+            // flowing, stopping the moment a listener pauses it again.
+            Readable.prototype._flushIfFlowing = function() {
+                var state = this._readableState;
+                while (state.buffer.length && state.flowing) {
+                    // Re-check each iteration: a `once('data')` consumer (the
+                    // async iterator) removes itself after the first chunk, and
+                    // emitting the rest to nobody would silently drop them.
+                    var hasDataL = this._events && this._events['data'] && this._events['data'].length > 0;
+                    if (!hasDataL) break;
+                    var chunk = state.buffer.shift();
+                    state.length = Math.max(0, state.length - _chunkBytes(chunk));
+                    this.emit('data', chunk);
+                }
+            };
+            // Emit 'end' only once the buffer is empty. Emitting it while data
+            // was still buffered (a fast producer calling push(null) before a
+            // paused consumer resumed) made small bodies vanish: the pending
+            // 'end' resolved a consumer's `for await` before its 'data' did.
+            Readable.prototype._maybeEnd = function() {
+                var state = this._readableState;
+                if (state.ended && !state._endEmitted && state.buffer.length === 0) {
+                    state._endEmitted = true;
+                    this.emit('end');
+                    this.emit('readable');
+                }
+            };
             Readable.prototype.push = function(chunk) {
+                var state = this._readableState;
                 if (chunk === null) {
                     // Flush any incomplete trailing multi-byte sequence the
                     // decoder has been holding back as a final 'data' event.
@@ -2242,12 +2293,13 @@ pub fn inject_require(
                         this._decoder = null;
                         if (tail) {
                             var hasDataT = this._events && this._events['data'] && this._events['data'].length > 0;
-                            if (!hasDataT) this._readableState.buffer.push(tail);
-                            this.emit('data', tail);
+                            if (state.flowing && hasDataT) this.emit('data', tail);
+                            else { state.buffer.push(tail); state.length += _chunkBytes(tail); }
                         }
                     }
-                    this._readableState.ended = true;
-                    this.emit('end');
+                    state.ended = true;
+                    this._flushIfFlowing();
+                    this._maybeEnd();
                     this.emit('readable');
                 } else {
                     // Honor setEncoding(): decode byte chunks through the
@@ -2255,29 +2307,59 @@ pub fn inject_require(
                     // across chunks are reassembled, never re-decoded
                     // per-chunk (which would corrupt boundary-straddling
                     // multi-byte characters into U+FFFD).
-                    if (this._decoder && !this._readableState.objectMode && typeof chunk !== 'string') {
+                    if (this._decoder && !state.objectMode && typeof chunk !== 'string') {
                         chunk = this._decoder.write(chunk);
                     }
+                    // Node only emits 'data' while flowing. Emitting while
+                    // paused (as this did) meant `pause()` did not actually
+                    // stop delivery, which corrupted uploads in libraries that
+                    // pause the request while they flush to disk (formidable).
                     var hasDataL = this._events && this._events['data'] && this._events['data'].length > 0;
-                    if (!hasDataL) this._readableState.buffer.push(chunk);
-                    if (this._events && this._events['readable'] && this._events['readable'].length) {
-                        this.emit('readable');
+                    if (state.flowing && hasDataL) {
+                        this.emit('data', chunk);
+                    } else {
+                        state.buffer.push(chunk);
+                        state.length += state.objectMode ? 1 : _chunkBytes(chunk);
+                        if (this._events && this._events['readable'] && this._events['readable'].length) {
+                            this.emit('readable');
+                        }
                     }
-                    this.emit('data', chunk);
                 }
-                return !this._readableState.ended;
+                return !state.ended;
             };
             Readable.prototype.unshift = function(chunk) { if (chunk != null) this.emit('data', chunk); return this; };
             Readable.prototype.pipe = function(dest, opts) {
                 var self = this;
-                this.on('data', function(c) { if (dest.write(c) === false && self.pause) self.pause(); });
+                function onDrain() { if (!self._readableState.flowing) self.resume(); }
+                this.on('data', function(c) {
+                    if (dest.write(c) === false) {
+                        // `write()` can return false *and* have already
+                        // emitted 'drain' synchronously (a sync `_write`). Only
+                        // pause if the destination is still over its watermark,
+                        // or the pause would outlive the drain and stall.
+                        var dst = dest._writableState;
+                        if (self.pause && dst && dst.length >= dst.highWaterMark) self.pause();
+                    }
+                });
                 this.on('end', function() { if (!opts || opts.end !== false) dest.end(); });
+                // Now that pause() actually stops 'data', resume when the
+                // destination drains — otherwise a slow destination stalls the
+                // pipe after the first backpressured write (Node does this too).
+                if (dest && typeof dest.on === 'function') dest.on('drain', onDrain);
                 dest.emit('pipe', this);
                 if (!this._readableState.flowing) this.resume();
                 return dest;
             };
             Readable.prototype.unpipe = function(dest) { return this; };
-            Readable.prototype.resume = function() { this._readableState.flowing = true; this._read(0); return this; };
+            Readable.prototype.resume = function() {
+                var state = this._readableState;
+                state.flowing = true;
+                state._resumeScheduled = false;
+                this._flushIfFlowing();
+                this._maybeEnd();
+                this._read(0);
+                return this;
+            };
             Readable.prototype.pause = function() { this._readableState.flowing = false; return this; };
             // setEncoding() creates the long-lived decoder used by push():
             // storing the value alone is not enough — consumers that collect
@@ -2298,8 +2380,12 @@ pub fn inject_require(
                         // earlier pending next() used to flip a shared flag and
                         // make a buffered final chunk invisible (the async
                         // generator dropped the last element).
-                        if (self._readableState.buffer.length)
-                            return Promise.resolve({ value: self._readableState.buffer.shift(), done: false });
+                        if (self._readableState.buffer.length) {
+                            var _v = self._readableState.buffer.shift();
+                            self._readableState.length = Math.max(0, self._readableState.length - _chunkBytes(_v));
+                            self._maybeEnd();
+                            return Promise.resolve({ value: _v, done: false });
+                        }
                         if (self._readableState.ended)
                             return Promise.resolve({ done: true });
                         return new Promise(function(resolve) {
@@ -2345,7 +2431,7 @@ pub fn inject_require(
                     return false;
                 }
                 var chunkLen = 1;
-                if (Buffer.isBuffer(chunk)) {
+                if (chunk instanceof Uint8Array) {
                     chunkLen = chunk.length;
                 } else if (typeof chunk === 'string') {
                     chunkLen = new TextEncoder().encode(chunk).length;
@@ -2649,7 +2735,17 @@ pub fn inject_require(
             // a function stage is called with the previous stage's async
             // iterable and whatever it returns becomes the next stage.
             function pipelineDrain(w) {
-                return new Promise(function(resolve) { w.once('drain', resolve); });
+                return new Promise(function(resolve) {
+                    // A synchronous `_write` (fs, sockets, custom Writables) can
+                    // return `false` from `write()` and already be drained by
+                    // the time we look — the `'drain'` it emitted ran before we
+                    // could attach a listener. Without this check the pipeline
+                    // waited for a drain that had already happened and stalled
+                    // after the first chunk.
+                    var st = w && w._writableState;
+                    if (!st || st.length < st.highWaterMark) { resolve(); return; }
+                    w.once('drain', resolve);
+                });
             }
             function pipelineEnd(w) {
                 return new Promise(function(resolve, reject) {
@@ -3974,10 +4070,12 @@ pub fn inject_require(
             var httpGlobalAgent = new httpAgent();
             var HTTP_STATUS_CODES = { '100': 'Continue', '200': 'OK', '201': 'Created', '204': 'No Content', '301': 'Moved Permanently', '302': 'Found', '304': 'Not Modified', '400': 'Bad Request', '401': 'Unauthorized', '403': 'Forbidden', '404': 'Not Found', '405': 'Method Not Allowed', '500': 'Internal Server Error', '502': 'Bad Gateway', '503': 'Service Unavailable' };
 
-            // ── IncomingMessage — request bodies are already fully buffered by the
-            // native accept loop (see http_server.rs), so headers/method/url/body
-            // are set synchronously; 'data'/'end' are still emitted async for code
-            // that expects to stream a request body.
+            // ── IncomingMessage — the request body streams from the native
+            // connection task (see http_server.rs): headers/method/url are set
+            // synchronously when the head is dispatched, and the body is pulled
+            // chunk by chunk from `__httpReadBody` only once something consumes
+            // the stream. The producer keeps at most 1 MiB buffered ahead, so a
+            // large upload never grows memory with its size.
             var httpIncomingMessage = function(socket) {
                 Readable.call(this);
                 this.socket = socket || {};
@@ -3988,43 +4086,130 @@ pub fn inject_require(
                 this.method = 'GET';
                 this.url = '/';
                 this.headers = {};
-                this.complete = true;
+                this.complete = false;
             };
             util.inherits(httpIncomingMessage, Readable);
-            // Server requests deliver their body when something starts consuming the stream
-            // ('data'/'readable' listener, resume(), read(), pipe(), for-await), not right after
-            // the handler returns: middleware that awaits before express.json() attaches its
-            // listeners late and used to miss it. Delivered through push() so setEncoding() is
-            // honored. A request without a body ends as soon as anyone listens for 'end', and
-            // 'end' listeners added after the end still get it once.
+            // The body is delivered when something starts consuming the stream
+            // ('data'/'readable'/'end' listener, resume(), read(), pipe(),
+            // for-await), not right after the handler returns: middleware that
+            // awaits before express.json() attaches its listeners late and used
+            // to miss it. Chunks go through push() so setEncoding() is honored.
+            // A consumed request reports `readable: false` / `readableEnded:
+            // true` before `'end'` (on-finished reads these inside an 'end'
+            // handler to tell a consumed request, e.g. the 400 for malformed
+            // JSON), and `'end'` listeners added after the end still get it once.
             var kIncomingBody = typeof Symbol === 'function' ? Symbol('3va.incomingBody') : '__3vaIncomingBody';
+            function finishIncoming(req, st) {
+                if (st.done) return;
+                st.done = true;
+                req.complete = true;
+                req.readable = false;
+                req.readableEnded = true;
+                req.push(null);
+            }
+            function pumpIncoming(req, st) {
+                var state = req._readableState;
+                function schedule() {
+                    if (st.pumpScheduled || st.done) return;
+                    st.pumpScheduled = true;
+                    queueMicrotask(function() { st.pumpScheduled = false; step(); });
+                }
+                function scheduleRetry() {
+                    if (st.pumpScheduled || st.done) return;
+                    st.pumpScheduled = true;
+                    setTimeout(function() { st.pumpScheduled = false; step(); }, 1);
+                }
+                function step() {
+                    if (st.done) return;
+                    var hasConsumer = state.flowing
+                        || (req._events && req._events['data'] && req._events['data'].length > 0)
+                        || (req._events && req._events['readable'] && req._events['readable'].length > 0);
+                    if (state.length >= state.highWaterMark) {
+                        // Backpressure: wait for the consumer to drain. With no
+                        // consumer at all (only an 'end' listener), discard so
+                        // the body still reaches 'end' without unbounded memory.
+                        if (hasConsumer) { st.waiting = true; return; }
+                        state.buffer.length = 0;
+                        state.length = 0;
+                    }
+                    st.waiting = false;
+                    var chunk;
+                    try {
+                        chunk = __httpReadBody(st.bodyId, 65536);
+                    } catch (e) {
+                        st.done = true;
+                        req.complete = true;
+                        req.readable = false;
+                        req.readableEnded = true;
+                        req.emit('error', e);
+                        req.push(null);
+                        return;
+                    }
+                    if (chunk === null) { finishIncoming(req, st); return; }
+                    if (chunk instanceof Error) {
+                        // The native reader reported a body error (stall, RUDY,
+                        // abort). Surface it on the request stream instead of
+                        // handing an Error to Buffer.from.
+                        st.done = true;
+                        req.complete = true;
+                        req.readable = false;
+                        req.readableEnded = true;
+                        req.emit('error', chunk);
+                        req.push(null);
+                        return;
+                    }
+                    if (chunk === undefined) { st.waiting = true; scheduleRetry(); return; }
+                    req.push(typeof Buffer !== 'undefined' ? Buffer.from(chunk) : chunk);
+                    if (state.length >= state.highWaterMark) { st.waiting = true; return; }
+                    // Yield between chunks so an async consumer (for await,
+                    // pipeline) applies backpressure instead of us racing ahead.
+                    schedule();
+                }
+                // Resuming after the consumer drained the buffer: run on the
+                // current turn unless a continuation is already queued.
+                st.step = function() { if (!st.pumpScheduled) { st.waiting = false; step(); } };
+                step();
+            }
             function deliverIncomingBody(req) {
                 var st = req[kIncomingBody];
                 if (!st || st.started) return;
                 st.started = true;
-                queueMicrotask(function() {
-                    if (st.raw) req.push(typeof Buffer !== 'undefined' ? Buffer.from(st.raw) : st.raw);
-                    st.raw = null;
-                    // Set before 'end' is emitted, as in Node: on-finished reads these inside an
-                    // 'end' handler to tell a consumed request (finalhandler then answers at once,
-                    // e.g. the 400 for malformed JSON).
-                    st.ended = true;
-                    req.readable = false;
-                    req.readableEnded = true;
-                    req.push(null);
-                });
+                if (!st.bodyId) { finishIncoming(req, st); return; }
+                pumpIncoming(req, st);
             }
             httpIncomingMessage.prototype.on = httpIncomingMessage.prototype.addListener = function(ev, fn) {
                 var st = this[kIncomingBody];
-                if (st && ev === 'end' && st.ended) { var self = this; queueMicrotask(function() { fn.call(self); }); return this; }
+                if (st && ev === 'end' && st.done) { var self = this; queueMicrotask(function() { fn.call(self); }); return this; }
                 var r = Readable.prototype.on.call(this, ev, fn);
-                if (st && (ev === 'data' || ev === 'readable' || (ev === 'end' && !st.raw))) deliverIncomingBody(this);
+                if (st && (ev === 'data' || ev === 'readable' || ev === 'end')) {
+                    deliverIncomingBody(this);
+                    // A consumer (e.g. `for await`) that drained the buffer and
+                    // re-attached its listener must also restart a pump paused
+                    // on backpressure — nothing else will.
+                    if (st.waiting && st.step) st.step();
+                }
                 return r;
             };
-            httpIncomingMessage.prototype.resume = function() { deliverIncomingBody(this); return Readable.prototype.resume.call(this); };
-            httpIncomingMessage.prototype.read = function(n) { deliverIncomingBody(this); return Readable.prototype.read.call(this, n); };
+            httpIncomingMessage.prototype.resume = function() {
+                var st = this[kIncomingBody];
+                deliverIncomingBody(this);
+                Readable.prototype.resume.call(this);
+                if (st && st.waiting && st.step) st.step();
+                return this;
+            };
+            httpIncomingMessage.prototype.read = function(n) {
+                var st = this[kIncomingBody];
+                deliverIncomingBody(this);
+                var r = Readable.prototype.read.call(this, n);
+                if (st && st.waiting && st.step) st.step();
+                return r;
+            };
             httpIncomingMessage.prototype.setTimeout = function() { return this; };
-            httpIncomingMessage.prototype.destroy = function() { return this; };
+            httpIncomingMessage.prototype.destroy = function() {
+                var st = this[kIncomingBody];
+                if (st) { st.done = true; this[kIncomingBody] = null; }
+                return this;
+            };
 
             // ── ServerResponse — buffers writes and flushes as one __httpRespond(Bytes)
             // call on end(), since the native side writes headers+body together.
@@ -4253,8 +4438,9 @@ __httpSetHandler(self._id, function() {
                         req.rawHeaders = _raw;
                         // Body state lives under a Symbol, never `req._body`: body-parser 1.x
                         // (Express 4) uses `req._body` as its "already parsed" flag. Set before
-                        // the 'request' event so the handler's own listeners see it.
-                        req[kIncomingBody] = { raw: raw[4], started: false, ended: false };
+                        // the 'request' event so the handler's own listeners see it. The body
+                        // streams from the native pipe named by `raw[4]` (0 = no body).
+                        req[kIncomingBody] = { bodyId: raw[4] | 0, started: false, done: false, waiting: false };
                         var res = new httpServerResponse(req);
                         self.emit('request', req, res);
                         self.emit('connection', req.socket);

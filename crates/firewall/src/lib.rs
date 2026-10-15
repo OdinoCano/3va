@@ -612,6 +612,23 @@ impl Firewall {
         let violations = bucket.violations;
         drop(buckets);
 
+        // A trusted reverse proxy must never be auto-blocked: it fronts every
+        // client, so putting its address on the blocklist would black-hole all
+        // of them. Requests that can't be attributed to a real client (a
+        // trusted peer with no `X-Forwarded-For`) are rate-limited instead, and
+        // attributed requests are limited against the resolved client IP long
+        // before this point (see `http_server::handle_connection`). Verify
+        // before recording so a manual `block_ip` of the proxy still stands.
+        if self.is_trusted_proxy(ip) {
+            let retry_after_ms = (1000.0 / self.config.rate_limit_rps as f64) as u64;
+            warn!(
+                ip = %ip,
+                violations,
+                "Firewall: rate limited trusted proxy (never auto-blocked; limits apply to the resolved client)"
+            );
+            return FirewallDecision::RateLimited { retry_after_ms };
+        }
+
         // Auto-block after threshold violations. The block duration escalates
         // for repeat offenders (see `record_auto_block`).
         if violations >= self.config.auto_block_threshold {
@@ -649,6 +666,27 @@ impl Firewall {
             if *c == 0 {
                 per_ip.remove(&ip);
             }
+        }
+        let mut total = self.conn_total.lock().unwrap();
+        *total = total.saturating_sub(1);
+    }
+
+    /// Register a connection from a trusted proxy whose client could not be
+    /// attributed (the peer sent no `X-Forwarded-For`). It counts only against
+    /// the global cap: the proxy's own per-IP count is meaningless (it fronts
+    /// many clients) and capping it would reject legitimate traffic.
+    /// Pair with [`Firewall::on_disconnect_unattributed`].
+    pub fn on_connect_unattributed(&self) {
+        if !self.config.enabled {
+            return;
+        }
+        *self.conn_total.lock().unwrap() += 1;
+    }
+
+    /// Release a connection registered with [`Firewall::on_connect_unattributed`].
+    pub fn on_disconnect_unattributed(&self) {
+        if !self.config.enabled {
+            return;
         }
         let mut total = self.conn_total.lock().unwrap();
         *total = total.saturating_sub(1);
@@ -1368,5 +1406,78 @@ mod tests {
         // …yet a connection from the same proxy still passes the behind-proxy
         // check, because its per-IP count is deferred to real clients.
         assert!(fw.check_connection_behind_proxy(proxy).is_allowed());
+    }
+
+    #[test]
+    fn trusted_proxy_is_rate_limited_but_never_auto_blocked() {
+        // A trusted proxy that keeps hammering without X-Forwarded-For must be
+        // rate-limited, never added to the blocklist: blocking its address
+        // would black-hole every client behind it.
+        let fw = Firewall::new(FirewallConfig {
+            rate_limit_rps: 1,
+            rate_limit_burst: 1,
+            auto_block_threshold: 1,
+            trusted_proxies: vec!["127.0.0.1".to_string()],
+            ..Default::default()
+        });
+        let proxy: IpAddr = "127.0.0.1".parse().unwrap();
+        for _ in 0..50 {
+            match fw.check_request(proxy) {
+                FirewallDecision::Blocked { .. } => {
+                    panic!("a trusted proxy must never be auto-blocked")
+                }
+                FirewallDecision::RateLimited { .. } | FirewallDecision::Allow => {}
+                other => panic!("unexpected decision: {other:?}"),
+            }
+        }
+        assert!(!fw.is_blocked(proxy));
+    }
+
+    #[test]
+    fn untrusted_client_is_still_auto_blocked() {
+        // The guard must be specific to trusted proxies.
+        let fw = Firewall::new(FirewallConfig {
+            rate_limit_rps: 1,
+            rate_limit_burst: 1,
+            auto_block_threshold: 1,
+            trusted_proxies: vec!["10.0.0.1".to_string()],
+            ..Default::default()
+        });
+        let client: IpAddr = "203.0.113.9".parse().unwrap();
+        let mut blocked = false;
+        for _ in 0..50 {
+            if matches!(fw.check_request(client), FirewallDecision::Blocked { .. }) {
+                blocked = true;
+                break;
+            }
+        }
+        assert!(blocked, "an untrusted abusive client must still be blocked");
+    }
+
+    #[test]
+    fn unattributed_proxy_connection_counts_only_globally() {
+        let fw = Firewall::new(FirewallConfig {
+            max_connections_per_ip: 1,
+            max_connections_total: 3,
+            ..Default::default()
+        });
+        let proxy: IpAddr = "127.0.0.1".parse().unwrap();
+        // Store 1 open unattributed connection from the proxy.
+        fw.on_connect_unattributed();
+        // The proxy's per-IP count is untouched, so its own cap is not hit.
+        assert!(fw.check_connection(proxy).is_allowed());
+        // But the global count is charged.
+        fw.on_connect_unattributed();
+        fw.on_connect_unattributed();
+        assert!(matches!(
+            fw.check_connection_behind_proxy(proxy),
+            FirewallDecision::ConnectionLimitReached
+        ));
+        // Releasing the unattributed connections restores room.
+        fw.on_disconnect_unattributed();
+        fw.on_disconnect_unattributed();
+        fw.on_disconnect_unattributed();
+        assert!(fw.check_connection_behind_proxy(proxy).is_allowed());
+        assert!(fw.check_connection(proxy).is_allowed());
     }
 }

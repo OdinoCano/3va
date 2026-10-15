@@ -202,6 +202,15 @@ Allows unencrypted protocols to non-loopback hosts: `http://` (fetch), `ws://`, 
 3va --allow-insecure run app.ts --allow-net=legacy.internal    # allowed
 ```
 
+Es un flag **global**: `3va --allow-insecure start app.js`, `3va --allow-insecure dev`
+y `3va --allow-insecure start --attach app.js` lo propagan al proceso supervisado
+(el supervisor y la app son procesos distintos; sin propagarlo, `fetch('http://…')`
+dentro de la app fallaba con "Insecure protocol HTTP … disabled" aunque el flag se
+pasara al CLI). El `3va restart` de un proceso lo conserva. También puede
+declararse en el manifiesto con `"3va": { "allow-insecure": true }` (ver
+`docs/06-permissions/06-package-json-permissions.md`), que es lo recomendado cuando
+la app arranca siempre desde el proyecto.
+
 ## 3.8 Short flag reference
 
 All flags that have a single-letter alias, grouped by command:

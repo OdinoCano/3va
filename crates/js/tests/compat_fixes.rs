@@ -2,7 +2,7 @@
 // Copyright (c) 3va contributors
 
 // Tests for the Node.js compatibility fixes introduced in this batch:
-//   - Buffer.isBuffer() accepting raw Uint8Array
+//   - Buffer.isBuffer() matching Node (true only for actual Buffers)
 //   - crypto.webcrypto wrapper
 //   - crypto.scryptSync using real scrypt
 //   - crypto.generateKeyPair / generateKeyPairSync (RSA, EC)
@@ -53,13 +53,16 @@ async fn eval_async_result(e: &mut JsEngine, setup: &str, var: &str) -> String {
 // ── Buffer.isBuffer ───────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn buffer_is_buffer_accepts_uint8array() {
+async fn buffer_is_buffer_rejects_plain_uint8array() {
+    // Node's Buffer.isBuffer is true only for actual Buffers, not for every
+    // Uint8Array. The old `instanceof Buffer || instanceof Uint8Array` made the
+    // conversion guards in Readable.from/fromWeb unreachable.
     let mut e = engine().await;
     let r = e
         .eval_to_string("String(Buffer.isBuffer(new Uint8Array(4)))")
         .await
         .unwrap();
-    assert_eq!(r, "true");
+    assert_eq!(r, "false");
 }
 
 #[tokio::test]
@@ -817,4 +820,32 @@ async fn pbkdf2_and_scrypt_return_buffers() {
         .await
         .unwrap();
     assert_eq!(r, "true,16,true,true,64,8");
+}
+
+/// Node's internal per-encoding Buffer slice helpers, which `busboy`/`dicer`
+/// (and so every `multipart/form-data` upload through `multer`) call while
+/// scanning boundaries. Without `latin1Slice` uploads failed with
+/// "chunk.latin1Slice is not a function".
+#[tokio::test]
+async fn buffer_has_internal_slice_helpers() {
+    let mut e = engine().await;
+    let r = e
+        .eval_to_string(
+            r#"
+            var b = Buffer.from([0x41, 0xff, 0x42, 0x43]);
+            [
+              b.latin1Slice(1, 3),
+              b.utf8Slice(0, 1),
+              b.hexSlice(0, 2),
+              b.base64Slice(0, 1),
+              typeof b.asciiSlice,
+              typeof b.base64urlSlice,
+              typeof b.ucs2Slice,
+              typeof b.utf16leSlice
+            ].join('|')
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r, "\u{ff}B|A|41ff|QQ==|function|function|function|function");
 }

@@ -85,6 +85,16 @@ pub struct ProcessInfo {
     pub autorestart: bool,
     #[serde(default)]
     pub instance_pids: Vec<u32>,
+    /// Global `--allow-insecure` in effect when the process was started. Kept
+    /// on disk so a supervised app — and a later `3va restart` — still reaches
+    /// plaintext (`http://`, `ws://`, …) hosts without the user re-passing the
+    /// flag to a command that never received it (the supervisor spawns a fresh
+    /// `3va run` process that would otherwise start with the opt-in off).
+    #[serde(default)]
+    pub allow_insecure: bool,
+    /// Global `--verbose` in effect when the process was started.
+    #[serde(default)]
+    pub verbose: bool,
 }
 
 fn processes_dir() -> PathBuf {
@@ -234,6 +244,12 @@ pub struct SupervisorConfig {
     /// `info.restarts + 1` for `3va restart`, so the count survives
     /// supervisor generations without racing the on-disk state.
     pub start_restarts: u32,
+    /// Global `--allow-insecure`: forwarded verbatim to every spawned
+    /// `3va run` (and to `3va __supervise`), so a supervised app inherits the
+    /// same plaintext-protocol opt-in as the CLI invocation that started it.
+    pub allow_insecure: bool,
+    /// Global `--verbose`: forwarded to every spawned `3va run`.
+    pub verbose: bool,
 }
 
 /// Spawn the managed daemon in the background: launches `3va __supervise`
@@ -259,25 +275,11 @@ pub fn start_managed(cfg: &SupervisorConfig, cwd: &Path) -> anyhow::Result<Proce
     let (abs_entry, run_dir) = resolve_entry_and_run_dir(&cfg.entry, cwd);
 
     let mut cmd = std::process::Command::new(&bin);
-    cmd.arg("__supervise")
-        .arg("--name")
-        .arg(&cfg.name)
-        .arg("--instances")
-        .arg(cfg.instances.to_string())
-        .arg("--max-restarts")
-        .arg(cfg.max_restarts.to_string())
-        .arg("--start-restarts")
-        .arg(cfg.start_restarts.to_string());
-    if !cfg.autorestart {
-        cmd.arg("--no-autorestart");
-    }
-    if let Some(p) = cfg.port {
-        cmd.arg("--port").arg(p.to_string());
-    }
-    cmd.arg(&abs_entry);
-    if !cfg.args.is_empty() {
-        cmd.arg("--").args(&cfg.args);
-    }
+    // Global flags live on the top-level `Cli` and are not inherited across
+    // fork/exec: without forwarding them here, a `3va --allow-insecure start`
+    // supervisor (and the `3va run` it spawns) would silently drop the opt-in
+    // that lets the app reach plaintext protocols (http://, ws://, …).
+    cmd.args(supervise_args(cfg, &abs_entry));
     cmd.current_dir(&run_dir)
         .stdout(log.try_clone()?)
         .stderr(log)
@@ -323,6 +325,8 @@ pub fn start_managed(cfg: &SupervisorConfig, cwd: &Path) -> anyhow::Result<Proce
         max_restarts: cfg.max_restarts,
         autorestart: cfg.autorestart,
         instance_pids: vec![],
+        allow_insecure: cfg.allow_insecure,
+        verbose: cfg.verbose,
     };
 
     save_process(&info)?;
@@ -335,6 +339,85 @@ pub fn start_managed(cfg: &SupervisorConfig, cwd: &Path) -> anyhow::Result<Proce
 /// `SO_REUSEPORT`, letting `instances > 1` share the same port. `inherit_stdio`
 /// is true only for `3va start --attach`, where the app's output should go
 /// straight to the foreground terminal/container log instead of a file.
+/// The global flags that must survive a fork/exec into a supervised app. They
+/// live on the top-level `Cli` and are not inherited across processes, so a
+/// `3va --allow-insecure start` would otherwise silently drop the opt-in for
+/// the `3va run` it spawns.
+pub(crate) fn global_flag_args(allow_insecure: bool, verbose: bool) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if allow_insecure {
+        v.push("--allow-insecure");
+    }
+    if verbose {
+        v.push("--verbose");
+    }
+    v
+}
+
+/// Argument vector for the supervised `3va run` process (excluding the program
+/// itself). Kept separate from [`spawn_app_instance`] so the propagation of
+/// global flags can be asserted without spawning anything.
+pub(crate) fn app_instance_args(
+    entry: &Path,
+    port: Option<u16>,
+    cluster: bool,
+    allow_insecure: bool,
+    verbose: bool,
+    args: &[String],
+) -> Vec<String> {
+    let mut v: Vec<String> = global_flag_args(allow_insecure, verbose)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    v.push("run".to_string());
+    if let Some(p) = port {
+        v.push("--port".to_string());
+        v.push(p.to_string());
+    }
+    // See the note in the old start_process: CI=true plus --allow-env=CI
+    // keeps dev-server CLIs (Vite, nodemon, ...) from treating a closed
+    // stdin as "my terminal died" and exiting before they bind their port.
+    v.push("--allow-env=CI".to_string());
+    v.push(entry.to_string_lossy().to_string());
+    if !args.is_empty() {
+        v.push("--".to_string());
+        v.extend(args.iter().cloned());
+    }
+    let _ = cluster; // VVVA_CLUSTER is set as an env var, not an argument.
+    v
+}
+
+/// Argument vector for the detached `3va __supervise` process.
+pub(crate) fn supervise_args(cfg: &SupervisorConfig, abs_entry: &Path) -> Vec<String> {
+    let mut v: Vec<String> = global_flag_args(cfg.allow_insecure, cfg.verbose)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    v.push("__supervise".to_string());
+    v.push("--name".to_string());
+    v.push(cfg.name.clone());
+    v.push("--instances".to_string());
+    v.push(cfg.instances.to_string());
+    v.push("--max-restarts".to_string());
+    v.push(cfg.max_restarts.to_string());
+    v.push("--start-restarts".to_string());
+    v.push(cfg.start_restarts.to_string());
+    if !cfg.autorestart {
+        v.push("--no-autorestart".to_string());
+    }
+    if let Some(p) = cfg.port {
+        v.push("--port".to_string());
+        v.push(p.to_string());
+    }
+    v.push(abs_entry.to_string_lossy().to_string());
+    if !cfg.args.is_empty() {
+        v.push("--".to_string());
+        v.extend(cfg.args.iter().cloned());
+    }
+    v
+}
+
+#[allow(clippy::too_many_arguments)]
 fn spawn_app_instance(
     entry: &Path,
     cwd: &Path,
@@ -343,24 +426,27 @@ fn spawn_app_instance(
     cluster: bool,
     inherit_stdio: bool,
     log_file_path: &Path,
+    allow_insecure: bool,
+    verbose: bool,
 ) -> anyhow::Result<tokio::process::Child> {
     let bin = std::env::current_exe()?;
     let mut cmd = tokio::process::Command::new(&bin);
-    cmd.arg("run");
-    if let Some(p) = port {
-        cmd.arg("--port").arg(p.to_string());
-    }
-    // See the note in the old start_process: CI=true plus --allow-env=CI
-    // keeps dev-server CLIs (Vite, nodemon, ...) from treating a closed
-    // stdin as "my terminal died" and exiting before they bind their port.
+    // Forward the global flags to the `3va run` grandchild — the supervisor
+    // and the app are separate processes, so flags parsed by the CLI that
+    // launched `start` are otherwise lost (e.g. `--allow-insecure`).
+    cmd.args(app_instance_args(
+        entry,
+        port,
+        cluster,
+        allow_insecure,
+        verbose,
+        args,
+    ));
+    // `CI=true` keeps dev-server CLIs (Vite, nodemon, ...) from treating a
+    // closed stdin as "my terminal died" and exiting before they bind a port.
     cmd.env("CI", "true");
-    cmd.arg("--allow-env=CI");
     if cluster {
         cmd.env("VVVA_CLUSTER", "1");
-    }
-    cmd.arg(entry);
-    if !args.is_empty() {
-        cmd.arg("--").args(args);
     }
     cmd.current_dir(cwd).stdin(std::process::Stdio::null());
 
@@ -434,6 +520,8 @@ pub async fn run_supervisor(cfg: &SupervisorConfig, inherit_stdio: bool) -> anyh
                 instances > 1,
                 inherit_stdio,
                 &log_file_path,
+                cfg.allow_insecure,
+                cfg.verbose,
             )?);
         }
         let pids: Vec<u32> = children.iter().filter_map(|c| c.id()).collect();
@@ -454,11 +542,15 @@ pub async fn run_supervisor(cfg: &SupervisorConfig, inherit_stdio: bool) -> anyh
                 max_restarts: cfg.max_restarts,
                 autorestart: cfg.autorestart,
                 instance_pids: vec![],
+                allow_insecure: cfg.allow_insecure,
+                verbose: cfg.verbose,
             });
             info.pid = std::process::id();
             info.status = "running".to_string();
             info.restarts = restarts;
             info.autorestart = cfg.autorestart;
+            info.allow_insecure = cfg.allow_insecure;
+            info.verbose = cfg.verbose;
             info.instance_pids = pids.clone();
             let _ = save_process(&info);
         }
@@ -617,6 +709,8 @@ pub fn restart_process(name: &str) -> anyhow::Result<ProcessInfo> {
         max_restarts: info.max_restarts,
         autorestart: info.autorestart,
         start_restarts: restarts,
+        allow_insecure: info.allow_insecure,
+        verbose: info.verbose,
     };
 
     // Stop (ignore error if already stopped)
@@ -778,6 +872,8 @@ mod tests {
             max_restarts: 15,
             autorestart: true,
             instance_pids: vec![],
+            allow_insecure: false,
+            verbose: false,
         };
         save_process(&info).unwrap();
 
@@ -845,5 +941,77 @@ mod tests {
         assert_eq!(info.restarts, 3);
         assert_eq!(info.instances, 1);
         assert_eq!(info.max_restarts, 15);
+    }
+
+    // ── global flag propagation ───────────────────────────────────────────────
+
+    #[test]
+    fn app_instance_forwards_global_flags_to_the_run_grandchild() {
+        let args = app_instance_args(
+            Path::new("/srv/app.js"),
+            Some(3000),
+            false,
+            true,
+            true,
+            &["--flag".to_string(), "value".to_string()],
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--allow-insecure",
+                "--verbose",
+                "run",
+                "--port",
+                "3000",
+                "--allow-env=CI",
+                "/srv/app.js",
+                "--",
+                "--flag",
+                "value",
+            ]
+        );
+        // Without the flags nothing is injected.
+        let plain = app_instance_args(Path::new("app.js"), None, false, false, false, &[]);
+        assert_eq!(plain, vec!["run", "--allow-env=CI", "app.js"]);
+    }
+
+    #[test]
+    fn supervise_forwards_global_flags_to_the_supervisor() {
+        let cfg = SupervisorConfig {
+            name: "app".to_string(),
+            entry: PathBuf::from("/srv/app.js"),
+            args: vec![],
+            port: Some(8080),
+            instances: 2,
+            max_restarts: 5,
+            autorestart: false,
+            start_restarts: 1,
+            allow_insecure: true,
+            verbose: false,
+        };
+        let args = supervise_args(&cfg, Path::new("/srv/app.js"));
+        assert_eq!(args[0], "--allow-insecure");
+        assert_eq!(args[1], "__supervise");
+        assert!(args.contains(&"--no-autorestart".to_string()));
+        assert!(args.contains(&"8080".to_string()));
+    }
+
+    #[test]
+    fn process_info_roundtrips_new_flag_fields() {
+        let legacy = r#"{
+            "name": "legacy", "entry": "/tmp/legacy.js", "pid": 1, "cwd": "/tmp",
+            "log_path": "/tmp/legacy.log", "status": "running", "started_at": 0,
+            "restarts": 0, "args": [], "port": null, "instances": 1, "max_restarts": 15
+        }"#;
+        // Missing fields must default to false (no accidental insecure opt-in
+        // for processes recorded before the fields existed).
+        let info: ProcessInfo = serde_json::from_str(legacy).unwrap();
+        assert!(!info.allow_insecure);
+        assert!(!info.verbose);
+
+        let json = serde_json::to_string(&info).unwrap();
+        let back: ProcessInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.allow_insecure, info.allow_insecure);
+        assert_eq!(back.verbose, info.verbose);
     }
 }

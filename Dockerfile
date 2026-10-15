@@ -12,7 +12,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl tar \
   && rm -rf /var/lib/apt/lists/*
 
-ARG RUNTIME_VERSION=v2.12.4
+ARG RUNTIME_VERSION=v2.12.5
 ARG TARGETARCH
 
 RUN case "${TARGETARCH}" in \

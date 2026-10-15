@@ -1189,7 +1189,13 @@ impl JsEngine {
                  ? String(process.__emitExit()) : '0'",
             )
             .await?;
-        Ok(code.trim().parse().unwrap_or(0))
+        let code = code.trim().parse().unwrap_or(0);
+        // Node's default `--unhandled-rejections=throw`: an unhandled rejection
+        // makes the process fail even if the script left `exitCode` at 0.
+        if code == 0 && rejection_tracker::had_unhandled() {
+            return Ok(1);
+        }
+        Ok(code)
     }
 
     pub fn set_server_mode(&mut self, enabled: bool) {

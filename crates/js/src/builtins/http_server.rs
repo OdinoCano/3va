@@ -39,9 +39,11 @@ type ReadyQueue = Arc<Mutex<HashMap<u32, std::collections::VecDeque<ReadyRequest
 /// A parsed request waiting for JS. Handed over as plain values (see
 /// `__httpAcceptPoll`) rather than a JSON string JS would have to re-parse.
 struct ReadyRequest {
-    parsed: ParsedRequest,
+    head: ParsedHead,
     conn_id: u32,
     remote: IpAddr,
+    /// Registry id of the streaming body, or 0 when the request has none.
+    body_id: u32,
 }
 
 /// Per-isolate dispatch state (an isolate slot): connection tasks push into
@@ -135,6 +137,8 @@ struct HttpListenCtx {
     fw: Arc<Option<Arc<Firewall>>>,
     conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
     conn_nid: Arc<Mutex<u32>>,
+    bodies: BodyRegistry,
+    body_nid: Arc<Mutex<u32>>,
     ready: ReadyQueue,
     upgrades: UpgradeRegistry,
     upgrades_q: UpgradeQueue,
@@ -143,6 +147,10 @@ struct HttpListenCtx {
 
 struct HttpAcceptCtx {
     ready: ReadyQueue,
+}
+
+struct HttpBodyCtx {
+    bodies: BodyRegistry,
 }
 
 struct HttpUpgradeCtx {
@@ -273,10 +281,10 @@ enum UpgradeRead {
 /// `upgrade` event. Carries the bytes already read past the headers (`head`)
 /// so the first thing the WS library sees is exactly what the client sent.
 struct UpgradeRequest {
-    parsed: ParsedRequest,
+    head: ParsedHead,
     conn_id: u32,
     remote: IpAddr,
-    head: Vec<u8>,
+    head_bytes: Vec<u8>,
 }
 
 type UpgradeQueue = Arc<Mutex<HashMap<u32, std::collections::VecDeque<UpgradeRequest>>>>;
@@ -284,7 +292,7 @@ type UpgradeRegistry = Arc<Mutex<HashMap<u32, Arc<UpgradeConn>>>>;
 
 /// Whether `parsed` is an HTTP upgrade request (any `Upgrade:` target — the
 /// `ws` library filters for `websocket` itself).
-fn is_upgrade_request(parsed: &ParsedRequest) -> bool {
+fn is_upgrade_request(parsed: &ParsedHead) -> bool {
     let conn_upgrade = parsed.headers.iter().any(|(k, v)| {
         k == "connection"
             && v.to_ascii_lowercase()
@@ -426,9 +434,146 @@ struct PendingResponse {
     bytes: Vec<u8>,
 }
 
+// ── Streaming request bodies ────────────────────────────────────────────────
+//
+// The request body is no longer buffered whole in Rust and handed to JS as one
+// lossy string (which corrupted non-UTF-8 bytes and, for a large upload, held
+// several copies — a 300 MB POST panicked in `V8String::new(...).unwrap()`).
+// Instead the connection task reads the socket in bounded chunks into a
+// per-request `BodyPipe` and JS pulls them with `__httpReadBody(bodyId, max)`
+// as its Readable stream is consumed. The pipe applies backpressure: the
+// reader stops once `BODY_PIPE_MAX` bytes are buffered ahead of JS.
+
+/// Most bytes buffered ahead of JS for a single request body. Bounds memory
+/// regardless of the declared `Content-Length` (which can be hundreds of MB).
+const BODY_PIPE_MAX: usize = 1 << 20;
+
+/// Largest single chunk `__httpReadBody` returns, matching the `net` poll read.
+const BODY_READ_MAX: usize = 64 * 1024;
+
+struct BodyState {
+    queue: std::collections::VecDeque<Vec<u8>>,
+    queued: usize,
+    /// Set once the whole declared body has been read (clean EOF).
+    eof: bool,
+    /// Set when the body read failed (client aborted, framing error, timeout).
+    /// Delivered to JS as a stream error after any queued chunks are drained.
+    error: Option<String>,
+    /// Set when JS has consumed EOF or the pipe is otherwise abandoned; the
+    /// producer stops waiting and the entry can be dropped.
+    released: bool,
+}
+
+/// A request body in transit between the connection task (producer) and the JS
+/// `IncomingMessage` stream (consumer).
+struct BodyPipe {
+    state: Mutex<BodyState>,
+    /// Signalled when JS drains the queue, so a producer blocked on
+    /// backpressure resumes.
+    space: tokio::sync::Notify,
+}
+
+impl BodyPipe {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(BodyState {
+                queue: std::collections::VecDeque::new(),
+                queued: 0,
+                eof: false,
+                error: None,
+                released: false,
+            }),
+            space: tokio::sync::Notify::new(),
+        })
+    }
+
+    /// Enqueue `chunk`, waiting for JS to make room when the pipe is full.
+    /// Returns without enqueuing if JS released the pipe (stream destroyed or
+    /// connection torn down), so the producer stops reading the socket.
+    async fn push(&self, chunk: Vec<u8>) {
+        if chunk.is_empty() {
+            return;
+        }
+        loop {
+            {
+                let mut st = self.state.lock().unwrap();
+                if st.released {
+                    return;
+                }
+                // Always accept at least one chunk, even when it alone exceeds
+                // the cap (a single reads are bounded by the caller).
+                if st.queued + chunk.len() <= BODY_PIPE_MAX || st.queue.is_empty() {
+                    st.queued += chunk.len();
+                    st.queue.push_back(chunk);
+                    return;
+                }
+            }
+            self.space.notified().await;
+        }
+    }
+
+    /// Mark the body as fully read.
+    fn finish(&self) {
+        self.state.lock().unwrap().eof = true;
+    }
+
+    /// Mark the body as failed; the error is delivered to JS.
+    fn fail(&self, msg: impl Into<String>) {
+        let mut st = self.state.lock().unwrap();
+        st.error = Some(msg.into());
+        st.eof = true;
+    }
+
+    /// Pop up to `max` bytes for JS.
+    fn read(&self, max: usize) -> BodyRead {
+        let max = max.max(1);
+        let mut st = self.state.lock().unwrap();
+        let head_len = st.queue.front().map(|f| f.len()).unwrap_or(0);
+        if head_len > 0 {
+            let out: Vec<u8> = if head_len <= max {
+                st.queue.pop_front().unwrap_or_default()
+            } else {
+                let head: Vec<u8> = st.queue.front().unwrap()[..max].to_vec();
+                if let Some(front) = st.queue.front_mut() {
+                    front.drain(..max);
+                }
+                head
+            };
+            st.queued = st.queued.saturating_sub(out.len());
+            drop(st);
+            self.space.notify_one();
+            return BodyRead::Data(out);
+        }
+        if let Some(err) = st.error.take() {
+            st.released = true;
+            return BodyRead::Error(err);
+        }
+        if st.eof {
+            st.released = true;
+            return BodyRead::Eof;
+        }
+        BodyRead::Eagain
+    }
+}
+
+enum BodyRead {
+    Data(Vec<u8>),
+    Eof,
+    Eagain,
+    Error(String),
+}
+
+/// Registry of live request bodies, keyed by a per-request id returned to JS.
+type BodyRegistry = Arc<Mutex<HashMap<u32, Arc<BodyPipe>>>>;
+
 fn js_err<'s>(scope: &mut PinScope<'s, '_>, msg: &str) -> v8::Local<'s, v8::Value> {
-    let src = format!("new Error(\"{}\")", msg);
-    let source = V8String::new(scope, &src).unwrap();
+    // `msg` can embed text that reached us from the client (e.g. a parse error
+    // string); escape it so it cannot break out of the JS string literal.
+    let src = format!("new Error(\"{}\")", json_escape(msg));
+    let source = match V8String::new(scope, &src) {
+        Some(s) => s,
+        None => return v8::undefined(scope).into(),
+    };
     Script::compile(scope, source, None)
         .and_then(|s| s.run(scope))
         .unwrap_or_else(|| v8::undefined(scope).into())
@@ -441,9 +586,13 @@ fn js_code_err<'s>(
 ) -> v8::Local<'s, v8::Value> {
     let src = format!(
         "(function(){{var e=new Error(\"{}\");e.code=\"{}\";return e;}})()",
-        msg, code
+        json_escape(msg),
+        json_escape(code)
     );
-    let source = V8String::new(scope, &src).unwrap();
+    let source = match V8String::new(scope, &src) {
+        Some(s) => s,
+        None => return v8::undefined(scope).into(),
+    };
     Script::compile(scope, source, None)
         .and_then(|s| s.run(scope))
         .unwrap_or_else(|| v8::undefined(scope).into())
@@ -544,6 +693,32 @@ fn is_valid_header_value(value: &str) -> bool {
         .all(|b| b == b'\t' || !(0x00..=0x1F).contains(&b) && b != 0x7F)
 }
 
+/// A request head (request line + headers), with the body framing left to be
+/// streamed separately by `pump_body`.
+#[derive(Debug)]
+pub struct ParsedHead {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    http10: bool,
+    framing: BodyFraming,
+}
+
+/// How the request body is framed, decided from the headers only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyFraming {
+    /// No body (`GET`, or `Content-Length: 0`).
+    None,
+    /// Fixed `Content-Length`.
+    Length(usize),
+    /// `Transfer-Encoding: chunked` (already validated as the final coding).
+    Chunked,
+}
+
+/// A fully-parsed request including its buffered body. Kept for unit tests and
+/// any caller that wants the whole body at once; the server itself uses
+/// `parse_request_head` + `pump_body` so it never holds a large body in memory.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ParsedRequest {
     method: String,
@@ -572,159 +747,17 @@ impl From<String> for ParseError {
     }
 }
 
-/// Decode a `Transfer-Encoding: chunked` body: hex size [+ ;extensions] CRLF,
-/// data CRLF, repeated until a 0-size chunk, then the trailer section (read
-/// and discarded, bounded by `max_header_bytes`). Applies the same body
-/// deadline and RUDY minimum-rate checks as the Content-Length path.
-async fn read_chunked_body<R>(
-    reader: &mut R,
-    body_timeout: std::time::Duration,
-    max_body: usize,
-    min_body_rate_bps: u32,
-    max_header_bytes: usize,
-) -> Result<Vec<u8>, ParseError>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let mut body: Vec<u8> = Vec::new();
-    // `Duration::ZERO` means the body deadline is disabled (firewall off).
-    let deadline = if body_timeout.is_zero() {
-        None
-    } else {
-        Some(Instant::now() + body_timeout)
-    };
-    let body_start = Instant::now();
-
-    loop {
-        let mut size_line = String::new();
-        let read_size = if body_timeout.is_zero() {
-            reader
-                .read_line(&mut size_line)
-                .await
-                .map_err(|e| ParseError::Silent(e.to_string()))
-        } else {
-            tokio::time::timeout(body_timeout, reader.read_line(&mut size_line))
-                .await
-                .map_err(|_| ParseError::Silent("timeout: chunk size line stalled".into()))?
-                .map_err(|e| ParseError::Silent(e.to_string()))
-        };
-        read_size?;
-        if size_line.is_empty() {
-            return Err(ParseError::Silent(
-                "connection closed mid-chunked-body".into(),
-            ));
-        }
-        let size_str = size_line.trim_end_matches(['\r', '\n']);
-        // Chunk extensions (RFC 9112 §7.1.1) are ignored.
-        let size_str = size_str.split(';').next().unwrap_or("").trim();
-        let chunk_len = usize::from_str_radix(size_str, 16)
-            .map_err(|_| ParseError::Respond(400, "Bad Request"))?;
-        if chunk_len > max_body || body.len().saturating_add(chunk_len) > max_body {
-            return Err(ParseError::Respond(413, "Payload Too Large"));
-        }
-
-        if chunk_len == 0 {
-            // Trailer section: read until blank line, discard, bounded.
-            let mut trailer_bytes = 0usize;
-            loop {
-                let mut trailer_line = String::new();
-                let read_trailer = if body_timeout.is_zero() {
-                    reader
-                        .read_line(&mut trailer_line)
-                        .await
-                        .map_err(|e| ParseError::Silent(e.to_string()))
-                } else {
-                    tokio::time::timeout(body_timeout, reader.read_line(&mut trailer_line))
-                        .await
-                        .map_err(|_| ParseError::Silent("timeout: trailers stalled".into()))?
-                        .map_err(|e| ParseError::Silent(e.to_string()))
-                };
-                read_trailer?;
-                if trailer_line.is_empty() {
-                    return Ok(body);
-                }
-                trailer_bytes += trailer_line.len();
-                if trailer_bytes > max_header_bytes {
-                    return Err(ParseError::Silent(format!(
-                        "trailer flood: exceeded {max_header_bytes} bytes"
-                    )));
-                }
-                if trailer_line.trim_end_matches(['\r', '\n']).is_empty() {
-                    return Ok(body);
-                }
-            }
-        }
-
-        // Read exactly chunk_len bytes of chunk data.
-        let mut remaining = chunk_len;
-        let mut buf = vec![0u8; chunk_len.min(16 * 1024)];
-        while remaining > 0 {
-            if let Some(d) = deadline
-                && Instant::now() >= d
-            {
-                return Err(ParseError::Silent(
-                    "timeout: body deadline exceeded (RUDY?)".into(),
-                ));
-            }
-            let to_read = remaining.min(buf.len());
-            let n = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                reader.read(&mut buf[..to_read]),
-            )
-            .await
-            .map_err(|_| ParseError::Silent("timeout: body stalled (RUDY?)".into()))?
-            .map_err(|e| ParseError::Silent(e.to_string()))?;
-            if n == 0 {
-                return Err(ParseError::Silent(
-                    "connection closed before body complete".into(),
-                ));
-            }
-            body.extend_from_slice(&buf[..n]);
-            remaining -= n;
-
-            if min_body_rate_bps > 0 {
-                let elapsed = body_start.elapsed().as_secs_f64();
-                if elapsed > 2.0 {
-                    let rate = body.len() as f64 / elapsed;
-                    if rate < min_body_rate_bps as f64 {
-                        return Err(ParseError::Silent(format!(
-                            "body rate too low ({rate:.0} B/s < {min_body_rate_bps} B/s min): RUDY?"
-                        )));
-                    }
-                }
-            }
-        }
-
-        // Chunk data must be followed by CRLF; consume it via one line read so
-        // buffering stays consistent with the next size line.
-        let mut crlf = String::new();
-        let read_crlf = if body_timeout.is_zero() {
-            reader
-                .read_line(&mut crlf)
-                .await
-                .map_err(|e| ParseError::Silent(e.to_string()))
-        } else {
-            tokio::time::timeout(body_timeout, reader.read_line(&mut crlf))
-                .await
-                .map_err(|_| ParseError::Silent("timeout: chunk terminator stalled".into()))?
-                .map_err(|e| ParseError::Silent(e.to_string()))
-        };
-        read_crlf?;
-        if !crlf.trim_end_matches(['\r', '\n']).is_empty() {
-            return Err(ParseError::Respond(400, "Bad Request"));
-        }
-    }
-}
-
-pub async fn parse_request<R>(
+/// Parse the request line and headers, deciding the body framing. The body
+/// itself is streamed by [`pump_body`] (or read whole by the test-only
+/// [`parse_request`] wrapper), so a server never has to buffer a large upload
+/// in Rust before handing it to JS.
+pub async fn parse_request_head<R>(
     reader: &mut R,
     header_timeout: std::time::Duration,
-    body_timeout: std::time::Duration,
     max_header_count: usize,
     max_header_bytes: usize,
     max_body_bytes: usize,
-    min_body_rate_bps: u32,
-) -> Result<ParsedRequest, ParseError>
+) -> Result<ParsedHead, ParseError>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -737,6 +770,14 @@ where
         .map_err(|e| ParseError::Silent(e.to_string()))?;
 
     let request_line = request_line.trim_end_matches(['\r', '\n']);
+    if request_line.is_empty() {
+        // EOF (or a stray blank line at the start of a keep-alive connection):
+        // there is no request here. Without this, an empty line parsed as a
+        // request with an empty method and reached the app as a phantom request.
+        return Err(ParseError::Silent(
+            "connection closed before request line".into(),
+        ));
+    }
     let mut parts = request_line.splitn(3, ' ');
     let method = parts.next().unwrap_or("GET").to_string();
     let path = parts.next().unwrap_or("/").to_string();
@@ -843,33 +884,233 @@ where
         return Err(ParseError::Respond(400, "Bad Request"));
     }
 
-    let body = if let Some(te) = transfer_encoding {
+    let framing = if let Some(te) = transfer_encoding {
         // Only "chunked" (as the final coding) can be decoded here; anything
         // else gets 501 Not Implemented per RFC 9112 §6.1.
         let final_coding = te.rsplit(',').next().unwrap_or("").trim();
         if final_coding != "chunked" {
             return Err(ParseError::Respond(501, "Not Implemented"));
         }
-        read_chunked_body(
-            reader,
-            body_timeout,
-            max_body,
-            min_body_rate_bps,
-            max_header_bytes,
-        )
-        .await?
+        BodyFraming::Chunked
     } else if has_content_length && content_length > 0 {
-        let mut body = vec![0u8; content_length];
-        // `Duration::ZERO` means the body deadline is disabled (firewall off).
-        let deadline = if body_timeout.is_zero() {
-            None
-        } else {
-            Some(Instant::now() + body_timeout)
-        };
-        let mut received: usize = 0;
-        let body_start = Instant::now();
+        BodyFraming::Length(content_length)
+    } else {
+        BodyFraming::None
+    };
 
-        while received < content_length {
+    Ok(ParsedHead {
+        method,
+        path,
+        headers,
+        http10,
+        framing,
+    })
+}
+
+/// Where a streamed body goes: the per-request `BodyPipe` (production) or a
+/// `Vec` (tests / callers that asked for the whole body).
+enum BodySink<'a> {
+    Pipe(&'a BodyPipe),
+    Vec(&'a mut Vec<u8>),
+}
+
+async fn body_push(sink: &mut BodySink<'_>, bytes: &[u8]) {
+    match sink {
+        BodySink::Pipe(p) => p.push(bytes.to_vec()).await,
+        BodySink::Vec(v) => v.extend_from_slice(bytes),
+    }
+}
+
+/// Stream the request body described by `framing` into `sink`, applying the
+/// same body deadline and RUDY minimum-rate checks as before. With a
+/// `BodySink::Pipe` the producer blocks on backpressure once
+/// [`BODY_PIPE_MAX`] bytes are buffered ahead of JS, so memory stays bounded
+/// regardless of the declared size.
+#[allow(clippy::too_many_arguments)]
+async fn pump_body<R>(
+    reader: &mut R,
+    framing: BodyFraming,
+    sink: &mut BodySink<'_>,
+    body_timeout: std::time::Duration,
+    max_body_bytes: usize,
+    min_body_rate_bps: u32,
+    max_header_bytes: usize,
+) -> Result<(), ParseError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let max_body = if max_body_bytes == 0 {
+        HARD_MAX_BODY
+    } else {
+        max_body_bytes
+    };
+    match framing {
+        BodyFraming::None => Ok(()),
+        BodyFraming::Length(len) => {
+            pump_length(reader, sink, len, body_timeout, min_body_rate_bps).await
+        }
+        BodyFraming::Chunked => {
+            pump_chunked(
+                reader,
+                sink,
+                body_timeout,
+                max_body,
+                min_body_rate_bps,
+                max_header_bytes,
+            )
+            .await
+        }
+    }
+}
+
+async fn pump_length<R>(
+    reader: &mut R,
+    sink: &mut BodySink<'_>,
+    content_length: usize,
+    body_timeout: std::time::Duration,
+    min_body_rate_bps: u32,
+) -> Result<(), ParseError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    // `Duration::ZERO` means the body deadline is disabled (firewall off).
+    let deadline = if body_timeout.is_zero() {
+        None
+    } else {
+        Some(Instant::now() + body_timeout)
+    };
+    let mut received: usize = 0;
+    let body_start = Instant::now();
+    let mut buf = vec![0u8; content_length.min(BODY_READ_MAX)];
+
+    while received < content_length {
+        if let Some(d) = deadline
+            && Instant::now() >= d
+        {
+            return Err(ParseError::Silent(
+                "timeout: body deadline exceeded (RUDY?)".into(),
+            ));
+        }
+        // Bound each individual read so a stalled socket doesn't hang the
+        // connection; the overall deadline (when set) is the real cap.
+        let chunk_timeout = match deadline {
+            None => std::time::Duration::from_secs(1),
+            Some(d) => d
+                .saturating_duration_since(Instant::now())
+                .min(std::time::Duration::from_secs(1)),
+        };
+        let to_read = (content_length - received).min(buf.len());
+        let n = tokio::time::timeout(chunk_timeout, reader.read(&mut buf[..to_read]))
+            .await
+            .map_err(|_| ParseError::Silent("timeout: body stalled (RUDY?)".into()))?
+            .map_err(|e| ParseError::Silent(e.to_string()))?;
+        if n == 0 {
+            return Err(ParseError::Silent(
+                "connection closed before body complete".into(),
+            ));
+        }
+        body_push(sink, &buf[..n]).await;
+        received += n;
+
+        if min_body_rate_bps > 0 {
+            let elapsed = body_start.elapsed().as_secs_f64();
+            if elapsed > 2.0 {
+                let rate = received as f64 / elapsed;
+                if rate < min_body_rate_bps as f64 {
+                    return Err(ParseError::Silent(format!(
+                        "body rate too low ({:.0} B/s < {} B/s min): RUDY?",
+                        rate, min_body_rate_bps
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn pump_chunked<R>(
+    reader: &mut R,
+    sink: &mut BodySink<'_>,
+    body_timeout: std::time::Duration,
+    max_body: usize,
+    min_body_rate_bps: u32,
+    max_header_bytes: usize,
+) -> Result<(), ParseError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let deadline = if body_timeout.is_zero() {
+        None
+    } else {
+        Some(Instant::now() + body_timeout)
+    };
+    let body_start = Instant::now();
+    let mut total: usize = 0;
+    let mut buf = vec![0u8; BODY_READ_MAX];
+
+    loop {
+        let mut size_line = String::new();
+        let read_size = if body_timeout.is_zero() {
+            reader
+                .read_line(&mut size_line)
+                .await
+                .map_err(|e| ParseError::Silent(e.to_string()))
+        } else {
+            tokio::time::timeout(body_timeout, reader.read_line(&mut size_line))
+                .await
+                .map_err(|_| ParseError::Silent("timeout: chunk size line stalled".into()))?
+                .map_err(|e| ParseError::Silent(e.to_string()))
+        };
+        read_size?;
+        if size_line.is_empty() {
+            return Err(ParseError::Silent(
+                "connection closed mid-chunked-body".into(),
+            ));
+        }
+        let size_str = size_line.trim_end_matches(['\r', '\n']);
+        // Chunk extensions (RFC 9112 §7.1.1) are ignored.
+        let size_str = size_str.split(';').next().unwrap_or("").trim();
+        let chunk_len = usize::from_str_radix(size_str, 16)
+            .map_err(|_| ParseError::Respond(400, "Bad Request"))?;
+        if chunk_len > max_body || total.saturating_add(chunk_len) > max_body {
+            return Err(ParseError::Respond(413, "Payload Too Large"));
+        }
+
+        if chunk_len == 0 {
+            // Trailer section: read until blank line, discard, bounded.
+            let mut trailer_bytes = 0usize;
+            loop {
+                let mut trailer_line = String::new();
+                let read_trailer = if body_timeout.is_zero() {
+                    reader
+                        .read_line(&mut trailer_line)
+                        .await
+                        .map_err(|e| ParseError::Silent(e.to_string()))
+                } else {
+                    tokio::time::timeout(body_timeout, reader.read_line(&mut trailer_line))
+                        .await
+                        .map_err(|_| ParseError::Silent("timeout: trailers stalled".into()))?
+                        .map_err(|e| ParseError::Silent(e.to_string()))
+                };
+                read_trailer?;
+                if trailer_line.is_empty() {
+                    return Ok(());
+                }
+                trailer_bytes += trailer_line.len();
+                if trailer_bytes > max_header_bytes {
+                    return Err(ParseError::Silent(format!(
+                        "trailer flood: exceeded {max_header_bytes} bytes"
+                    )));
+                }
+                if trailer_line.trim_end_matches(['\r', '\n']).is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Read exactly chunk_len bytes of chunk data, pushing each slice.
+        let mut remaining = chunk_len;
+        while remaining > 0 {
             if let Some(d) = deadline
                 && Instant::now() >= d
             {
@@ -877,49 +1118,100 @@ where
                     "timeout: body deadline exceeded (RUDY?)".into(),
                 ));
             }
-            // Bound each individual read so a stalled socket doesn't hang the
-            // connection; the overall deadline (when set) is the real cap.
-            let chunk_timeout = match deadline {
-                None => std::time::Duration::from_secs(1),
-                Some(d) => d
-                    .saturating_duration_since(Instant::now())
-                    .min(std::time::Duration::from_secs(1)),
-            };
-            let n = tokio::time::timeout(chunk_timeout, reader.read(&mut body[received..]))
-                .await
-                .map_err(|_| ParseError::Silent("timeout: body stalled (RUDY?)".into()))?
-                .map_err(|e| ParseError::Silent(e.to_string()))?;
+            let to_read = remaining.min(buf.len());
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                reader.read(&mut buf[..to_read]),
+            )
+            .await
+            .map_err(|_| ParseError::Silent("timeout: body stalled (RUDY?)".into()))?
+            .map_err(|e| ParseError::Silent(e.to_string()))?;
             if n == 0 {
                 return Err(ParseError::Silent(
                     "connection closed before body complete".into(),
                 ));
             }
-            received += n;
+            body_push(sink, &buf[..n]).await;
+            remaining -= n;
+            total += n;
 
             if min_body_rate_bps > 0 {
                 let elapsed = body_start.elapsed().as_secs_f64();
                 if elapsed > 2.0 {
-                    let rate = received as f64 / elapsed;
+                    let rate = total as f64 / elapsed;
                     if rate < min_body_rate_bps as f64 {
                         return Err(ParseError::Silent(format!(
-                            "body rate too low ({:.0} B/s < {} B/s min): RUDY?",
-                            rate, min_body_rate_bps
+                            "body rate too low ({rate:.0} B/s < {min_body_rate_bps} B/s min): RUDY?"
                         )));
                     }
                 }
             }
         }
-        body
-    } else {
-        Vec::new()
-    };
 
+        // Chunk data must be followed by CRLF; consume it via one line read so
+        // buffering stays consistent with the next size line.
+        let mut crlf = String::new();
+        let read_crlf = if body_timeout.is_zero() {
+            reader
+                .read_line(&mut crlf)
+                .await
+                .map_err(|e| ParseError::Silent(e.to_string()))
+        } else {
+            tokio::time::timeout(body_timeout, reader.read_line(&mut crlf))
+                .await
+                .map_err(|_| ParseError::Silent("chunk terminator stalled".into()))?
+                .map_err(|e| ParseError::Silent(e.to_string()))
+        };
+        read_crlf?;
+        if !crlf.trim_end_matches(['\r', '\n']).is_empty() {
+            return Err(ParseError::Respond(400, "Bad Request"));
+        }
+    }
+}
+
+/// Read the whole request (head + body) into memory. Used by unit tests and
+/// any caller that wants the body as one value; the server uses
+/// `parse_request_head` + `pump_body` so it streams instead.
+pub async fn parse_request<R>(
+    reader: &mut R,
+    header_timeout: std::time::Duration,
+    body_timeout: std::time::Duration,
+    max_header_count: usize,
+    max_header_bytes: usize,
+    max_body_bytes: usize,
+    min_body_rate_bps: u32,
+) -> Result<ParsedRequest, ParseError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let head = parse_request_head(
+        reader,
+        header_timeout,
+        max_header_count,
+        max_header_bytes,
+        max_body_bytes,
+    )
+    .await?;
+    let mut body: Vec<u8> = Vec::new();
+    {
+        let mut sink = BodySink::Vec(&mut body);
+        pump_body(
+            reader,
+            head.framing,
+            &mut sink,
+            body_timeout,
+            max_body_bytes,
+            min_body_rate_bps,
+            max_header_bytes,
+        )
+        .await?;
+    }
     Ok(ParsedRequest {
-        method,
-        path,
-        headers,
+        method: head.method,
+        path: head.path,
+        headers: head.headers,
         body,
-        http10,
+        http10: head.http10,
     })
 }
 
@@ -981,6 +1273,15 @@ fn tls_acceptor(cert_pem: &str, key_pem: &str) -> Result<tokio_rustls::TlsAccept
 /// defeating the firewall's connection-exhaustion protection.
 const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Human-readable message for a body-read failure, delivered to JS as the
+/// request stream's `'error'`.
+fn parse_error_message(e: &ParseError) -> String {
+    match e {
+        ParseError::Respond(status, msg) => format!("HTTP {status} {msg}"),
+        ParseError::Silent(m) => m.clone(),
+    }
+}
+
 /// Drives a single accepted connection: parses requests in a loop (HTTP/1.1
 /// keep-alive), drops each parsed request into `ready` for JS, waits for
 /// `__httpRespond` to push a response through the per-connection channel, and
@@ -1002,6 +1303,8 @@ async fn handle_connection<S>(
     max_requests_per_conn: u32,
     conns: Arc<Mutex<HashMap<u32, ConnEntry>>>,
     conn_nid: Arc<Mutex<u32>>,
+    bodies: BodyRegistry,
+    body_nid: Arc<Mutex<u32>>,
     fw: Arc<Option<Arc<Firewall>>>,
     ready: ReadyQueue,
     upgrades: UpgradeRegistry,
@@ -1035,6 +1338,10 @@ async fn handle_connection<S>(
     } else {
         Some(ip)
     };
+    // Set when a trusted-proxy connection is counted against the global cap
+    // only (no `X-Forwarded-For` to attribute it to a client); the matching
+    // release at the end uses `on_disconnect_unattributed`.
+    let mut account_global_only = false;
 
     // Requests already served on this TCP connection. The first request gets
     // the full `hdr_timeout`; every reused-connection request afterwards is
@@ -1044,20 +1351,23 @@ async fn handle_connection<S>(
     // `Connection` header.
     let mut requests_served: u32 = 0;
 
+    // Body id registered for the most recent request on this connection, so it
+    // can be released when the connection ends (and the previous one when the
+    // next request starts) if JS never drained it.
+    let mut my_last_body: Option<u32> = None;
+
     loop {
         let hdr_deadline = if requests_served == 0 {
             hdr_timeout
         } else {
             keepalive_timeout
         };
-        let parsed = match parse_request(
+        let head = match parse_request_head(
             &mut reader,
             hdr_deadline,
-            body_timeout,
             max_hdr_count,
             max_hdr_bytes,
             max_body,
-            min_body_rate,
         )
         .await
         {
@@ -1077,11 +1387,12 @@ async fn handle_connection<S>(
         // Resolve the effective client IP: the peer itself, or — when the
         // peer is a trusted proxy that sent X-Forwarded-For — the forwarded
         // address. Used for both rate-limit accounting and remoteAddress.
+        let xff_present = head.headers.iter().any(|(k, _)| k == "x-forwarded-for");
         let req_ip = fw
             .as_ref()
             .as_ref()
             .map(|f| {
-                let xff = parsed
+                let xff = head
                     .headers
                     .iter()
                     .find(|(k, _)| k == "x-forwarded-for")
@@ -1095,20 +1406,44 @@ async fn handle_connection<S>(
         // connection cap and register the connection against it.
         if account_ip.is_none() {
             if let Some(firewall) = fw.as_ref().as_ref() {
-                match firewall.check_connection(req_ip) {
-                    FirewallDecision::Allow => {
-                        firewall.on_connect(req_ip);
-                        account_ip = Some(req_ip);
+                if !xff_present {
+                    // No X-Forwarded-For: the request cannot be attributed to
+                    // a client. Count the connection against the global cap
+                    // only — never against the proxy's per-IP cap (it fronts
+                    // many clients) and never allow it to be auto-blocked (see
+                    // `Firewall::check_request`).
+                    match firewall.check_connection_behind_proxy(ip) {
+                        FirewallDecision::Allow => {
+                            firewall.on_connect_unattributed();
+                            account_global_only = true;
+                        }
+                        decision => {
+                            let resp = format!(
+                                "HTTP/1.1 {s} {m}\r\nContent-Length: {l}\r\nConnection: close\r\n\r\n{m}",
+                                s = decision.http_status(),
+                                m = decision.message(),
+                                l = decision.message().len(),
+                            );
+                            let _ = writer.write_all(resp.as_bytes()).await;
+                            break;
+                        }
                     }
-                    decision => {
-                        let resp = format!(
-                            "HTTP/1.1 {s} {m}\r\nContent-Length: {l}\r\nConnection: close\r\n\r\n{m}",
-                            s = decision.http_status(),
-                            m = decision.message(),
-                            l = decision.message().len(),
-                        );
-                        let _ = writer.write_all(resp.as_bytes()).await;
-                        break;
+                } else {
+                    match firewall.check_connection(req_ip) {
+                        FirewallDecision::Allow => {
+                            firewall.on_connect(req_ip);
+                            account_ip = Some(req_ip);
+                        }
+                        decision => {
+                            let resp = format!(
+                                "HTTP/1.1 {s} {m}\r\nContent-Length: {l}\r\nConnection: close\r\n\r\n{m}",
+                                s = decision.http_status(),
+                                m = decision.message(),
+                                l = decision.message().len(),
+                            );
+                            let _ = writer.write_all(resp.as_bytes()).await;
+                            break;
+                        }
                     }
                 }
             } else {
@@ -1136,8 +1471,8 @@ async fn handle_connection<S>(
         // of answering the request — `ws` (npm) performs the 101 handshake and
         // drives the frames itself. The bytes already read past the headers go
         // out as `head` so the client's first WS frame arrives intact.
-        if is_upgrade_request(&parsed) {
-            let head = reader.buffer().to_vec();
+        if is_upgrade_request(&head) {
+            let head_bytes = reader.buffer().to_vec();
             drop(reader);
             let conn = Arc::new(UpgradeConn::new());
             upgrades.lock().unwrap().insert(conn_id, conn.clone());
@@ -1155,10 +1490,10 @@ async fn handle_connection<S>(
                 .entry(server_id)
                 .or_default()
                 .push_back(UpgradeRequest {
-                    parsed,
+                    head,
                     conn_id,
                     remote: req_ip,
-                    head,
+                    head_bytes,
                 });
             wake.notify_one();
             conns.lock().unwrap().remove(&conn_id);
@@ -1169,7 +1504,7 @@ async fn handle_connection<S>(
 
         requests_served += 1;
 
-        let conn_hdr = parsed
+        let conn_hdr = head
             .headers
             .iter()
             .find(|(k, _)| k == "connection")
@@ -1180,8 +1515,32 @@ async fn handle_connection<S>(
         // regardless of what the client asked for.
         let close_after = match conn_hdr.as_deref() {
             Some(v) => v == "close",
-            None => parsed.http10,
+            None => head.http10,
         } || requests_served >= max_requests_per_conn;
+
+        // Register the streaming body (if any) under a per-request id. The
+        // previous request's pipe is dropped here: JS has normally consumed it
+        // by now, and a read of a released/unknown id is treated as EOF.
+        let framing = head.framing;
+        let body = match framing {
+            BodyFraming::None => None,
+            _ => {
+                if let Some(prev) = my_last_body.take() {
+                    bodies.lock().unwrap().remove(&prev);
+                }
+                let id = {
+                    let mut n = body_nid.lock().unwrap();
+                    let v = *n;
+                    *n = n.wrapping_add(1).max(1);
+                    v
+                };
+                let pipe = BodyPipe::new();
+                bodies.lock().unwrap().insert(id, pipe.clone());
+                my_last_body = Some(id);
+                Some((id, pipe))
+            }
+        };
+        let body_id = body.as_ref().map(|(id, _)| *id).unwrap_or(0);
 
         ready
             .lock()
@@ -1189,14 +1548,88 @@ async fn handle_connection<S>(
             .entry(server_id)
             .or_default()
             .push_back(ReadyRequest {
-                parsed,
+                head,
                 conn_id,
                 remote: req_ip,
+                body_id,
             });
         wake.notify_one();
 
-        let resp = match tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx.recv()).await {
-            Ok(Some(r)) if r.conn_id == conn_id => r,
+        // Read the body into its pipe while waiting for the response. If the
+        // response arrives first the body is abandoned and the connection is
+        // closed afterwards (an unread body would be misparsed as the next
+        // request); the pipe's read then reports EOF.
+        let has_body = body.is_some();
+        let mut body_done = !has_body;
+        let mut body_err: Option<ParseError> = None;
+        let resp = {
+            let pump_pipe = body.as_ref().map(|(_, p)| p.clone());
+            let mut pump = Box::pin(async {
+                let pipe = pump_pipe?;
+                let mut sink = BodySink::Pipe(&pipe);
+                match pump_body(
+                    &mut reader,
+                    framing,
+                    &mut sink,
+                    body_timeout,
+                    max_body,
+                    min_body_rate,
+                    max_hdr_bytes,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        pipe.finish();
+                        None
+                    }
+                    Err(e) => {
+                        pipe.fail(parse_error_message(&e));
+                        Some(e)
+                    }
+                }
+            });
+            loop {
+                if body_done {
+                    // A silent body failure (stall, RUDY, client abort) means
+                    // the request can never complete: close now instead of
+                    // waiting out the response timeout.
+                    if body_err.is_some() {
+                        break None;
+                    }
+                    // Body fully read: bound the wait for JS's response so a
+                    // handler that never answers can't pin the connection open.
+                    match tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx.recv()).await {
+                        Ok(r) => break r,
+                        Err(_) => break None,
+                    }
+                }
+                tokio::select! {
+                    r = resp_rx.recv() => break r,
+                    res = &mut pump => {
+                        body_done = true;
+                        body_err = res;
+                    }
+                }
+            }
+        };
+
+        // A framing error found while streaming (malformed chunked body, 413)
+        // is answered here: the request was already handed to JS, but a
+        // protocol violation must get its status promptly even if the app
+        // ignores the body.
+        let had_body_error = body_err.is_some();
+        if let Some(ParseError::Respond(status, msg)) = &body_err {
+            let resp = format!(
+                "HTTP/1.1 {status} {msg}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{msg}",
+                len = msg.len()
+            );
+            let _ = writer.write_all(resp.as_bytes()).await;
+            let _ = writer.flush().await;
+            break;
+        }
+
+        let resp = match resp {
+            Some(r) if r.conn_id == conn_id => r,
             _ => break,
         };
 
@@ -1206,18 +1639,23 @@ async fn handle_connection<S>(
         if writer.flush().await.is_err() {
             break;
         }
-        if close_after {
+        if close_after || !body_done || had_body_error {
             break;
         }
     }
 
     conns.lock().unwrap().remove(&conn_id);
+    if let Some(id) = my_last_body {
+        bodies.lock().unwrap().remove(&id);
+    }
     // Only release a slot that was actually counted: a trusted-proxy
     // connection that dropped before its first request never registered.
-    if let Some(account_ip) = account_ip
-        && let Some(firewall) = fw.as_ref().as_ref()
-    {
-        firewall.on_disconnect(account_ip);
+    if let Some(firewall) = fw.as_ref().as_ref() {
+        if let Some(account_ip) = account_ip {
+            firewall.on_disconnect(account_ip);
+        } else if account_global_only {
+            firewall.on_disconnect_unattributed();
+        }
     }
 }
 
@@ -1231,6 +1669,8 @@ pub fn inject_http_server(
     let conns: Arc<Mutex<HashMap<u32, ConnEntry>>> = Arc::new(Mutex::new(HashMap::new()));
     let next_server_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
     let next_conn_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(1));
+    let bodies: BodyRegistry = Arc::new(Mutex::new(HashMap::new()));
+    let next_body_id: Arc<Mutex<u32>> = Arc::new(Mutex::new(1));
     let fw: Arc<Option<Arc<Firewall>>> = Arc::new(firewall);
     let ready: ReadyQueue = Arc::new(Mutex::new(HashMap::new()));
     let upgrades: UpgradeRegistry = Arc::new(Mutex::new(HashMap::new()));
@@ -1251,6 +1691,8 @@ pub fn inject_http_server(
             servers: servers.clone(),
             conns: conns.clone(),
             conn_nid: next_conn_id.clone(),
+            bodies: bodies.clone(),
+            body_nid: next_body_id.clone(),
             ready: ready.clone(),
             upgrades: upgrades.clone(),
             upgrades_q: upgrades_q.clone(),
@@ -1445,6 +1887,8 @@ pub fn inject_http_server(
 
                                         let conns2 = conns.clone();
                                         let conn_nid2 = conn_nid.clone();
+                                        let bodies2 = ctx.bodies.clone();
+                                        let body_nid2 = ctx.body_nid.clone();
                                         let fw2 = fw.clone();
                                         let ready2 = ready.clone();
                                         let wake2 = wake.clone();
@@ -1489,6 +1933,8 @@ pub fn inject_http_server(
                                                     max_requests_per_conn,
                                                     conns2,
                                                     conn_nid2,
+                                                    bodies2,
+                                                    body_nid2,
                                                     fw2,
                                                     ready2,
                                                     upgrades2,
@@ -1512,6 +1958,8 @@ pub fn inject_http_server(
                                                 max_requests_per_conn,
                                                 conns2,
                                                 conn_nid2,
+                                                bodies2,
+                                                body_nid2,
                                                 fw2,
                                                 ready2,
                                                 upgrades2,
@@ -1575,9 +2023,9 @@ pub fn inject_http_server(
                     .and_then(|q| q.pop_front());
 
                 match popped {
-                    // [method, url, connId, remoteAddress, body, [k0, v0, k1, v1, ...]]
+                    // [method, url, connId, remoteAddress, bodyId, [k0, v0, k1, v1, ...]]
                     Some(r) => {
-                        let p = &r.parsed;
+                        let p = &r.head;
                         let flat: Vec<v8::Local<v8::Value>> = p
                             .headers
                             .iter()
@@ -1585,13 +2033,12 @@ pub fn inject_http_server(
                             .map(|x| V8String::new(scope, x).unwrap().into())
                             .collect();
                         let headers = v8::Array::new_with_elements(scope, &flat);
-                        let body = String::from_utf8_lossy(&p.body);
                         let items: [v8::Local<v8::Value>; 6] = [
                             V8String::new(scope, &p.method).unwrap().into(),
                             V8String::new(scope, &p.path).unwrap().into(),
                             v8::Integer::new_from_unsigned(scope, r.conn_id).into(),
                             V8String::new(scope, &r.remote.to_string()).unwrap().into(),
-                            V8String::new(scope, &body).unwrap().into(),
+                            v8::Integer::new_from_unsigned(scope, r.body_id).into(),
                             headers.into(),
                         ];
                         rv.set(v8::Array::new_with_elements(scope, &items).into());
@@ -1607,6 +2054,65 @@ pub fn inject_http_server(
             scope,
             V8String::new(scope, "__httpAcceptPoll").unwrap().into(),
             http_accept_fn.into(),
+        );
+    }
+
+    // ── Streaming request body reader ────────────────────────────────────────
+    // JS pulls body chunks from the per-request `BodyPipe` the connection task
+    // fills. Returns a Uint8Array, `null` at EOF, a coded Error on failure, or
+    // `undefined` when no chunk is ready yet (EAGAIN) — the JS `IncomingMessage`
+    // pump retries on the next tick (the same poll shape `net` sockets use).
+    {
+        let ctx_ptr = native_ctx.leak(HttpBodyCtx {
+            bodies: bodies.clone(),
+        });
+        let external = v8::External::new(scope, ctx_ptr);
+        let http_read_body_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpBodyCtx)
+                };
+                let body_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let max = args
+                    .get(1)
+                    .uint32_value(scope)
+                    .unwrap_or(BODY_READ_MAX as u32)
+                    .min(BODY_READ_MAX as u32) as usize;
+                let pipe = ctx.bodies.lock().unwrap().get(&body_id).cloned();
+                let Some(pipe) = pipe else {
+                    // Unknown or already released id: treat as clean EOF so a
+                    // stream whose connection ended still finishes.
+                    rv.set(v8::null(scope).into());
+                    return;
+                };
+                match pipe.read(max) {
+                    BodyRead::Data(bytes) => {
+                        let arr = crate::builtins::v8_compat::uint8array_from_bytes(scope, &bytes);
+                        rv.set(arr.into());
+                    }
+                    BodyRead::Eof => {
+                        ctx.bodies.lock().unwrap().remove(&body_id);
+                        rv.set(v8::null(scope).into());
+                    }
+                    BodyRead::Eagain => {
+                        rv.set(v8::undefined(scope).into());
+                    }
+                    BodyRead::Error(msg) => {
+                        ctx.bodies.lock().unwrap().remove(&body_id);
+                        let err = js_code_err(scope, "ECONNRESET", &msg);
+                        rv.set(err);
+                    }
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpReadBody").unwrap().into(),
+            http_read_body_fn.into(),
         );
     }
 
@@ -1638,7 +2144,7 @@ pub fn inject_http_server(
                 match popped {
                     // [connId, remoteAddress, head(Uint8Array), method, url, [k0,v0,...]]
                     Some(r) => {
-                        let p = &r.parsed;
+                        let p = &r.head;
                         let flat: Vec<v8::Local<v8::Value>> = p
                             .headers
                             .iter()
@@ -1647,7 +2153,7 @@ pub fn inject_http_server(
                             .collect();
                         let headers = v8::Array::new_with_elements(scope, &flat);
                         let head =
-                            crate::builtins::v8_compat::uint8array_from_bytes(scope, &r.head);
+                            crate::builtins::v8_compat::uint8array_from_bytes(scope, &r.head_bytes);
                         let items: [v8::Local<v8::Value>; 6] = [
                             v8::Integer::new_from_unsigned(scope, r.conn_id).into(),
                             V8String::new(scope, &r.remote.to_string()).unwrap().into(),
