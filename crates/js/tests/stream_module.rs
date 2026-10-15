@@ -645,3 +645,109 @@ async fn response_body_is_a_web_stream_and_binary_bodies_keep_their_bytes() {
     }
     panic!("response body test never finished");
 }
+
+/// `Readable.fromWeb` / `Readable.from` must emit `Buffer` chunks, not bare
+/// `Uint8Array`: `Buffer.isBuffer` used to accept any Uint8Array, which made
+/// the conversion guards in both bridges dead code and left `s += chunk`
+/// producing "104,105" instead of "hi".
+#[tokio::test]
+async fn readable_from_web_and_from_emit_buffers() {
+    let mut e = engine().await;
+    let r = eval_async_result(
+        &mut e,
+        r#"
+        var Readable = require('stream').Readable;
+        globalThis.__bufs = null;
+        (async function() {
+            var out = [];
+            var web = new ReadableStream({ start: function(c) { c.enqueue(new Uint8Array([104, 105])); c.close(); } });
+            for await (var c of Readable.fromWeb(web)) out.push(Buffer.isBuffer(c) + ':' + c);
+            for await (var d of Readable.from([new Uint8Array([104, 105])])) out.push(Buffer.isBuffer(d) + ':' + d);
+            // pipeline through a generator transform must keep them Buffers too.
+            var stream = require('stream');
+            var pipeline = require('stream/promises').pipeline;
+            var got = [];
+            var dst = new stream.Writable({ write: function(c, enc, cb) { got.push(Buffer.isBuffer(c)); cb(); } });
+            await pipeline(
+                Readable.from([new Uint8Array([104, 105])]),
+                async function*(s) { for await (var x of s) yield x; },
+                dst
+            );
+            globalThis.__bufs = out.join(',') + '|' + got.join(',');
+        })().catch(function(err) { globalThis.__bufs = 'ERR ' + err.message; });
+        "#,
+        "globalThis.__bufs",
+    )
+    .await;
+    assert_eq!(r, "true:hi,true:hi|true");
+}
+
+/// `pause()` must actually stop `'data'`: pushing while paused has to buffer,
+/// not emit. Libraries that pause the request while they flush to disk
+/// (`formidable`) relied on this and silently lost part of the upload.
+#[tokio::test]
+async fn paused_stream_buffers_instead_of_emitting() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var Readable = require('stream').Readable;
+        globalThis.__pause = null;
+        var src = new Readable({ read: function() {} });
+        var bad = 0, recv = 0, n = 0;
+        src.on('data', function(c) {
+            if (!src._readableState.flowing) bad++;
+            recv += c.length;
+            n++;
+            if (n < 6) {
+                src.pause();
+                src.push(Buffer.alloc(65536, 7));   // pushed while paused
+                setTimeout(function() { src.resume(); }, 1);
+            } else {
+                globalThis.__pause = 'recv:' + recv + '|bad:' + bad;
+            }
+        });
+        src.push(Buffer.alloc(65536, 1));
+        "#,
+    )
+    .await
+    .unwrap();
+    let r = pump_until(
+        &mut e,
+        "globalThis.__pause !== null ? globalThis.__pause : 'false'",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("paused stream never delivered its chunks");
+    assert_eq!(r, "recv:393216|bad:0");
+}
+
+/// `pipe()` must resume the source when a slow destination drains. Now that
+/// `pause()` really stops `'data'`, a destination whose `write()` returns false
+/// would otherwise stall the pipe after the first backpressured chunk.
+#[tokio::test]
+async fn pipe_resumes_after_destination_drain() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var stream = require('stream');
+        globalThis.__pipebp = null;
+        var got = 0;
+        var w = new stream.Writable({ highWaterMark: 1024, write: function(c, e, cb) { got += c.length; setTimeout(cb, 1); } });
+        var src = new stream.Readable({ read: function() {} });
+        src.pipe(w);
+        for (var i = 0; i < 20; i++) src.push(Buffer.alloc(1024, 3));
+        src.push(null);
+        w.on('finish', function() { globalThis.__pipebp = 'got:' + got; });
+        "#,
+    )
+    .await
+    .unwrap();
+    let r = pump_until(
+        &mut e,
+        "globalThis.__pipebp !== null ? globalThis.__pipebp : 'false'",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("pipe never finished");
+    assert_eq!(r, "got:20480");
+}

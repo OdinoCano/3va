@@ -2794,6 +2794,10 @@ fn read_package_json_permissions(start_dir: &std::path::Path) -> ThreeVaPermissi
     // try_run_package_script), así que esta es la única forma real de negar
     // esa superficie por completo en vez de confiar en responder "N" cada vez.
     merged.no_delegate = json["3va"]["no-delegate"].as_bool().unwrap_or(false);
+    // "3va": { "allow-insecure": true } — equivalente al flag global
+    // `--allow-insecure`, declarado junto a los permisos para que sobreviva al
+    // salto de proceso de `3va start`/`3va restart` (ver ThreeVaPermissions).
+    merged.allow_insecure = json["3va"]["allow-insecure"].as_bool().unwrap_or(false);
     let Some(scopes) = json["3va"]["permissions"].as_object() else {
         return merged;
     };
@@ -2904,6 +2908,13 @@ struct ThreeVaPermissions {
     allow_ffi: Vec<String>,
     no_prompt: bool,
     no_delegate: bool,
+    /// `"3va": { "allow-insecure": true }` — opt in to plaintext protocols
+    /// (http://, ws://, …) to non-loopback hosts, the manifest equivalent of
+    /// the global `--allow-insecure` flag. Because a supervised app is a
+    /// separate process (`3va start` → `__supervise` → `3va run`), a flag
+    /// passed to the launcher doesn't cross that boundary; declaring it next
+    /// to the permissions keeps the opt-in with the project.
+    allow_insecure: bool,
     deny_read: Vec<String>,
     deny_write: Vec<String>,
     deny_net: Vec<String>,
@@ -4436,6 +4447,12 @@ async fn main() -> anyhow::Result<()> {
             info!("Running {:?} (Sandboxed)", file);
             let pkg_permissions =
                 read_package_json_permissions(file.parent().unwrap_or(std::path::Path::new(".")));
+            if pkg_permissions.allow_insecure {
+                // `"3va": { "allow-insecure": true }` — the manifest's
+                // equivalent of the global flag, so it survives the
+                // `3va start` → supervisor → `3va run` process boundary.
+                vvva_permissions::set_allow_insecure(true);
+            }
             let mut permissions = build_permissions(
                 allow_read.as_deref(),
                 allow_write.as_deref(),
@@ -5253,6 +5270,10 @@ async fn main() -> anyhow::Result<()> {
                 max_restarts: *max_restarts,
                 autorestart: !*no_autorestart,
                 start_restarts: 0,
+                // Global flags are consumed by this process; forward them so
+                // the supervisor and the `3va run` it spawns keep the opt-in.
+                allow_insecure: cli.allow_insecure,
+                verbose: cli.verbose,
             };
             if *attach {
                 println!(
@@ -5290,6 +5311,8 @@ async fn main() -> anyhow::Result<()> {
                 max_restarts: *max_restarts,
                 autorestart: !*no_autorestart,
                 start_restarts: *start_restarts,
+                allow_insecure: cli.allow_insecure,
+                verbose: cli.verbose,
             };
             proc::run_supervisor(&cfg, false).await?;
         }

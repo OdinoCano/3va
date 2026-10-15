@@ -276,7 +276,11 @@ if (typeof globalThis.TextDecoder === 'undefined') {
   Buffer.allocUnsafe = function(size) { return new Buffer(size < 0 ? 0 : size); };
   Buffer.allocUnsafeSlow = Buffer.allocUnsafe;
 
-  Buffer.isBuffer = function(obj) { return obj instanceof Buffer || obj instanceof Uint8Array; };
+  // Node: true only for actual Buffers. Returning true for every Uint8Array
+  // (as 3va did) defeated the "convert a foreign byte view to Buffer" guards in
+  // stream bridges like Readable.from/fromWeb, so web-stream/fetch chunks
+  // leaked through as bare Uint8Arrays ("104,105" when concatenated).
+  Buffer.isBuffer = function(obj) { return obj instanceof Buffer; };
   Buffer.isEncoding = function(enc) {
     return ['utf8','utf-8','hex','base64','base64url','ascii','latin1','binary','ucs2','ucs-2','utf16le','utf-16le']
       .indexOf((enc||'').toLowerCase()) !== -1;
@@ -310,6 +314,20 @@ if (typeof globalThis.TextDecoder === 'undefined') {
   Buffer.prototype.toString = function(enc, start, end) {
     return _decodeBytes(this, enc || 'utf8', start, end);
   };
+
+  // Node's internal per-encoding slice helpers. Not in the public docs, but
+  // real libraries call them: `busboy`/`dicer` (and therefore `multer`) use
+  // `chunk.latin1Slice(start, end)` while scanning multipart boundaries, and
+  // without it every multipart upload failed with
+  // "chunk.latin1Slice is not a function".
+  Buffer.prototype.asciiSlice = function(s, e) { return _decodeBytes(this, 'ascii', s, e); };
+  Buffer.prototype.latin1Slice = function(s, e) { return _decodeBytes(this, 'latin1', s, e); };
+  Buffer.prototype.utf8Slice = function(s, e) { return _decodeBytes(this, 'utf8', s, e); };
+  Buffer.prototype.ucs2Slice = function(s, e) { return _decodeBytes(this, 'ucs2', s, e); };
+  Buffer.prototype.utf16leSlice = function(s, e) { return _decodeBytes(this, 'utf16le', s, e); };
+  Buffer.prototype.hexSlice = function(s, e) { return _decodeBytes(this, 'hex', s, e); };
+  Buffer.prototype.base64Slice = function(s, e) { return _decodeBytes(this, 'base64', s, e); };
+  Buffer.prototype.base64urlSlice = function(s, e) { return _decodeBytes(this, 'base64url', s, e); };
 
   Buffer.prototype.slice = function(s, e) {
     return new Buffer(this.subarray(s || 0, e !== undefined ? e : this.length));

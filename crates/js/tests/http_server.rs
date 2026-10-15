@@ -1136,6 +1136,63 @@ async fn trusted_proxy_rate_limit_is_per_client() {
     );
 }
 
+/// A trusted proxy that sends requests *without* `X-Forwarded-For` cannot be
+/// attributed to a client. Those requests are rate-limited, but the proxy's own
+/// address must never be added to the blocklist — doing so returned `403
+/// Forbidden` ("blocked proxy") for every client behind it, permanently.
+#[tokio::test]
+async fn trusted_proxy_without_xff_is_rate_limited_not_blocked() {
+    let port = free_port();
+    let mut e = engine_with_firewall(FirewallConfig {
+        rate_limit_rps: 1,
+        rate_limit_burst: 1,
+        auto_block_threshold: 1,
+        trusted_proxies: vec!["127.0.0.1".to_string()],
+        ..FirewallConfig::default()
+    })
+    .await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+        port = port,
+    ))
+    .await
+    .unwrap();
+
+    wait_for_port(port).await;
+
+    // Hammer well past the burst and the auto-block threshold. No response may
+    // ever be 403: a trusted proxy is never auto-blocked.
+    let mut saw_429 = false;
+    for _ in 0..20 {
+        let st = status_only(drive_until(&mut e, raw_http(port, "GET", "/", "")).await);
+        if st == 403 {
+            panic!("trusted proxy was auto-blocked (403) — all clients behind it would fail");
+        }
+        if st == 429 {
+            saw_429 = true;
+        }
+    }
+    assert!(
+        saw_429,
+        "without XFF the proxy's requests must be rate-limited"
+    );
+
+    // After the bucket refills, the proxy is still usable (never blocklisted).
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let after = status_only(drive_until(&mut e, raw_http(port, "GET", "/", "")).await);
+    assert_eq!(after, 200, "the proxy must recover, not stay blocklisted");
+}
+
+fn status_only(resp: String) -> u16 {
+    response_status(&resp)
+}
+
 /// `firewall.enabled: false` disables the firewall's protections, including
 /// the body deadline: a body that arrives after `bodyTimeoutMs` must still be
 /// accepted. (With the firewall on, the same request is dropped.)
@@ -1169,7 +1226,13 @@ async fn disabled_firewall_lifts_body_timeout() {
     e.eval_to_string(&format!(
         r#"
         var http = require('http');
-        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        var _server = http.createServer(function(req, res) {{
+            // Consume the body: with streaming, the handler runs before the
+            // body is read, so the deadline must surface as a stream error.
+            var n = 0;
+            req.on('data', function(c) {{ n += c.length; }});
+            req.on('end', function() {{ res.end('ok'); }});
+        }});
         _server.listen({port}, '127.0.0.1');
         'started'
         "#,
@@ -1192,7 +1255,11 @@ async fn disabled_firewall_lifts_body_timeout() {
     e2.eval_to_string(&format!(
         r#"
         var http = require('http');
-        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        var _server = http.createServer(function(req, res) {{
+            var n = 0;
+            req.on('data', function(c) {{ n += c.length; }});
+            req.on('end', function() {{ res.end('ok'); }});
+        }});
         _server.listen({port}, '127.0.0.1');
         'started'
         "#,
@@ -1443,7 +1510,13 @@ async fn firewall_rudy_slow_body_rejected_and_recovers() {
         globalThis.__okCount = 0;
         var _server = http.createServer(function(req, res) {{
             globalThis.__okCount++;
-            res.end('ok');
+            // Read the body so the rate check surfaces as a stream error:
+            // with streaming the handler is invoked as soon as the head
+            // arrives, before the slow body is known to be abusive.
+            var n = 0;
+            req.on('data', function(c) {{ n += c.length; }});
+            req.on('end', function() {{ res.end('ok'); }});
+            req.on('error', function() {{}});
         }});
         _server.listen({port}, '127.0.0.1');
         'started'
@@ -1492,12 +1565,9 @@ async fn firewall_rudy_slow_body_rejected_and_recovers() {
          deadline is 120 s so only the rate check can have rejected it)"
     );
 
-    // The incomplete RUDY body must never have reached JS.
-    let count = e
-        .eval_to_string("String(globalThis.__okCount)")
-        .await
-        .unwrap();
-    assert_eq!(count, "0", "the RUDY request must not reach the handler");
+    // With streaming the handler is invoked as soon as the head arrives (so it
+    // may have run once), but the incomplete RUDY body is dropped before it
+    // ever completes — the connection closes without a response.
 
     // A normal request after the attack must succeed.
     let resp = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
@@ -1511,7 +1581,11 @@ async fn firewall_rudy_slow_body_rejected_and_recovers() {
         .eval_to_string("String(globalThis.__okCount)")
         .await
         .unwrap();
-    assert_eq!(count, "1");
+    assert_eq!(
+        count, "2",
+        "the RUDY request and the recovery request both reached the handler, \
+         but only the latter completed"
+    );
 }
 
 /// Verify adaptive rate limiting end-to-end: a repeat offender's block

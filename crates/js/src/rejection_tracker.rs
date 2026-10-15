@@ -23,6 +23,17 @@ thread_local! {
     static HANDLED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Set once any rejection is reported as unhandled, so the process exits with a
+/// non-zero status the way Node does by default (`--unhandled-rejections=throw`).
+/// Without it a script whose only failure was an unhandled `fetch()` rejection
+/// — a TLS error at the top level, say — exited 0 and hid the failure.
+static HAD_UNHANDLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether any unhandled rejection has been reported this process.
+pub fn had_unhandled() -> bool {
+    HAD_UNHANDLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 extern "C" fn on_promise_reject(msg: PromiseRejectMessage) {
     v8::callback_scope!(unsafe scope, &msg);
     // The object's identity hash, not the Local's address: each callback gets
@@ -72,6 +83,7 @@ pub fn report_pending() {
             let mut pending = p.borrow_mut();
             pending.retain(|r| !handled.contains(&r.promise_ptr));
             for r in pending.drain(..) {
+                HAD_UNHANDLED.store(true, std::sync::atomic::Ordering::Relaxed);
                 eprintln!("Unhandled promise rejection: {}", r.text);
                 if !r.stack.is_empty() {
                     eprintln!("{}", r.stack);
