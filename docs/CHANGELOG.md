@@ -34,7 +34,7 @@ production Express app (`pg`, file uploads, a reverse proxy).
   closed) even though the handler was invoked.
 - **`Buffer.isBuffer()` is Node-compatible**: it is `true` only for actual `Buffer`s, not for every `Uint8Array`. Code (or a test) that relied on the old behaviour must check `x instanceof Uint8Array` instead.
 - HTTP/1 request parsing no longer turns a stray blank line (an empty request line at EOF on a keep-alive connection) into a phantom request delivered to the app.
-- Native error messages built for JS are escaped, so a message that embeds client-influenced text can no longer break out of its string literal.
+- **Native error messages built for JS are escaped**, so a message that embeds client-influenced text can no longer break out of its string literal. The request line is counted against `maxHeaderBytes`, so an oversized method/target can no longer reach JS as a V8 string (`V8String::new(...).unwrap()`).
 
 Verified against Node 24 on the body/stream/framework matrix (raw `http`, `for await`, `pipeline`, multer/busboy/formidable, Express 4/5, Fastify, Koa) — see the PR. Not reproduced: the report that a top-level `fetch()` to a private CA "neither resolves nor rejects"; it settles correctly with and without `NODE_EXTRA_CA_CERTS`, but the exit-code divergence above was real and is fixed.
 

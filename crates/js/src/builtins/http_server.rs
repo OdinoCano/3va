@@ -769,6 +769,15 @@ where
         })?
         .map_err(|e| ParseError::Silent(e.to_string()))?;
 
+    // Count the request line against the header budget so an oversized
+    // method/target (client-controlled) can never reach V8 as a string and hit
+    // the `V8String::new(...).unwrap()` in `__httpAcceptPoll`.
+    let request_line_len = request_line.len();
+    if request_line_len > max_header_bytes {
+        return Err(ParseError::Silent(format!(
+            "request line flood: exceeded {max_header_bytes} bytes"
+        )));
+    }
     let request_line = request_line.trim_end_matches(['\r', '\n']);
     if request_line.is_empty() {
         // EOF (or a stray blank line at the start of a keep-alive connection):
@@ -793,7 +802,7 @@ where
     let mut content_length: usize = 0;
     let mut has_content_length = false;
     let mut transfer_encoding: Option<String> = None;
-    let mut total_header_bytes: usize = 0;
+    let mut total_header_bytes: usize = request_line_len;
 
     loop {
         let mut line = String::new();
@@ -3790,6 +3799,17 @@ mod tests {
             matches!(result, Err(ParseError::Respond(400, _))),
             "{result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_request_line_is_rejected_before_reaching_v8() {
+        // A request target longer than max_header_bytes (16 KiB here) must be
+        // refused, not carried to JS as a method/target V8 string.
+        let mut req = b"GET /".to_vec();
+        req.extend(std::iter::repeat_n(b'a', 20_000));
+        req.extend_from_slice(b" HTTP/1.1\r\nHost: x\r\n\r\n");
+        let result = parse_raw(&req, 0).await;
+        assert!(matches!(result, Err(ParseError::Silent(_))), "{result:?}");
     }
 
     #[tokio::test]
