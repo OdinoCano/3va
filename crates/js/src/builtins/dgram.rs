@@ -483,6 +483,7 @@ pub fn inject_dgram(
                 return this;
             };
 
+            // ponytail: no-op by design — UDP-level socket options (setsockopt: SO_BROADCAST, IP_TTL, IP_MULTICAST_*, IP_ADD/DROP_MEMBERSHIP) are not wired to the OS socket; see docs/05-js-engine/07-inventario-stubs.md §7.1.
             Socket.prototype.setBroadcast = function() { return this; };
             Socket.prototype.setMulticastTTL = function() { return this; };
             Socket.prototype.setMulticastLoopback = function() { return this; };

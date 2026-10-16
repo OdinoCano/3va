@@ -1507,6 +1507,7 @@ pub fn inject_child_process(
                             });
                             return dest;
                         },
+                        // ponytail: no-op by design — synthetic stdio stream: resume/pause/removeListener do nothing; see docs/05-js-engine/07-inventario-stubs.md §7.4.
                         resume: function() { return this; },
                         destroy: function() {},
                         unref: function() {}

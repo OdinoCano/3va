@@ -1482,6 +1482,7 @@ pub fn inject_require(
                     if (cb) setTimeout(cb, 0);
                     return this;
                 };
+                // ponytail: ref/unref are no-ops — 3va's event loop does not release the process per handle; see docs/05-js-engine/07-inventario-stubs.md §7.2.
                 Http2Server.prototype.ref = function() { return this; };
                 Http2Server.prototype.unref = function() { return this; };
 
@@ -2535,6 +2536,7 @@ pub fn inject_require(
                 return this;
             };
             Writable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
+            // TODO(2.13.0): implement — setDefaultEncoding must set the encoding used by write(string); see docs/05-js-engine/07-inventario-stubs.md §7.4.
             Writable.prototype.setDefaultEncoding = function() { return this; };
             Writable.prototype.cork = function() { this._writableState.corked++; };
             Writable.prototype.uncork = function() {
@@ -3812,6 +3814,7 @@ pub fn inject_require(
                 if (this._connId !== null) __tcpSetNoDelay(this._connId, on === false ? 0 : 1);
                 return this;
             };
+            // ponytail: no-op by design — TCP socket options (SO_KEEPALIVE / TCP_NODELAY) are performance hints, not semantics; see docs/05-js-engine/07-inventario-stubs.md §7.2.
             Socket.prototype.setKeepAlive = function() { return this; };
             // ponytail: no-ops — pg-pool/pg call socket.ref()/unref() on idle clients; unref() does not
             // yet release the event loop (a pool with idle clients keeps the process alive until pool.end()).
@@ -3962,6 +3965,7 @@ pub fn inject_require(
                     if (cb) cb(err);
                 });
             };
+            // ponytail: no-op by design — see docs/05-js-engine/07-inventario-stubs.md §7.2.
             UpgradeSocket.prototype.setNoDelay = function() { return this; };
             UpgradeSocket.prototype.setTimeout = function(ms, cb) {
                 if (typeof cb === 'function') this.once('timeout', cb);
@@ -4047,6 +4051,7 @@ pub fn inject_require(
             Server.prototype.address = function() {
                 return this.listening ? { address: '0.0.0.0', port: 0, family: 'IPv4' } : null;
             };
+            // ponytail: ref/unref are no-ops — see docs/05-js-engine/07-inventario-stubs.md §7.2.
             Server.prototype.unref = function() { return this; };
             Server.prototype.ref = function() { return this; };
             Server.prototype.getConnections = function(cb) { if (cb) cb(null, 0); };
@@ -4409,6 +4414,7 @@ pub fn inject_require(
                 if (st && st.waiting && st.step) st.step();
                 return r;
             };
+            // ponytail: no-op by design — the effective timeout is applied by the server/firewall; see docs/05-js-engine/07-inventario-stubs.md §7.3.
             httpIncomingMessage.prototype.setTimeout = function() { return this; };
             httpIncomingMessage.prototype.destroy = function() {
                 var st = this[kIncomingBody];
@@ -4553,6 +4559,7 @@ pub fn inject_require(
                 queueMicrotask(function() { self.emit('finish'); self.emit('close'); if (typeof callback === 'function') callback(); });
                 return this;
             };
+            // ponytail: no-op by design — see docs/05-js-engine/07-inventario-stubs.md §7.3.
             httpServerResponse.prototype.setTimeout = function() { return this; };
             httpServerResponse.prototype.destroy = function() { return this; };
             httpServerResponse.prototype.flushHeaders = function() {};
@@ -4722,6 +4729,7 @@ __httpSetHandler(self._id, function() {
                     configurable: true,
                 });
             });
+            // ponytail: ref/unref/timeout are no-ops — see docs/05-js-engine/07-inventario-stubs.md §7.2-7.3.
             httpServer.prototype.ref = function() { return this; };
             httpServer.prototype.unref = function() { return this; };
             httpServer.prototype.listenOnServerHandler = function(socket) {};
@@ -4890,6 +4898,7 @@ __httpSetHandler(self._id, function() {
                 delete this._headers[lk]; delete this._headerNames[lk];
                 return this;
             };
+            // ponytail: no-op by design — TCP socket options are hints; see docs/05-js-engine/07-inventario-stubs.md §7.2.
             ClientRequest.prototype.setNoDelay = function() { return this; };
             ClientRequest.prototype.setSocketKeepAlive = function() { return this; };
             ClientRequest.prototype.setTimeout = function(ms, cb) {
@@ -5617,6 +5626,7 @@ __httpSetHandler(self._id, function() {
                     __acsSet(prevFrame);
                 }
             };
+            // ponytail: no-op by design — 3va has no AsyncResource destroy hooks to run; see docs/05-js-engine/07-inventario-stubs.md §7.5.
             AsyncResource.prototype.emitDestroy = function() { return this; };
             AsyncResource.prototype.asyncId = function() { return 0; };
             AsyncResource.prototype.triggerAsyncId = function() { return 0; };
@@ -5642,6 +5652,7 @@ __httpSetHandler(self._id, function() {
                 triggerAsyncId: function() { return 0; },
                 executionAsyncResource: function() { return {}; },
                 createHook: function() {
+                    // ponytail: no-op by design — diagnostics_channel enable/disable has no state to change; see docs/05-js-engine/07-inventario-stubs.md §7.5.
                     return { enable: function() { return this; }, disable: function() { return this; } };
                 },
             };
