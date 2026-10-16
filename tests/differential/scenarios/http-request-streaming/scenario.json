@@ -1,0 +1,5 @@
+{
+  "kind": "client-server",
+  "timeout_s": 30,
+  "description": "http.request with an incrementally-written body: node frames it as Transfer-Encoding: chunked, 3va buffers and sets Content-Length (known difference, see known-differences.json)."
+}

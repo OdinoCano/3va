@@ -1,0 +1,5 @@
+{
+  "kind": "single",
+  "timeout_s": 30,
+  "description": "stream.finished fires once on a Duplex and reports a stream error once."
+}

@@ -12,6 +12,9 @@ crates/pm/.cache/
 # npm artifacts (use 3va-lock.json instead)
 package-lock.json
 yarn.lock
+# …except the differential suite's lockfile: `npm ci` needs it committed for
+# reproducible scenario dependencies (tests/differential/README.md).
+!tests/differential/package-lock.json
 
 # Platform binaries are downloaded by CI — never committed
 dist/npm/linux-x64/bin/

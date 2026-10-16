@@ -1,0 +1,5 @@
+{
+  "kind": "client-server",
+  "timeout_s": 30,
+  "description": "a client that aborts mid-body must not take the express server down; the next request still works."
+}

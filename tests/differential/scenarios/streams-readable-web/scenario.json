@@ -1,0 +1,5 @@
+{
+  "kind": "single",
+  "timeout_s": 30,
+  "description": "Readable.from, Readable.fromWeb and Readable.toWeb."
+}
