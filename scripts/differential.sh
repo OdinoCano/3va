@@ -102,10 +102,19 @@ launch() {
   else
     cmd=("$THREEVA_BIN" run "${perms[@]}" "$script" -- "$@")
   fi
+  local -a run=()
   if [ -n "$extra_env" ]; then
-    timeout --signal=KILL "$LAUNCH_TIMEOUT" env $extra_env "${cmd[@]}"
+    run=(timeout --signal=KILL "$LAUNCH_TIMEOUT" env $extra_env "${cmd[@]}")
   else
-    timeout --signal=KILL "$LAUNCH_TIMEOUT" "${cmd[@]}"
+    run=(timeout --signal=KILL "$LAUNCH_TIMEOUT" "${cmd[@]}")
+  fi
+  # LAUNCH_EXEC=1 makes the backgrounded subshell exec `timeout`, so `$!` is the
+  # timeout pid and killing it forwards to the server (otherwise the subshell
+  # dies and the node/3va server is orphaned).
+  if [ "${LAUNCH_EXEC:-0}" = 1 ]; then
+    exec "${run[@]}"
+  else
+    "${run[@]}"
   fi
 }
 
@@ -202,7 +211,7 @@ for name in "${SCENARIOS[@]}"; do
       IFS='/' read -r srv_rt cli_rt <<<"$combo"
       port="$(free_port)"
       LAUNCH_TIMEOUT="$((timeout_s + 5))"
-      launch "$srv_rt" server scenarios/"$name"/server.js "$port" >"$slog" 2>"$serr" &
+      LAUNCH_EXEC=1 launch "$srv_rt" server scenarios/"$name"/server.js "$port" >"$slog" 2>"$serr" &
       srv_pid=$!
       ready=0
       for _ in $(seq 1 $((timeout_s * 10))); do
