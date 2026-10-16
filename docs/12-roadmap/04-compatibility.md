@@ -14,9 +14,10 @@ passed / (passed + failed); tests skipped because they need a Node/V8 flag or
 reach into Node internals are counted separately and excluded.
 
 Measured on 3va 2.12.6 against nodejs/node v24.22.0 (commit `f14cd3aa`),
-2026-10-16, for the modules whose baseline is committed. `http`, `https`, `net`
-and `stream` are the next scope and are **not** measured yet: no percentage is
-claimed for them. This is the pass rate of Node's own tests for a module, not a
+2026-10-16, for the 17 modules whose baseline is committed (`test/parallel`
+prefixes `buffer`, `child-process`, `crypto`, `events`, `fs`, `http`, `https`,
+`net`, `os`, `path`, `querystring`, `stream`, `string-decoder`, `timers`, `url`,
+`util`, `zlib`). This is the pass rate of Node's own tests for a module, not a
 per-function claim.
 
 | Module | Passed | Failed | Skipped | Compatibility |
@@ -26,15 +27,19 @@ per-function claim.
 | `crypto` | 15 | 120 | 22 | 11.1% |
 | `events` | 0 | 5 | 3 | 0.0% |
 | `fs` | 56 | 181 | 38 | 23.6% |
+| `http` | 54 | 335 | 14 | 13.9% |
+| `https` | 2 | 63 | 2 | 3.1% |
+| `net` | 9 | 138 | 11 | 6.1% |
 | `os` | 0 | 5 | 2 | 0.0% |
 | `path` | 5 | 11 | 0 | 31.2% |
 | `querystring` | 0 | 3 | 0 | 0.0% |
+| `stream` | 17 | 150 | 48 | 10.2% |
 | `string-decoder` | 0 | 2 | 0 | 0.0% |
 | `timers` | 16 | 30 | 12 | 34.8% |
 | `url` | 0 | 14 | 1 | 0.0% |
 | `util` | 2 | 16 | 13 | 11.1% |
 | `zlib` | 4 | 60 | 1 | 6.2% |
-| **total** | **116** | **589** | **114** | **16.5%** |
+| **total** | **198** | **1275** | **189** | **13.4%** |
 
 An earlier version of this section carried hand-written "self-reported"
 percentages (e.g. `buffer` 100%, `crypto` 97%, `http` 99%). They were never

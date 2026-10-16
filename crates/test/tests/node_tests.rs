@@ -21,20 +21,23 @@ use vvva_test::node_tests::{
     diff_baseline, read_baseline, run_suite, write_baseline, Options, Summary,
 };
 
-// ponytail: the initial scope from the standard (§7.4 step 2) — the modules
-// whose baseline is measured and committed. `test-stream-`, `test-http-`,
-// `test-https-` and `test-net-` are the next scope: their server tests hang
-// under 3va and dominate the run time, so they need a shorter per-test timeout
-// (NODE_TESTS_TIMEOUT_SECS) and their own baseline before they gate CI.
+// ponytail: the initial scope from the standard (§7.4 step 2). The `test/http/
+// https/net/stream` server tests hang under 3va and dominate the runtime
+// (~44 min total on a debug build), so the weekly deep-check is the right
+// place for them; the rest of the prefixes run in a few minutes.
 const PREFIXES: &[&str] = &[
     "test-buffer-",
     "test-child-process-",
     "test-crypto-",
     "test-events-",
     "test-fs-",
+    "test-http-",
+    "test-https-",
+    "test-net-",
     "test-os-",
     "test-path-",
     "test-querystring-",
+    "test-stream-",
     "test-string-decoder-",
     "test-timers-",
     "test-url-",
