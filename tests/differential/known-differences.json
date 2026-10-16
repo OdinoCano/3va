@@ -12,8 +12,5 @@
   },
   "esm-cyclic-import": {
     "3va": "in an import cycle the binding read from the other module stays undefined instead of the live binding node exposes: main prints cycle-a's aValue correctly (`a->b`) but cycle-b's seenA() returns `undefined` instead of `a->b`. Listed as a 2.13.0 target. Remove this entry when cycles expose live bindings."
-  },
-  "http-status-codes": {
-    "3va": "http.STATUS_CODES[415] is missing (returns null/undefined); node returns 'Unsupported Media Type'. This also strips the `error` field from fastify's 415 response body. Listed as a 2.13.0 target. Remove this entry when the table matches node."
   }
 }
