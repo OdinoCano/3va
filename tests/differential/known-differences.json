@@ -3,10 +3,6 @@
     "node/3va": "3va buffers an incrementally-written request body and sends Content-Length; node sends Transfer-Encoding: chunked. Status and body bytes are identical, only the framing header differs. Listed as a 2.13.0 target (streaming/flushHeaders semantics). Remove this entry when 3va frames incremental writes as chunked.",
     "3va/3va": "same as node/3va: the 3va client buffers the incrementally-written body and frames it with Content-Length instead of chunked."
   },
-  "tls-private-ca": {
-    "node/3va": "the 3va `https`/`tls` client does not read NODE_EXTRA_CA_CERTS: the non-FIPS path uses native-tls (OpenSSL), which trusts only the OS store, so a private CA trusted via that variable fails to verify (`unable to get local issuer certificate`). fetch() does honour it (rustls/ureq path). Listed as a 2.13.0 target. Remove this entry when the OpenSSL TLS client honours NODE_EXTRA_CA_CERTS.",
-    "3va/3va": "same as node/3va: the 3va client cannot verify the private CA that the 3va server presents via NODE_EXTRA_CA_CERTS."
-  },
   "esm-mjs-import": {
     "3va": "a relative import whose target ends in .mjs fails with `require() of ES module ... not supported. Use import() instead.`; .js targets resolve as ESM. The CLI dispatches the .mjs dependency through the CJS loader. Listed as a 2.13.0 target. Remove this entry when importing a relative .mjs works."
   },

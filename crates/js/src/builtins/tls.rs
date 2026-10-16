@@ -22,9 +22,28 @@ pub struct TlsConnector;
 impl TlsConnector {
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> native_tls::Result<native_tls::TlsConnector> {
-        native_tls::TlsConnector::builder()
-            .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
-            .build()
+        let mut builder = native_tls::TlsConnector::builder();
+        builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
+        // Node's NODE_EXTRA_CA_CERTS: add the PEM bundle as trust anchors, the
+        // same variable the rustls/ureq path already honours (add_extra_ca_certs
+        // in tcp.rs). Without this, `https`/`tls` cannot verify a private CA that
+        // `fetch` and Node trust.
+        if let Ok(path) = std::env::var("NODE_EXTRA_CA_CERTS")
+            && !path.is_empty()
+        {
+            match std::fs::read(&path) {
+                Ok(pem) => {
+                    let mut reader = std::io::BufReader::new(pem.as_slice());
+                    for cert in rustls_pemfile::certs(&mut reader).flatten() {
+                        if let Ok(cert) = native_tls::Certificate::from_der(&cert) {
+                            let _ = builder.add_root_certificate(cert);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("[3va-tls] NODE_EXTRA_CA_CERTS: cannot read {path}: {e}"),
+            }
+        }
+        builder.build()
     }
 }
 
