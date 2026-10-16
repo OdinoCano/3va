@@ -9,6 +9,65 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ---
 
+## [2.13.0] — 2026-10-16
+
+Verificación de compatibilidad con Node con pruebas que la respaldan
+(`docs/09-testing/07-compatibilidad-node.md`). Es una *minor* y no un parche
+porque añade infraestructura de verificación en CI, un gate de release y cambios
+de comportamiento visibles.
+
+### Added
+
+- **Suite diferencial node vs 3va** (`tests/differential/`, `scripts/differential.sh`):
+  25 escenarios con el mismo script ejecutado con `node` 24 y con `3va`,
+  comparando la salida byte a byte, servidor y cliente en procesos distintos y
+  binarios por SHA-256. Job nuevo en `ci.yml`.
+- **Suite oficial de Node con trinquete** (`scripts/setup-node-tests.sh`,
+  `crates/test/src/node_tests.rs`): `test/parallel` de nodejs/node v24.22.0
+  (17 prefijos) con línea base versionada; falla si aparece un fallo nuevo y si
+  uno arreglado sigue en la línea base. Job en `deep-checks.yml`.
+- **Escenario del cliente como gate de release** (`tests/client-scenario/`,
+  `scripts/client-scenario.sh`): app Express + sesión + subida/descarga por
+  SHA-256 + `pg`/SCRAM + axios + nginx con `trustedProxies`, con el binario de
+  release en `debian:bookworm-slim`. Job nuevo en `release.yml` que bloquea la
+  publicación.
+- **Suites de librerías reales** (`scripts/library-suites.sh`): express 4/5,
+  body-parser, axios, pg, multer, ws y fastify; resultados de referencia en
+  `tests/library-suites/results.txt`. Job de referencia en `deep-checks.yml`.
+- Inventario de métodos falsos: `docs/05-js-engine/07-inventario-stubs.md`.
+
+### Fixed
+
+- **`cluster.fork()`**: el worker se creía el primario (`cluster.isPrimary === true`,
+  congelado en el snapshot de builtins) y no recibía el `env`; volvía a forkear
+  sin fin (bomba de procesos). `isPrimary`/`isWorker`/`worker` son ahora getters
+  en tiempo de ejecución y `cluster.fork(env)` propaga el env.
+- **`child_process.fork(path, args)`**: los `args` no llegaban al hijo, así que
+  un hijo que ramifica por `process.argv[2]` volvía a forkear. Ahora se pasan.
+- **`http.STATUS_CODES`**: faltaban entradas (p. ej. `415`), lo que además
+  eliminaba el campo `error` de la respuesta 415 de fastify. Tabla completa de Node.
+- **TLS con CA privada**: el cliente `https`/`tls` no leía `NODE_EXTRA_CA_CERTS`
+  (usaba native-tls/OpenSSL, que solo confía en el almacén del SO). Ahora añade
+  los certificados del bundle como raíces.
+- La suite diferencial ya no deja servidores huérfanos al terminar.
+
+### Medido
+
+Compatibilidad con Node medida con `test/parallel` de nodejs/node v24.22.0
+(`f14cd3aa`), 3va 2.13.0, 2026-10-16: **198/1275/189 → 13,4 %**
+(pasados/fallados/saltados; los saltados no cuentan). Sustituye al ~97 %
+auto-declarado. Detalle por módulo en `docs/12-roadmap/04-compatibility.md`.
+
+### Notes
+
+- `http`/`https`/`net`/`stream` de `test/parallel` cuelgan en algunos tests y
+  dominan el tiempo; por eso corren en el chequeo semanal y no en cada PR.
+- Diferencias conocidas pendientes en la suite diferencial: import relativo de
+  `.mjs`, live bindings en ciclos ESM y framing `chunked` en escrituras
+  incrementales de `http.request`.
+
+---
+
 ## [2.12.6] — 2026-10-15
 
 Client-side HTTP/`fetch`/`net`/`stream` compatibility. 2.12.5 fixed the server

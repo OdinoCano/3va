@@ -37,10 +37,10 @@ faltan (node 24, npm, docker, hyperfine 1.x, oha…) y descarga test262 (`tests/
 | Capa | Herramienta | Estado |
 |---|---|---|
 | Lenguaje (ECMAScript) | test262, gate de trinquete en CI | Activo (`06-test262.md`) |
-| API de Node (`http`, `stream`, `Buffer`, `fs`, `net`, `zlib`, `crypto`…) | Suite oficial de Node (`test/parallel` de nodejs/node) con línea base y trinquete | **Pendiente** (§7.4, paso 2) |
-| Comportamiento observable frente a Node | Pruebas diferenciales: el mismo script con `node` y con `3va`, comparando la salida | **Pendiente** de convertir en suite de CI (§7.4, paso 1) |
-| Librerías reales | Las suites de tests de las propias librerías (`npm test`) ejecutadas con 3va | **Pendiente** (§7.4, paso 4) |
-| Uso real de un cliente | Escenario completo con el binario de release en la imagen de producción | **Pendiente** (§7.4, paso 5) |
+| API de Node (`http`, `stream`, `Buffer`, `fs`, `net`, `zlib`, `crypto`…) | Suite oficial de Node (`test/parallel` de nodejs/node v24.22.0) con línea base y trinquete | **Activo** (§7.4 paso 2): `scripts/setup-node-tests.sh` + `cargo test -p vvva_test --test node_tests -- --ignored`; job en `deep-checks.yml` |
+| Comportamiento observable frente a Node | Pruebas diferenciales: el mismo script con `node` y con `3va`, comparando la salida | **Activo** (§7.4 paso 1): `scripts/differential.sh` (25 escenarios, 4 combinaciones); job en `ci.yml` |
+| Librerías reales | Las suites de tests de las propias librerías (`npm test`) ejecutadas con 3va | **Activo como referencia** (§7.4 paso 4): `scripts/library-suites.sh`; resultados en `tests/library-suites/results.txt`; job en `deep-checks.yml` |
+| Uso real de un cliente | Escenario completo con el binario de release en la imagen de producción | **Activo como gate** (§7.4 paso 5): `scripts/client-scenario.sh`; job en `release.yml` (bloquea la publicación) |
 
 ## 7.3 Reglas para todo PR que toque la API de Node
 
@@ -91,14 +91,31 @@ faltan (node 24, npm, docker, hyperfine 1.x, oha…) y descarga test262 (`tests/
 Hasta completar los pasos 1 y 2, cualquier porcentaje de compatibilidad con Node que publiquemos es una
 estimación y debe decirlo.
 
+**Estado en 2.13.0:** los pasos 1-5 están implementados y en CI; el paso 6 (tabla medida) se genera con
+`scripts/compat-table.sh` y vive en `docs/12-roadmap/04-compatibility.md` y el README. Los comandos de
+cada paso están en la tabla de §7.2.
+
 ## 7.5 Antes de cada release
 
-- [ ] Las pruebas diferenciales del área tocada, con su salida en el PR.
-- [ ] `cargo test -p vvva_js -p vvva_firewall -p vvva_cli --no-fail-fast` completo.
+- [x] Las pruebas diferenciales del área tocada, con su salida en el PR. 2.13.0:
+      `scripts/differential.sh` → 53 coincidencias, 4 diferencias conocidas, 0 inesperadas.
+- [x] `cargo test -p vvva_js -p vvva_firewall -p vvva_cli --no-fail-fast` completo. 2.13.0:
+      1097 pasados, 0 fallados (82 binarios de test).
 - [ ] test262 sin fallos nuevos frente a la lista de la versión anterior (`scripts/test262.sh`).
+      **Pendiente en 2.13.0**: requiere descargar `tests/test262/` y ~1 h de ejecución;
+      no se ejecutó. Sin cambios en el compilador de JS en esta release, pero no está verificado.
 - [ ] `scripts/perf-check.sh` frente a la versión anterior, en rondas alternadas (es ruidoso).
-- [ ] `scripts/compat-check.sh` y `scripts/compat-scan.sh`.
-- [ ] `cargo vet --locked` y `cargo deny check` en verde; solo cambian las dependencias justificadas.
+      **Pendiente en 2.13.0**: no ejecutado.
+- [x] `scripts/compat-check.sh` (21/24, 87 %) y `scripts/compat-scan.sh`. 2.13.0:
+      `compat-check` dio 21/24 (los 3 fallos son `@nestjs/core`, `@tauri-apps/cli`,
+      `react-native`, preexistentes); `compat-scan` **no se completó** — recorre los árboles
+      de `.compatibility/` (pnpm/bun/vite) y agotó 30 min con el build debug.
+- [x] `cargo vet --locked` y `cargo deny check` en verde; solo cambian las dependencias
+      justificadas. 2.13.0: `Vetting Succeeded` y `advisories ok, bans ok, licenses ok, sources ok`
+      (sin cambios de dependencias).
 - [ ] El Security Pipeline en verde sobre el commit que se va a etiquetar (el workflow de release lo
-      exige).
-- [ ] El binario publicado se prueba en `debian:bookworm-slim` (glibc 2.36) con el flujo del cliente.
+      exige). Lo comprueba CI, no el entorno local.
+- [~] El binario publicado se prueba en `debian:bookworm-slim` (glibc 2.36) con el flujo del cliente.
+      2.13.0: el escenario pasa con el binario **2.12.6 publicado**; el binario construido en local no
+      corre en bookworm (pide glibc 2.39), así que la prueba con el binario de 2.13.0 la hace el job
+      `client-scenario` de `release.yml` con el binario construido en `ubuntu-22.04`.
