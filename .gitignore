@@ -78,6 +78,9 @@ security-reports/
 # test262 suite — downloaded by scripts/setup-test262.sh, not committed
 tests/test262/
 
+# nodejs/node test suite — downloaded by scripts/setup-node-tests.sh, not committed
+tests/node/
+
 bench/express/node_modules/
 bench/express/package-lock.json
 

@@ -30,6 +30,10 @@ Además había métodos que aparentaban funcionar sin hacer nada (`function() { 
 
 ## 7.2 Las capas y cómo se verifica cada una
 
+Preparación del entorno: `./scripts/dev-setup.sh --all` instala los hooks, avisa de las herramientas que
+faltan (node 24, npm, docker, hyperfine 1.x, oha…) y descarga test262 (`tests/test262/`) y la suite de Node
+(`tests/node/`). Por separado: `--with-test262` o `--with-node-tests`. Ver también `CONTRIBUTING.md`.
+
 | Capa | Herramienta | Estado |
 |---|---|---|
 | Lenguaje (ECMAScript) | test262, gate de trinquete en CI | Activo (`06-test262.md`) |
@@ -58,6 +62,12 @@ Además había métodos que aparentaban funcionar sin hacer nada (`function() { 
    exija un advisory. `cargo vet --locked` y `cargo deny check` en verde. No usar
    `cargo vet regenerate imports` sin revisar el diff de `supply-chain/config.toml`, porque borra
    exenciones con notas de revisión manual.
+
+9. **Tests que crean procesos.** Siempre dentro de `systemd-run --user --scope -p MemoryMax=8G
+   -p TasksMax=1024`, una sola tanda a la vez. Para matar el grupo de procesos de un test usa
+   `kill -KILL -- -<pgid>` (con `--`) o `libc::kill(-(pgid as i32), SIGKILL)`, nunca con `pgid <= 1`:
+   en procps-ng 4.0.4, `kill -KILL -<pgid>` sin `--` se convierte en `kill(-1, SIGKILL)` y mata todos los
+   procesos del usuario (tumbó la sesión de escritorio dos veces el 2026-10-16).
 
 ## 7.4 Hoja de ruta (en este orden)
 
