@@ -1482,6 +1482,7 @@ pub fn inject_require(
                     if (cb) setTimeout(cb, 0);
                     return this;
                 };
+                // ponytail: ref/unref are no-ops — 3va's event loop does not release the process per handle; see docs/05-js-engine/07-inventario-stubs.md §7.2.
                 Http2Server.prototype.ref = function() { return this; };
                 Http2Server.prototype.unref = function() { return this; };
 
@@ -2055,43 +2056,47 @@ pub fn inject_require(
                 ClusterWorker.prototype.disconnect = function() { this.kill(); };
                 ClusterWorker.prototype.isDead = function() { return this.state === 'dead'; };
 
-                cluster.isPrimary = !process.env.CLUSTER_WORKER;
-                cluster.isMaster = cluster.isPrimary;
-                cluster.isWorker = !!process.env.CLUSTER_WORKER;
+                function _clusterEnvIsWorker() {
+                    return !!(typeof process !== 'undefined' && process.env && process.env.CLUSTER_WORKER);
+                }
+                var _clusterWorkerHandle = null;
+                // Only sets the worker handle; the per-run `fork-ipc` bootstrap
+                // already installs process.send/stdin polling from VVVA_FORKED.
+                function _clusterEnsureWorker() {
+                    if (cluster._workerReady || !_clusterEnvIsWorker()) return;
+                    cluster._workerReady = true;
+                    _clusterWorkerHandle = {
+                        id: parseInt(process.env.NODE_WORKER_ID || '0'),
+                        send: function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
+                    };
+                }
+                // Runtime getters, not values baked into the builtins snapshot:
+                // the snapshot is recorded with an empty environment, so an eager
+                // `cluster.isPrimary = !process.env.CLUSTER_WORKER` froze `true`
+                // for every process and made cluster workers re-fork forever.
+                Object.defineProperty(cluster, 'isPrimary', {
+                    get: function() { return !_clusterEnvIsWorker(); },
+                    enumerable: true, configurable: true,
+                });
+                Object.defineProperty(cluster, 'isMaster', {
+                    get: function() { return cluster.isPrimary; },
+                    enumerable: true, configurable: true,
+                });
+                Object.defineProperty(cluster, 'isWorker', {
+                    get: function() { _clusterEnsureWorker(); return _clusterEnvIsWorker(); },
+                    enumerable: true, configurable: true,
+                });
+                Object.defineProperty(cluster, 'worker', {
+                    get: function() { _clusterEnsureWorker(); return _clusterWorkerHandle; },
+                    enumerable: true, configurable: true,
+                });
                 cluster.workers = _clusterWorkers;
                 cluster.settings = {};
                 cluster.schedulingPolicy = 2;
                 cluster.SCHED_NONE = 1;
                 cluster.SCHED_RR = 2;
 
-                if (cluster.isWorker) {
-                    cluster.worker = {
-                        id: parseInt(process.env.NODE_WORKER_ID || '0'),
-                        send: function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
-                    };
-                    process.send = function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); };
-                    process.connected = true;
-                    // Read IPC messages from stdin (parent writes JSON lines via __clusterSend)
-                    var _ipcBuf = '';
-                    setInterval(function() {
-                        try {
-                            var chunk = __stdinReadPoll();
-                            if (chunk && chunk.length > 0) {
-                                _ipcBuf += Buffer.from(chunk).toString('utf8');
-                                var lines = _ipcBuf.split('\n');
-                                _ipcBuf = lines.pop();
-                                for (var i = 0; i < lines.length; i++) {
-                                    var line = lines[i].trim();
-                                    if (!line) continue;
-                                    try {
-                                        var msg = JSON.parse(line);
-                                        process.emit('message', msg);
-                                    } catch(e) {}
-                                }
-                            }
-                        } catch(e) {}
-                    }, 10);
-                }
+                _clusterEnsureWorker();
 
                 cluster.fork = function(env) {
                     if (!cluster.isPrimary) return null;
@@ -2099,7 +2104,7 @@ pub fn inject_require(
                     w.id = ++_clusterNextId;
                     _clusterWorkers[w.id] = w;
                     var scriptPath = process.argv[1] || cluster.settings.exec || '';
-                    var result = __clusterFork(scriptPath, w.id);
+                    var result = __clusterFork(scriptPath, w.id, JSON.stringify(env || {}), JSON.stringify([]), true);
                     if (result === -1) {
                         delete _clusterWorkers[w.id];
                         return null;
@@ -2531,6 +2536,7 @@ pub fn inject_require(
                 return this;
             };
             Writable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
+            // TODO(2.13.0): implement — setDefaultEncoding must set the encoding used by write(string); see docs/05-js-engine/07-inventario-stubs.md §7.4.
             Writable.prototype.setDefaultEncoding = function() { return this; };
             Writable.prototype.cork = function() { this._writableState.corked++; };
             Writable.prototype.uncork = function() {
@@ -3808,6 +3814,7 @@ pub fn inject_require(
                 if (this._connId !== null) __tcpSetNoDelay(this._connId, on === false ? 0 : 1);
                 return this;
             };
+            // ponytail: no-op by design — TCP socket options (SO_KEEPALIVE / TCP_NODELAY) are performance hints, not semantics; see docs/05-js-engine/07-inventario-stubs.md §7.2.
             Socket.prototype.setKeepAlive = function() { return this; };
             // ponytail: no-ops — pg-pool/pg call socket.ref()/unref() on idle clients; unref() does not
             // yet release the event loop (a pool with idle clients keeps the process alive until pool.end()).
@@ -3958,6 +3965,7 @@ pub fn inject_require(
                     if (cb) cb(err);
                 });
             };
+            // ponytail: no-op by design — see docs/05-js-engine/07-inventario-stubs.md §7.2.
             UpgradeSocket.prototype.setNoDelay = function() { return this; };
             UpgradeSocket.prototype.setTimeout = function(ms, cb) {
                 if (typeof cb === 'function') this.once('timeout', cb);
@@ -4043,6 +4051,7 @@ pub fn inject_require(
             Server.prototype.address = function() {
                 return this.listening ? { address: '0.0.0.0', port: 0, family: 'IPv4' } : null;
             };
+            // ponytail: ref/unref are no-ops — see docs/05-js-engine/07-inventario-stubs.md §7.2.
             Server.prototype.unref = function() { return this; };
             Server.prototype.ref = function() { return this; };
             Server.prototype.getConnections = function(cb) { if (cb) cb(null, 0); };
@@ -4205,7 +4214,71 @@ pub fn inject_require(
             httpAgent.prototype.onConnected = function(socket, options) {};
             httpAgent.prototype.onRemoved = function(socket) {};
             var httpGlobalAgent = new httpAgent();
-            var HTTP_STATUS_CODES = { '100': 'Continue', '200': 'OK', '201': 'Created', '204': 'No Content', '301': 'Moved Permanently', '302': 'Found', '304': 'Not Modified', '400': 'Bad Request', '401': 'Unauthorized', '403': 'Forbidden', '404': 'Not Found', '405': 'Method Not Allowed', '500': 'Internal Server Error', '502': 'Bad Gateway', '503': 'Service Unavailable' };
+            var HTTP_STATUS_CODES = {
+                '100': "Continue",
+                '101': "Switching Protocols",
+                '102': "Processing",
+                '103': "Early Hints",
+                '200': "OK",
+                '201': "Created",
+                '202': "Accepted",
+                '203': "Non-Authoritative Information",
+                '204': "No Content",
+                '205': "Reset Content",
+                '206': "Partial Content",
+                '207': "Multi-Status",
+                '208': "Already Reported",
+                '226': "IM Used",
+                '300': "Multiple Choices",
+                '301': "Moved Permanently",
+                '302': "Found",
+                '303': "See Other",
+                '304': "Not Modified",
+                '305': "Use Proxy",
+                '307': "Temporary Redirect",
+                '308': "Permanent Redirect",
+                '400': "Bad Request",
+                '401': "Unauthorized",
+                '402': "Payment Required",
+                '403': "Forbidden",
+                '404': "Not Found",
+                '405': "Method Not Allowed",
+                '406': "Not Acceptable",
+                '407': "Proxy Authentication Required",
+                '408': "Request Timeout",
+                '409': "Conflict",
+                '410': "Gone",
+                '411': "Length Required",
+                '412': "Precondition Failed",
+                '413': "Payload Too Large",
+                '414': "URI Too Long",
+                '415': "Unsupported Media Type",
+                '416': "Range Not Satisfiable",
+                '417': "Expectation Failed",
+                '418': "I'm a Teapot",
+                '421': "Misdirected Request",
+                '422': "Unprocessable Entity",
+                '423': "Locked",
+                '424': "Failed Dependency",
+                '425': "Too Early",
+                '426': "Upgrade Required",
+                '428': "Precondition Required",
+                '429': "Too Many Requests",
+                '431': "Request Header Fields Too Large",
+                '451': "Unavailable For Legal Reasons",
+                '500': "Internal Server Error",
+                '501': "Not Implemented",
+                '502': "Bad Gateway",
+                '503': "Service Unavailable",
+                '504': "Gateway Timeout",
+                '505': "HTTP Version Not Supported",
+                '506': "Variant Also Negotiates",
+                '507': "Insufficient Storage",
+                '508': "Loop Detected",
+                '509': "Bandwidth Limit Exceeded",
+                '510': "Not Extended",
+                '511': "Network Authentication Required",
+            };
 
             // ── IncomingMessage — the request body streams from the native
             // connection task (see http_server.rs): headers/method/url are set
@@ -4341,6 +4414,7 @@ pub fn inject_require(
                 if (st && st.waiting && st.step) st.step();
                 return r;
             };
+            // ponytail: no-op by design — the effective timeout is applied by the server/firewall; see docs/05-js-engine/07-inventario-stubs.md §7.3.
             httpIncomingMessage.prototype.setTimeout = function() { return this; };
             httpIncomingMessage.prototype.destroy = function() {
                 var st = this[kIncomingBody];
@@ -4485,6 +4559,7 @@ pub fn inject_require(
                 queueMicrotask(function() { self.emit('finish'); self.emit('close'); if (typeof callback === 'function') callback(); });
                 return this;
             };
+            // ponytail: no-op by design — see docs/05-js-engine/07-inventario-stubs.md §7.3.
             httpServerResponse.prototype.setTimeout = function() { return this; };
             httpServerResponse.prototype.destroy = function() { return this; };
             httpServerResponse.prototype.flushHeaders = function() {};
@@ -4654,6 +4729,7 @@ __httpSetHandler(self._id, function() {
                     configurable: true,
                 });
             });
+            // ponytail: ref/unref/timeout are no-ops — see docs/05-js-engine/07-inventario-stubs.md §7.2-7.3.
             httpServer.prototype.ref = function() { return this; };
             httpServer.prototype.unref = function() { return this; };
             httpServer.prototype.listenOnServerHandler = function(socket) {};
@@ -4822,6 +4898,7 @@ __httpSetHandler(self._id, function() {
                 delete this._headers[lk]; delete this._headerNames[lk];
                 return this;
             };
+            // ponytail: no-op by design — TCP socket options are hints; see docs/05-js-engine/07-inventario-stubs.md §7.2.
             ClientRequest.prototype.setNoDelay = function() { return this; };
             ClientRequest.prototype.setSocketKeepAlive = function() { return this; };
             ClientRequest.prototype.setTimeout = function(ms, cb) {
@@ -5549,6 +5626,7 @@ __httpSetHandler(self._id, function() {
                     __acsSet(prevFrame);
                 }
             };
+            // ponytail: no-op by design — 3va has no AsyncResource destroy hooks to run; see docs/05-js-engine/07-inventario-stubs.md §7.5.
             AsyncResource.prototype.emitDestroy = function() { return this; };
             AsyncResource.prototype.asyncId = function() { return 0; };
             AsyncResource.prototype.triggerAsyncId = function() { return 0; };
@@ -5574,6 +5652,7 @@ __httpSetHandler(self._id, function() {
                 triggerAsyncId: function() { return 0; },
                 executionAsyncResource: function() { return {}; },
                 createHook: function() {
+                    // ponytail: no-op by design — diagnostics_channel enable/disable has no state to change; see docs/05-js-engine/07-inventario-stubs.md §7.5.
                     return { enable: function() { return this; }, disable: function() { return this; } };
                 },
             };
@@ -6257,7 +6336,7 @@ __httpSetHandler(self._id, function() {
         // When this process is a forked child (child_process.fork or cluster.fork),
         // set up process.send and stdin IPC polling immediately — not gated on
         // require('cluster'), so child scripts that never require cluster still get IPC.
-        if (process.env && process.env.CLUSTER_WORKER === '1' && typeof process.send !== 'function') {
+        if (process.env && process.env.VVVA_FORKED === '1' && typeof process.send !== 'function') {
             process.send = function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); };
             process.connected = true;
             var __forkIpcBuf = '';

@@ -1,0 +1,6 @@
+{
+  "kind": "single",
+  "main": "main.mjs",
+  "timeout_s": 30,
+  "description": "an ESM import cycle must expose live bindings to the other side (3va 2.12.6 returns undefined; see known-differences.json)."
+}

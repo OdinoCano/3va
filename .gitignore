@@ -12,6 +12,10 @@ crates/pm/.cache/
 # npm artifacts (use 3va-lock.json instead)
 package-lock.json
 yarn.lock
+# …except the differential suite's lockfile: `npm ci` needs it committed for
+# reproducible scenario dependencies (tests/differential/README.md).
+!tests/differential/package-lock.json
+!tests/client-scenario/app/package-lock.json
 
 # Platform binaries are downloaded by CI — never committed
 dist/npm/linux-x64/bin/
@@ -37,6 +41,9 @@ dist/npm/win32-x64/bin/
 *.p12
 *.pfx
 .compatibility/
+
+# Binary under test copied in by scripts/client-scenario.sh
+tests/client-scenario/3va
 
 # Fuzzing artifacts
 fuzz/corpus/
@@ -70,6 +77,9 @@ security-reports/
 #   se commitea igual que Cargo.lock, ver crates/pm/src/provenance.rs)
 # test262 suite — downloaded by scripts/setup-test262.sh, not committed
 tests/test262/
+
+# nodejs/node test suite — downloaded by scripts/setup-node-tests.sh, not committed
+tests/node/
 
 bench/express/node_modules/
 bench/express/package-lock.json

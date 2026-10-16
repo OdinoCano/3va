@@ -775,6 +775,7 @@ pub fn inject_zlib(scope: &mut ContextScope<HandleScope>) -> anyhow::Result<()> 
                             piped = dest ? piped.filter(function(d) { return d !== dest; }) : [];
                             return this;
                         },
+                        // ponytail: no-op by design — the zlib stream has no external flow control; see docs/05-js-engine/07-inventario-stubs.md §7.4.
                         pause: function() { return this; },
                         resume: function() { return this; },
                         destroy: function(e) {

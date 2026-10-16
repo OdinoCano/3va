@@ -23,10 +23,21 @@ cd 3va
 cargo build              # debug build → target/debug/3va
 ```
 
-Add `--with-test262` to `dev-setup.sh` to also download the tc39/test262
-conformance suite into `tests/test262/` (gitignored, pinned to one commit, ~70k
-files). It is only needed for `cargo test --ignored test262`; `bench/run.sh`
-fetches it on demand.
+`dev-setup.sh` also reports which optional tools are missing and what each is
+for (node 24, npm, docker, hyperfine 1.x, oha, gitleaks, cargo-deny/audit/vet/fuzz).
+The conformance suites are large, gitignored, pinned downloads; fetch them only
+if you need them:
+
+| Option | Downloads | Needed for |
+|---|---|---|
+| `--with-test262` | tc39/test262 into `tests/test262/` (~70k files) | `scripts/test262.sh`, `cargo test --ignored test262` (`bench/run.sh` fetches it on demand) |
+| `--with-node-tests` | Node's own `test/common`, `test/fixtures`, `test/parallel` into `tests/node/` | `cargo test -p vvva_test --test node_tests -- --ignored` |
+| `--all` | both | |
+
+If you change the Node API layer (`http`, `stream`, `Buffer`, `fs`, `net`,
+`fetch`, module loading), you also need `node` 24 for `scripts/differential.sh`
+and Docker for `scripts/client-scenario.sh`; see
+[`docs/09-testing/07-compatibilidad-node.md`](docs/09-testing/07-compatibilidad-node.md).
 
 This installs git hooks:
 
@@ -42,6 +53,13 @@ cargo fmt           # format code
 cargo clippy        # check lints
 cargo deny check    # check dependencies for CVEs and license issues
 ```
+
+**Changes to the Node API layer** (`http`, `stream`, `Buffer`, `fs`, `net`, `fetch`, module loading)
+follow the verification standard in
+[`docs/09-testing/07-compatibilidad-node.md`](docs/09-testing/07-compatibilidad-node.md): a
+differential test against `node` (client and server in separate processes for networking), the whole
+matrix of the API rather than the reported case, and no compatibility claim without the test behind it.
+test262 does not cover this layer.
 
 **Tests are required.** Every PR that adds functionality or fixes a bug must
 add automated tests covering it: unit tests next to the code, or integration

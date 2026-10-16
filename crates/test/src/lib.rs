@@ -7,6 +7,7 @@
 
 pub mod coverage;
 pub mod framework;
+pub mod node_tests;
 pub mod runner;
 pub mod security;
 pub mod test262;

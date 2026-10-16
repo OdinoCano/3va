@@ -1,6 +1,6 @@
 [package]
 name = "vvva_js"
-version = "2.12.6"
+version = "2.13.0"
 rust-version.workspace = true
 edition = "2024"
 license = "MIT"
@@ -14,7 +14,7 @@ categories = ["api-bindings"]
 tempfile.workspace = true
 tungstenite = { workspace = true }
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
-vvva_firewall = { version = "2.12.6", path = "../firewall" }
+vvva_firewall = { version = "2.13.0", path = "../firewall" }
 rand10 = { package = "rand", version = "0.10" }
 
 [[test]]
@@ -211,9 +211,9 @@ hmac = { workspace = true }
 rand = { workspace = true }
 pbkdf2 = { workspace = true }
 scrypt = { workspace = true }
-vvva_core = { version = "2.12.6", path = "../core" }
-vvva_firewall = { version = "2.12.6", path = "../firewall" }
-vvva_permissions = { version = "2.12.6", path = "../permissions" }
+vvva_core = { version = "2.13.0", path = "../core" }
+vvva_firewall = { version = "2.13.0", path = "../firewall" }
+vvva_permissions = { version = "2.13.0", path = "../permissions" }
 hex = "0.4"
 base64.workspace = true
 serde.workspace = true

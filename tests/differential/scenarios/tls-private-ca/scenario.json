@@ -1,0 +1,8 @@
+{
+  "kind": "client-server",
+  "timeout_s": 30,
+  "env": "NODE_EXTRA_CA_CERTS=certs/ca.pem",
+  "server_perms": ["--allow-net=127.0.0.1", "--allow-read=.", "--allow-env=NODE_EXTRA_CA_CERTS"],
+  "client_perms": ["--allow-net=127.0.0.1", "--allow-read=.", "--allow-env=NODE_EXTRA_CA_CERTS"],
+  "description": "tls client against a server with a private CA, trusted via NODE_EXTRA_CA_CERTS."
+}

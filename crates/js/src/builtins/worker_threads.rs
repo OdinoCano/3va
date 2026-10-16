@@ -279,6 +279,7 @@ pub fn inject_worker_threads_native(scope: &mut PinScope, permissions: Arc<Permi
             return Promise.resolve(0);
         };
 
+        // ponytail: ref/unref are no-ops — see docs/05-js-engine/07-inventario-stubs.md §7.2.
         Worker.prototype.unref = function() { return this; };
         Worker.prototype.ref = function() { return this; };
 

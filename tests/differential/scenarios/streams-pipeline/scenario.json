@@ -1,0 +1,5 @@
+{
+  "kind": "single",
+  "timeout_s": 30,
+  "description": "stream.pipeline with async generators, Readable.from, and a mid-stream error."
+}

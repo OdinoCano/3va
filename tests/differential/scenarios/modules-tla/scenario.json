@@ -1,0 +1,6 @@
+{
+  "kind": "single",
+  "main": "main.mjs",
+  "timeout_s": 30,
+  "description": "ESM top-level await in a dependency that does I/O, an import chain and a cycle."
+}

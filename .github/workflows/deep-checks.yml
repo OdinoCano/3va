@@ -64,6 +64,79 @@ jobs:
           path: test262-failures.txt
           if-no-files-found: ignore
 
+  node-tests:
+    name: node test/parallel compatibility
+    # Not on PRs: ~1.6k of Node's own tests, and some are slow. Weekly + on demand.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The tag is pinned in the script, so the baseline stays comparable.
+      - name: Fetch the nodejs/node test suite
+        run: bash scripts/setup-node-tests.sh
+      # Same rust-cache / librusty_v8.a issue as the other jobs.
+      - run: test -f target/debug/gn_out/obj/librusty_v8.a || cargo clean -p v8
+      - name: Build the 3va binary
+        run: cargo build --bin 3va
+      # Ratchet: fails if a test not in the baseline fails, or if one in the
+      # baseline starts passing (then the baseline must be lowered).
+      - name: Run the compatibility suite
+        env:
+          THREEVA_BIN: ${{ github.workspace }}/target/debug/3va
+          # Full lists, for diffing a regression against the baseline.
+          NODE_TESTS_FAILURES_OUT: ${{ github.workspace }}/node-tests-failures.txt
+          NODE_TESTS_SKIPPED_OUT: ${{ github.workspace }}/node-tests-skipped.txt
+          NODE_TESTS_COUNTS_OUT: ${{ github.workspace }}/node-tests-counts.tsv
+        run: cargo test -p vvva_test --test node_tests -- --ignored --nocapture
+      - name: Generate the compatibility table
+        if: always()
+        run: bash scripts/compat-table.sh node-tests-counts.tsv --title > node-tests-table.md || true
+      # Also on failure: the list is what you diff against another run.
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-tests
+          path: |
+            node-tests-failures.txt
+            node-tests-skipped.txt
+            node-tests-counts.tsv
+            node-tests-table.md
+          if-no-files-found: ignore
+
+  library-suites:
+    name: Library test suites (reference)
+    # Reference, not a gate: the real suites of express/axios/pg/… run with 3va.
+    # Most fail today; the artifact is the baseline to measure the threshold for
+    # turning this into a gate (docs/09-testing/07-compatibilidad-node.md §7.4).
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.17.0"
+      - run: test -f target/debug/gn_out/obj/librusty_v8.a || cargo clean -p v8
+      - run: cargo build --bin 3va
+      - name: Run the library suites
+        env:
+          THREEVA_BIN: ${{ github.workspace }}/target/debug/3va
+        # `|| true`: this is a measurement, and every suite failing is expected
+        # today. The results file is the artifact, not the exit code.
+        run: bash scripts/library-suites.sh || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: library-suites
+          path: tests/library-suites/results.txt
+          if-no-files-found: ignore
+
   napi-asan:
     name: napi under AddressSanitizer
     runs-on: ubuntu-latest
