@@ -193,6 +193,32 @@ jobs:
             ${{ env.ARCHIVE }}.sha256
           retention-days: 1
 
+  # ── Release gate: client scenario ────────────────────────────────────────────
+  # The freshly built x86_64 Linux binary runs the client scenario (Express +
+  # pg/SCRAM + uploads behind nginx) in debian:bookworm-slim. Publishing is
+  # blocked if it fails; see tests/client-scenario/ and
+  # docs/09-testing/07-compatibilidad-node.md (§7.4 step 5).
+  client-scenario:
+    name: Client scenario (release gate)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the x86_64 Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-x86_64-unknown-linux-gnu
+          path: client-scenario-binary
+      - name: Extract the binary
+        run: |
+          tar xzf client-scenario-binary/*.tar.gz -C client-scenario-binary
+          chmod +x client-scenario-binary/3va
+      - name: Run the client scenario
+        env:
+          THREEVA_BIN: ${{ github.workspace }}/client-scenario-binary/3va
+        run: bash scripts/client-scenario.sh
+
   # ── Collect hashes for SLSA provenance ───────────────────────────────────────
   hash:
     name: Collect artifact hashes
@@ -300,7 +326,7 @@ jobs:
   github-release:
     name: GitHub Release
     if: github.event.inputs.test_only != 'true'
-    needs: [build, provenance, sign, sbom]
+    needs: [build, provenance, sign, sbom, client-scenario]
     runs-on: ubuntu-latest
     permissions:
       contents: write
