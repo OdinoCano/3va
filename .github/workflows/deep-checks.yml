@@ -107,6 +107,36 @@ jobs:
             node-tests-table.md
           if-no-files-found: ignore
 
+  library-suites:
+    name: Library test suites (reference)
+    # Reference, not a gate: the real suites of express/axios/pg/… run with 3va.
+    # Most fail today; the artifact is the baseline to measure the threshold for
+    # turning this into a gate (docs/09-testing/07-compatibilidad-node.md §7.4).
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.17.0"
+      - run: test -f target/debug/gn_out/obj/librusty_v8.a || cargo clean -p v8
+      - run: cargo build --bin 3va
+      - name: Run the library suites
+        env:
+          THREEVA_BIN: ${{ github.workspace }}/target/debug/3va
+        # `|| true`: this is a measurement, and every suite failing is expected
+        # today. The results file is the artifact, not the exit code.
+        run: bash scripts/library-suites.sh || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: library-suites
+          path: tests/library-suites/results.txt
+          if-no-files-found: ignore
+
   napi-asan:
     name: napi under AddressSanitizer
     runs-on: ubuntu-latest
