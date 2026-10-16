@@ -2055,43 +2055,47 @@ pub fn inject_require(
                 ClusterWorker.prototype.disconnect = function() { this.kill(); };
                 ClusterWorker.prototype.isDead = function() { return this.state === 'dead'; };
 
-                cluster.isPrimary = !process.env.CLUSTER_WORKER;
-                cluster.isMaster = cluster.isPrimary;
-                cluster.isWorker = !!process.env.CLUSTER_WORKER;
+                function _clusterEnvIsWorker() {
+                    return !!(typeof process !== 'undefined' && process.env && process.env.CLUSTER_WORKER);
+                }
+                var _clusterWorkerHandle = null;
+                // Only sets the worker handle; the per-run `fork-ipc` bootstrap
+                // already installs process.send/stdin polling from VVVA_FORKED.
+                function _clusterEnsureWorker() {
+                    if (cluster._workerReady || !_clusterEnvIsWorker()) return;
+                    cluster._workerReady = true;
+                    _clusterWorkerHandle = {
+                        id: parseInt(process.env.NODE_WORKER_ID || '0'),
+                        send: function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
+                    };
+                }
+                // Runtime getters, not values baked into the builtins snapshot:
+                // the snapshot is recorded with an empty environment, so an eager
+                // `cluster.isPrimary = !process.env.CLUSTER_WORKER` froze `true`
+                // for every process and made cluster workers re-fork forever.
+                Object.defineProperty(cluster, 'isPrimary', {
+                    get: function() { return !_clusterEnvIsWorker(); },
+                    enumerable: true, configurable: true,
+                });
+                Object.defineProperty(cluster, 'isMaster', {
+                    get: function() { return cluster.isPrimary; },
+                    enumerable: true, configurable: true,
+                });
+                Object.defineProperty(cluster, 'isWorker', {
+                    get: function() { _clusterEnsureWorker(); return _clusterEnvIsWorker(); },
+                    enumerable: true, configurable: true,
+                });
+                Object.defineProperty(cluster, 'worker', {
+                    get: function() { _clusterEnsureWorker(); return _clusterWorkerHandle; },
+                    enumerable: true, configurable: true,
+                });
                 cluster.workers = _clusterWorkers;
                 cluster.settings = {};
                 cluster.schedulingPolicy = 2;
                 cluster.SCHED_NONE = 1;
                 cluster.SCHED_RR = 2;
 
-                if (cluster.isWorker) {
-                    cluster.worker = {
-                        id: parseInt(process.env.NODE_WORKER_ID || '0'),
-                        send: function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
-                    };
-                    process.send = function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); };
-                    process.connected = true;
-                    // Read IPC messages from stdin (parent writes JSON lines via __clusterSend)
-                    var _ipcBuf = '';
-                    setInterval(function() {
-                        try {
-                            var chunk = __stdinReadPoll();
-                            if (chunk && chunk.length > 0) {
-                                _ipcBuf += Buffer.from(chunk).toString('utf8');
-                                var lines = _ipcBuf.split('\n');
-                                _ipcBuf = lines.pop();
-                                for (var i = 0; i < lines.length; i++) {
-                                    var line = lines[i].trim();
-                                    if (!line) continue;
-                                    try {
-                                        var msg = JSON.parse(line);
-                                        process.emit('message', msg);
-                                    } catch(e) {}
-                                }
-                            }
-                        } catch(e) {}
-                    }, 10);
-                }
+                _clusterEnsureWorker();
 
                 cluster.fork = function(env) {
                     if (!cluster.isPrimary) return null;
@@ -2099,7 +2103,7 @@ pub fn inject_require(
                     w.id = ++_clusterNextId;
                     _clusterWorkers[w.id] = w;
                     var scriptPath = process.argv[1] || cluster.settings.exec || '';
-                    var result = __clusterFork(scriptPath, w.id);
+                    var result = __clusterFork(scriptPath, w.id, JSON.stringify(env || {}), JSON.stringify([]), true);
                     if (result === -1) {
                         delete _clusterWorkers[w.id];
                         return null;
@@ -6257,7 +6261,7 @@ __httpSetHandler(self._id, function() {
         // When this process is a forked child (child_process.fork or cluster.fork),
         // set up process.send and stdin IPC polling immediately — not gated on
         // require('cluster'), so child scripts that never require cluster still get IPC.
-        if (process.env && process.env.CLUSTER_WORKER === '1' && typeof process.send !== 'function') {
+        if (process.env && process.env.VVVA_FORKED === '1' && typeof process.send !== 'function') {
             process.send = function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); };
             process.connected = true;
             var __forkIpcBuf = '';

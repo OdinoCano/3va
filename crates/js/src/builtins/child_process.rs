@@ -1110,6 +1110,14 @@ pub fn inject_child_process(
             let extra_env_json = args.get(2).to_rust_string_lossy(scope);
             let extra_env: std::collections::HashMap<String, String> =
                 serde_json::from_str(&extra_env_json).unwrap_or_default();
+            // Extra argv for the child (`child_process.fork(path, args)`). Without
+            // these a forked script that branches on `process.argv[2]` re-ran as
+            // its own parent, forking again: a process bomb.
+            let args_json = args.get(3).to_rust_string_lossy(scope);
+            let script_args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+            // cluster.fork marks the child as a cluster worker (CLUSTER_WORKER);
+            // child_process.fork does not, so `cluster.isWorker` stays false there.
+            let cluster_worker = args.get(4).boolean_value(scope);
 
             // The worker id comes from the caller and is only unique within one
             // engine. Refuse to clobber a worker another engine already forked
@@ -1128,10 +1136,22 @@ pub fn inject_child_process(
 
             let mut cmd = std::process::Command::new(&exe);
             cmd.args(worker_run_args(perms, &script_path));
+            if !script_args.is_empty() {
+                cmd.arg("--");
+                for a in &script_args {
+                    cmd.arg(a);
+                }
+            }
             apply_child_env(&mut cmd, perms);
+            // Every forked child gets the IPC marker (the per-run `fork-ipc`
+            // bootstrap installs process.send from it); only cluster workers get
+            // CLUSTER_WORKER, which is what `cluster.isWorker` keys on.
             cmd.env("NODE_UNIQUE_ID", worker_id.to_string())
-                .env("NODE_WORKER_ID", worker_id.to_string())
-                .env("CLUSTER_WORKER", "1");
+                .env("VVVA_FORKED", "1");
+            if cluster_worker {
+                cmd.env("NODE_WORKER_ID", worker_id.to_string())
+                    .env("CLUSTER_WORKER", "1");
+            }
             for (k, v) in &extra_env {
                 cmd.env(k, v);
             }
@@ -1711,7 +1731,7 @@ pub fn inject_child_process(
                     var forkId = ++globalThis.__forkIdCounter || (globalThis.__forkIdCounter = 0);
                     // Pass opts.env as JSON so the child inherits custom env vars
                     var extraEnv = (opts.env && typeof opts.env === 'object') ? opts.env : {};
-                    var pid = __clusterFork(modulePath, forkId, JSON.stringify(extraEnv));
+                    var pid = __clusterFork(modulePath, forkId, JSON.stringify(extraEnv), JSON.stringify(args), false);
                     if (pid === -1) return null;
 
                     var EventEmitter = require('events');
