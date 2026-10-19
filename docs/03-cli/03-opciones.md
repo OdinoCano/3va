@@ -211,7 +211,29 @@ declararse en el manifiesto con `"3va": { "allow-insecure": true }` (ver
 `docs/06-permissions/06-package-json-permissions.md`), que es lo recomendado cuando
 la app arranca siempre desde el proyecto.
 
-## 3.8 Short flag reference
+## 3.8 Node-compatible runtime flags
+
+`3va run` accepts the Node flags that change the runtime's behaviour, so a
+script (or a test suite) that expects them can be run unchanged:
+
+| Flag | Effect in 3va |
+|------|----------------|
+| `--no-warnings` | No warning is printed. The `warning` event is still delivered, like in Node. 3va prints no warnings by default, so the flag only keeps stderr clean. |
+| `--pending-deprecation` | Enables the pending deprecation warnings. 3va has no pending deprecations yet, so the flag currently changes nothing. |
+| `--expose-gc` (alias `--expose_gc`) | Exposes `globalThis.gc()`, which forces a full garbage collection. |
+| `--zero-fill-buffers` | `Buffer.allocUnsafe()` hands out zeroed memory. 3va's buffers are always zero-filled, so the flag matches the default behaviour. |
+| `--insecure-http-parser` | Accepts control characters in incoming header values. 3va's HTTP parser already accepts them. |
+| `--tls-min-v1.0` | **Rejected**: 3va's TLS stack (rustls) has a TLS 1.2 floor, so `3va run --tls-min-v1.0 app.js` fails with a clear error instead of pretending to allow TLS 1.0. |
+
+```bash
+3va run app.ts --expose-gc
+3va run test.js --no-warnings
+```
+
+The flags are `run`-level options (after the subcommand), like the permission
+flags. `3va start`, `3va dev` and the REPL do not take them.
+
+## 3.9 Short flag reference
 
 All flags that have a single-letter alias, grouped by command:
 

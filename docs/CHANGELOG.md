@@ -7,6 +7,42 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+### Added
+
+- **`node:test`**: `require('node:test')` ya no devuelve un objeto vacío (`test`,
+  `describe` e `it` eran `undefined`). Implementa el subconjunto que usan la
+  suite oficial de nodejs/node y una suite de proyecto típica: `test`/`it`,
+  `describe`/`suite`, `before`/`after`/`beforeEach`/`afterEach`, `t.test()`
+  anidado, `{ skip, todo, only }`, funciones `async` y con callback `done`,
+  `t.mock.fn()`/`t.mock.method()` y `t.assert`. Salida TAP y código de salida
+  ≠ 0 si algo falla. Lo que no se implementa (`mock.timers`, `snapshot`, `run()`)
+  lanza `ERR_NOT_SUPPORTED`, no queda `undefined`.
+- **Módulos heredados `_http_*` y `_stream_*`**: `_http_common`, `_http_server`,
+  `_http_agent`, `_http_client`, `_http_incoming`, `_http_outgoing`,
+  `_stream_readable`, `_stream_writable`, `_stream_duplex`, `_stream_transform`
+  y `_stream_passthrough` (deprecados en Node, pero públicos) exponen lo que
+  3va ya implementa, sin duplicar código. `HTTPParser` no se expone: 3va no
+  tiene un equivalente.
+- **Flags de Node en `3va run`**: `--no-warnings`, `--pending-deprecation`,
+  `--expose-gc` (y su alias `--expose_gc`), `--zero-fill-buffers` e
+  `--insecure-http-parser`. `--tls-min-v1.0` se rechaza con un error claro: el
+  TLS de 3va (rustls) tiene un suelo de TLS 1.2.
+
+### Fixed
+
+- **El archivo de entrada se ejecuta como módulo CommonJS**: antes se evaluaba
+  como script global. Sus `const`/`let` de nivel superior entraban en el ámbito
+  léxico global, así que `const { setTimeout } = require('timers/promises')` en
+  `server.js` dejaba en TDZ el `setTimeout` de *todas* las dependencias que se
+  cargaban después; y un `return` de nivel superior era un error de sintaxis.
+  Ahora la entrada corre dentro del mismo envoltorio que los módulos
+  requeridos, con `require.main === module`, `module.id === '.'`,
+  `this === module.exports`, `__filename`/`__dirname` propios y las variables de
+  nivel superior locales al módulo (un `var` de la entrada ya no aparece en
+  `globalThis`). Las entradas ESM (`.mjs`, `import`/`export`) conservan la
+  semántica de módulo: allí un `return` de nivel superior sigue siendo un
+  error de sintaxis.
+
 ---
 
 ## [2.13.0] — 2026-10-16

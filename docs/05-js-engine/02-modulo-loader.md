@@ -113,7 +113,34 @@ Promise.resolve(42)
 
 ## 2.3 CommonJS
 
-Files that do not contain static `import`/`export` are evaluated as plain scripts. `require()` is not available in ESM mode and vice versa.
+Files that do not contain static `import`/`export` are evaluated as CommonJS
+modules. `require()` is not available in ESM mode and vice versa.
+
+### 2.3.1 The entry point is a module too
+
+The file passed to `3va run` (or `3va start`, or a worker) is compiled the way
+Node compiles it: the body of the file is the body of
+
+```javascript
+(function (exports, require, module, __filename, __dirname) { /* … */ })
+```
+
+and it is called with `this === module.exports`. So the entry point has:
+
+- `require.main === module` and `module.id === '.'`;
+- its own `__filename` and `__dirname`;
+- `module.exports` / `exports` bound to the same object;
+- top-level `var`/`const`/`let` local to the module — a top-level `const` no
+  longer shadows a global for the dependencies loaded after it (the bug that
+  made `const { setTimeout } = require('timers/promises')` in `server.js` break
+  `setTimeout` everywhere else);
+- a top-level `return`, which Node allows in a CommonJS file and which used to
+  be a `SyntaxError` here.
+
+ES module entries (`.mjs`, or a file with `import`/`export`) keep the module
+semantics: there, a top-level `return` *is* a `SyntaxError`, as in Node.
+`-e`/`--eval` and the REPL are not modules (as in Node): they run as scripts,
+with `require` available.
 
 ---
 
