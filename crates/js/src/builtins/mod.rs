@@ -24,6 +24,7 @@ pub mod irc;
 pub mod modules;
 pub mod mqtt;
 pub mod napi;
+pub mod node_test;
 pub mod os_info;
 pub mod pop3;
 pub mod process;
@@ -35,6 +36,7 @@ pub mod tcp;
 pub mod timers;
 pub mod tls;
 pub mod v8_compat;
+pub mod validators;
 pub mod vm;
 pub mod web_globals;
 pub mod webrtc;
@@ -174,6 +176,8 @@ pub fn inject_all(
         "require",
         modules::inject_require(scope, permissions.clone())
     )?;
+    t!("node_test", node_test::inject_node_test(scope))?;
+    t!("validators", validators::inject_validators(scope))?;
     t!(
         "websocket",
         websocket::inject_websocket(scope, permissions.clone(), ws_pool)
