@@ -130,6 +130,24 @@ pub fn dispatch_ready(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::
     }
 }
 
+/// The timeouts the application configured on the server
+/// (`server.headersTimeout`, `server.requestTimeout`, `server.keepAliveTimeout`).
+///
+/// Node lets the application set them; 3va's firewall has its own limits
+/// (the slowloris protection). The application's value wins when it is
+/// stricter, and the firewall's stays in force when the application left the
+/// timeout disabled (`0`), so the protection cannot be turned off by
+/// accident.
+#[derive(Debug, Clone, Copy, Default)]
+struct ServerTimeouts {
+    /// `None`: the firewall's header timeout.
+    headers: Option<std::time::Duration>,
+    /// `None`: no application-wide request deadline.
+    request: Option<std::time::Duration>,
+    /// `None`: the firewall's keep-alive timeout.
+    keepalive: Option<std::time::Duration>,
+}
+
 struct HttpListenCtx {
     perms: Arc<PermissionState>,
     servers: Arc<Mutex<HashMap<u32, Arc<TcpListener>>>>,
@@ -143,10 +161,17 @@ struct HttpListenCtx {
     upgrades: UpgradeRegistry,
     upgrades_q: UpgradeQueue,
     wake: Arc<tokio::sync::Notify>,
+    /// The timeouts the application set, per server.
+    timeouts: Arc<Mutex<HashMap<u32, Arc<Mutex<ServerTimeouts>>>>>,
 }
 
 struct HttpAcceptCtx {
     ready: ReadyQueue,
+}
+
+/// The per-server timeout cells the application configures.
+struct HttpTimeoutsCtx {
+    timeouts: Arc<Mutex<HashMap<u32, Arc<Mutex<ServerTimeouts>>>>>,
 }
 
 struct HttpBodyCtx {
@@ -427,6 +452,13 @@ fn bind_one(sockaddr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
 
 struct ConnEntry {
     resp_tx: mpsc::Sender<PendingResponse>,
+    /// Whether the connection is closed after this response (the client said
+    /// `Connection: close`, or it is an HTTP/1.0 request without keep-alive).
+    /// The response head carries the matching `Connection` header, as in Node.
+    close_after: std::sync::atomic::AtomicBool,
+    /// The HTTP version of the request: an HTTP/1.0 request is answered with
+    /// an HTTP/1.0 status line.
+    http10: std::sync::atomic::AtomicBool,
 }
 
 struct PendingResponse {
@@ -614,6 +646,70 @@ fn js_type_error_with_code<'s>(
         obj.set(scope, key.into(), val.into());
     }
     err
+}
+
+/// The `Date` header value Node sends on every response (RFC 1123, UTC).
+///
+/// The clock is read per response (not cached): a server that runs for days
+/// must not send a stale date.
+fn http_date_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format_http_date(now)
+}
+
+/// Format a Unix timestamp as an HTTP date (`Sun, 06 Nov 1994 08:49:37 GMT`).
+fn format_http_date(secs: u64) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let (hour, min, sec) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let mut year = 1970i64;
+    let mut d = days as i64;
+    loop {
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        let len = if leap { 366 } else { 365 };
+        if d < len {
+            break;
+        }
+        d -= len;
+        year += 1;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let month_lengths = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 0usize;
+    while month < 12 && d >= month_lengths[month] {
+        d -= month_lengths[month];
+        month += 1;
+    }
+    format!(
+        "{}, {:02} {} {} {:02}:{:02}:{:02} GMT",
+        DAYS[(days % 7) as usize],
+        d + 1,
+        MONTHS[month],
+        year,
+        hour,
+        min,
+        sec
+    )
 }
 
 fn json_escape(s: &str) -> String {
@@ -1319,6 +1415,7 @@ async fn handle_connection<S>(
     upgrades: UpgradeRegistry,
     upgrades_q: UpgradeQueue,
     wake: Arc<tokio::sync::Notify>,
+    app_timeouts: Arc<Mutex<ServerTimeouts>>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -1333,7 +1430,14 @@ async fn handle_connection<S>(
     };
 
     let (resp_tx, mut resp_rx) = mpsc::channel::<PendingResponse>(16);
-    conns.lock().unwrap().insert(conn_id, ConnEntry { resp_tx });
+    conns.lock().unwrap().insert(
+        conn_id,
+        ConnEntry {
+            resp_tx,
+            close_after: std::sync::atomic::AtomicBool::new(true),
+            http10: std::sync::atomic::AtomicBool::new(false),
+        },
+    );
 
     // Connection accounting IP. Normally the peer itself, registered by the
     // accept loop before this task started. When the peer is a trusted reverse
@@ -1366,14 +1470,52 @@ async fn handle_connection<S>(
     let mut my_last_body: Option<u32> = None;
 
     loop {
-        let hdr_deadline = if requests_served == 0 {
-            hdr_timeout
+        // The timeouts the application set on the server (Node's
+        // `headersTimeout`, `requestTimeout` and `keepAliveTimeout`). They
+        // are read per request: the application can change them while the
+        // server runs.
+        let app = *app_timeouts.lock().unwrap();
+        let hdr_limit = match app.headers {
+            Some(d) if !d.is_zero() => d,
+            _ => hdr_timeout,
+        };
+        let keepalive_limit = match app.keepalive {
+            Some(d) if !d.is_zero() => d,
+            _ => keepalive_timeout,
+        };
+        // `requestTimeout` is the deadline for the whole request (head and
+        // body). Node answers 408 when it expires.
+        let request_deadline = app
+            .request
+            .filter(|d| !d.is_zero())
+            .map(|d| tokio::time::Instant::now() + d);
+        // The head has to arrive within the header timeout *and* within the
+        // request timeout, whichever is sooner.
+        // The first request on a connection gets the header timeout; the
+        // reused ones get the (shorter) keep-alive timeout, so an idle
+        // keep-alive socket cannot be parked open.
+        let hdr_limit = if requests_served == 0 {
+            hdr_limit
         } else {
-            keepalive_timeout
+            keepalive_limit
+        };
+        let hdr_budget = match request_deadline {
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    let _ = writer
+                        .write_all(b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n")
+                        .await;
+                    let _ = writer.flush().await;
+                    break;
+                }
+                hdr_limit.min(left)
+            }
+            None => hdr_limit,
         };
         let head = match parse_request_head(
             &mut reader,
-            hdr_deadline,
+            hdr_budget,
             max_hdr_count,
             max_hdr_bytes,
             max_body,
@@ -1390,7 +1532,17 @@ async fn handle_connection<S>(
                 let _ = writer.flush().await;
                 break;
             }
-            Err(ParseError::Silent(_)) => break,
+            Err(ParseError::Silent(_)) => {
+                // The request timeout expired while the head was still coming
+                // in: Node answers 408 and closes the connection.
+                if request_deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+                    let _ = writer
+                        .write_all(b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n")
+                        .await;
+                    let _ = writer.flush().await;
+                }
+                break;
+            }
         };
 
         // Resolve the effective client IP: the peer itself, or — when the
@@ -1526,6 +1678,16 @@ async fn handle_connection<S>(
             Some(v) => v == "close",
             None => head.http10,
         } || requests_served >= max_requests_per_conn;
+        // The response head carries the matching `Connection` header and the
+        // version of the request, as in Node.
+        if let Some(entry) = conns.lock().unwrap().get(&conn_id) {
+            entry
+                .close_after
+                .store(close_after, std::sync::atomic::Ordering::Relaxed);
+            entry
+                .http10
+                .store(head.http10, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Register the streaming body (if any) under a per-request id. The
         // previous request's pipe is dropped here: JS has normally consumed it
@@ -1571,6 +1733,19 @@ async fn handle_connection<S>(
         let has_body = body.is_some();
         let mut body_done = !has_body;
         let mut body_err: Option<ParseError> = None;
+        // The body has to arrive within the request timeout too: the deadline
+        // covers the whole request, not only its head.
+        let body_budget = match request_deadline {
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    std::time::Duration::ZERO
+                } else {
+                    body_timeout.min(left)
+                }
+            }
+            None => body_timeout,
+        };
         let resp = {
             let pump_pipe = body.as_ref().map(|(_, p)| p.clone());
             let mut pump = Box::pin(async {
@@ -1580,7 +1755,7 @@ async fn handle_connection<S>(
                     &mut reader,
                     framing,
                     &mut sink,
-                    body_timeout,
+                    body_budget,
                     max_body,
                     min_body_rate,
                     max_hdr_bytes,
@@ -1637,6 +1812,16 @@ async fn handle_connection<S>(
             break;
         }
 
+        // The request timeout expired while the request was still incomplete:
+        // Node answers 408 and closes the connection.
+        if !body_done && request_deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+            let _ = writer
+                .write_all(b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n")
+                .await;
+            let _ = writer.flush().await;
+            break;
+        }
+
         let resp = match resp {
             Some(r) if r.conn_id == conn_id => r,
             _ => break,
@@ -1685,6 +1870,8 @@ pub fn inject_http_server(
     let upgrades: UpgradeRegistry = Arc::new(Mutex::new(HashMap::new()));
     let upgrades_q: UpgradeQueue = Arc::new(Mutex::new(HashMap::new()));
     let wake = Arc::new(tokio::sync::Notify::new());
+    let timeouts: Arc<Mutex<HashMap<u32, Arc<Mutex<ServerTimeouts>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     scope.set_slot(HttpDispatch {
         ready: ready.clone(),
         upgrades: upgrades_q.clone(),
@@ -1708,6 +1895,7 @@ pub fn inject_http_server(
             wake: wake.clone(),
             nid: next_server_id.clone(),
             fw: fw.clone(),
+            timeouts: timeouts.clone(),
         });
         let external = v8::External::new(scope, ctx_ptr);
         let http_listen_fn = v8::Function::builder(
@@ -1764,6 +1952,15 @@ pub fn inject_http_server(
                                 };
                                 let listener = Arc::new(tokio_listener);
                                 ctx.servers.lock().unwrap().insert(id, listener.clone());
+                                // The timeouts the application sets on this
+                                // server (`server.headersTimeout` and friends)
+                                // live in a cell the connection tasks read.
+                                let server_timeouts =
+                                    Arc::new(Mutex::new(ServerTimeouts::default()));
+                                ctx.timeouts
+                                    .lock()
+                                    .unwrap()
+                                    .insert(id, server_timeouts.clone());
                                 HTTP_ACTIVE_LISTENERS
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -1904,6 +2101,7 @@ pub fn inject_http_server(
                                         let tls2 = tls.clone();
                                         let upgrades2 = upgrades.clone();
                                         let upgrades_q2 = upgrades_q.clone();
+                                        let timeouts2 = server_timeouts.clone();
                                         tokio::spawn(async move {
                                             // TLS: handshake first, bounded by
                                             // the header timeout so a client
@@ -1949,6 +2147,7 @@ pub fn inject_http_server(
                                                     upgrades2,
                                                     upgrades_q2,
                                                     wake2,
+                                                    timeouts2,
                                                 )
                                                 .await;
                                                 return;
@@ -1974,6 +2173,7 @@ pub fn inject_http_server(
                                                 upgrades2,
                                                 upgrades_q2,
                                                 wake2,
+                                                timeouts2,
                                             )
                                             .await;
                                         });
@@ -2042,13 +2242,18 @@ pub fn inject_http_server(
                             .map(|x| V8String::new(scope, x).unwrap().into())
                             .collect();
                         let headers = v8::Array::new_with_elements(scope, &flat);
-                        let items: [v8::Local<v8::Value>; 6] = [
+                        let items: [v8::Local<v8::Value>; 7] = [
                             V8String::new(scope, &p.method).unwrap().into(),
                             V8String::new(scope, &p.path).unwrap().into(),
                             v8::Integer::new_from_unsigned(scope, r.conn_id).into(),
                             V8String::new(scope, &r.remote.to_string()).unwrap().into(),
                             v8::Integer::new_from_unsigned(scope, r.body_id).into(),
                             headers.into(),
+                            // The HTTP version of the request: an HTTP/1.0
+                            // request is reported as such, as in Node.
+                            V8String::new(scope, if p.http10 { "1.0" } else { "1.1" })
+                                .unwrap()
+                                .into(),
                         ];
                         rv.set(v8::Array::new_with_elements(scope, &items).into());
                     }
@@ -2317,12 +2522,22 @@ pub fn inject_http_server(
                 let body = body_arg.to_rust_string_lossy(scope);
 
                 let body_bytes = body.as_bytes();
+                // Whether the connection stays open after this response: the
+                // `Connection` header says so, as in Node.
+                let close_after = ctx
+                    .conns
+                    .lock()
+                    .unwrap()
+                    .get(&conn_id)
+                    .map(|c| c.close_after.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(true);
                 let extra = parse_extra_headers(&headers_json);
+                // Node's header order (lib/_http_outgoing.js): the headers the
+                // application set first, then the ones the server generates.
                 let mut resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
-                resp.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
                 for (k, v) in &extra {
                     let kl = k.to_lowercase();
-                    if kl == "content-length" || kl == "connection" {
+                    if kl == "content-length" || kl == "connection" || kl == "date" {
                         continue;
                     }
                     if !is_valid_header_name(k) || !is_valid_header_value(v) {
@@ -2336,6 +2551,13 @@ pub fn inject_http_server(
                     }
                     resp.push_str(&format!("{}: {}\r\n", k, v));
                 }
+                resp.push_str(&format!("Date: {}\r\n", http_date_now()));
+                resp.push_str(if close_after {
+                    "Connection: close\r\n"
+                } else {
+                    "Connection: keep-alive\r\n"
+                });
+                resp.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
                 resp.push_str("\r\n");
 
                 let mut bytes = resp.into_bytes();
@@ -2397,13 +2619,33 @@ pub fn inject_http_server(
                 } else {
                     vec![]
                 };
+                // Whether the connection stays open after this response: the
+                // `Connection` header says so, as in Node.
+                let close_after = ctx
+                    .conns
+                    .lock()
+                    .unwrap()
+                    .get(&conn_id)
+                    .map(|c| c.close_after.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(true);
 
                 let extra = parse_extra_headers(&headers_json);
+                // `res.sendDate = false` keeps the `Date` header out, as in
+                // Node.
+                let send_date = args.get(5).boolean_value(scope);
+                // `res.removeHeader('Connection')` keeps the server from
+                // adding one back, as in Node.
+                let send_connection = args.get(6).boolean_value(scope);
+                // Node's header order (lib/_http_outgoing.js): the headers the
+                // application set first, then the ones the server generates.
                 let mut resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
-                resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
                 for (k, v) in &extra {
                     let kl = k.to_lowercase();
-                    if kl == "content-length" || kl == "connection" || kl == "transfer-encoding" {
+                    if kl == "content-length"
+                        || kl == "connection"
+                        || kl == "transfer-encoding"
+                        || kl == "date"
+                    {
                         continue;
                     }
                     if !is_valid_header_name(k) || !is_valid_header_value(v) {
@@ -2417,6 +2659,17 @@ pub fn inject_http_server(
                     }
                     resp.push_str(&format!("{}: {}\r\n", k, v));
                 }
+                if send_date {
+                    resp.push_str(&format!("Date: {}\r\n", http_date_now()));
+                }
+                if send_connection {
+                    resp.push_str(if close_after {
+                        "Connection: close\r\n"
+                    } else {
+                        "Connection: keep-alive\r\n"
+                    });
+                }
+                resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
                 resp.push_str("\r\n");
 
                 let mut bytes = resp.into_bytes();
@@ -2449,6 +2702,53 @@ pub fn inject_http_server(
             scope,
             V8String::new(scope, "__httpRespondBytes").unwrap().into(),
             http_respond_bytes_fn.into(),
+        );
+    }
+
+    {
+        // The timeouts the application set on the server (Node's
+        // `headersTimeout`, `requestTimeout` and `keepAliveTimeout`). They
+        // are read by the connection tasks, so a change takes effect on the
+        // next request without restarting the server.
+        let ctx_ptr = native_ctx.leak(HttpTimeoutsCtx {
+            timeouts: timeouts.clone(),
+        });
+        let external = v8::External::new(scope, ctx_ptr);
+        let set_timeouts_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpTimeoutsCtx)
+                };
+                let server_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                // A timeout of 0 means "disabled" in Node; the firewall's own
+                // limit stays in force in that case.
+                let dur = |v: v8::Local<v8::Value>| -> Option<std::time::Duration> {
+                    let ms = v.number_value(scope).unwrap_or(0.0);
+                    if !ms.is_finite() || ms <= 0.0 {
+                        None
+                    } else {
+                        Some(std::time::Duration::from_millis(ms as u64))
+                    }
+                };
+                let t = ServerTimeouts {
+                    headers: dur(args.get(1)),
+                    request: dur(args.get(2)),
+                    keepalive: dur(args.get(3)),
+                };
+                if let Some(cell) = ctx.timeouts.lock().unwrap().get(&server_id) {
+                    *cell.lock().unwrap() = t;
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpSetTimeouts").unwrap().into(),
+            set_timeouts_fn.into(),
         );
     }
 

@@ -4259,7 +4259,24 @@ pub fn inject_require(
                 if (typeof cb === 'function') socket.once('connect', function() { cb(null, socket); });
                 return socket;
             };
-            httpAgent.prototype.destroy = function() {};
+            httpAgent.prototype.destroy = function() {
+                // Node closes every socket the agent holds: the free ones and
+                // the ones a request is using. Without this a keep-alive
+                // socket stays open and the process never exits.
+                var self = this;
+                var close = function(map) {
+                    Object.keys(map || {}).forEach(function(k) {
+                        var list = map[k] || [];
+                        for (var i = 0; i < list.length; i++) {
+                            var s = list[i];
+                            if (s && !s.destroyed && typeof s.destroy === 'function') s.destroy();
+                        }
+                        map[k] = [];
+                    });
+                };
+                close(self.sockets);
+                close(self.freeSockets);
+            };
             httpAgent.prototype.free = function(socket, options) {};
             httpAgent.prototype.getCurrentStatus = function() { return { activeSockets: 0, freeSocketCount: 0, requestCount: 0 }; };
             httpAgent.prototype.keepSocketAlive = function(socket) {};
@@ -4589,6 +4606,12 @@ pub fn inject_require(
                 this._chunks = [];
                 this.finished = false;
                 this.headersSent = false;
+                // Node sends a `Date` header unless the application turns it
+                // off (`res.sendDate = false`).
+                this.sendDate = true;
+                // Set when the application removes the `Connection` header:
+                // the server must not add one back.
+                this._removedConnection = false;
             };
             util.inherits(httpServerResponse, Writable);
             // Header validation — same rules as Node's lib/_http_outgoing.js:
@@ -4622,14 +4645,53 @@ pub fn inject_require(
                 return this;
             };
             httpServerResponse.prototype.getHeader = function(name) { return this._headers[name]; };
-            httpServerResponse.prototype.removeHeader = function(name) { delete this._headers[name]; return this; };
+            httpServerResponse.prototype.removeHeader = function(name) {
+                delete this._headers[name];
+                // Node: removing the `Connection` header keeps the server
+                // from adding one back (lib/_http_outgoing.js).
+                if (String(name).toLowerCase() === 'connection') this._removedConnection = true;
+                return this;
+            };
             httpServerResponse.prototype.hasHeader = function(name) { return Object.prototype.hasOwnProperty.call(this._headers, name); };
             httpServerResponse.prototype.getHeaders = function() { return this._headers; };
             httpServerResponse.prototype.writeHead = function(statusCode, statusMessage, headers) {
                 if (typeof statusMessage === 'object' && statusMessage !== null) { headers = statusMessage; statusMessage = undefined; }
+                // Node accepts three shapes for the headers: an object, a flat
+                // array of alternating names and values, and an array of
+                // [name, value] pairs.
+                var pairs = null;
+                if (Array.isArray(headers)) {
+                    pairs = [];
+                    if (headers.length && Array.isArray(headers[0])) {
+                        for (var pi = 0; pi < headers.length; pi++) {
+                            var p = headers[pi];
+                            if (!Array.isArray(p) || p.length !== 2) {
+                                var pe = new TypeError('Invalid header value: ' + String(p));
+                                pe.code = 'ERR_INVALID_ARG_VALUE';
+                                throw pe;
+                            }
+                            pairs.push([String(p[0]), p[1]]);
+                        }
+                    } else {
+                        if (headers.length % 2 !== 0) {
+                            var oe = new TypeError('Invalid header value: ' + JSON.stringify(headers));
+                            oe.code = 'ERR_INVALID_ARG_VALUE';
+                            throw oe;
+                        }
+                        for (var ai = 0; ai < headers.length; ai += 2) {
+                            pairs.push([String(headers[ai]), headers[ai + 1]]);
+                        }
+                    }
+                }
                 // Validate before touching any state so a rejected header leaves
                 // the response untouched (same observable behaviour as Node).
-                if (headers) {
+                if (pairs) {
+                    for (var q = 0; q < pairs.length; q++) {
+                        __validateHeaderName(pairs[q][0]);
+                        __validateHeaderValue(pairs[q][0], pairs[q][1]);
+                    }
+                }
+                if (headers && !pairs) {
                     for (var k in headers) if (Object.prototype.hasOwnProperty.call(headers, k)) {
                         __validateHeaderName(k);
                         __validateHeaderValue(k, headers[k]);
@@ -4637,7 +4699,16 @@ pub fn inject_require(
                 }
                 this.statusCode = statusCode;
                 this.statusMessage = statusMessage || HTTP_STATUS_CODES[String(statusCode)] || '';
-                if (headers) {
+                if (pairs) {
+                    for (var p2 = 0; p2 < pairs.length; p2++) {
+                        var lk = pairs[p2][0].toLowerCase();
+                        var value = pairs[p2][1];
+                        if (this._headers[lk] === undefined) this._headers[lk] = value;
+                        else if (Array.isArray(this._headers[lk])) this._headers[lk].push(value);
+                        else this._headers[lk] = [this._headers[lk], value];
+                    }
+                }
+                if (headers && !pairs) {
                     for (var k2 in headers) if (Object.prototype.hasOwnProperty.call(headers, k2)) this._headers[k2] = headers[k2];
                 }
                 this.headersSent = true;
@@ -4679,7 +4750,7 @@ pub fn inject_require(
                     var merged = new Uint8Array(total);
                     var off = 0;
                     parts.forEach(function(p) { merged.set(p, off); off += p.length; });
-                    __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged);
+                    __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged, this.sendDate !== false, !this._removedConnection);
                 } else {
                     // Route through __httpRespondBytes (JS-side TextEncoder,
                     // not the native __httpRespond(string) path) even for a
@@ -4699,9 +4770,9 @@ pub fn inject_require(
                     // the exact defect in it.
                     var __finalS = this._chunks.join('');
                     if (typeof Buffer !== 'undefined') {
-                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'));
+                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'), this.sendDate !== false, !this._removedConnection);
                     } else {
-                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS));
+                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS), this.sendDate !== false, !this._removedConnection);
                     }
                 }
                 // A microtask, not a 0 ms timer: it still runs after the handler
@@ -4775,12 +4846,60 @@ pub fn inject_require(
                 if (!(this instanceof httpServer)) return new httpServer(opts, requestListener);
                 EventEmitter.call(this);
                 if (typeof opts === 'function') { requestListener = opts; opts = {}; }
+                opts = opts || {};
                 if (requestListener) this.on('request', requestListener);
                 this._id = null;
                 this._pollTimer = null;
                 this.listening = false;
                 this._port = 0;
                 this._host = '0.0.0.0';
+                // Node's server timeouts (lib/_http_server.js). `requestTimeout`
+                // is the deadline for the whole request, `headersTimeout` for
+                // its head, and `keepAliveTimeout` for an idle keep-alive
+                // connection.
+                var V = globalThis.__validators;
+                var timeout = function(name, value) {
+                    if (typeof value !== 'number') throw V.invalidArgType(name, 'of type number', value);
+                    if (!(value >= 0) || value > Number.MAX_SAFE_INTEGER) {
+                        throw V.outOfRange(name, value, 0, Number.MAX_SAFE_INTEGER);
+                    }
+                    return value;
+                };
+                var requestTimeout = opts.requestTimeout !== undefined
+                    ? timeout('requestTimeout', opts.requestTimeout) : 300000;
+                var headersTimeout = opts.headersTimeout !== undefined
+                    ? timeout('headersTimeout', opts.headersTimeout)
+                    : Math.min(requestTimeout, 60000);
+                if (requestTimeout > 0 && headersTimeout > requestTimeout) {
+                    var e = new RangeError('The value of "headersTimeout" is out of range. ' +
+                        'It must be <= requestTimeout. Received ' + headersTimeout);
+                    e.code = 'ERR_OUT_OF_RANGE';
+                    throw e;
+                }
+                var keepAliveTimeout = opts.keepAliveTimeout !== undefined
+                    ? timeout('keepAliveTimeout', opts.keepAliveTimeout) : 5000;
+                var self = this;
+                var timeouts = {
+                    headersTimeout: headersTimeout,
+                    requestTimeout: requestTimeout,
+                    keepAliveTimeout: keepAliveTimeout,
+                };
+                var pushTimeouts = function() {
+                    if (self._id === null) return;
+                    if (typeof __httpSetTimeouts === 'function') {
+                        __httpSetTimeouts(self._id, timeouts.headersTimeout,
+                            timeouts.requestTimeout, timeouts.keepAliveTimeout);
+                    }
+                };
+                ['headersTimeout', 'requestTimeout', 'keepAliveTimeout'].forEach(function(name) {
+                    Object.defineProperty(self, name, {
+                        get: function() { return timeouts[name]; },
+                        set: function(v) { timeouts[name] = timeout(name, v); pushTimeouts(); },
+                        enumerable: true,
+                        configurable: true,
+                    });
+                });
+                this._pushTimeouts = pushTimeouts;
             };
             util.inherits(httpServer, EventEmitter);
             httpServer.prototype.listen = function(port, hostname, backlog, callback) {
@@ -4822,6 +4941,9 @@ pub fn inject_require(
                 self._port = __httpServerPort(result);
                 self._host = __httpServerAddress(result) || hostname;
                 self.listening = true;
+                // The timeouts the application configured reach the
+                // connection tasks now that the server has an id.
+                if (typeof self._pushTimeouts === 'function') self._pushTimeouts();
                 // Called by the event loop (http_server.rs dispatch_ready) as
                 // soon as a connection task queues a parsed request — no
                 // polling interval, so no latency floor between arrivals.
@@ -4848,6 +4970,11 @@ __httpSetHandler(self._id, function() {
                         var req = new httpIncomingMessage(_sock);
                         req.method = raw[0];
                         req.url = raw[1];
+                        // The HTTP version of the request: an HTTP/1.0
+                        // request is reported as such, as in Node.
+                        req.httpVersion = raw[6] || '1.1';
+                        req.httpVersionMajor = parseInt(req.httpVersion.split('.')[0], 10) || 1;
+                        req.httpVersionMinor = parseInt(req.httpVersion.split('.')[1], 10) || 1;
                         // Last duplicate wins, as the JSON object this replaced did.
                         var _flat = raw[5], _rh = {};
                         for (var _i = 0; _i < _flat.length; _i += 2) _rh[_flat[_i]] = _flat[_i + 1];
@@ -4921,8 +5048,7 @@ __httpSetHandler(self._id, function() {
             // (header timeout 10 s by default), not from these properties.
             // Report the real value and say so when code sets one, instead
             // of silently accepting e.g. a slowloris `headersTimeout` (INFO-F).
-            [['requestTimeout', 0], ['headersTimeout', 10000],
-             ['maxHeadersCount', null], ['maxConnections', 0]].forEach(function(p) {
+            [['maxHeadersCount', null], ['maxConnections', 0]].forEach(function(p) {
                 var warned = false;
                 Object.defineProperty(httpServer.prototype, p[0], {
                     get: function() { return p[1]; },
@@ -4982,6 +5108,17 @@ __httpSetHandler(self._id, function() {
             // Parse one response head (status line + headers). Header names are
             // lower-cased; duplicates are joined with ", " except set-cookie,
             // which stays an array, as in Node.
+            //
+            // The headers Node calls "no-repeat" keep their first value: a
+            // repeated `content-length` or `location` is not a list, and the
+            // first one is the one the client acts on.
+            var __NO_REPEAT_HEADERS = {
+                'age': 1, 'authorization': 1, 'content-length': 1, 'content-type': 1,
+                'etag': 1, 'expires': 1, 'from': 1, 'host': 1, 'if-modified-since': 1,
+                'if-unmodified-since': 1, 'last-modified': 1, 'location': 1,
+                'max-forwards': 1, 'proxy-authorization': 1, 'referer': 1,
+                'retry-after': 1, 'server': 1, 'user-agent': 1,
+            };
             function __parseResponseHead(head) {
                 var lines = head.split('\r\n');
                 var m = /^HTTP\/(\d+)\.(\d+)\s+(\d{3})\s?(.*)$/.exec(lines[0] || '');
@@ -5015,6 +5152,9 @@ __httpSetHandler(self._id, function() {
                         else out.headers[lk] = [].concat(out.headers[lk], value);
                     } else if (out.headers[lk] === undefined) {
                         out.headers[lk] = value;
+                    } else if (__NO_REPEAT_HEADERS[lk]) {
+                        // The first value wins for the headers Node does not
+                        // repeat.
                     } else {
                         out.headers[lk] = out.headers[lk] + ', ' + value;
                     }
@@ -5234,6 +5374,12 @@ __httpSetHandler(self._id, function() {
                     self._connected = true;
                     self._socketErrorHandler = function(err) { self._fail(err); };
                     reused.on('error', self._socketErrorHandler);
+                    var agent = self._agent;
+                    if (agent && agent.sockets) {
+                        var list = agent.sockets[self._keepAliveKey];
+                        if (!list) { list = []; agent.sockets[self._keepAliveKey] = list; }
+                        list.push(reused);
+                    }
                     self._attachSocket(reused);
                     self.emit('socket', reused);
                     self._sendHead();
@@ -5299,6 +5445,14 @@ __httpSetHandler(self._id, function() {
                 this._socket = socket;
                 this._socketErrorHandler = function(err) { self._fail(err); };
                 socket.on('error', this._socketErrorHandler);
+                // The agent keeps the socket it handed out, so `agent.destroy()`
+                // can close it and `agent.totalSocketCount` can count it.
+                var agent = this._agent;
+                if (agent && agent.sockets) {
+                    var list = agent.sockets[this._keepAliveKey];
+                    if (!list) { list = []; agent.sockets[this._keepAliveKey] = list; }
+                    list.push(socket);
+                }
                 var go = function() {
                     if (self._aborted) return;
                     self._connected = true;
@@ -5536,8 +5690,14 @@ __httpSetHandler(self._id, function() {
                     // request is usually created from this stream's 'end'
                     // handler, and returning it after that made the agent hand
                     // out a fresh connection instead of reusing this one.
-                    if (keepAlive && this._agent && typeof this._agent._returnSocket === 'function') {
-                        this._agent._returnSocket(this._keepAliveKey, socket);
+                    var agent = this._agent;
+                    if (agent && agent.sockets && agent.sockets[this._keepAliveKey]) {
+                        var inUse = agent.sockets[this._keepAliveKey];
+                        var at = inUse.indexOf(socket);
+                        if (at >= 0) inUse.splice(at, 1);
+                    }
+                    if (keepAlive && agent && typeof agent._returnSocket === 'function') {
+                        agent._returnSocket(this._keepAliveKey, socket);
                     } else if (!socket.destroyed) {
                         socket.destroy();
                     }
