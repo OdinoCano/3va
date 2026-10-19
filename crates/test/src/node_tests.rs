@@ -18,6 +18,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// One test that failed.
@@ -64,6 +66,8 @@ pub struct Options {
     /// Tests to skip with a reason (name → reason), e.g. ones that allocate
     /// more memory than the run budget.
     pub skips: BTreeMap<String, String>,
+    /// How many test files to run at the same time.
+    pub jobs: usize,
 }
 
 /// The module key for a test file, from the longest matching prefix
@@ -168,8 +172,74 @@ fn skip_reason(name: &str, src: &str) -> Option<String> {
     None
 }
 
+/// The port `test/common` uses for its own server (`common.PORT`). Each
+/// parallel worker gets its own, so two tests never fight for it.
+const COMMON_PORT_BASE: i64 = 12346;
+
+/// Tests that run alone, after the parallel ones.
+///
+/// They spawn processes of their own (a `3va` inside a `3va`, a `python3`),
+/// and with several of them at the same time the session runs out of
+/// processes: the spawn fails with "Resource temporarily unavailable" and the
+/// test fails for a reason that has nothing to do with what it checks. They
+/// still count — they are only not run at the same time as another test.
+const SEQUENTIAL_TESTS: &[&str] = &[
+    "test-child-process-set-blocking.js",
+    "test-child-process-spawnsync-non-string-args.js",
+];
+
+/// Spawn the command, waiting for the machine when it is momentarily out of
+/// process slots.
+///
+/// The scope the suite runs in has a limit on how many processes it can have
+/// at once (`TasksMax`). When many tests spawn children at the same time, the
+/// limit is reached and `fork` is refused with `EAGAIN`. That is the machine
+/// running out of room, not the test failing: wait a moment and try again
+/// instead of counting it as a failure.
+fn spawn_with_retry(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..20u32 {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                last = Some(e);
+                std::thread::sleep(Duration::from_millis(50 * (attempt as u64 + 1)));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("spawn failed")))
+}
+
+/// Whether the process has exited and nobody has reaped it yet.
+///
+/// A zombie keeps its pid reserved, so the pid can be used to identify the
+/// process group without the risk of hitting an unrelated process that
+/// inherited the number after the child was reaped.
+fn is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // "pid (comm) state ...": the command name can contain spaces and
+    // parentheses, so the state is the first field after the last ')'.
+    let Some((_, rest)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    rest.split_whitespace().next() == Some("Z")
+}
+
 /// Run one test file with a timeout, returning `(passed, reason)`.
-fn run_one(opts: &Options, root: &Path, file: &Path, flags: &[String]) -> (bool, String) {
+///
+/// `worker` is the index of the parallel worker running it: it decides the
+/// port `test/common` uses and the temporary directory it works in, so two
+/// tests never share either.
+fn run_one(
+    opts: &Options,
+    root: &Path,
+    file: &Path,
+    flags: &[String],
+    worker: usize,
+) -> (bool, String) {
     use std::os::unix::process::CommandExt;
 
     let mut cmd = Command::new(&opts.threeva_bin);
@@ -182,6 +252,17 @@ fn run_one(opts: &Options, root: &Path, file: &Path, flags: &[String]) -> (bool,
     }
     cmd.arg(file)
         .current_dir(root)
+        // The test's own helper (`test/common`) opens a server on this port;
+        // one port per worker, so two tests never pick the same one.
+        .env(
+            "NODE_COMMON_PORT",
+            (COMMON_PORT_BASE + 100 * worker as i64).to_string(),
+        )
+        // `test/common`'s temporary directory is named after this variable
+        // (`.tmp.<TEST_THREAD_ID>`), so each worker gets its own — Node's own
+        // runner does the same. Without it, two workers refreshing the
+        // temporary directory delete each other's files.
+        .env("TEST_THREAD_ID", worker.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -189,39 +270,48 @@ fn run_one(opts: &Options, root: &Path, file: &Path, flags: &[String]) -> (bool,
     // does not leak it into the run: the whole group is killed afterwards.
     cmd.process_group(0);
 
-    let mut child = match cmd.spawn() {
+    let mut child = match spawn_with_retry(&mut cmd) {
         Ok(c) => c,
         Err(e) => return (false, format!("spawn failed: {e}")),
     };
+    let pid = child.id();
 
+    // Wait for the test to finish *without* reaping it: while the child is a
+    // zombie its pid is still reserved, so killing its process group below
+    // cannot reach an unrelated process that reused the number (with several
+    // tests running at once, that is not a rare accident: it killed other
+    // tests' processes at random).
     let deadline = Instant::now() + opts.timeout;
+    let mut timed_out = false;
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                kill_group(child.id());
-                if status.success() {
-                    return (true, String::new());
-                }
-                let reason = match status.code() {
-                    Some(c) => format!("exit {c}"),
-                    None => "killed by signal".to_string(),
-                };
-                return (false, reason);
-            }
-            Ok(None) => {}
-            Err(e) => {
-                kill_group(child.id());
-                return (false, format!("wait failed: {e}"));
-            }
+        if is_zombie(pid) {
+            break;
         }
         if Instant::now() >= deadline {
-            kill_group(child.id());
-            let _ = child.kill();
-            let _ = child.wait();
-            return (false, format!("timeout after {}s", opts.timeout.as_secs()));
+            timed_out = true;
+            break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+
+    // The whole group goes down: the test may have left children behind
+    // (a detached spawn, a server that did not close).
+    kill_group(pid);
+    let status = child.wait().ok();
+    if timed_out {
+        return (false, format!("timeout after {}s", opts.timeout.as_secs()));
+    }
+    let Some(status) = status else {
+        return (false, "wait failed".to_string());
+    };
+    if status.success() {
+        return (true, String::new());
+    }
+    let reason = match status.code() {
+        Some(c) => format!("exit {c}"),
+        None => "killed by signal".to_string(),
+    };
+    (false, reason)
 }
 
 /// Kill the process group `pgid` (the whole tree a test may have spawned).
@@ -270,54 +360,171 @@ fn collect(root: &Path, opts: &Options) -> Vec<PathBuf> {
     files
 }
 
+/// One test file, with everything decided before it runs.
+struct Planned {
+    name: String,
+    file: PathBuf,
+    module: String,
+    /// The Node flags 3va honors, handed to `3va run`.
+    flags: Vec<String>,
+    /// Why the test is skipped, if it is.
+    skip: Option<String>,
+}
+
+/// What a test ended up doing.
+enum Outcome {
+    Passed,
+    Failed(String),
+    Skipped(String),
+}
+
 /// Run the suite. `root` is the nodejs/node checkout (`tests/node`).
+///
+/// The files run in parallel (`opts.jobs` at a time), each in its own process
+/// group with its own timeout, like Node's own runner does. The results are
+/// collected per file and written out in the (sorted) file order, so a run
+/// always produces the same lists, whatever the interleaving was.
 pub fn run_suite(root: &Path, opts: &Options) -> Summary {
     let files = collect(root, opts);
+    let planned: Vec<Planned> = files
+        .iter()
+        .map(|file| {
+            let name = file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let module = module_of(&name, &opts.prefixes);
+            let src = std::fs::read_to_string(file).unwrap_or_default();
+            let skip = opts
+                .skips
+                .get(&name)
+                .cloned()
+                .or_else(|| skip_reason(&name, &src));
+            Planned {
+                flags: supported_flags(&src),
+                name,
+                file: file.clone(),
+                module,
+                skip,
+            }
+        })
+        .collect();
+
+    let jobs = opts.jobs.max(1);
+    let next = AtomicUsize::new(0);
+    let outcomes: Mutex<Vec<Option<Outcome>>> =
+        Mutex::new((0..planned.len()).map(|_| None).collect());
+
+    let planned = &planned;
+    let next = &next;
+    let outcomes = &outcomes;
+    std::thread::scope(|scope| {
+        for worker in 0..jobs {
+            scope.spawn(move || {
+                // One port and one temporary directory per worker.
+                loop {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(planned) = planned.get(index) else {
+                        break;
+                    };
+                    if SEQUENTIAL_TESTS.contains(&planned.name.as_str()) {
+                        // Run alone, after the parallel ones.
+                        continue;
+                    }
+                    let outcome = match &planned.skip {
+                        Some(reason) => Outcome::Skipped(reason.clone()),
+                        None => {
+                            // Printed BEFORE running: if a test kills the batch,
+                            // the last START line names the culprit.
+                            eprintln!("NODE_TEST_START\t{}", planned.name);
+                            let (passed, reason) =
+                                run_one(opts, root, &planned.file, &planned.flags, worker);
+                            eprintln!(
+                                "NODE_TEST_DONE\t{}\t{}",
+                                planned.name,
+                                if passed { "ok" } else { "fail" }
+                            );
+                            if passed {
+                                Outcome::Passed
+                            } else {
+                                Outcome::Failed(reason)
+                            }
+                        }
+                    };
+                    outcomes.lock().expect("outcomes mutex")[index] = Some(outcome);
+                }
+            });
+        }
+    });
+
+    // The tests that must run alone, one after the other, with the machine to
+    // themselves.
+    for (index, planned) in planned.iter().enumerate() {
+        if !SEQUENTIAL_TESTS.contains(&planned.name.as_str()) {
+            continue;
+        }
+        let outcome = match &planned.skip {
+            Some(reason) => Outcome::Skipped(reason.clone()),
+            None => {
+                eprintln!("NODE_TEST_START\t{}", planned.name);
+                let (passed, reason) = run_one(opts, root, &planned.file, &planned.flags, 0);
+                eprintln!(
+                    "NODE_TEST_DONE\t{}\t{}",
+                    planned.name,
+                    if passed { "ok" } else { "fail" }
+                );
+                if passed {
+                    Outcome::Passed
+                } else {
+                    Outcome::Failed(reason)
+                }
+            }
+        };
+        outcomes.lock().expect("outcomes mutex")[index] = Some(outcome);
+    }
+
     let mut summary = Summary {
         passed: 0,
         failed: Vec::new(),
         skipped: Vec::new(),
         by_module: BTreeMap::new(),
     };
-
-    for file in files {
-        let name = file
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let module = module_of(&name, &opts.prefixes);
-        let entry = summary.by_module.entry(module).or_default();
-
-        let src = std::fs::read_to_string(&file).unwrap_or_default();
-        if let Some(reason) = opts.skips.get(&name) {
-            entry.skipped += 1;
-            summary.skipped.push(Skipped {
-                name,
-                reason: reason.clone(),
-            });
-            continue;
-        }
-        if let Some(reason) = skip_reason(&name, &src) {
-            entry.skipped += 1;
-            summary.skipped.push(Skipped { name, reason });
-            continue;
-        }
-        // Printed BEFORE running: if a test kills the batch, the last START
-        // line names the culprit.
-        eprintln!("NODE_TEST_START\t{name}");
-        let flags = supported_flags(&src);
-        let (passed, reason) = run_one(opts, root, &file, &flags);
-        eprintln!(
-            "NODE_TEST_DONE\t{name}\t{}",
-            if passed { "ok" } else { "fail" }
-        );
-        if passed {
-            entry.passed += 1;
-            summary.passed += 1;
-        } else {
-            entry.failed += 1;
-            summary.failed.push(Failed { name, reason });
+    let outcomes = outcomes
+        .lock()
+        .expect("outcomes mutex")
+        .drain(..)
+        .collect::<Vec<_>>();
+    for (planned, outcome) in planned.iter().zip(outcomes) {
+        let entry = summary.by_module.entry(planned.module.clone()).or_default();
+        match outcome {
+            Some(Outcome::Passed) => {
+                entry.passed += 1;
+                summary.passed += 1;
+            }
+            Some(Outcome::Failed(reason)) => {
+                entry.failed += 1;
+                summary.failed.push(Failed {
+                    name: planned.name.clone(),
+                    reason,
+                });
+            }
+            Some(Outcome::Skipped(reason)) => {
+                entry.skipped += 1;
+                summary.skipped.push(Skipped {
+                    name: planned.name.clone(),
+                    reason,
+                });
+            }
+            None => {
+                // The worker died before running this file; count it as a
+                // failure instead of silently dropping it from the count.
+                entry.failed += 1;
+                summary.failed.push(Failed {
+                    name: planned.name.clone(),
+                    reason: "not run (the worker died)".to_string(),
+                });
+            }
         }
     }
     summary

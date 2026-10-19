@@ -4083,9 +4083,12 @@ pub fn inject_require(
                 // the flag.
                 if (port && typeof port === 'object') {
                     var sock = new Socket(port);
+                    sock._3vaSocket = true;
                     return sock.connect(port, host);
                 }
-                return new Socket({}).connect(port, host, cb);
+                var s = new Socket({});
+                s._3vaSocket = true;
+                return s.connect(port, host, cb);
             }
 
             var __autoSelectFamilyAttemptTimeout = 250;
@@ -4139,6 +4142,7 @@ pub fn inject_require(
                 if (typeof opts === 'function') { cb = opts; opts = {}; }
                 host = host || (opts && opts.host) || 'localhost';
                 var s = new TLSSocket(null, opts || {});
+                s._3vaSocket = true;
                 if (typeof cb === 'function') s.once('secureConnect', cb);
                 var result = __tcpConnectTls(host, port);
                 if (typeof result === 'number') {
@@ -4209,6 +4213,8 @@ pub fn inject_require(
 
             // ── http module ──────────────────────────────────────────────────────────
             var httpAgent = function(options) {
+                // Node allows `http.Agent()` without `new`.
+                if (!(this instanceof httpAgent)) return new httpAgent(options);
                 EventEmitter.call(this);
                 this.options = options || {};
                 this.maxSockets = Infinity;
@@ -4219,11 +4225,40 @@ pub fn inject_require(
                 this.requests = {};
                 this.keepAlive = !!(options && options.keepAlive);
                 this.keepAliveMsecs = (options && options.keepAliveMsecs) || 1000;
+                this.options.keepAlive = this.keepAlive;
+                this.options.keepAliveMsecs = this.keepAliveMsecs;
+                this.maxCachedSessions = this.options.maxCachedSessions || 100;
             };
             httpAgent.prototype = Object.create(EventEmitter.prototype);
             httpAgent.prototype.constructor = httpAgent;
             httpAgent.prototype.addRequest = function(req, options) {};
-            httpAgent.prototype.createConnection = function(options, cb) { if (cb) cb(null, {}); return {}; };
+            // Node's lib/_http_agent.js: the name of the pool a request goes
+            // to. It is the key `agent.sockets` and `agent.freeSockets` are
+            // indexed by, and the value `agent.getName()` returns.
+            httpAgent.prototype.getName = function(options) {
+                options = options || {};
+                var name = options.host || 'localhost';
+                name += ':';
+                if (options.port) name += options.port;
+                name += ':';
+                if (options.localAddress) name += options.localAddress;
+                if (options.family === 4 || options.family === 6) name += ':' + options.family;
+                if (options.socketPath) name += ':' + options.socketPath;
+                return name;
+            };
+            // The socket a request uses. Node's default is a plain TCP
+            // connection (TLS for https). An agent that overrides this is how
+            // the proxy agents work (https-proxy-agent, http-proxy-agent,
+            // tunnel, global-agent): the request has to go through it and not
+            // straight to the origin, or the proxy is bypassed.
+            httpAgent.prototype.createConnection = function(options, cb) {
+                options = options || {};
+                var socket = options.secure
+                    ? tlsConnect(options.port, options.host, { servername: options.servername || options.host })
+                    : netConnect(options.port, options.host);
+                if (typeof cb === 'function') socket.once('connect', function() { cb(null, socket); });
+                return socket;
+            };
             httpAgent.prototype.destroy = function() {};
             httpAgent.prototype.free = function(socket, options) {};
             httpAgent.prototype.getCurrentStatus = function() { return { activeSockets: 0, freeSocketCount: 0, requestCount: 0 }; };
@@ -4232,6 +4267,23 @@ pub fn inject_require(
             httpAgent.prototype.onFREE = function(socket) {};
             httpAgent.prototype.onConnected = function(socket, options) {};
             httpAgent.prototype.onRemoved = function(socket) {};
+            // Node keeps the sockets of the agent in `agent.sockets` and the
+            // reusable ones in `agent.freeSockets`; the total is what
+            // `totalSocketCount` reports.
+            Object.defineProperty(httpAgent.prototype, 'totalSocketCount', {
+                get: function() {
+                    var self = this;
+                    var count = 0;
+                    Object.keys(self.sockets || {}).forEach(function(k) {
+                        count += (self.sockets[k] || []).length;
+                    });
+                    Object.keys(self.freeSockets || {}).forEach(function(k) {
+                        count += (self.freeSockets[k] || []).length;
+                    });
+                    return count;
+                },
+                configurable: true,
+            });
             var httpGlobalAgent = new httpAgent();
             var HTTP_STATUS_CODES = {
                 '100': "Continue",
@@ -4306,6 +4358,8 @@ pub fn inject_require(
             // the stream. The producer keeps at most 1 MiB buffered ahead, so a
             // large upload never grows memory with its size.
             var httpIncomingMessage = function(socket) {
+                // Node allows `http.IncomingMessage(socket)` without `new`.
+                if (!(this instanceof httpIncomingMessage)) return new httpIncomingMessage(socket);
                 Readable.call(this);
                 this.socket = socket || {};
                 this.connection = this.socket;
@@ -4315,7 +4369,10 @@ pub fn inject_require(
                 this.method = 'GET';
                 this.url = '/';
                 this.headers = {};
+                this.rawHeaders = [];
                 this.complete = false;
+                this.aborted = false;
+                this._headerLines = [];
             };
             util.inherits(httpIncomingMessage, Readable);
             // The body is delivered when something starts consuming the stream
@@ -4435,15 +4492,89 @@ pub fn inject_require(
             };
             // ponytail: no-op by design — the effective timeout is applied by the server/firewall; see docs/05-js-engine/07-inventario-stubs.md §7.3.
             httpIncomingMessage.prototype.setTimeout = function() { return this; };
+            httpIncomingMessage.prototype.clearTimeout = function() { return this; };
             httpIncomingMessage.prototype.destroy = function() {
                 var st = this[kIncomingBody];
                 if (st) { st.done = true; this[kIncomingBody] = null; }
                 return this;
             };
+            // The header accessors Node's IncomingMessage has (lib/_http_incoming.js).
+            // The server fills `headers` when it dispatches the request, so
+            // these read from there and keep the raw lines for `_addHeaderLine`.
+            httpIncomingMessage.prototype.getHeader = function(name) {
+                var lk = String(name).toLowerCase();
+                var value = this.headers[lk];
+                if (value === undefined) return undefined;
+                return Array.isArray(value) ? value.slice() : value;
+            };
+            httpIncomingMessage.prototype.getHeaderNames = function() {
+                return Object.keys(this.headers || {});
+            };
+            httpIncomingMessage.prototype.getHeaders = function() {
+                var out = {};
+                var self = this;
+                Object.keys(this.headers || {}).forEach(function(k) {
+                    var v = self.headers[k];
+                    out[k] = Array.isArray(v) ? v.slice() : v;
+                });
+                return out;
+            };
+            httpIncomingMessage.prototype.hasHeader = function(name) {
+                return Object.prototype.hasOwnProperty.call(this.headers || {}, String(name).toLowerCase());
+            };
+            httpIncomingMessage.prototype.setHeader = function(name, value) {
+                this.headers[String(name).toLowerCase()] = value;
+                return this;
+            };
+            httpIncomingMessage.prototype.appendHeader = function(name, value) {
+                var lk = String(name).toLowerCase();
+                var current = this.headers[lk];
+                if (current === undefined) this.headers[lk] = value;
+                else if (Array.isArray(current)) current.push(value);
+                else this.headers[lk] = [current, value];
+                return this;
+            };
+            httpIncomingMessage.prototype.removeHeader = function(name) {
+                delete this.headers[String(name).toLowerCase()];
+                return this;
+            };
+            // Node's `_addHeaderLine`: the raw `name: value` line a header
+            // arrived in. It is what `matchKnownFields` and the raw-header
+            // tests read, so the line is kept as it came.
+            httpIncomingMessage.prototype._addHeaderLine = function(field, value, dest) {
+                if (this._headerLines === undefined) this._headerLines = [];
+                this._headerLines.push(field, value);
+                if (dest && typeof dest === 'object') {
+                    var lk = String(field).toLowerCase();
+                    var current = dest[lk];
+                    if (current === undefined) dest[lk] = value;
+                    else if (Array.isArray(current)) current.push(value);
+                    else dest[lk] = [current, value];
+                }
+                return this;
+            };
+            // Trailers are sent after the body. 3va's server writes the whole
+            // response in one go (Content-Length framing), so there is no
+            // place to put a trailer section; the values are recorded so the
+            // code that sets them does not crash.
+            // ponytail: no-op by design — the response is not chunked, so it
+            // has no trailer section; see docs/05-js-engine/07-inventario-stubs.md §7.3.
+            httpIncomingMessage.prototype.addTrailers = function(headers) {
+                if (!this._trailers) this._trailers = {};
+                var self = this;
+                Object.keys(headers || {}).forEach(function(k) { self._trailers[k] = headers[k]; });
+                return this;
+            };
+            // `cork`/`uncork` are part of the stream API (Node's
+            // OutgoingMessage inherits them from Writable).
+            httpIncomingMessage.prototype.cork = function() { return this; };
+            httpIncomingMessage.prototype.uncork = function() { return this; };
 
             // ── ServerResponse — buffers writes and flushes as one __httpRespond(Bytes)
             // call on end(), since the native side writes headers+body together.
             var httpServerResponse = function(req) {
+                // Node allows `http.ServerResponse(req)` without `new`.
+                if (!(this instanceof httpServerResponse)) return new httpServerResponse(req);
                 Writable.call(this);
                 // Real usage: constructed internally by the accept loop with a
                 // req whose `socket._connId` names the native connection to
@@ -4582,9 +4713,66 @@ pub fn inject_require(
             httpServerResponse.prototype.setTimeout = function() { return this; };
             httpServerResponse.prototype.destroy = function() { return this; };
             httpServerResponse.prototype.flushHeaders = function() {};
+            // Node's ServerResponse has these (lib/_http_server.js): the
+            // response can be handed a socket it did not come from
+            // (`assignSocket`), give it back (`detachSocket`), and can carry
+            // trailers. Without them, code that moves a response between
+            // sockets (a proxy, a middleware that rewrites the socket)
+            // crashes with "not a function".
+            httpServerResponse.prototype.assignSocket = function(socket) {
+                this.socket = socket;
+                this.connection = socket;
+                this._connId = socket && socket._connId;
+                if (socket && typeof socket.on === 'function') {
+                    var self = this;
+                    socket.on('close', function() { self.emit('close'); });
+                }
+                return this;
+            };
+            httpServerResponse.prototype.detachSocket = function(socket) {
+                if (socket && typeof socket.removeListener === 'function') {
+                    // The 'close' listener added by assignSocket.
+                    var self = this;
+                    var listeners = socket.listeners ? socket.listeners('close') : [];
+                    for (var i = 0; i < listeners.length; i++) {
+                        if (listeners[i]._3vaResponse === this) socket.removeListener('close', listeners[i]);
+                    }
+                    void self;
+                }
+                if (this.socket === socket) { this.socket = null; this.connection = null; }
+                return this;
+            };
+            // ponytail: no-op by design — the response is not chunked, so it
+            // has no trailer section; see docs/05-js-engine/07-inventario-stubs.md §7.3.
+            httpServerResponse.prototype.addTrailers = function(headers) {
+                if (!this._trailers) this._trailers = {};
+                var self = this;
+                Object.keys(headers || {}).forEach(function(k) { self._trailers[k] = headers[k]; });
+                return this;
+            };
+            httpServerResponse.prototype.getHeaderNames = function() {
+                return Object.keys(this._headers || {});
+            };
+            // Node's `writeEarlyHints` / `writeInformation`: 1xx informational
+            // responses sent before the final one.
+            // ponytail: no-op by design — 3va's server writes one response
+            // per request; see docs/05-js-engine/07-inventario-stubs.md §7.3.
+            httpServerResponse.prototype.writeEarlyHints = function(hints, cb) {
+                if (typeof cb === 'function') setTimeout(cb, 0);
+                return this;
+            };
+            httpServerResponse.prototype.writeInformation = function(code, headers, cb) {
+                if (typeof cb === 'function') setTimeout(cb, 0);
+                return this;
+            };
+            httpServerResponse.prototype.writeProcessing = function() { return this; };
+            httpServerResponse.prototype.cork = function() { return this; };
+            httpServerResponse.prototype.uncork = function() { return this; };
 
             // ── Server — real listener backed by __httpListen/__httpAcceptPoll.
             var httpServer = function(opts, requestListener) {
+                // Node allows `http.Server(fn)` without `new`.
+                if (!(this instanceof httpServer)) return new httpServer(opts, requestListener);
                 EventEmitter.call(this);
                 if (typeof opts === 'function') { requestListener = opts; opts = {}; }
                 if (requestListener) this.on('request', requestListener);
@@ -4753,7 +4941,11 @@ __httpSetHandler(self._id, function() {
             httpServer.prototype.unref = function() { return this; };
             httpServer.prototype.listenOnServerHandler = function(socket) {};
 
-            var httpOutgoingMessage = function() { EventEmitter.call(this); };
+            var httpOutgoingMessage = function() {
+                // Node allows `http.OutgoingMessage()` without `new`.
+                if (!(this instanceof httpOutgoingMessage)) return new httpOutgoingMessage();
+                EventEmitter.call(this);
+            };
             util.inherits(httpOutgoingMessage, EventEmitter);
             httpOutgoingMessage.prototype.write = function(chunk, encoding, callback) { return true; };
             httpOutgoingMessage.prototype.end = function(chunk, encoding, callback) {};
@@ -4815,9 +5007,17 @@ __httpSetHandler(self._id, function() {
                     var lk = name.toLowerCase();
                     out.rawHeaders.push(name, value);
                     lastName = lk;
-                    if (out.headers[lk] === undefined) out.headers[lk] = value;
-                    else if (lk === 'set-cookie') out.headers[lk] = [].concat(out.headers[lk], value);
-                    else out.headers[lk] = out.headers[lk] + ', ' + value;
+                    // Node keeps `set-cookie` in an array even when there is
+                    // only one: the header can be repeated and a string would
+                    // lose the difference between "one cookie" and "several".
+                    if (lk === 'set-cookie') {
+                        if (out.headers[lk] === undefined) out.headers[lk] = [value];
+                        else out.headers[lk] = [].concat(out.headers[lk], value);
+                    } else if (out.headers[lk] === undefined) {
+                        out.headers[lk] = value;
+                    } else {
+                        out.headers[lk] = out.headers[lk] + ', ' + value;
+                    }
                 }
                 return out;
             }
@@ -4836,6 +5036,8 @@ __httpSetHandler(self._id, function() {
             // defaultProtocol is 'https:' when called through the https module:
             // those requests must go over TLS, never a plain TCP socket.
             function ClientRequest(options, callback, defaultProtocol) {
+                // Node allows `http.ClientRequest(options)` without `new`.
+                if (!(this instanceof ClientRequest)) return new ClientRequest(options, callback, defaultProtocol);
                 EventEmitter.call(this);
                 if (typeof options === 'string') {
                     var u = new URL(options);
@@ -4868,6 +5070,9 @@ __httpSetHandler(self._id, function() {
                 this._parserState = null;
                 this._leftover = null;
                 this._agent = options.agent === undefined ? httpGlobalAgent : (options.agent === false ? null : options.agent);
+                // Node: `options.createConnection` replaces the agent's own
+                // factory for this request.
+                this._createConnection = typeof options.createConnection === 'function' ? options.createConnection : null;
                 this._keepAliveKey = null;
                 this._timeoutMs = options.timeout || 0;
                 this._timeoutTimer = null;
@@ -5037,13 +5242,64 @@ __httpSetHandler(self._id, function() {
                     self._armTimeout();
                     return;
                 }
+                // Node's lib/_http_client.js: the socket comes from
+                // `options.createConnection` when the caller gave one, from
+                // the agent's `createConnection` when there is an agent, and
+                // from a plain connection otherwise. An agent that replaces
+                // it is how the proxy agents work, so the request has to go
+                // through it and not straight to the origin.
+                var options = {
+                    host: self._host,
+                    port: self._port,
+                    path: self._path,
+                    method: self._method,
+                    secure: self._secure,
+                    servername: self._host,
+                };
+                var factory = null;
+                if (typeof self._createConnection === 'function') {
+                    factory = self._createConnection;
+                } else if (self._agent && typeof self._agent.createConnection === 'function') {
+                    var agent = self._agent;
+                    factory = function(opts, cb) { return agent.createConnection(opts, cb); };
+                }
+                if (factory) {
+                    // `once`: the factory may both return the socket and call
+                    // the callback, and only the first one counts.
+                    var settled = false;
+                    var oncreate = function(err, socket) {
+                        if (settled) return;
+                        settled = true;
+                        if (err) { self._fail(err); return; }
+                        if (!socket) return;
+                        self._useSocket(socket);
+                    };
+                    var created = null;
+                    try {
+                        created = factory(options, oncreate);
+                    } catch (e) {
+                        this._fail(e);
+                        return;
+                    }
+                    if (created) oncreate(null, created);
+                    return;
+                }
                 var socket = self._secure
                     ? tlsConnect(self._port, self._host, { servername: self._host })
                     : netConnect(self._port, self._host);
-                self._socket = socket;
-                self._socketErrorHandler = function(err) { self._fail(err); };
-                socket.on('error', self._socketErrorHandler);
-                socket.once('connect', function() {
+                self._useSocket(socket);
+            };
+            // Take the socket the connection produced and start the request on
+            // it. A socket 3va opened waits for its 'connect' event (a write
+            // before the connection is up is lost); a socket the application
+            // brought (a Duplex from `createConnection`) is used right away,
+            // as in Node.
+            ClientRequest.prototype._useSocket = function(socket) {
+                var self = this;
+                this._socket = socket;
+                this._socketErrorHandler = function(err) { self._fail(err); };
+                socket.on('error', this._socketErrorHandler);
+                var go = function() {
                     if (self._aborted) return;
                     self._connected = true;
                     self.emit('socket', socket);
@@ -5052,7 +5308,9 @@ __httpSetHandler(self._id, function() {
                     self._flushBody();
                     self._maybeFinishRequest();
                     self._armTimeout();
-                });
+                };
+                if (socket._3vaSocket) socket.once('connect', go);
+                else go();
             };
             ClientRequest.prototype._maybeFinishRequest = function() {
                 if (!this._ended || !this._headerSent) return;
@@ -5336,6 +5594,7 @@ __httpSetHandler(self._id, function() {
                 return new httpServer(opts, requestListener);
             }
 
+            // Node's `http.METHODS` is the list llhttp knows, sorted.
             var HTTP_METHODS = [
                 'ACL','BIND','CHECKOUT','CONNECT','COPY','DELETE',
                 'GET','HEAD','LINK','LOCK','M-SEARCH','MERGE',
@@ -5343,7 +5602,7 @@ __httpSetHandler(self._id, function() {
                 'OPTIONS','PATCH','POST','PRI','PROPFIND','PROPPATCH',
                 'PURGE','PUT','REBIND','REPORT','SEARCH','SOURCE',
                 'SUBSCRIBE','TRACE','UNBIND','UNLINK','UNLOCK','UNSUBSCRIBE'
-            ];
+            ].sort();
 
             var httpModule = {
                 createServer: createServer,

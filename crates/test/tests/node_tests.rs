@@ -70,7 +70,11 @@ fn threeva_bin() -> PathBuf {
     if let Ok(p) = std::env::var("THREEVA_BIN") {
         return PathBuf::from(p);
     }
-    for candidate in ["../../target/release/3va", "../../target/debug/3va"] {
+    // The debug build first: the suite is the ratchet of the Node
+    // compatibility and it is measured with the debug build (the same one CI
+    // uses, see .github/workflows/deep-checks.yml). A `target/release/3va`
+    // left over from an older commit would silently measure the wrong code.
+    for candidate in ["../../target/debug/3va", "../../target/release/3va"] {
         let p = Path::new(candidate);
         if p.exists() {
             return p.to_path_buf();
@@ -140,6 +144,17 @@ fn node_parallel_suite() {
         .collect(),
         filter: std::env::var("NODE_TESTS_FILTER").ok(),
         skips: read_skips(Path::new(SKIP_LIST)),
+        // How many test files run at the same time. Half the cores by
+        // default (the run is mostly waiting on timeouts), 16 at most.
+        jobs: std::env::var("NODE_TESTS_JOBS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| {
+                let cores = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(2);
+                (cores / 2).clamp(1, 16)
+            }),
     };
 
     println!("3va: {}", bin.display());
