@@ -148,6 +148,16 @@ pub fn inject_all(
     let require_cache_init = "globalThis.__requireCache = globalThis.__requireCache || {}; globalThis.__loadedModules = globalThis.__loadedModules || {}; globalThis.__fallbackModules = globalThis.__fallbackModules || {};";
     code_cache::bootstrap_js(scope, "require-cache-init", require_cache_init)?;
 
+    // Node-compatible command-line flags (`--no-warnings`, `--pending-deprecation`,
+    // `--zero-fill-buffers`, `--insecure-http-parser`), published for the
+    // builtins that honour them. Per-run, not part of the startup snapshot:
+    // they depend on the command line.
+    let node_flags = format!(
+        "globalThis.__node_flags__ = {};",
+        crate::node_flags::js_flags_literal()
+    );
+    code_cache::bootstrap_js_per_run(scope, "node-flags", &node_flags)?;
+
     t!("buffer", buffer::inject_buffer(scope))?;
     t!(
         "process",

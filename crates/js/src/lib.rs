@@ -7,7 +7,9 @@ pub mod async_context;
 pub mod builtins;
 mod caller_scope;
 pub mod esm;
+pub mod gc;
 pub mod inspector;
+pub mod node_flags;
 pub mod profiler;
 pub mod rejection_tracker;
 pub mod snapshot;
@@ -90,6 +92,11 @@ pub fn ensure_v8_initialized() {
         // idle scavenge task (0.4-3.5 ms) run just before exiting. Also
         // measured faster under HTTP load (fewer early scavenges).
         v8::V8::set_flags_from_string("--min-semi-space-size=2");
+        // `--expose-gc`: V8 aborts `RequestGarbageCollectionForTesting`
+        // unless the flag is set, and flags are only read before V8 starts.
+        if node_flags::expose_gc() {
+            v8::V8::set_flags_from_string("--expose-gc");
+        }
         // 4 background threads (concurrent GC/compilation), Node's default.
         // 0 meant one per core, all spawned on every start.
         let platform = v8::new_default_platform(4, false).make_shared();
@@ -622,6 +629,7 @@ async fn sleep_or_wake(d: std::time::Duration, wake: &Option<Arc<tokio::sync::No
 impl Drop for JsEngine {
     fn drop(&mut self) {
         caller_scope::uninstall(&self.isolate);
+        gc::uninstall(&self.isolate);
         // Run Node-API finalizers for objects still alive and free the
         // per-function bridges, before the isolate is disposed (a disposed
         // isolate can no longer call into the addon). Environments that were
@@ -794,6 +802,11 @@ impl JsEngine {
         builtins::code_cache::set_boot_mode(previous);
         let recorded = builtins::code_cache::take_recorded();
         injected?;
+        // `--expose-gc`: Node exposes `globalThis.gc()` with that flag.
+        if node_flags::expose_gc() {
+            gc::install(raw_isolate);
+            gc::install_gc(&mut scope);
+        }
         if recording {
             snapshot::build_in_background(recorded);
         }

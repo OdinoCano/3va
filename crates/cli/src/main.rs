@@ -3289,6 +3289,25 @@ enum PermissionsAction {
     },
 }
 
+/// The Node-compatible runtime flags as they were written on the command
+/// line, in order. Node exposes the same list as `process.execArgv`.
+fn node_exec_argv() -> Vec<String> {
+    const NODE_FLAGS: &[&str] = &[
+        "--no-warnings",
+        "--pending-deprecation",
+        "--expose-gc",
+        "--expose_gc",
+        "--zero-fill-buffers",
+        "--insecure-http-parser",
+        "--tls-min-v1.0",
+    ];
+    std::env::args()
+        .skip(1)
+        .filter(|a| NODE_FLAGS.contains(&a.as_str()))
+        .map(|a| a.to_string())
+        .collect()
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
@@ -3338,6 +3357,39 @@ enum Commands {
         /// package.json grants honored and everything else denied without asking.
         #[arg(long = "no-prompt")]
         no_prompt: bool,
+
+        /// Do not print warnings (Node's `--no-warnings`). The `warning` event
+        /// is still delivered, like in Node; 3va prints no warnings by
+        /// default, so the flag only keeps stderr clean.
+        #[arg(long = "no-warnings")]
+        no_warnings: bool,
+
+        /// Enable the pending deprecation warnings (Node's
+        /// `--pending-deprecation`). 3va has no pending deprecations yet, so
+        /// the flag currently changes nothing.
+        #[arg(long = "pending-deprecation")]
+        pending_deprecation: bool,
+
+        /// Expose `globalThis.gc()` (Node's `--expose-gc`).
+        #[arg(long = "expose-gc", alias = "expose_gc")]
+        expose_gc: bool,
+
+        /// Zero-fill the memory `Buffer.allocUnsafe()` hands out (Node's
+        /// `--zero-fill-buffers`). 3va's buffers are always zero-filled, so
+        /// the flag matches the default behavior.
+        #[arg(long = "zero-fill-buffers")]
+        zero_fill_buffers: bool,
+
+        /// Parse HTTP headers leniently, accepting control characters in
+        /// header values (Node's `--insecure-http-parser`). 3va's parser
+        /// already accepts them.
+        #[arg(long = "insecure-http-parser")]
+        insecure_http_parser: bool,
+
+        /// Allow TLS 1.0 (Node's `--tls-min-v1.0`). Not supported: 3va's TLS
+        /// stack (rustls) has a TLS 1.2 floor.
+        #[arg(long = "tls-min-v1.0")]
+        tls_min_v1_0: bool,
 
         /// Print each denied permission the moment it is refused, showing what
         /// the script was trying to do and the flag that would allow it.
@@ -4402,6 +4454,12 @@ async fn main() -> anyhow::Result<()> {
             allow_child_process,
             allow_ffi,
             no_prompt,
+            no_warnings,
+            pending_deprecation,
+            expose_gc,
+            zero_fill_buffers,
+            insecure_http_parser,
+            tls_min_v1_0,
             trace_denials,
             inspect,
             audit_log,
@@ -4420,6 +4478,24 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             let __t = std::time::Instant::now();
+            // Node-compatible runtime flags. They are process-wide switches,
+            // set before the engine (and its snapshot) is built.
+            if *tls_min_v1_0 {
+                anyhow::bail!(
+                    "--tls-min-v1.0 is not supported by 3va: its TLS stack (rustls) \
+                     has a TLS 1.2 floor"
+                );
+            }
+            vvva_js::node_flags::set_no_warnings(*no_warnings);
+            vvva_js::node_flags::set_pending_deprecation(*pending_deprecation);
+            vvva_js::node_flags::set_zero_fill_buffers(*zero_fill_buffers);
+            vvva_js::node_flags::set_insecure_http_parser(*insecure_http_parser);
+            if *expose_gc {
+                vvva_js::node_flags::set_expose_gc(true);
+            }
+            // `process.execArgv`: the runtime flags as they were written, the
+            // way Node reports them.
+            vvva_js::node_flags::set_exec_argv(node_exec_argv());
             maybe_auto_install(
                 file.parent().unwrap_or(std::path::Path::new(".")),
                 std::io::stderr().is_terminal() && !*no_prompt,

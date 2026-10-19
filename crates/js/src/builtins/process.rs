@@ -1387,6 +1387,10 @@ pub fn inject_process(
             // process.emitWarning — used by Node.js built-ins and drivers (e.g. MongoDB)
             var _warnListeners = [];
             process.emitWarning = function(message, options) {
+                // `--no-warnings` silences the warning *output*, not the event:
+                // the `warning` event is delivered either way, like in Node.
+                // 3va prints no warnings by default, so the flag only keeps
+                // stderr clean.
                 var code = (options && typeof options === 'object') ? options.code : options;
                 var w = new Error(typeof message === 'string' ? message : String(message));
                 w.name = 'Warning';
@@ -1432,7 +1436,14 @@ pub fn inject_process(
         crate::builtins::code_cache::bootstrap_js_per_run(
             scope,
             "process-start",
-            "globalThis.__processStartMs = Date.now();",
+            // `process.execArgv`: the runtime flags the process was started
+            // with, as in Node. Code (Node's own test suite among others)
+            // reads this array to know how the process was started, so it
+            // has to be set on every run — the startup snapshot is built
+            // without it, because it depends on the command line.
+            "globalThis.__processStartMs = Date.now(); \
+             globalThis.process.execArgv = \
+                (globalThis.__node_flags__ && globalThis.__node_flags__.execArgv) || [];",
         )?;
         crate::builtins::code_cache::bootstrap_js(scope, "process-tail", js_src)?;
     }
