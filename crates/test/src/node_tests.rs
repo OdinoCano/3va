@@ -211,6 +211,29 @@ fn spawn_with_retry(cmd: &mut Command) -> std::io::Result<std::process::Child> {
     Err(last.unwrap_or_else(|| std::io::Error::other("spawn failed")))
 }
 
+/// Wait for the child, but not for ever.
+///
+/// A test that ignored the kill (or a process stuck in an uninterruptible
+/// state) must not block the runner: after the deadline the child is left
+/// behind and the run continues.
+fn wait_bounded(
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Whether the process has exited and nobody has reaped it yet.
 ///
 /// A zombie keeps its pid reserved, so the pid can be used to identify the
@@ -275,6 +298,33 @@ fn run_one(
         Err(e) => return (false, format!("spawn failed: {e}")),
     };
     let pid = child.id();
+    // The stderr of the test is drained while it runs: nobody read the pipe,
+    // so a test that writes more than the pipe buffer (64 KB) blocked
+    // forever and the runner waited for it until the end of the session.
+    let stderr_tail = child.stderr.take().map(|mut pipe| {
+        let tail = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = tail.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 8192];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut sink = sink.lock().expect("stderr sink mutex");
+                        sink.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        // Only the tail is kept: the whole stderr of a test
+                        // would fill the memory of the runner.
+                        if sink.len() > 8192 {
+                            let cut = sink.len() - 8192;
+                            sink.drain(..cut);
+                        }
+                    }
+                }
+            }
+        });
+        tail
+    });
 
     // Wait for the test to finish *without* reaping it: while the child is a
     // zombie its pid is still reserved, so killing its process group below
@@ -295,11 +345,19 @@ fn run_one(
     }
 
     // The whole group goes down: the test may have left children behind
-    // (a detached spawn, a server that did not close).
-    kill_group(pid);
-    let status = child.wait().ok();
+    // (a detached spawn, a server that did not close). The child itself is
+    // killed too, so `wait()` always returns: the group signal can fail
+    // (the process is in a state that cannot be signalled) and a runner that
+    // waits for ever is worse than a leaked process.
+    let group_killed = kill_group(pid);
+    let _ = child.kill();
+    let status = wait_bounded(&mut child, Duration::from_secs(2));
     if timed_out {
-        return (false, format!("timeout after {}s", opts.timeout.as_secs()));
+        let mut reason = format!("timeout after {}s", opts.timeout.as_secs());
+        if !group_killed {
+            reason.push_str(" (the process group did not die)");
+        }
+        return (false, reason);
     }
     let Some(status) = status else {
         return (false, "wait failed".to_string());
@@ -307,30 +365,47 @@ fn run_one(
     if status.success() {
         return (true, String::new());
     }
-    let reason = match status.code() {
+    let mut reason = match status.code() {
         Some(c) => format!("exit {c}"),
         None => "killed by signal".to_string(),
     };
+    if let Some(tail) = stderr_tail {
+        let text = tail.lock().expect("stderr sink mutex").trim().to_string();
+        if !text.is_empty() {
+            let text: String = text.chars().take(400).collect();
+            reason.push_str(": ");
+            reason.push_str(&text);
+        }
+    }
     (false, reason)
 }
 
 /// Kill the process group `pgid` (the whole tree a test may have spawned).
 ///
-/// Never `kill -KILL -<pgid>` without `--`: procps-ng `kill` parses that as
-/// `kill(-1, SIGKILL)` and kills every process of the user (it took down the
-/// desktop session twice on 2026-10-16). Refuse pgids that would widen the target.
-fn kill_group(pgid: u32) {
+/// The call goes straight to `kill(2)` with the negated pgid, as the rules of
+/// the project ask: never `kill -KILL -<pgid>` without `--`, because procps-ng
+/// parses that as `kill(-1, SIGKILL)` and kills every process of the user (it
+/// took down the desktop session twice on 2026-10-16). The `pgid > 1` guard
+/// keeps the target away from the caller's own group.
+///
+/// Returns whether the signal was delivered (a group that is already gone is
+/// not an error: the test exited by itself).
+#[allow(unsafe_code)]
+fn kill_group(pgid: u32) -> bool {
     if pgid <= 1 {
-        return;
+        return false;
     }
-    let _ = Command::new("kill")
-        .arg("-KILL")
-        .arg("--")
-        .arg(format!("-{pgid}"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // Safety: `kill(2)` with a negative pid signals the process group `pgid`.
+    // The guard above keeps it away from group 0 (the caller's group) and 1
+    // (every process of the user), so the target is only the group the test
+    // was given.
+    let rc = unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+    if rc == 0 {
+        return true;
+    }
+    // ESRCH: the group is already gone (the test exited). Anything else: the
+    // signal was not delivered.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 /// Collect the test files matching the prefixes, sorted.

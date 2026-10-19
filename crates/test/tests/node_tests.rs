@@ -66,21 +66,29 @@ fn read_skips(path: &Path) -> std::collections::BTreeMap<String, String> {
     map
 }
 
+/// The 3va binary the suite runs the tests with.
+///
+/// The suite is the ratchet of the Node compatibility and it is measured with
+/// the **debug** build, the one CI uses (see
+/// .github/workflows/deep-checks.yml): with the release build the tests that
+/// depend on the timing pass here and fail in CI. So when the debug binary is
+/// missing the run fails with a clear message instead of quietly measuring
+/// another build. `THREEVA_BIN` overrides it (that is how CI points at its
+/// own binary).
 fn threeva_bin() -> PathBuf {
     if let Ok(p) = std::env::var("THREEVA_BIN") {
         return PathBuf::from(p);
     }
-    // The debug build first: the suite is the ratchet of the Node
-    // compatibility and it is measured with the debug build (the same one CI
-    // uses, see .github/workflows/deep-checks.yml). A `target/release/3va`
-    // left over from an older commit would silently measure the wrong code.
-    for candidate in ["../../target/debug/3va", "../../target/release/3va"] {
-        let p = Path::new(candidate);
-        if p.exists() {
-            return p.to_path_buf();
-        }
+    let debug = Path::new("../../target/debug/3va");
+    if debug.exists() {
+        return debug.to_path_buf();
     }
-    PathBuf::from("3va")
+    panic!(
+        "the debug build of 3va is missing: {}. Build it with \
+         `cargo build -p vvva_cli` (the suite is measured with the debug build, \
+         the one CI uses), or point THREEVA_BIN at the binary to measure.",
+        debug.display()
+    );
 }
 
 fn print_summary(summary: &Summary) {

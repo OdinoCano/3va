@@ -55,7 +55,7 @@ pub fn insecure_tls_allowed(host: &str) -> bool {
 pub fn insecure_tls_denied_message(host: &str) -> String {
     format!(
         "Skipping the TLS certificate verification for '{host}' is disabled by default. \
-         Use the TLS variant, or run with --allow-insecure"
+         Pass rejectUnauthorized: true (the default), or run with --allow-insecure"
     )
 }
 
@@ -68,8 +68,13 @@ fn is_loopback(host: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The flag is process-wide, so the tests that change it are serialized:
+    /// without this, one test can see the flag another one set.
+    static FLAG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn loopback_allowed_remote_denied_until_opt_in() {
+        let _guard = FLAG.lock().unwrap_or_else(|e| e.into_inner());
         assert!(plaintext_allowed("localhost"));
         assert!(plaintext_allowed("127.0.0.1"));
         assert!(plaintext_allowed("127.8.9.10"));
@@ -83,6 +88,7 @@ mod tests {
 
     #[test]
     fn insecure_ssh_allowed_follows_loopback_and_opt_in() {
+        let _guard = FLAG.lock().unwrap_or_else(|e| e.into_inner());
         assert!(insecure_ssh_allowed("localhost"));
         assert!(insecure_ssh_allowed("127.0.0.1"));
         assert!(!insecure_ssh_allowed("example.com"));
@@ -93,6 +99,7 @@ mod tests {
 
     #[test]
     fn insecure_tls_allowed_follows_loopback_and_opt_in() {
+        let _guard = FLAG.lock().unwrap_or_else(|e| e.into_inner());
         assert!(insecure_tls_allowed("localhost"));
         assert!(insecure_tls_allowed("127.0.0.1"));
         assert!(insecure_tls_allowed("[::1]"));

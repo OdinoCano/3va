@@ -3,7 +3,11 @@
 
 //! Test framework for 3va — runner, matchers, coverage, and security test utilities.
 
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: the runner of the Node suite has to signal a process
+// group (`kill(-pgid, SIGKILL)`), and `forbid` cannot be allowed for a single
+// item. The only `unsafe` in the crate is that one call, marked with
+// `#[allow(unsafe_code)]` and its safety comment.
+#![deny(unsafe_code)]
 
 pub mod coverage;
 pub mod framework;
