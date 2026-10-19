@@ -1080,6 +1080,21 @@ impl JsEngine {
 
         let code = transpiler::replace_import_meta(&code);
 
+        // CommonJS entry point: Node compiles the entry file as a *module* —
+        // the file body is the body of
+        // `(function (exports, require, module, __filename, __dirname) { … })`.
+        // Running it as a bare script leaks `var`/`const`/`let` into the global
+        // scope, and a top-level `const` then shadows a global for *every*
+        // dependency loaded afterwards (`const { setTimeout } = require('timers/promises')`
+        // in `server.js` used to break `setTimeout` in every module it pulled in).
+        // It also makes a top-level `return` a SyntaxError, which Node allows
+        // in a CommonJS file. ES module entries keep the module semantics.
+        let code = if is_esm {
+            code
+        } else {
+            cjs_entry_wrapper(&code, &filename)
+        };
+
         {
             let context_global = self.context.clone().expect("engine not initialized");
             let scope = std::pin::pin!(v8::HandleScope::new(&mut *self.isolate));
@@ -1118,15 +1133,23 @@ impl JsEngine {
              {{ globalThis.process.argv.push('{f}'); }}\
              if (typeof globalThis.require !== 'undefined') {{ \
                var __vvva_entry_module__ = {{ \
-                 id: '.', filename: '{f}', loaded: true, \
-                 exports: {{}}, parent: null, children: [], paths: [] \
+                 id: '.', filename: '{f}', path: '{d}', loaded: false, \
+                 exports: {{}}, parent: null, children: [], \
+                 paths: {paths_js}, \
+                 require: function (id) {{ return globalThis.require(id); }} \
                }}; \
+               globalThis.__vvva_entry_module__ = __vvva_entry_module__; \
                globalThis.require.main = __vvva_entry_module__; \
                globalThis.module = __vvva_entry_module__; \
+               globalThis.exports = __vvva_entry_module__.exports; \
+               if (globalThis.__loadedModules) {{ \
+                 globalThis.__loadedModules['{f}'] = __vvva_entry_module__; \
+               }} \
              }}",
                 f = f,
                 d = d,
                 u = u,
+                paths_js = module_paths_js(&dirname),
             );
 
             let setup_src = v8::String::new(&scope, &setup).unwrap();
@@ -1446,6 +1469,60 @@ fn has_dynamic_import(line: &str) -> bool {
         }
     }
     false
+}
+
+/// Wrap a CommonJS entry file in Node's module wrapper.
+///
+/// Node compiles the entry point as a module: the file body is the body of
+/// `(function (exports, require, module, __filename, __dirname) { … })`, called
+/// with `this === module.exports`. The prefix is prepended to the *first line*
+/// of the body (as Node does) so the line numbers of the original file survive
+/// in stack traces.
+fn cjs_entry_wrapper(code: &str, filename: &str) -> String {
+    // A UTF-8 BOM is only valid at the very beginning of a file, and the
+    // wrapper puts the body inside a function: drop it (Node's `stripBOM`).
+    let code = code.strip_prefix('\u{feff}').unwrap_or(code);
+    // V8 only accepts `#!` at the very beginning of a script and the wrapper
+    // puts the body inside a function: turn the shebang into a comment, the
+    // way Node's `stripShebang` does, so the line count does not shift.
+    let body = match code.strip_prefix("#!") {
+        Some(rest) => format!("//{}", rest),
+        None => code.to_string(),
+    };
+    let src = filename.replace('\\', "\\\\").replace('\'', "\\'");
+    format!(
+        "(function(){{var __m=globalThis.__vvva_entry_module__;\
+         var __fn=function (exports, require, module, __filename, __dirname) {{ {body}\n}};\
+         var __exp=(__m&&__m.exports)||globalThis.exports||{{}};\
+         var __mod=__m||globalThis.module||{{exports:__exp}};\
+         __fn.call(__exp,__exp,globalThis.require,__mod,\
+                  globalThis.__filename,globalThis.__dirname);\
+         if(__m)__m.loaded=true;}})();\n//# sourceURL={src}"
+    )
+}
+
+/// The `module.paths` of the entry module: the `node_modules` directories Node
+/// would look up, from the file's own directory up to the root.
+fn module_paths_js(dirname: &str) -> String {
+    let mut dirs: Vec<String> = Vec::new();
+    let mut cur = std::path::Path::new(dirname);
+    loop {
+        if let Some(name) = cur.file_name().and_then(|n| n.to_str())
+            && name != "node_modules"
+        {
+            dirs.push(cur.join("node_modules").to_string_lossy().to_string());
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => break,
+        }
+    }
+    let list = dirs
+        .iter()
+        .map(|d| format!("'{}'", d.replace('\\', "\\\\").replace('\'', "\\'")))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{list}]")
 }
 
 #[cfg(test)]
