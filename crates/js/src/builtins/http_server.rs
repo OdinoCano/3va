@@ -2246,11 +2246,11 @@ pub fn inject_http_server(
                             V8String::new(scope, &r.remote.to_string()).unwrap().into(),
                             v8::Integer::new_from_unsigned(scope, r.body_id).into(),
                             headers.into(),
-                            // The HTTP version of the request: an HTTP/1.0
-                            // request is reported as such, as in Node.
-                            V8String::new(scope, if p.http10 { "1.0" } else { "1.1" })
-                                .unwrap()
-                                .into(),
+                            // The HTTP version of the request: 10 for
+                            // HTTP/1.0, 11 for HTTP/1.1. A number, not a
+                            // string: this is on the path of every request
+                            // and a V8 string would be allocated each time.
+                            v8::Integer::new(scope, if p.http10 { 10 } else { 11 }).into(),
                             // Whether the connection closes after this
                             // response: the `Connection` header of the
                             // response says so.

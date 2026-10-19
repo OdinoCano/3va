@@ -4980,9 +4980,11 @@ __httpSetHandler(self._id, function() {
                         req.url = raw[1];
                         // The HTTP version of the request: an HTTP/1.0
                         // request is reported as such, as in Node.
-                        req.httpVersion = raw[6] || '1.1';
-                        req.httpVersionMajor = parseInt(req.httpVersion.split('.')[0], 10) || 1;
-                        req.httpVersionMinor = parseInt(req.httpVersion.split('.')[1], 10) || 1;
+                        // The version comes as a number (10 or 11) so the
+                        // hot path does not build a string per request.
+                        req.httpVersion = raw[6] === 10 ? '1.0' : '1.1';
+                        req.httpVersionMajor = 1;
+                        req.httpVersionMinor = raw[6] === 10 ? 0 : 1;
                         // Last duplicate wins, as the JSON object this replaced did.
                         var _flat = raw[5], _rh = {};
                         for (var _i = 0; _i < _flat.length; _i += 2) _rh[_flat[_i]] = _flat[_i + 1];
