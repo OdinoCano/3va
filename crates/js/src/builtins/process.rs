@@ -1331,7 +1331,6 @@ pub fn inject_process(
 
             // process.execPath / process.execArgv
             if (!process.execPath) process.execPath = process.argv && process.argv[0] || '3va';
-            if (!process.execArgv) process.execArgv = [];
 
             // process.abort() — terminate immediately
             process.abort = function() { process.exit(1); };
