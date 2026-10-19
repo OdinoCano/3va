@@ -44,6 +44,10 @@ struct ReadyRequest {
     remote: IpAddr,
     /// Registry id of the streaming body, or 0 when the request has none.
     body_id: u32,
+    /// Whether the connection is closed after this response: the response
+    /// head carries the matching `Connection` header, as in Node. It travels
+    /// with the request so the response path does not have to look it up.
+    close_after: bool,
 }
 
 /// Per-isolate dispatch state (an isolate slot): connection tasks push into
@@ -138,14 +142,39 @@ pub fn dispatch_ready(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::
 /// stricter, and the firewall's stays in force when the application left the
 /// timeout disabled (`0`), so the protection cannot be turned off by
 /// accident.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default)]
 struct ServerTimeouts {
-    /// `None`: the firewall's header timeout.
-    headers: Option<std::time::Duration>,
-    /// `None`: no application-wide request deadline.
-    request: Option<std::time::Duration>,
-    /// `None`: the firewall's keep-alive timeout.
-    keepalive: Option<std::time::Duration>,
+    /// The application's header timeout, in milliseconds (0: not set, the
+    /// firewall's limit applies). Atomics, not a mutex: the connection task
+    /// reads them on every request.
+    headers_ms: std::sync::atomic::AtomicU64,
+    /// The application's request timeout, in milliseconds (0: not set).
+    request_ms: std::sync::atomic::AtomicU64,
+    /// The application's keep-alive timeout, in milliseconds (0: not set).
+    keepalive_ms: std::sync::atomic::AtomicU64,
+}
+
+impl ServerTimeouts {
+    fn headers(&self) -> Option<std::time::Duration> {
+        match self.headers_ms.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            ms => Some(std::time::Duration::from_millis(ms)),
+        }
+    }
+
+    fn request(&self) -> Option<std::time::Duration> {
+        match self.request_ms.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            ms => Some(std::time::Duration::from_millis(ms)),
+        }
+    }
+
+    fn keepalive(&self) -> Option<std::time::Duration> {
+        match self.keepalive_ms.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            ms => Some(std::time::Duration::from_millis(ms)),
+        }
+    }
 }
 
 struct HttpListenCtx {
@@ -162,7 +191,7 @@ struct HttpListenCtx {
     upgrades_q: UpgradeQueue,
     wake: Arc<tokio::sync::Notify>,
     /// The timeouts the application set, per server.
-    timeouts: Arc<Mutex<HashMap<u32, Arc<Mutex<ServerTimeouts>>>>>,
+    timeouts: Arc<Mutex<HashMap<u32, Arc<ServerTimeouts>>>>,
 }
 
 struct HttpAcceptCtx {
@@ -171,7 +200,7 @@ struct HttpAcceptCtx {
 
 /// The per-server timeout cells the application configures.
 struct HttpTimeoutsCtx {
-    timeouts: Arc<Mutex<HashMap<u32, Arc<Mutex<ServerTimeouts>>>>>,
+    timeouts: Arc<Mutex<HashMap<u32, Arc<ServerTimeouts>>>>,
 }
 
 /// The firewall the server runs under, to report the limits in force.
@@ -457,13 +486,6 @@ fn bind_one(sockaddr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
 
 struct ConnEntry {
     resp_tx: mpsc::Sender<PendingResponse>,
-    /// Whether the connection is closed after this response (the client said
-    /// `Connection: close`, or it is an HTTP/1.0 request without keep-alive).
-    /// The response head carries the matching `Connection` header, as in Node.
-    close_after: std::sync::atomic::AtomicBool,
-    /// The HTTP version of the request: an HTTP/1.0 request is answered with
-    /// an HTTP/1.0 status line.
-    http10: std::sync::atomic::AtomicBool,
 }
 
 struct PendingResponse {
@@ -656,12 +678,31 @@ fn js_type_error_with_code<'s>(
     err
 }
 
-/// The `Date` header value Node sends on every response (RFC 1123, UTC).
-///
-/// The clock is read per response (not cached): a server that runs for days
-/// must not send a stale date.
-fn http_date_now() -> String {
-    httpdate::fmt_http_date(std::time::SystemTime::now())
+thread_local! {
+    /// The `Date` header of the last response, with the second it belongs to.
+    /// Node formats the date once per second (lib/_http_outgoing.js), not
+    /// once per response: the clock is read and the string is built once a
+    /// second, and the responses of that second reuse it.
+    static DATE_CACHE: std::cell::RefCell<(u64, String)> =
+        const { std::cell::RefCell::new((0, String::new())) };
+}
+
+/// Write the `Date` header of a response.
+fn push_date_header(resp: &mut String) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    DATE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.0 != now {
+            cache.0 = now;
+            cache.1 = httpdate::fmt_http_date(std::time::SystemTime::now());
+        }
+        resp.push_str("Date: ");
+        resp.push_str(&cache.1);
+        resp.push_str("\r\n");
+    });
 }
 
 fn json_escape(s: &str) -> String {
@@ -1367,7 +1408,7 @@ async fn handle_connection<S>(
     upgrades: UpgradeRegistry,
     upgrades_q: UpgradeQueue,
     wake: Arc<tokio::sync::Notify>,
-    app_timeouts: Arc<Mutex<ServerTimeouts>>,
+    app_timeouts: Arc<ServerTimeouts>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -1382,14 +1423,7 @@ async fn handle_connection<S>(
     };
 
     let (resp_tx, mut resp_rx) = mpsc::channel::<PendingResponse>(16);
-    conns.lock().unwrap().insert(
-        conn_id,
-        ConnEntry {
-            resp_tx,
-            close_after: std::sync::atomic::AtomicBool::new(true),
-            http10: std::sync::atomic::AtomicBool::new(false),
-        },
-    );
+    conns.lock().unwrap().insert(conn_id, ConnEntry { resp_tx });
 
     // Connection accounting IP. Normally the peer itself, registered by the
     // accept loop before this task started. When the peer is a trusted reverse
@@ -1426,23 +1460,22 @@ async fn handle_connection<S>(
         // `headersTimeout`, `requestTimeout` and `keepAliveTimeout`). They
         // are read per request: the application can change them while the
         // server runs.
-        let app = *app_timeouts.lock().unwrap();
         // The application can tighten the limits, never loosen them: the
         // firewall's slowloris protection stays in force. `min`, not "the
         // application wins": a server with no configuration must not go from
         // the firewall's 10 s to Node's 60 s default.
-        let hdr_limit = match app.headers {
+        let hdr_limit = match app_timeouts.headers() {
             Some(d) if !d.is_zero() => hdr_timeout.min(d),
             _ => hdr_timeout,
         };
-        let keepalive_limit = match app.keepalive {
+        let keepalive_limit = match app_timeouts.keepalive() {
             Some(d) if !d.is_zero() => keepalive_timeout.min(d),
             _ => keepalive_timeout,
         };
         // `requestTimeout` is the deadline for the whole request (head and
         // body). Node answers 408 when it expires.
-        let request_deadline = app
-            .request
+        let request_deadline = app_timeouts
+            .request()
             .filter(|d| !d.is_zero())
             .map(|d| tokio::time::Instant::now() + d);
         // The head has to arrive within the header timeout *and* within the
@@ -1634,16 +1667,8 @@ async fn handle_connection<S>(
             Some(v) => v == "close",
             None => head.http10,
         } || requests_served >= max_requests_per_conn;
-        // The response head carries the matching `Connection` header and the
-        // version of the request, as in Node.
-        if let Some(entry) = conns.lock().unwrap().get(&conn_id) {
-            entry
-                .close_after
-                .store(close_after, std::sync::atomic::Ordering::Relaxed);
-            entry
-                .http10
-                .store(head.http10, std::sync::atomic::Ordering::Relaxed);
-        }
+        // The response head carries the matching `Connection` header, as in
+        // Node: the flag travels with the request to the JS side.
 
         // Register the streaming body (if any) under a per-request id. The
         // previous request's pipe is dropped here: JS has normally consumed it
@@ -1679,6 +1704,7 @@ async fn handle_connection<S>(
                 conn_id,
                 remote: req_ip,
                 body_id,
+                close_after,
             });
         wake.notify_one();
 
@@ -1842,7 +1868,7 @@ pub fn inject_http_server(
     let upgrades: UpgradeRegistry = Arc::new(Mutex::new(HashMap::new()));
     let upgrades_q: UpgradeQueue = Arc::new(Mutex::new(HashMap::new()));
     let wake = Arc::new(tokio::sync::Notify::new());
-    let timeouts: Arc<Mutex<HashMap<u32, Arc<Mutex<ServerTimeouts>>>>> =
+    let timeouts: Arc<Mutex<HashMap<u32, Arc<ServerTimeouts>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     scope.set_slot(HttpDispatch {
         ready: ready.clone(),
@@ -1927,8 +1953,7 @@ pub fn inject_http_server(
                                 // The timeouts the application sets on this
                                 // server (`server.headersTimeout` and friends)
                                 // live in a cell the connection tasks read.
-                                let server_timeouts =
-                                    Arc::new(Mutex::new(ServerTimeouts::default()));
+                                let server_timeouts = Arc::new(ServerTimeouts::default());
                                 ctx.timeouts
                                     .lock()
                                     .unwrap()
@@ -2214,7 +2239,7 @@ pub fn inject_http_server(
                             .map(|x| V8String::new(scope, x).unwrap().into())
                             .collect();
                         let headers = v8::Array::new_with_elements(scope, &flat);
-                        let items: [v8::Local<v8::Value>; 7] = [
+                        let items: [v8::Local<v8::Value>; 8] = [
                             V8String::new(scope, &p.method).unwrap().into(),
                             V8String::new(scope, &p.path).unwrap().into(),
                             v8::Integer::new_from_unsigned(scope, r.conn_id).into(),
@@ -2226,6 +2251,10 @@ pub fn inject_http_server(
                             V8String::new(scope, if p.http10 { "1.0" } else { "1.1" })
                                 .unwrap()
                                 .into(),
+                            // Whether the connection closes after this
+                            // response: the `Connection` header of the
+                            // response says so.
+                            v8::Boolean::new(scope, r.close_after).into(),
                         ];
                         rv.set(v8::Array::new_with_elements(scope, &items).into());
                     }
@@ -2495,14 +2524,10 @@ pub fn inject_http_server(
 
                 let body_bytes = body.as_bytes();
                 // Whether the connection stays open after this response: the
-                // `Connection` header says so, as in Node.
-                let close_after = ctx
-                    .conns
-                    .lock()
-                    .unwrap()
-                    .get(&conn_id)
-                    .map(|c| c.close_after.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(true);
+                // `Connection` header says so, as in Node. The flag comes
+                // with the request, so the response path does not have to
+                // look the connection up.
+                let close_after = args.get(7).boolean_value(scope);
                 let extra = parse_extra_headers(&headers_json);
                 // Node's header order (lib/_http_outgoing.js): the headers the
                 // application set first, then the ones the server generates.
@@ -2523,7 +2548,7 @@ pub fn inject_http_server(
                     }
                     resp.push_str(&format!("{}: {}\r\n", k, v));
                 }
-                resp.push_str(&format!("Date: {}\r\n", http_date_now()));
+                push_date_header(&mut resp);
                 resp.push_str(if close_after {
                     "Connection: close\r\n"
                 } else {
@@ -2596,14 +2621,10 @@ pub fn inject_http_server(
                     vec![]
                 };
                 // Whether the connection stays open after this response: the
-                // `Connection` header says so, as in Node.
-                let close_after = ctx
-                    .conns
-                    .lock()
-                    .unwrap()
-                    .get(&conn_id)
-                    .map(|c| c.close_after.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(true);
+                // `Connection` header says so, as in Node. The flag comes
+                // with the request, so the response path does not have to
+                // look the connection up.
+                let close_after = args.get(7).boolean_value(scope);
 
                 let extra = parse_extra_headers(&headers_json);
                 // `res.sendDate = false` keeps the `Date` header out, as in
@@ -2636,7 +2657,7 @@ pub fn inject_http_server(
                     resp.push_str(&format!("{}: {}\r\n", k, v));
                 }
                 if send_date {
-                    resp.push_str(&format!("Date: {}\r\n", http_date_now()));
+                    push_date_header(&mut resp);
                 }
                 if send_connection {
                     resp.push_str(if close_after {
@@ -2818,21 +2839,32 @@ pub fn inject_http_server(
                 let server_id = args.get(0).uint32_value(scope).unwrap_or(0);
                 // A timeout of 0 means "disabled" in Node; the firewall's own
                 // limit stays in force in that case.
-                let dur = |v: v8::Local<v8::Value>| -> Option<std::time::Duration> {
+                let millis = |v: v8::Local<v8::Value>| -> u64 {
                     let ms = v.number_value(scope).unwrap_or(0.0);
                     if !ms.is_finite() || ms <= 0.0 {
-                        None
+                        0
                     } else {
-                        Some(std::time::Duration::from_millis(ms as u64))
+                        ms as u64
                     }
                 };
                 let t = ServerTimeouts {
-                    headers: dur(args.get(1)),
-                    request: dur(args.get(2)),
-                    keepalive: dur(args.get(3)),
+                    headers_ms: std::sync::atomic::AtomicU64::new(millis(args.get(1))),
+                    request_ms: std::sync::atomic::AtomicU64::new(millis(args.get(2))),
+                    keepalive_ms: std::sync::atomic::AtomicU64::new(millis(args.get(3))),
                 };
                 if let Some(cell) = ctx.timeouts.lock().unwrap().get(&server_id) {
-                    *cell.lock().unwrap() = t;
+                    cell.headers_ms.store(
+                        t.headers_ms.load(std::sync::atomic::Ordering::Relaxed),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    cell.request_ms.store(
+                        t.request_ms.load(std::sync::atomic::Ordering::Relaxed),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    cell.keepalive_ms.store(
+                        t.keepalive_ms.load(std::sync::atomic::Ordering::Relaxed),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
                 rv.set(v8::undefined(scope).into());
             },

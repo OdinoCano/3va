@@ -4159,6 +4159,9 @@ pub fn inject_require(
                 if (typeof cb === 'function') s.once('secureConnect', cb);
                 var tlsOpts = {
                     ca: opts && opts.ca !== undefined ? opts.ca : undefined,
+                    cert: opts && opts.cert !== undefined ? opts.cert : undefined,
+                    key: opts && opts.key !== undefined ? opts.key : undefined,
+                    passphrase: opts && opts.passphrase !== undefined ? opts.passphrase : undefined,
                     rejectUnauthorized: opts && opts.rejectUnauthorized !== false,
                 };
                 var result = __tcpConnectTls(host, port, JSON.stringify(tlsOpts));
@@ -4715,7 +4718,7 @@ pub fn inject_require(
                     var merged = new Uint8Array(total);
                     var off = 0;
                     parts.forEach(function(p) { merged.set(p, off); off += p.length; });
-                    __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged, this.sendDate !== false, !this._removedConnection);
+                    __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged, this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
                 } else {
                     // Route through __httpRespondBytes (JS-side TextEncoder,
                     // not the native __httpRespond(string) path) even for a
@@ -4735,9 +4738,9 @@ pub fn inject_require(
                     // the exact defect in it.
                     var __finalS = this._chunks.join('');
                     if (typeof Buffer !== 'undefined') {
-                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'), this.sendDate !== false, !this._removedConnection);
+                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'), this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
                     } else {
-                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS), this.sendDate !== false, !this._removedConnection);
+                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS), this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
                     }
                 }
                 // A microtask, not a 0 ms timer: it still runs after the handler
@@ -4993,6 +4996,7 @@ __httpSetHandler(self._id, function() {
                         // streams from the native pipe named by `raw[4]` (0 = no body).
                         req[kIncomingBody] = { bodyId: raw[4] | 0, started: false, done: false, waiting: false };
                         var res = new httpServerResponse(req);
+                        res._closeAfter = raw[7] === true;
                         self.emit('request', req, res);
                         self.emit('connection', req.socket);
                         // The raw body stays in this closure, never on `req`: body-parser 1.x

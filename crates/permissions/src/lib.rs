@@ -40,7 +40,8 @@ pub use capability::{
 };
 pub use enforcement::{EnvEnforcer, FsEnforcer, NetEnforcer, PermissionError, ProcessEnforcer};
 pub use insecure::{
-    insecure_ssh_allowed, plaintext_allowed, plaintext_denied_message, set_allow_insecure,
+    insecure_ssh_allowed, insecure_tls_allowed, insecure_tls_denied_message, plaintext_allowed,
+    plaintext_denied_message, set_allow_insecure,
 };
 pub use preset::PermissionPreset;
 pub use sandbox::{VirtualFs, VirtualNetwork};

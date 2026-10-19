@@ -402,10 +402,26 @@ pub fn inject_tcp(
                     return;
                 }
 
-                // The TLS options the request named (`ca`,
+                // The TLS options the request named (`ca`, `cert`, `key`,
                 // `rejectUnauthorized`).
                 let opts_json = args.get(2).to_rust_string_lossy(_scope);
                 let opts = super::tls::TlsOptions::from_json(&opts_json);
+                // Skipping the certificate verification is the TLS version of
+                // a plaintext connection: it needs the user's permission
+                // (`--allow-insecure`), or a loopback host. Without this, a
+                // dependency could turn `rejectUnauthorized: false` into
+                // "accept any certificate" for every host.
+                if !opts.reject_unauthorized
+                    && !vvva_permissions::insecure::insecure_tls_allowed(&host)
+                {
+                    let err = js_code_err(
+                        _scope,
+                        "ERR_TLS_VERIFICATION_SKIPPED",
+                        vvva_permissions::insecure::insecure_tls_denied_message(&host),
+                    );
+                    rv.set(err);
+                    return;
+                }
                 let connector = match super::tls::TlsConnector::with_options(Some(&opts)) {
                     Ok(c) => c,
                     Err(e) => {

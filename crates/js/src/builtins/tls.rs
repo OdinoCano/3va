@@ -19,22 +19,28 @@ pub use native_tls::TlsStream;
 pub struct TlsConnector;
 
 #[cfg(not(feature = "fips"))]
-/// The TLS options a request named: the trust anchors it asked for
-/// (`ca`) and whether it wants the peer verified (`rejectUnauthorized`).
-#[derive(Debug, Clone)]
+/// The TLS options a request named: the trust anchors it asked for (`ca`),
+/// the client certificate (`cert`/`key`) and whether it wants the peer
+/// verified (`rejectUnauthorized`).
+#[derive(Debug, Clone, Default)]
 pub struct TlsOptions {
-    /// The PEM bundles the request trusts, in addition to the system roots.
+    /// The PEM bundles the request trusts. In Node, `ca` *replaces* the
+    /// default roots: a private CA means only that CA is trusted.
     pub ca: Vec<String>,
+    /// The client certificate (PEM) for mTLS.
+    pub cert: Option<String>,
+    /// The client key (PEM) for mTLS.
+    pub key: Option<String>,
+    /// The passphrase of the client key, if it has one.
+    pub passphrase: Option<String>,
     /// `false` when the request asked not to verify the peer.
     pub reject_unauthorized: bool,
 }
 
-impl Default for TlsOptions {
-    fn default() -> Self {
-        Self {
-            ca: Vec::new(),
-            reject_unauthorized: true,
-        }
+impl TlsOptions {
+    /// True when the request named a client certificate.
+    pub fn has_client_certificate(&self) -> bool {
+        self.cert.is_some() || self.key.is_some()
     }
 }
 
@@ -59,46 +65,69 @@ impl TlsOptions {
         if let Some(serde_json::Value::Bool(verify)) = value.get("rejectUnauthorized") {
             out.reject_unauthorized = *verify;
         }
+        if let Some(serde_json::Value::String(pem)) = value.get("cert") {
+            out.cert = Some(pem.clone());
+        }
+        if let Some(serde_json::Value::String(pem)) = value.get("key") {
+            out.key = Some(pem.clone());
+        }
+        if let Some(serde_json::Value::String(pass)) = value.get("passphrase") {
+            out.passphrase = Some(pass.clone());
+        }
         out
+    }
+}
+
+/// Node's `NODE_EXTRA_CA_CERTS`: add the PEM bundle as trust anchors, the same
+/// variable the rustls/ureq path already honours (add_extra_ca_certs in
+/// tcp.rs). Without this, `https`/`tls` cannot verify a private CA that
+/// `fetch` and Node trust.
+fn add_extra_ca_certs(builder: &mut native_tls::TlsConnectorBuilder) {
+    let Ok(path) = std::env::var("NODE_EXTRA_CA_CERTS") else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    match std::fs::read(&path) {
+        Ok(pem) => {
+            let mut reader = std::io::BufReader::new(pem.as_slice());
+            for cert in rustls_pemfile::certs(&mut reader).flatten() {
+                if let Ok(cert) = native_tls::Certificate::from_der(&cert) {
+                    let _ = builder.add_root_certificate(cert);
+                }
+            }
+        }
+        Err(e) => eprintln!("[3va-tls] NODE_EXTRA_CA_CERTS: cannot read {path}: {e}"),
     }
 }
 
 impl TlsConnector {
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> native_tls::Result<native_tls::TlsConnector> {
-        Self::with_options(None)
+        let mut builder = native_tls::TlsConnector::builder();
+        builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
+        add_extra_ca_certs(&mut builder);
+        builder.build()
     }
 
     /// The connector for a request that named its own trust anchors (`ca`) or
     /// asked not to verify the peer (`rejectUnauthorized: false`).
-    pub fn with_options(opts: Option<&TlsOptions>) -> native_tls::Result<native_tls::TlsConnector> {
+    pub fn with_options(opts: Option<&TlsOptions>) -> Result<native_tls::TlsConnector, String> {
         let mut builder = native_tls::TlsConnector::builder();
         builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
-        // Node's NODE_EXTRA_CA_CERTS: add the PEM bundle as trust anchors, the
-        // same variable the rustls/ureq path already honours (add_extra_ca_certs
-        // in tcp.rs). Without this, `https`/`tls` cannot verify a private CA that
-        // `fetch` and Node trust.
-        if let Ok(path) = std::env::var("NODE_EXTRA_CA_CERTS")
-            && !path.is_empty()
-        {
-            match std::fs::read(&path) {
-                Ok(pem) => {
-                    let mut reader = std::io::BufReader::new(pem.as_slice());
+        if let Some(opts) = opts {
+            if !opts.ca.is_empty() {
+                // Node's `ca` *replaces* the default roots: a request that
+                // names a private CA trusts only that CA (and not the system
+                // roots, nor the NODE_EXTRA_CA_CERTS bundle).
+                builder.disable_built_in_roots(true);
+                for pem in &opts.ca {
+                    let mut reader = std::io::BufReader::new(pem.as_bytes());
                     for cert in rustls_pemfile::certs(&mut reader).flatten() {
                         if let Ok(cert) = native_tls::Certificate::from_der(&cert) {
                             let _ = builder.add_root_certificate(cert);
                         }
-                    }
-                }
-                Err(e) => eprintln!("[3va-tls] NODE_EXTRA_CA_CERTS: cannot read {path}: {e}"),
-            }
-        }
-        if let Some(opts) = opts {
-            for pem in &opts.ca {
-                let mut reader = std::io::BufReader::new(pem.as_bytes());
-                for cert in rustls_pemfile::certs(&mut reader).flatten() {
-                    if let Ok(cert) = native_tls::Certificate::from_der(&cert) {
-                        let _ = builder.add_root_certificate(cert);
                     }
                 }
             }
@@ -106,8 +135,31 @@ impl TlsConnector {
                 builder.danger_accept_invalid_certs(true);
                 builder.danger_accept_invalid_hostnames(true);
             }
+            if opts.has_client_certificate() {
+                let cert = opts.cert.clone().unwrap_or_default();
+                let key = opts.key.clone().unwrap_or_default();
+                if let Some(pass) = opts.passphrase.as_ref()
+                    && !pass.is_empty()
+                {
+                    return Err(
+                        "the client certificate could not be loaded: an encrypted private key is not supported"
+                            .to_string(),
+                    );
+                }
+                let identity = native_tls::Identity::from_pkcs8(cert.as_bytes(), key.as_bytes())
+                    .map_err(|e| {
+                        format!(
+                            "the client certificate could not be loaded: {e} (the key must be a PEM \
+                             PKCS#8 private key and the certificate a PEM chain)"
+                        )
+                    })?;
+                builder.identity(identity);
+            }
         }
-        builder.build()
+        if opts.map(|o| o.ca.is_empty()).unwrap_or(true) {
+            add_extra_ca_certs(&mut builder);
+        }
+        builder.build().map_err(|e| e.to_string())
     }
 }
 
@@ -188,13 +240,8 @@ mod fips {
             if opts.ca.is_empty() {
                 return Self::new();
             }
+            // Node's `ca` replaces the default roots.
             let mut roots = rustls::RootCertStore::empty();
-            let native = rustls_native_certs::load_native_certs();
-            for cert in native.certs {
-                let _ = roots.add(cert);
-            }
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            super::super::tcp::add_extra_ca_certs(&mut roots);
             for pem in &opts.ca {
                 let mut reader = std::io::BufReader::new(pem.as_bytes());
                 for cert in rustls_pemfile::certs(&mut reader).flatten() {

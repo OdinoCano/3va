@@ -40,6 +40,25 @@ pub fn insecure_ssh_allowed(host: &str) -> bool {
     ALLOW_INSECURE.load(Ordering::Relaxed) || is_loopback(host)
 }
 
+/// True when the TLS certificate verification may be skipped for `host`.
+///
+/// The same rule as the SSH host-key check: either the user passed
+/// `--allow-insecure` or `host` is loopback. Without it, a script (or a
+/// dependency) could turn `rejectUnauthorized: false` into "accept any
+/// certificate" for every host, and the TLS verification would be nothing
+/// but a setting in a package.json.
+pub fn insecure_tls_allowed(host: &str) -> bool {
+    ALLOW_INSECURE.load(Ordering::Relaxed) || is_loopback(host)
+}
+
+/// Error message thrown to JS when a TLS verification skip is refused.
+pub fn insecure_tls_denied_message(host: &str) -> String {
+    format!(
+        "Skipping the TLS certificate verification for '{host}' is disabled by default. \
+         Use the TLS variant, or run with --allow-insecure"
+    )
+}
+
 fn is_loopback(host: &str) -> bool {
     let h = host.trim_start_matches('[').trim_end_matches(']');
     h.eq_ignore_ascii_case("localhost") || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
@@ -70,6 +89,25 @@ mod tests {
         set_allow_insecure(true);
         assert!(insecure_ssh_allowed("example.com"));
         set_allow_insecure(false);
+    }
+
+    #[test]
+    fn insecure_tls_allowed_follows_loopback_and_opt_in() {
+        assert!(insecure_tls_allowed("localhost"));
+        assert!(insecure_tls_allowed("127.0.0.1"));
+        assert!(insecure_tls_allowed("[::1]"));
+        assert!(!insecure_tls_allowed("example.com"));
+        assert!(!insecure_tls_allowed("10.0.0.1"));
+        set_allow_insecure(true);
+        assert!(insecure_tls_allowed("example.com"));
+        set_allow_insecure(false);
+    }
+
+    #[test]
+    fn insecure_tls_denied_message_names_the_host_and_the_opt_in() {
+        let msg = insecure_tls_denied_message("example.com");
+        assert!(msg.contains("example.com"), "{msg}");
+        assert!(msg.contains("--allow-insecure"), "{msg}");
     }
 
     #[test]
