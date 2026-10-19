@@ -1211,13 +1211,18 @@ pub fn inject_process(
 
             // setImmediate / clearImmediate — backed by setTimeout(fn, 0) so the
             // timer manager tracks it and the event loop continues to run.
+            // The timer function is captured here, at bootstrap: Node's
+            // `setImmediate` does not depend on the global `setTimeout`, and
+            // code that deletes the global timers (Node's own test suite does)
+            // must still be able to schedule an immediate.
             var _immediateMap = {};
             var _immediateId = 0;
+            var _setTimeoutRef = globalThis.setTimeout;
             globalThis.setImmediate = function(cb) {
                 if (typeof cb !== 'function') throw new TypeError('callback is not a function');
                 var args = Array.prototype.slice.call(arguments, 1);
                 var id = ++_immediateId;
-                var timerId = setTimeout(function() {
+                var timerId = _setTimeoutRef.call(globalThis, function() {
                     if (_immediateMap[id]) {
                         delete _immediateMap[id];
                         cb.apply(null, args);

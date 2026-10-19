@@ -1686,6 +1686,9 @@ pub fn inject_require(
                 };
                 globalThis.__requireCache['timers/promises'] = timersPromises;
                 globalThis.__requireCache['node:timers/promises'] = timersPromises;
+                // `require('node:timers').promises` is the same object, as in
+                // Node (`timers.promises === require('node:timers/promises')`).
+                timers.promises = timersPromises;
             })();
 
             // ── dns / dns/promises ───────────────────────────────────────────────────
@@ -1928,7 +1931,23 @@ pub fn inject_require(
                     },
                     endianness: function() { return 'LE'; },
                     EOL: __osPlatform() === 'win32' ? '\r\n' : '\n',
-                    constants: { signals: {}, errno: {}, priority: {} },
+                    constants: (function() {
+                        // Node's `os.constants`: the POSIX signal numbers, with
+                        // `signals` frozen (writing to it throws a TypeError in
+                        // strict mode, like in Node).
+                        var signals = {
+                            SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5,
+                            SIGABRT: 6, SIGIOT: 6, SIGBUS: 7, SIGFPE: 8, SIGKILL: 9,
+                            SIGUSR1: 10, SIGSEGV: 11, SIGUSR2: 12, SIGPIPE: 13,
+                            SIGALRM: 14, SIGTERM: 15, SIGCHLD: 17, SIGSTKFLT: 16,
+                            SIGCONT: 18, SIGSTOP: 19, SIGTSTP: 20, SIGTTIN: 21,
+                            SIGTTOU: 22, SIGURG: 23, SIGXCPU: 24, SIGXFSZ: 25,
+                            SIGVTALRM: 26, SIGPROF: 27, SIGWINCH: 28, SIGIO: 29,
+                            SIGPOLL: 29, SIGPWR: 30, SIGSYS: 31
+                        };
+                        Object.freeze(signals);
+                        return { signals: signals, errno: {}, priority: {} };
+                    })(),
                 };
                 globalThis.__requireCache['os'] = os;
                 globalThis.__requireCache['node:os'] = os;
@@ -5392,6 +5411,61 @@ __httpSetHandler(self._id, function() {
             };
             globalThis.__requireCache['https'] = httpsModule;
             globalThis.__requireCache['node:https'] = httpsModule;
+
+            // ── legacy `_http_*` / `_stream_*` modules ───────────────────────────
+            // Node still ships these deprecated aliases and they are public
+            // API (plenty of old code requires them), so they alias what 3va
+            // already implements instead of duplicating an implementation.
+            // `HTTPParser` is not aliased: 3va has no equivalent to expose.
+            (function() {
+                // Node's lib/_http_common.js: a header field name must be an
+                // HTTP token; a header field value must not carry control
+                // characters (except HTAB) nor DEL. The lenient variant
+                // (`--insecure-http-parser`) only rejects NUL, CR, LF and
+                // characters above U+00FF, per the Fetch specification.
+                var httpTokenRegex = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+                var headerCharRegex = /[^\t\x20-\x7e\x80-\xff]/;
+                var lenientHeaderCharRegex = /[\x00\r\n]|[\u0100-\uffff]/;
+                var _checkIsHttpToken = function(val) { return httpTokenRegex.test(val); };
+                var _checkInvalidHeaderChar = function(val, insecureHTTPParser) {
+                    if (insecureHTTPParser) return lenientHeaderCharRegex.test(val);
+                    return headerCharRegex.test(val);
+                };
+                globalThis.__requireCache['_http_common'] = {
+                    methods: HTTP_METHODS,
+                    _checkIsHttpToken: _checkIsHttpToken,
+                    _checkInvalidHeaderChar: _checkInvalidHeaderChar
+                };
+                globalThis.__requireCache['_http_server'] = {
+                    Server: httpModule.Server,
+                    ServerResponse: httpModule.ServerResponse,
+                    STATUS_CODES: HTTP_STATUS_CODES,
+                    kConnectionsCheckingInterval: 30000
+                };
+                globalThis.__requireCache['_http_agent'] = {
+                    Agent: httpModule.Agent,
+                    globalAgent: httpModule.globalAgent
+                };
+                globalThis.__requireCache['_http_client'] = {
+                    ClientRequest: httpModule.ClientRequest
+                };
+                globalThis.__requireCache['_http_incoming'] = {
+                    IncomingMessage: httpModule.IncomingMessage
+                };
+                globalThis.__requireCache['_http_outgoing'] = {
+                    OutgoingMessage: httpModule.OutgoingMessage,
+                    kHighWaterMark: 16384
+                };
+
+                // Node's lib/_stream_*.js export the class itself, so
+                // `require('_stream_readable') === stream.Readable`.
+                var Stream = globalThis.__requireCache['stream'];
+                globalThis.__requireCache['_stream_readable'] = Stream.Readable;
+                globalThis.__requireCache['_stream_writable'] = Stream.Writable;
+                globalThis.__requireCache['_stream_duplex'] = Stream.Duplex;
+                globalThis.__requireCache['_stream_transform'] = Stream.Transform;
+                globalThis.__requireCache['_stream_passthrough'] = Stream.PassThrough;
+            })();
 
             // ── reflect-metadata polyfill ──────────────────────────────────────────
             (function() {
