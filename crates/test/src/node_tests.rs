@@ -88,8 +88,9 @@ fn module_of(name: &str, prefixes: &[String]) -> String {
 }
 
 /// Node tests declare runner flags in a `// Flags:` line in the leading comment
-/// block. Any flag means we cannot reproduce the test faithfully, so it is
-/// skipped rather than counted.
+/// block. The flags 3va understands are passed to `3va run`; any other flag
+/// means we cannot reproduce the test faithfully, so it is skipped rather
+/// than counted.
 fn declared_flags(src: &str) -> Vec<String> {
     let mut flags = Vec::new();
     for line in src.lines() {
@@ -107,11 +108,46 @@ fn declared_flags(src: &str) -> Vec<String> {
     flags
 }
 
+/// The Node flags 3va honors, and can therefore hand to `3va run`.
+///
+/// * `--no-warnings` — silences the warning output (the `warning` event still
+///   fires, like in Node).
+/// * `--expose-gc` / `--expose_gc` — exposes `globalThis.gc()`.
+/// * `--zero-fill-buffers` — `Buffer.allocUnsafe()` hands out zeroed memory.
+/// * `--insecure-http-parser` — the lenient HTTP header parser.
+///
+/// The flags left out are the ones 3va cannot honor yet, and a test that
+/// needs them is skipped with its reason instead of being run and failed:
+/// `--expose-internals` and `--allow-natives-syntax` reach into Node's
+/// internals, `--experimental-stream-iter` is an experimental Node API,
+/// `--pending-deprecation` has nothing to activate (3va emits no pending
+/// deprecations) and `--tls-min-v1.0` is below rustls' TLS 1.2 floor.
+const SUPPORTED_FLAGS: &[&str] = &[
+    "--no-warnings",
+    "--expose-gc",
+    "--expose_gc",
+    "--zero-fill-buffers",
+    "--insecure-http-parser",
+];
+
+/// The declared flags 3va can pass to `3va run`.
+fn supported_flags(src: &str) -> Vec<String> {
+    declared_flags(src)
+        .into_iter()
+        .filter(|f| SUPPORTED_FLAGS.contains(&f.as_str()))
+        .collect()
+}
+
 /// Reason to skip a test before running it, if any.
 fn skip_reason(name: &str, src: &str) -> Option<String> {
     let flags = declared_flags(src);
-    if !flags.is_empty() {
-        return Some(format!("unsupported flags: {}", flags.join(" ")));
+    let unsupported: Vec<String> = flags
+        .iter()
+        .filter(|f| !SUPPORTED_FLAGS.contains(&f.as_str()))
+        .cloned()
+        .collect();
+    if !unsupported.is_empty() {
+        return Some(format!("unsupported flags: {}", unsupported.join(" ")));
     }
     for needle in [
         "require('internal",
@@ -133,13 +169,16 @@ fn skip_reason(name: &str, src: &str) -> Option<String> {
 }
 
 /// Run one test file with a timeout, returning `(passed, reason)`.
-fn run_one(opts: &Options, root: &Path, file: &Path) -> (bool, String) {
+fn run_one(opts: &Options, root: &Path, file: &Path, flags: &[String]) -> (bool, String) {
     use std::os::unix::process::CommandExt;
 
     let mut cmd = Command::new(&opts.threeva_bin);
     cmd.arg("run").arg("--no-prompt");
     for p in &opts.perms {
         cmd.arg(p);
+    }
+    for f in flags {
+        cmd.arg(f);
     }
     cmd.arg(file)
         .current_dir(root)
@@ -267,7 +306,8 @@ pub fn run_suite(root: &Path, opts: &Options) -> Summary {
         // Printed BEFORE running: if a test kills the batch, the last START
         // line names the culprit.
         eprintln!("NODE_TEST_START\t{name}");
-        let (passed, reason) = run_one(opts, root, &file);
+        let flags = supported_flags(&src);
+        let (passed, reason) = run_one(opts, root, &file, &flags);
         eprintln!(
             "NODE_TEST_DONE\t{name}\t{}",
             if passed { "ok" } else { "fail" }
