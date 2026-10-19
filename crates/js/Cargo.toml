@@ -215,6 +215,9 @@ vvva_core = { version = "2.13.0", path = "../core" }
 vvva_firewall = { version = "2.13.0", path = "../firewall" }
 vvva_permissions = { version = "2.13.0", path = "../permissions" }
 hex = "0.4"
+# The `Date` header of an HTTP response (RFC 1123). Already in the tree as a
+# transitive dependency; used directly so the format is Node's.
+httpdate = "1.0"
 base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true

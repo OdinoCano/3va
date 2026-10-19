@@ -11,6 +11,8 @@ import session from 'express-session';
 import multer from 'multer';
 import axios from 'axios';
 import crypto from 'crypto';
+import http from 'http';
+import net from 'net';
 import { dbReady, getSeed } from './db.js';
 
 const app = express();
@@ -63,6 +65,56 @@ app.get('/upstream', async (req, res) => {
     const r = await axios.get((process.env.MOCK_URL || 'http://mock:1234') + '/data', { timeout: 5000 });
     res.json({ ok: true, upstream: r.data });
   } catch (e) {
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// The outgoing request has to go through the proxy of the network: the agent
+// builds the connection (the `CONNECT` tunnel) and the request is written on
+// it. If the runtime ignored the agent, the request would leave the machine
+// without the proxy.
+app.get('/upstream-via-proxy', async (req, res) => {
+  const proxyUrl = new URL(process.env.PROXY_URL || 'http://proxy:1235');
+  const agent = new http.Agent();
+  // The factory that builds the tunnel: the request is written on it, so it
+  // leaves the machine through the proxy.
+  agent.createConnection = function createConnection(options, cb) {
+    const socket = net.connect(Number(proxyUrl.port), proxyUrl.hostname, () => {
+      socket.write(
+        'CONNECT ' + options.host + ':' + options.port + ' HTTP/1.1\r\n' +
+        'Host: ' + options.host + ':' + options.port + '\r\n\r\n',
+      );
+    });
+    let head = '';
+    const onData = (chunk) => {
+      head += chunk.toString('latin1');
+      const idx = head.indexOf('\r\n\r\n');
+      if (idx < 0) return;
+      socket.removeListener('data', onData);
+      const status = (head.split('\r\n')[0] || '').split(' ')[1];
+      if (status !== '200') {
+        socket.destroy();
+        cb(new Error('the proxy refused the tunnel: ' + status));
+        return;
+      }
+      cb(null, socket);
+    };
+    socket.on('data', onData);
+    socket.on('error', (err) => cb(err));
+  };
+  try {
+    const body = await new Promise((resolve, reject) => {
+      const r = http.get(process.env.MOCK_URL || 'http://mock:1234', { agent }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      });
+      r.on('error', reject);
+    });
+    agent.destroy();
+    res.json({ ok: true, upstream: JSON.parse(body) });
+  } catch (e) {
+    agent.destroy();
     res.status(502).json({ ok: false, error: e.message });
   }
 });

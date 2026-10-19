@@ -23,6 +23,14 @@ services:
       - ./mock:/mock:ro
     command: ["node", "/mock/server.js"]
 
+  proxy:
+    image: node:24-alpine
+    volumes:
+      - ./proxy:/proxy:ro
+    environment:
+      PROXY_PORT: "1235"
+    command: ["node", "/proxy/server.js"]
+
   app:
     build:
       context: .
@@ -37,11 +45,14 @@ services:
       PGPASSWORD: appsecret
       PGDATABASE: appdb
       MOCK_URL: http://mock:1234
+      PROXY_URL: http://proxy:1235
       SESSION_SECRET: client-scenario-secret
     depends_on:
       db:
         condition: service_healthy
       mock:
+        condition: service_started
+      proxy:
         condition: service_started
     command:
       - 3va

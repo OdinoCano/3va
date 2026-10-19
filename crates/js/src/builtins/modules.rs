@@ -3824,7 +3824,19 @@ pub fn inject_require(
             };
 
             Socket.prototype.setTimeout = function(ms, cb) {
+                if (typeof ms === 'function') { cb = ms; ms = 0; }
                 if (typeof cb === 'function') this.once('timeout', cb);
+                // Node keeps the current timeout in `socket.timeout` and
+                // fires the 'timeout' event when it expires.
+                this.timeout = ms;
+                if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
+                if (ms > 0) {
+                    var self = this;
+                    this._timeoutTimer = setTimeout(function() {
+                        self._timeoutTimer = null;
+                        self.emit('timeout');
+                    }, ms);
+                }
                 return this;
             };
             Socket.prototype.setNoDelay = function(on) {
@@ -3841,6 +3853,7 @@ pub fn inject_require(
             Socket.prototype.unref = function() { return this; };
             Socket.prototype.destroy = function(err) {
                 this._stopPoll();
+                if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
                 if (this._connId !== null) { __tcpClose(this._connId); this._connId = null; }
                 this.destroyed = true;
                 return Duplex.prototype.destroy.call(this, err);
@@ -4144,7 +4157,11 @@ pub fn inject_require(
                 var s = new TLSSocket(null, opts || {});
                 s._3vaSocket = true;
                 if (typeof cb === 'function') s.once('secureConnect', cb);
-                var result = __tcpConnectTls(host, port);
+                var tlsOpts = {
+                    ca: opts && opts.ca !== undefined ? opts.ca : undefined,
+                    rejectUnauthorized: opts && opts.rejectUnauthorized !== false,
+                };
+                var result = __tcpConnectTls(host, port, JSON.stringify(tlsOpts));
                 if (typeof result === 'number') {
                     s._connId = result;
                     s._startPoll();
@@ -4254,7 +4271,11 @@ pub fn inject_require(
             httpAgent.prototype.createConnection = function(options, cb) {
                 options = options || {};
                 var socket = options.secure
-                    ? tlsConnect(options.port, options.host, { servername: options.servername || options.host })
+                    ? tlsConnect(options.port, options.host, {
+                        servername: options.servername || options.host,
+                        ca: options.ca,
+                        rejectUnauthorized: options.rejectUnauthorized,
+                    })
                     : netConnect(options.port, options.host);
                 if (typeof cb === 'function') socket.once('connect', function() { cb(null, socket); });
                 return socket;
@@ -4509,55 +4530,15 @@ pub fn inject_require(
             };
             // ponytail: no-op by design — the effective timeout is applied by the server/firewall; see docs/05-js-engine/07-inventario-stubs.md §7.3.
             httpIncomingMessage.prototype.setTimeout = function() { return this; };
-            httpIncomingMessage.prototype.clearTimeout = function() { return this; };
             httpIncomingMessage.prototype.destroy = function() {
                 var st = this[kIncomingBody];
                 if (st) { st.done = true; this[kIncomingBody] = null; }
                 return this;
             };
-            // The header accessors Node's IncomingMessage has (lib/_http_incoming.js).
-            // The server fills `headers` when it dispatches the request, so
-            // these read from there and keep the raw lines for `_addHeaderLine`.
-            httpIncomingMessage.prototype.getHeader = function(name) {
-                var lk = String(name).toLowerCase();
-                var value = this.headers[lk];
-                if (value === undefined) return undefined;
-                return Array.isArray(value) ? value.slice() : value;
-            };
-            httpIncomingMessage.prototype.getHeaderNames = function() {
-                return Object.keys(this.headers || {});
-            };
-            httpIncomingMessage.prototype.getHeaders = function() {
-                var out = {};
-                var self = this;
-                Object.keys(this.headers || {}).forEach(function(k) {
-                    var v = self.headers[k];
-                    out[k] = Array.isArray(v) ? v.slice() : v;
-                });
-                return out;
-            };
-            httpIncomingMessage.prototype.hasHeader = function(name) {
-                return Object.prototype.hasOwnProperty.call(this.headers || {}, String(name).toLowerCase());
-            };
-            httpIncomingMessage.prototype.setHeader = function(name, value) {
-                this.headers[String(name).toLowerCase()] = value;
-                return this;
-            };
-            httpIncomingMessage.prototype.appendHeader = function(name, value) {
-                var lk = String(name).toLowerCase();
-                var current = this.headers[lk];
-                if (current === undefined) this.headers[lk] = value;
-                else if (Array.isArray(current)) current.push(value);
-                else this.headers[lk] = [current, value];
-                return this;
-            };
-            httpIncomingMessage.prototype.removeHeader = function(name) {
-                delete this.headers[String(name).toLowerCase()];
-                return this;
-            };
-            // Node's `_addHeaderLine`: the raw `name: value` line a header
-            // arrived in. It is what `matchKnownFields` and the raw-header
-            // tests read, so the line is kept as it came.
+            // Node's `_addHeaderLine` (lib/_http_incoming.js): the raw
+            // `name: value` line a header arrived in. Node's IncomingMessage
+            // has no `getHeader`/`setHeader`/... — those belong to
+            // OutgoingMessage — so nothing else is added here.
             httpIncomingMessage.prototype._addHeaderLine = function(field, value, dest) {
                 if (this._headerLines === undefined) this._headerLines = [];
                 this._headerLines.push(field, value);
@@ -4570,22 +4551,6 @@ pub fn inject_require(
                 }
                 return this;
             };
-            // Trailers are sent after the body. 3va's server writes the whole
-            // response in one go (Content-Length framing), so there is no
-            // place to put a trailer section; the values are recorded so the
-            // code that sets them does not crash.
-            // ponytail: no-op by design — the response is not chunked, so it
-            // has no trailer section; see docs/05-js-engine/07-inventario-stubs.md §7.3.
-            httpIncomingMessage.prototype.addTrailers = function(headers) {
-                if (!this._trailers) this._trailers = {};
-                var self = this;
-                Object.keys(headers || {}).forEach(function(k) { self._trailers[k] = headers[k]; });
-                return this;
-            };
-            // `cork`/`uncork` are part of the stream API (Node's
-            // OutgoingMessage inherits them from Writable).
-            httpIncomingMessage.prototype.cork = function() { return this; };
-            httpIncomingMessage.prototype.uncork = function() { return this; };
 
             // ── ServerResponse — buffers writes and flushes as one __httpRespond(Bytes)
             // call on end(), since the native side writes headers+body together.
@@ -4783,6 +4748,8 @@ pub fn inject_require(
             // ponytail: no-op by design — see docs/05-js-engine/07-inventario-stubs.md §7.3.
             httpServerResponse.prototype.setTimeout = function() { return this; };
             httpServerResponse.prototype.destroy = function() { return this; };
+            // ponytail: no-op by design — the head and the body are written
+            // together in end(); see docs/05-js-engine/07-inventario-stubs.md §7.3.
             httpServerResponse.prototype.flushHeaders = function() {};
             // Node's ServerResponse has these (lib/_http_server.js): the
             // response can be handed a socket it did not come from
@@ -4796,20 +4763,18 @@ pub fn inject_require(
                 this._connId = socket && socket._connId;
                 if (socket && typeof socket.on === 'function') {
                     var self = this;
-                    socket.on('close', function() { self.emit('close'); });
+                    // The listener is kept so `detachSocket` can take it back
+                    // out (it is the only one this response added).
+                    this._onSocketClose = function() { self.emit('close'); };
+                    socket.on('close', this._onSocketClose);
                 }
                 return this;
             };
             httpServerResponse.prototype.detachSocket = function(socket) {
-                if (socket && typeof socket.removeListener === 'function') {
-                    // The 'close' listener added by assignSocket.
-                    var self = this;
-                    var listeners = socket.listeners ? socket.listeners('close') : [];
-                    for (var i = 0; i < listeners.length; i++) {
-                        if (listeners[i]._3vaResponse === this) socket.removeListener('close', listeners[i]);
-                    }
-                    void self;
+                if (socket && typeof socket.removeListener === 'function' && this._onSocketClose) {
+                    socket.removeListener('close', this._onSocketClose);
                 }
+                this._onSocketClose = null;
                 if (this.socket === socket) { this.socket = null; this.connection = null; }
                 return this;
             };
@@ -4824,21 +4789,32 @@ pub fn inject_require(
             httpServerResponse.prototype.getHeaderNames = function() {
                 return Object.keys(this._headers || {});
             };
-            // Node's `writeEarlyHints` / `writeInformation`: 1xx informational
-            // responses sent before the final one.
-            // ponytail: no-op by design — 3va's server writes one response
-            // per request; see docs/05-js-engine/07-inventario-stubs.md §7.3.
+            // The 1xx informational responses Node can send before the final
+            // one: `writeEarlyHints` (103), `writeProcessing` (102) and
+            // `writeInformation` (any 1xx). They are written to the socket
+            // before the response, as in Node.
             httpServerResponse.prototype.writeEarlyHints = function(hints, cb) {
+                if (typeof hints === 'function') { cb = hints; hints = {}; }
+                this._writeInformational(103, 'Early Hints', hints || {});
                 if (typeof cb === 'function') setTimeout(cb, 0);
                 return this;
             };
-            httpServerResponse.prototype.writeInformation = function(code, headers, cb) {
+            httpServerResponse.prototype.writeProcessing = function() {
+                this._writeInformational(102, 'Processing', {});
+                return this;
+            };
+            httpServerResponse.prototype.writeInformation = function(statusCode, headers, cb) {
+                if (typeof headers === 'function') { cb = headers; headers = {}; }
+                var code = parseInt(statusCode, 10) || 100;
+                this._writeInformational(code, HTTP_STATUS_CODES[String(code)] || '', headers || {});
                 if (typeof cb === 'function') setTimeout(cb, 0);
                 return this;
             };
-            httpServerResponse.prototype.writeProcessing = function() { return this; };
-            httpServerResponse.prototype.cork = function() { return this; };
-            httpServerResponse.prototype.uncork = function() { return this; };
+            httpServerResponse.prototype._writeInformational = function(statusCode, statusText, headers) {
+                if (this._connId === undefined || this._connId === null) return;
+                if (typeof __httpRespondInformational !== 'function') return;
+                __httpRespondInformational(this._connId, statusCode, statusText, JSON.stringify(headers || {}));
+            };
 
             // ── Server — real listener backed by __httpListen/__httpAcceptPoll.
             var httpServer = function(opts, requestListener) {
@@ -4858,6 +4834,11 @@ pub fn inject_require(
                 // its head, and `keepAliveTimeout` for an idle keep-alive
                 // connection.
                 var V = globalThis.__validators;
+                // The limits 3va really enforces: the firewall's slowloris
+                // protection. The application can tighten them, never loosen
+                // them, and it is told when its value is looser than the
+                // limit in force (the INFO-F guard of the security audit).
+                var limits = (typeof __httpServerLimits === 'function') ? __httpServerLimits() : null;
                 var timeout = function(name, value) {
                     if (typeof value !== 'number') throw V.invalidArgType(name, 'of type number', value);
                     if (!(value >= 0) || value > Number.MAX_SAFE_INTEGER) {
@@ -4879,26 +4860,50 @@ pub fn inject_require(
                 var keepAliveTimeout = opts.keepAliveTimeout !== undefined
                     ? timeout('keepAliveTimeout', opts.keepAliveTimeout) : 5000;
                 var self = this;
-                var timeouts = {
+                // What Node reports.
+                var reported = {
                     headersTimeout: headersTimeout,
                     requestTimeout: requestTimeout,
                     keepAliveTimeout: keepAliveTimeout,
                 };
+                // Only the values the application set reach the native side:
+                // Node's defaults are not 3va's limits, and the firewall's
+                // own (stricter) limits must not be replaced by them.
+                var applied = {
+                    headersTimeout: opts.headersTimeout !== undefined ? headersTimeout : undefined,
+                    requestTimeout: opts.requestTimeout !== undefined ? requestTimeout : undefined,
+                    keepAliveTimeout: opts.keepAliveTimeout !== undefined ? keepAliveTimeout : undefined,
+                };
+                var warnLooser = function(name, value) {
+                    var limit = limits && limits[name];
+                    if (!limit) return;
+                    if (value > limit || value === 0) {
+                        console.warn('3va: http.Server.' + name + ' is ' + value + ' ms, but the built-in ' +
+                            'firewall limits it to ' + limit + ' ms; the effective limit is ' + limit + ' ms.');
+                    }
+                };
                 var pushTimeouts = function() {
                     if (self._id === null) return;
                     if (typeof __httpSetTimeouts === 'function') {
-                        __httpSetTimeouts(self._id, timeouts.headersTimeout,
-                            timeouts.requestTimeout, timeouts.keepAliveTimeout);
+                        __httpSetTimeouts(self._id, applied.headersTimeout || 0,
+                            applied.requestTimeout || 0, applied.keepAliveTimeout || 0);
                     }
                 };
                 ['headersTimeout', 'requestTimeout', 'keepAliveTimeout'].forEach(function(name) {
                     Object.defineProperty(self, name, {
-                        get: function() { return timeouts[name]; },
-                        set: function(v) { timeouts[name] = timeout(name, v); pushTimeouts(); },
+                        get: function() { return reported[name]; },
+                        set: function(v) {
+                            reported[name] = timeout(name, v);
+                            applied[name] = reported[name];
+                            warnLooser(name, reported[name]);
+                            pushTimeouts();
+                        },
                         enumerable: true,
                         configurable: true,
                     });
                 });
+                if (opts.headersTimeout !== undefined) warnLooser('headersTimeout', headersTimeout);
+                if (opts.keepAliveTimeout !== undefined) warnLooser('keepAliveTimeout', keepAliveTimeout);
                 this._pushTimeouts = pushTimeouts;
             };
             util.inherits(httpServer, EventEmitter);
@@ -5207,6 +5212,21 @@ __httpSetHandler(self._id, function() {
                 this._responseDone = false;
                 this._heardResponse = false;
                 this._omitHost = options.setHost === false;
+                // The TLS options of the request (Node's `https.request`
+                // options). They reach the connection factory, so the
+                // default connection and a proxy agent both honour them.
+                this._ca = options.ca;
+                this._cert = options.cert;
+                this._key = options.key;
+                this._passphrase = options.passphrase;
+                this._servername = options.servername;
+                this._rejectUnauthorized = options.rejectUnauthorized !== false;
+                // The OutgoingMessage state Node exposes on a request.
+                this.destroyed = false;
+                this.writableEnded = false;
+                this.writableFinished = false;
+                this.finished = false;
+                this.headersSent = false;
                 this._parserState = null;
                 this._leftover = null;
                 this._agent = options.agent === undefined ? httpGlobalAgent : (options.agent === false ? null : options.agent);
@@ -5269,17 +5289,34 @@ __httpSetHandler(self._id, function() {
                 if (typeof ms === 'function') { cb = ms; ms = 0; }
                 this._timeoutMs = ms;
                 if (typeof cb === 'function') this.once('timeout', cb);
+                // Node hands the timeout to the socket; the socket's
+                // 'timeout' event is what the request reports.
+                if (this._socket && typeof this._socket.setTimeout === 'function') {
+                    this._socket.setTimeout(ms);
+                } else {
+                    var self = this;
+                    this.once('socket', function(sock) {
+                        if (sock && typeof sock.setTimeout === 'function') sock.setTimeout(self._timeoutMs);
+                    });
+                }
                 return this;
             };
             ClientRequest.prototype._clearTimer = function() {
                 if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
+            };
+            // The 'timeout' event fires once, no matter whether the deadline
+            // came from the request's own timer or from the socket's.
+            ClientRequest.prototype._emitTimeout = function() {
+                if (this._timeoutFired) return;
+                this._timeoutFired = true;
+                this.emit('timeout');
             };
             ClientRequest.prototype._armTimeout = function() {
                 var self = this;
                 if (self._timeoutMs > 0 && !self._timeoutTimer && !self._responseDone) {
                     self._timeoutTimer = setTimeout(function() {
                         self._timeoutTimer = null;
-                        self.emit('timeout');
+                        self._emitTimeout();
                     }, self._timeoutMs);
                 }
             };
@@ -5326,6 +5363,8 @@ __httpSetHandler(self._id, function() {
                 if (typeof encoding === 'function') { cb = encoding; encoding = null; }
                 if (this._ended) { if (cb) cb(); return this; }
                 this._ended = true;
+                this.writableEnded = true;
+                this.finished = true;
                 if (chunk !== undefined && chunk !== null) {
                     var buf = __reqChunkToBuffer(chunk, encoding);
                     this._bodyLen += buf.length;
@@ -5348,6 +5387,7 @@ __httpSetHandler(self._id, function() {
             ClientRequest.prototype.abort = function() {
                 if (this._aborted) return this;
                 this._aborted = true;
+                this.destroyed = true;
                 this._clearTimer();
                 if (this._socket && !this._socket.destroyed) this._socket.destroy();
                 this.emit('abort');
@@ -5357,6 +5397,7 @@ __httpSetHandler(self._id, function() {
             ClientRequest.prototype.destroy = function(err) {
                 if (this._aborted) { if (err) this.emit('error', err); return this; }
                 this._aborted = true;
+                this.destroyed = true;
                 this._clearTimer();
                 if (this._socket && !this._socket.destroyed) this._socket.destroy();
                 if (err) this.emit('error', err);
@@ -5394,13 +5435,21 @@ __httpSetHandler(self._id, function() {
                 // from a plain connection otherwise. An agent that replaces
                 // it is how the proxy agents work, so the request has to go
                 // through it and not straight to the origin.
+                // The options the factory gets. The TLS ones come from the
+                // request, so an agent (or a proxy agent) can build the
+                // connection the application asked for.
                 var options = {
                     host: self._host,
                     port: self._port,
                     path: self._path,
                     method: self._method,
                     secure: self._secure,
-                    servername: self._host,
+                    servername: self._servername || self._host,
+                    ca: self._ca,
+                    cert: self._cert,
+                    key: self._key,
+                    passphrase: self._passphrase,
+                    rejectUnauthorized: self._rejectUnauthorized,
                 };
                 var factory = null;
                 if (typeof self._createConnection === 'function') {
@@ -5463,7 +5512,13 @@ __httpSetHandler(self._id, function() {
                     self._maybeFinishRequest();
                     self._armTimeout();
                 };
-                if (socket._3vaSocket) socket.once('connect', go);
+                // The socket reports its own timeout; the request turns it
+                // into its 'timeout' event, as in Node.
+                if (this._timeoutMs > 0 && typeof socket.setTimeout === 'function') {
+                    socket.setTimeout(this._timeoutMs);
+                    socket.once('timeout', function() { self._emitTimeout(); });
+                }
+                if (socket._3vaSocket && socket._connId === null) socket.once('connect', go);
                 else go();
             };
             ClientRequest.prototype._maybeFinishRequest = function() {
@@ -5737,15 +5792,47 @@ __httpSetHandler(self._id, function() {
                 list.push(socket);
             };
 
-            function httpRequest(options, callback) { return new ClientRequest(options, callback); }
-            function httpGet(options, callback) {
-                var req = httpRequest(options, callback);
+            // Node's `http.request(url[, options][, callback])`: the URL can
+            // come first, and the options are merged with it.
+            function __mergeUrlOptions(url, extra) {
+                var u = (url instanceof URL) ? url : new URL(String(url));
+                var opts = {};
+                if (extra) { for (var k in extra) opts[k] = extra[k]; }
+                opts.protocol = u.protocol;
+                opts.hostname = u.hostname;
+                opts.host = u.host;
+                opts.port = u.port || (u.protocol === 'https:' ? 443 : 80);
+                opts.path = (u.pathname || '/') + (u.search || '');
+                if (u.hash) opts.hash = u.hash;
+                if (u.username || u.password) {
+                    opts.auth = decodeURIComponent(u.username) + ':' + decodeURIComponent(u.password);
+                }
+                return opts;
+            }
+            function httpRequest(options, callback, extra) {
+                // http.request(url, options, callback)
+                if (typeof options === 'string' || (typeof URL !== 'undefined' && options instanceof URL)) {
+                    var cb = (typeof callback === 'function') ? callback : (typeof extra === 'function' ? extra : null);
+                    var opts = (typeof callback === 'function') ? {} : (callback || {});
+                    return new ClientRequest(__mergeUrlOptions(options, opts), cb);
+                }
+                return new ClientRequest(options, callback);
+            }
+            function httpGet(options, callback, extra) {
+                var req = httpRequest(options, callback, extra);
                 req.end();
                 return req;
             }
-            function httpsRequest(options, callback) { return new ClientRequest(options, callback, 'https:'); }
-            function httpsGet(options, callback) {
-                var req = httpsRequest(options, callback);
+            function httpsRequest(options, callback, extra) {
+                if (typeof options === 'string' || (typeof URL !== 'undefined' && options instanceof URL)) {
+                    var cb = (typeof callback === 'function') ? callback : (typeof extra === 'function' ? extra : null);
+                    var opts = (typeof callback === 'function') ? {} : (callback || {});
+                    return new ClientRequest(__mergeUrlOptions(options, opts), cb, 'https:');
+                }
+                return new ClientRequest(options, callback, 'https:');
+            }
+            function httpsGet(options, callback, extra) {
+                var req = httpsRequest(options, callback, extra);
                 req.end();
                 return req;
             }

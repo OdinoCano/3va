@@ -174,6 +174,11 @@ struct HttpTimeoutsCtx {
     timeouts: Arc<Mutex<HashMap<u32, Arc<Mutex<ServerTimeouts>>>>>,
 }
 
+/// The firewall the server runs under, to report the limits in force.
+struct HttpLimitsCtx {
+    fw: Arc<Option<Arc<Firewall>>>,
+}
+
 struct HttpBodyCtx {
     bodies: BodyRegistry,
 }
@@ -464,6 +469,9 @@ struct ConnEntry {
 struct PendingResponse {
     conn_id: u32,
     bytes: Vec<u8>,
+    /// A 1xx informational response: it is written to the socket and the
+    /// connection keeps waiting for the final response.
+    informational: bool,
 }
 
 // ── Streaming request bodies ────────────────────────────────────────────────
@@ -653,63 +661,7 @@ fn js_type_error_with_code<'s>(
 /// The clock is read per response (not cached): a server that runs for days
 /// must not send a stale date.
 fn http_date_now() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format_http_date(now)
-}
-
-/// Format a Unix timestamp as an HTTP date (`Sun, 06 Nov 1994 08:49:37 GMT`).
-fn format_http_date(secs: u64) -> String {
-    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let days = secs / 86_400;
-    let rem = secs % 86_400;
-    let (hour, min, sec) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    let mut year = 1970i64;
-    let mut d = days as i64;
-    loop {
-        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-        let len = if leap { 366 } else { 365 };
-        if d < len {
-            break;
-        }
-        d -= len;
-        year += 1;
-    }
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let month_lengths = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 0usize;
-    while month < 12 && d >= month_lengths[month] {
-        d -= month_lengths[month];
-        month += 1;
-    }
-    format!(
-        "{}, {:02} {} {} {:02}:{:02}:{:02} GMT",
-        DAYS[(days % 7) as usize],
-        d + 1,
-        MONTHS[month],
-        year,
-        hour,
-        min,
-        sec
-    )
+    httpdate::fmt_http_date(std::time::SystemTime::now())
 }
 
 fn json_escape(s: &str) -> String {
@@ -1475,12 +1427,16 @@ async fn handle_connection<S>(
         // are read per request: the application can change them while the
         // server runs.
         let app = *app_timeouts.lock().unwrap();
+        // The application can tighten the limits, never loosen them: the
+        // firewall's slowloris protection stays in force. `min`, not "the
+        // application wins": a server with no configuration must not go from
+        // the firewall's 10 s to Node's 60 s default.
         let hdr_limit = match app.headers {
-            Some(d) if !d.is_zero() => d,
+            Some(d) if !d.is_zero() => hdr_timeout.min(d),
             _ => hdr_timeout,
         };
         let keepalive_limit = match app.keepalive {
-            Some(d) if !d.is_zero() => d,
+            Some(d) if !d.is_zero() => keepalive_timeout.min(d),
             _ => keepalive_timeout,
         };
         // `requestTimeout` is the deadline for the whole request (head and
@@ -1783,12 +1739,28 @@ async fn handle_connection<S>(
                     // Body fully read: bound the wait for JS's response so a
                     // handler that never answers can't pin the connection open.
                     match tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx.recv()).await {
+                        Ok(Some(r)) if r.informational => {
+                            let _ = writer.write_all(&r.bytes).await;
+                            let _ = writer.flush().await;
+                            continue;
+                        }
                         Ok(r) => break r,
                         Err(_) => break None,
                     }
                 }
                 tokio::select! {
-                    r = resp_rx.recv() => break r,
+                    r = resp_rx.recv() => {
+                        match r {
+                            // A 1xx informational response goes out before
+                            // the final one; the wait goes on.
+                            Some(r) if r.informational => {
+                                let _ = writer.write_all(&r.bytes).await;
+                                let _ = writer.flush().await;
+                                continue;
+                            }
+                            other => break other,
+                        }
+                    }
                     res = &mut pump => {
                         body_done = true;
                         body_err = res;
@@ -2566,7 +2538,11 @@ pub fn inject_http_server(
                 let guard = ctx.conns.lock().unwrap();
                 match guard.get(&conn_id) {
                     Some(conn) => {
-                        let ok = conn.resp_tx.try_send(PendingResponse { conn_id, bytes });
+                        let ok = conn.resp_tx.try_send(PendingResponse {
+                            conn_id,
+                            bytes,
+                            informational: false,
+                        });
                         drop(guard);
                         if ok.is_err() {
                             let err = js_code_err(scope, "ENOENT", "connection closed");
@@ -2678,7 +2654,11 @@ pub fn inject_http_server(
                 let guard = ctx.conns.lock().unwrap();
                 match guard.get(&conn_id) {
                     Some(conn) => {
-                        let ok = conn.resp_tx.try_send(PendingResponse { conn_id, bytes });
+                        let ok = conn.resp_tx.try_send(PendingResponse {
+                            conn_id,
+                            bytes,
+                            informational: false,
+                        });
                         drop(guard);
                         if ok.is_err() {
                             let err = js_code_err(scope, "ENOENT", "connection closed");
@@ -2702,6 +2682,121 @@ pub fn inject_http_server(
             scope,
             V8String::new(scope, "__httpRespondBytes").unwrap().into(),
             http_respond_bytes_fn.into(),
+        );
+    }
+
+    {
+        // A 1xx informational response (103 Early Hints, 102 Processing, …):
+        // it goes to the socket before the final response, as in Node.
+        let ctx_ptr = native_ctx.leak(HttpRespondCtx {
+            conns: conns.clone(),
+        });
+        let external = v8::External::new(scope, ctx_ptr);
+        let http_respond_informational_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpRespondCtx)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let status = args.get(1).uint32_value(scope).unwrap_or(100);
+                let status_text = args.get(2).to_rust_string_lossy(scope);
+                let headers_json = args.get(3).to_rust_string_lossy(scope);
+
+                let extra = parse_extra_headers(&headers_json);
+                let mut resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
+                for (k, v) in &extra {
+                    let kl = k.to_lowercase();
+                    if !is_valid_header_name(k) || !is_valid_header_value(v) {
+                        let err = js_type_error_with_code(
+                            scope,
+                            "ERR_INVALID_CHAR",
+                            &format!("Invalid character in header content [\"{kl}\"]"),
+                        );
+                        scope.throw_exception(err);
+                        return;
+                    }
+                    resp.push_str(&format!("{}: {}\r\n", k, v));
+                }
+                resp.push_str("\r\n");
+
+                let guard = ctx.conns.lock().unwrap();
+                match guard.get(&conn_id) {
+                    Some(conn) => {
+                        let ok = conn.resp_tx.try_send(PendingResponse {
+                            conn_id,
+                            bytes: resp.into_bytes(),
+                            informational: true,
+                        });
+                        drop(guard);
+                        if ok.is_err() {
+                            let err = js_code_err(scope, "ENOENT", "connection closed");
+                            rv.set(err);
+                            return;
+                        }
+                    }
+                    None => {
+                        let err = js_code_err(scope, "ENOENT", "unknown conn_id");
+                        rv.set(err);
+                        return;
+                    }
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpRespondInformational")
+                .unwrap()
+                .into(),
+            http_respond_informational_fn.into(),
+        );
+    }
+
+    {
+        // The limits the firewall applies to a server, in milliseconds. The
+        // application can tighten them, never loosen them, and it is told
+        // which ones are really in force (the INFO-F guard of the security
+        // audit).
+        let ctx_ptr = native_ctx.leak(HttpLimitsCtx { fw: fw.clone() });
+        let external = v8::External::new(scope, ctx_ptr);
+        let limits_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpLimitsCtx)
+                };
+                let (header, keepalive, body) = match ctx.fw.as_ref().as_ref() {
+                    Some(f) => (
+                        f.config.header_timeout_ms,
+                        f.config.keepalive_timeout_ms,
+                        f.config.body_timeout_ms,
+                    ),
+                    None => (10_000, 5_000, 30_000),
+                };
+                let obj = v8::Object::new(scope);
+                let set = |name: &str, value: i64| {
+                    let key = V8String::new(scope, name).unwrap();
+                    let val = v8::Integer::new(scope, value as i32);
+
+                    obj.set(scope, key.into(), val.into());
+                };
+                set("headersTimeout", header as i64);
+                set("keepAliveTimeout", keepalive as i64);
+                set("bodyTimeout", body as i64);
+                rv.set(obj.into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpServerLimits").unwrap().into(),
+            limits_fn.into(),
         );
     }
 

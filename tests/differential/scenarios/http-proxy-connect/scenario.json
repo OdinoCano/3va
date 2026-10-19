@@ -1,0 +1,5 @@
+{
+  "kind": "client-server",
+  "timeout_s": 30,
+  "description": "http: the request goes through the agent's createConnection() (a CONNECT proxy in another process)."
+}

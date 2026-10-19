@@ -402,7 +402,11 @@ pub fn inject_tcp(
                     return;
                 }
 
-                let connector = match super::tls::TlsConnector::new() {
+                // The TLS options the request named (`ca`,
+                // `rejectUnauthorized`).
+                let opts_json = args.get(2).to_rust_string_lossy(_scope);
+                let opts = super::tls::TlsOptions::from_json(&opts_json);
+                let connector = match super::tls::TlsConnector::with_options(Some(&opts)) {
                     Ok(c) => c,
                     Err(e) => {
                         let err = js_err(_scope, &format!("TLS init failed: {}", e));

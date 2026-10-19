@@ -6296,6 +6296,7 @@ dependencies = [
  "hickory-resolver",
  "hmac 0.12.1",
  "http",
+ "httpdate",
  "hyper-util",
  "inferno",
  "libc",

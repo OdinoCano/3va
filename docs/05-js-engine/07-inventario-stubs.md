@@ -58,6 +58,8 @@ y las suites de librerías antes de aterrizar.
 | `OutgoingMessage.setTimeout` (`4556`), `ClientRequest.setTimeout` (`4688`, que sí registra el callback) | Idem | `return this` | No-op documentado para `4556`; el de `ClientRequest` registra el callback |
 | `ServerResponse.setTimeout(ms, cb)` (`4556`) y `http.Server.setTimeout` (`4636`) | Idem | `return this` | No-op documentado |
 | `ServerResponse.destroy()` (`4557`) | Destruye la respuesta y cierra el socket | `return this` | **Pendiente de implementar** (hoy un `destroy()` no cierra nada) |
+| `ServerResponse.addTrailers(headers)` | Añade una sección de trailers al final del cuerpo | No existía | No-op documentado: la respuesta se escribe entera de una vez (con `Content-Length`), así que no hay sección de trailers donde ponerlos. Los valores quedan en `res._trailers` |
+| `ServerResponse.flushHeaders()` | Escribe la cabeza sin el cuerpo | No existía | No-op documentado: la cabeza y el cuerpo se escriben juntos en `end()` (no hay escritura parcial de la respuesta) |
 
 ## 7.4 Streams
 

@@ -75,6 +75,17 @@ async function main() {
     JSON.stringify(upstreamBody)
   );
 
+  // The outgoing request of the app goes through the proxy of the network:
+  // the agent builds the `CONNECT` tunnel and the request is written on it.
+  const viaProxy = await fetch(BASE + '/upstream-via-proxy');
+  const viaProxyBody = await viaProxy.json();
+  check('upstream-via-proxy-status', viaProxy.status === 200, viaProxy.status);
+  check(
+    'upstream-via-proxy-data',
+    viaProxyBody.ok === true && viaProxyBody.upstream && viaProxyBody.upstream.mock === 'ok',
+    JSON.stringify(viaProxyBody)
+  );
+
   const ip = await fetch(BASE + '/ip');
   const ipBody = await ip.json();
   check('proxy-remote-address', ipBody.remoteAddress === '203.0.113.7', JSON.stringify(ipBody));

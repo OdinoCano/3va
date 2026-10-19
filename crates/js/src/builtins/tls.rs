@@ -19,9 +19,59 @@ pub use native_tls::TlsStream;
 pub struct TlsConnector;
 
 #[cfg(not(feature = "fips"))]
+/// The TLS options a request named: the trust anchors it asked for
+/// (`ca`) and whether it wants the peer verified (`rejectUnauthorized`).
+#[derive(Debug, Clone)]
+pub struct TlsOptions {
+    /// The PEM bundles the request trusts, in addition to the system roots.
+    pub ca: Vec<String>,
+    /// `false` when the request asked not to verify the peer.
+    pub reject_unauthorized: bool,
+}
+
+impl Default for TlsOptions {
+    fn default() -> Self {
+        Self {
+            ca: Vec::new(),
+            reject_unauthorized: true,
+        }
+    }
+}
+
+impl TlsOptions {
+    /// Read the options from the JSON the JS side sends.
+    pub fn from_json(json: &str) -> TlsOptions {
+        let mut out = TlsOptions::default();
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            return out;
+        };
+        match value.get("ca") {
+            Some(serde_json::Value::String(pem)) => out.ca.push(pem.clone()),
+            Some(serde_json::Value::Array(items)) => {
+                for item in items {
+                    if let serde_json::Value::String(pem) = item {
+                        out.ca.push(pem.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(serde_json::Value::Bool(verify)) = value.get("rejectUnauthorized") {
+            out.reject_unauthorized = *verify;
+        }
+        out
+    }
+}
+
 impl TlsConnector {
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> native_tls::Result<native_tls::TlsConnector> {
+        Self::with_options(None)
+    }
+
+    /// The connector for a request that named its own trust anchors (`ca`) or
+    /// asked not to verify the peer (`rejectUnauthorized: false`).
+    pub fn with_options(opts: Option<&TlsOptions>) -> native_tls::Result<native_tls::TlsConnector> {
         let mut builder = native_tls::TlsConnector::builder();
         builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
         // Node's NODE_EXTRA_CA_CERTS: add the PEM bundle as trust anchors, the
@@ -41,6 +91,20 @@ impl TlsConnector {
                     }
                 }
                 Err(e) => eprintln!("[3va-tls] NODE_EXTRA_CA_CERTS: cannot read {path}: {e}"),
+            }
+        }
+        if let Some(opts) = opts {
+            for pem in &opts.ca {
+                let mut reader = std::io::BufReader::new(pem.as_bytes());
+                for cert in rustls_pemfile::certs(&mut reader).flatten() {
+                    if let Ok(cert) = native_tls::Certificate::from_der(&cert) {
+                        let _ = builder.add_root_certificate(cert);
+                    }
+                }
+            }
+            if !opts.reject_unauthorized {
+                builder.danger_accept_invalid_certs(true);
+                builder.danger_accept_invalid_hostnames(true);
             }
         }
         builder.build()
@@ -106,6 +170,38 @@ mod fips {
     impl TlsConnector {
         pub fn new() -> Result<Self, String> {
             super::super::tcp::pq_tls_client_config_native().map(Self)
+        }
+
+        /// The connector for a request that named its own trust anchors.
+        /// The FIPS build always verifies the peer: `rejectUnauthorized:
+        /// false` is refused.
+        pub fn with_options(opts: Option<&super::TlsOptions>) -> Result<Self, String> {
+            let Some(opts) = opts else {
+                return Self::new();
+            };
+            if !opts.reject_unauthorized {
+                return Err(
+                    "rejectUnauthorized: false is not supported in the FIPS build: the peer is always verified"
+                        .to_string(),
+                );
+            }
+            if opts.ca.is_empty() {
+                return Self::new();
+            }
+            let mut roots = rustls::RootCertStore::empty();
+            let native = rustls_native_certs::load_native_certs();
+            for cert in native.certs {
+                let _ = roots.add(cert);
+            }
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            super::super::tcp::add_extra_ca_certs(&mut roots);
+            for pem in &opts.ca {
+                let mut reader = std::io::BufReader::new(pem.as_bytes());
+                for cert in rustls_pemfile::certs(&mut reader).flatten() {
+                    let _ = roots.add(cert);
+                }
+            }
+            super::super::tcp::pq_tls_client_config_from_roots(roots).map(Self)
         }
 
         pub fn connect(&self, host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>, String> {
