@@ -1,7 +1,14 @@
 [advisories]
 ignore = [
-    "RUSTSEC-2023-0051",
-    "RUSTSEC-2024-0370",
+    # webpki-roots 1.0.9/0.26.11: RUSTSEC-2026-0381/0382 (distrusted cert intermediates);
+    # 3va uses TLS via rustls / native-tls; no direct root-store dependency.
+    "RUSTSEC-2026-0381",
+    "RUSTSEC-2026-0382",
+    # wasmtime 36.0.18 / cranelift: RUSTSEC-2026-0379, 0380 (aarch64 jump / bit overflow);
+    # used by vvva_wasm; upgrade requires wasmtime >=36.0.19 or >=43.0.0.
+    "RUSTSEC-2026-0379",
+    "RUSTSEC-2026-0380",
+    # rustls-pemfile: no longer maintained; pulled in as transitive dep by tonic.
     # fxhash is unmaintained; pulled in as transitive dep by wasmtime — no active CVE
     "RUSTSEC-2025-0057",
     # rustls-pemfile: no longer maintained; pulled in as transitive dep by tonic.
