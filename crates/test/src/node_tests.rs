@@ -59,6 +59,9 @@ pub struct Options {
     pub threeva_bin: PathBuf,
     /// Per-test wall-clock timeout.
     pub timeout: Duration,
+    /// Per-test resident-set limit in megabytes, the test and its descendants
+    /// together. A test that goes over it is killed and fails; 0 disables it.
+    pub max_rss_mb: u64,
     /// Permission flags passed to `3va run`.
     pub perms: Vec<String>,
     /// Run only files whose name contains this substring.
@@ -345,6 +348,31 @@ fn kill_descendants(pid: u32) {
     kill_seen(&descendants(pid));
 }
 
+/// Resident memory of a process, in kilobytes: `VmRSS` in `/proc/<pid>/status`.
+///
+/// It counts the pages the process actually has in RAM, not the virtual size a
+/// `Buffer` reservation would report, so it is what the 1 GB per-test budget
+/// is about. A process that exited reads as `None`.
+fn rss_kb(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            return rest.split_whitespace().next()?.parse().ok();
+        }
+    }
+    None
+}
+
+/// Resident memory of a test and the descendants the runner has seen, in
+/// kilobytes.
+///
+/// The test itself is one process; a test that spawns children (or that leaves
+/// them behind, the ones in `seen`) spends memory in each of them, so the
+/// budget is per test, not per process.
+fn group_rss_kb(pid: u32, seen: &[SeenProcess]) -> u64 {
+    rss_kb(pid).unwrap_or(0) + seen.iter().filter_map(|p| rss_kb(p.pid)).sum::<u64>()
+}
+
 /// Run one test file with a timeout, returning `(passed, reason)`.
 ///
 /// `worker` is the index of the parallel worker running it: it decides the
@@ -431,6 +459,7 @@ fn run_one(
     // tests' processes at random).
     let deadline = Instant::now() + opts.timeout;
     let mut timed_out = false;
+    let mut memory_exceeded = false;
     loop {
         if is_zombie(pid) {
             break;
@@ -445,6 +474,14 @@ fn run_one(
                 if !orphans.contains(&seen) {
                     orphans.push(seen);
                 }
+            }
+            // A test that allocates without bound is a failure, not a reason
+            // to raise the budget: it is measured while it runs because the
+            // machine has to survive the run (six to fourteen `3va` at a time
+            // used 27 GB on 2026-10-20).
+            if opts.max_rss_mb > 0 && group_rss_kb(pid, &orphans) > opts.max_rss_mb * 1024 {
+                memory_exceeded = true;
+                break;
             }
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -463,6 +500,9 @@ fn run_one(
     kill_seen(&orphans);
     let _ = child.kill();
     let status = wait_bounded(&mut child, Duration::from_secs(2));
+    if memory_exceeded {
+        return (false, format!("memory limit {} MB", opts.max_rss_mb));
+    }
     if timed_out {
         let mut reason = format!("timeout after {}s", opts.timeout.as_secs());
         if !group_killed {
@@ -909,5 +949,43 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// A test that allocates past the budget is killed and fails with the
+    /// reason the run reports; the runner keeps running on a machine that has
+    /// to survive a dozen tests at once.
+    #[test]
+    fn a_test_that_goes_over_the_memory_limit_is_killed() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("_3va_rss_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("hog.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             # 200 MB of resident memory, held until the runner kills the group.\n\
+             a=$(head -c 200000000 /dev/zero | tr '\\0' x)\n\
+             sleep 30\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = dir.join("test-hog.js");
+        std::fs::write(&file, "// the script ignores it\n").unwrap();
+
+        let opts = Options {
+            prefixes: vec![],
+            threeva_bin: script,
+            timeout: Duration::from_secs(10),
+            max_rss_mb: 32,
+            perms: vec![],
+            filter: None,
+            skips: std::collections::BTreeMap::new(),
+            jobs: 1,
+        };
+        let (passed, reason) = run_one(&opts, &dir, &file, &[], 0, None);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!passed, "un test que pasa de 32 MB no puede pasar");
+        assert_eq!(reason, "memory limit 32 MB");
     }
 }

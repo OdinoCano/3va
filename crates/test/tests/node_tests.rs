@@ -138,6 +138,13 @@ fn node_parallel_suite() {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10),
         ),
+        // 1 GB per test (the test and its children together). A test that goes
+        // over it is killed and counted as failed, never as skipped:
+        // NODE_TESTS_MAX_RSS_MB overrides it, 0 disables it.
+        max_rss_mb: std::env::var("NODE_TESTS_MAX_RSS_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1024),
         perms: [
             "--allow-read",
             "--allow-write",
