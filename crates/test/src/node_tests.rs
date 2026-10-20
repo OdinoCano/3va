@@ -262,7 +262,7 @@ fn is_zombie(pid: u32) -> bool {
 ///
 /// The list is read *while the test is still alive*: when it exits, its
 /// children are re-parented and the list is empty.
-fn descendants(pid: u32) -> Vec<u32> {
+fn descendants(pid: u32) -> Vec<SeenProcess> {
     let mut found = Vec::new();
     let mut queue = vec![pid];
     let mut seen = std::collections::BTreeSet::new();
@@ -281,7 +281,15 @@ fn descendants(pid: u32) -> Vec<u32> {
                 if let Ok(child) = child.parse::<u32>() {
                     if child > 1 {
                         queue.push(child);
-                        found.push(child);
+                        // The moment it started is captured now, next to the
+                        // pid: it is the only thing that tells this process
+                        // from an unrelated one that reuses the number later.
+                        if let Some(started) = start_time(child) {
+                            found.push(SeenProcess {
+                                pid: child,
+                                started,
+                            });
+                        }
                     }
                 }
             }
@@ -290,43 +298,51 @@ fn descendants(pid: u32) -> Vec<u32> {
     found
 }
 
+/// A process the runner saw descending from the test, with the moment it
+/// started: the pair is what makes it safe to signal later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeenProcess {
+    pid: u32,
+    started: u64,
+}
+
 /// The moment a process started, in clock ticks since the boot (field 22 of
 /// `/proc/<pid>/stat`).
 ///
-/// It tells a process we saw from one that reused its number: a pid we are
-/// about to signal is only ours if it started after the test did.
+/// It tells a process we saw from one that reused its number: a pid is only
+/// ours while its start time is still the one we recorded.
 fn start_time(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, rest) = stat.rsplit_once(')')?;
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
-/// Kill the processes in `pids` that are still alive.
+/// Kill the processes we saw, if they are still the same ones.
 ///
-/// Only the pids that started at or after `since` are killed: a pid that was
-/// reused by an unrelated process must not be touched.
+/// The pid alone is not enough: with several tests running at once, an
+/// unrelated process (from another worker or the desktop) can reuse the number
+/// between the scan and the signal. Only when the current start time is still
+/// the recorded one is the process ours.
 #[allow(unsafe_code)]
-fn kill_pids(pids: &[u32], since: u64) {
-    for &child in pids {
-        if child <= 1 {
+fn kill_seen(procs: &[SeenProcess]) {
+    for proc_ in procs {
+        if proc_.pid <= 1 || proc_.started == 0 {
             continue;
         }
-        match start_time(child) {
-            Some(started) if started >= since => {
-                // Safety: `kill(2)` with a positive pid signals that process
-                // only. The `child > 1` guard keeps it away from init.
-                unsafe {
-                    libc::kill(child as i32, libc::SIGKILL);
-                }
-            }
-            _ => {}
+        if start_time(proc_.pid) != Some(proc_.started) {
+            continue;
+        }
+        // Safety: `kill(2)` with a positive pid signals that process only.
+        // The `pid > 1` guard keeps it away from init.
+        unsafe {
+            libc::kill(proc_.pid as i32, libc::SIGKILL);
         }
     }
 }
 
 /// Kill the processes that descend from `pid` and are still alive.
-fn kill_descendants(pid: u32, since: u64) {
-    kill_pids(&descendants(pid), since);
+fn kill_descendants(pid: u32) {
+    kill_seen(&descendants(pid));
 }
 
 /// Run one test file with a timeout, returning `(passed, reason)`.
@@ -398,13 +414,11 @@ fn run_one(
         Err(e) => return (false, format!("spawn failed: {e}")),
     };
     let pid = child.id();
-    // The moment the test started: a pid that was reused by an unrelated
-    // process must not be killed with it.
-    let started = start_time(pid).unwrap_or(0);
-    // The descendants of the test, noted while it runs: the ones that leave
-    // its process group survive the group kill, and when the test exits its
-    // children are re-parented and the list is gone.
-    let mut orphans: Vec<u32> = Vec::new();
+    // The descendants of the test, noted while it runs together with the
+    // moment each one started: the ones that leave its process group survive
+    // the group kill, and when the test exits its children are re-parented and
+    // the list is gone.
+    let mut orphans: Vec<SeenProcess> = Vec::new();
     let mut next_scan = Instant::now();
     // The stderr of the test is drained while it runs: nobody read the pipe,
     // so a test that writes more than the pipe buffer (64 KB) blocked
@@ -427,9 +441,9 @@ fn run_one(
         }
         if Instant::now() >= next_scan {
             next_scan = Instant::now() + Duration::from_millis(200);
-            for child_pid in descendants(pid) {
-                if !orphans.contains(&child_pid) {
-                    orphans.push(child_pid);
+            for seen in descendants(pid) {
+                if !orphans.contains(&seen) {
+                    orphans.push(seen);
                 }
             }
         }
@@ -445,8 +459,8 @@ fn run_one(
     // The descendants that left the group are killed by pid: the group signal
     // does not reach them, and they would keep the machine busy. The ones
     // that appeared after the last scan are caught here.
-    kill_descendants(pid, started);
-    kill_pids(&orphans, started);
+    kill_descendants(pid);
+    kill_seen(&orphans);
     let _ = child.kill();
     let status = wait_bounded(&mut child, Duration::from_secs(2));
     if timed_out {
@@ -836,16 +850,18 @@ mod tests {
             .expect("cannot spawn the child");
         let child_pid = child.id();
         let parent = std::process::id();
-        let started = start_time(parent).unwrap_or(0);
 
-        // The child is a descendant of this process.
+        // The child is a descendant of this process, with its start time.
         let found = descendants(parent);
         assert!(
-            found.contains(&child_pid),
+            found.iter().any(|p| p.pid == child_pid),
             "el hijo debe aparecer entre los descendientes: {found:?}"
         );
 
-        kill_pids(&[child_pid], started);
+        kill_seen(&[SeenProcess {
+            pid: child_pid,
+            started: start_time(child_pid).unwrap_or(0),
+        }]);
 
         // The child is gone: a process that nobody reaped is a zombie, and
         // that is already dead.
@@ -864,9 +880,11 @@ mod tests {
     }
 
     /// A pid that was reused by an unrelated process must not be killed: the
-    /// start time tells one from the other.
+    /// start time tells one from the other. The guard used to compare against
+    /// the moment the test started, which a reused pid also passes; now the
+    /// recorded start time has to match exactly.
     #[test]
-    fn a_pid_that_started_before_the_test_is_not_killed() {
+    fn a_pid_that_is_not_the_one_we_saw_is_not_killed() {
         let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let mut child = std::process::Command::new("sleep")
             .arg("300")
@@ -875,10 +893,14 @@ mod tests {
             .spawn()
             .expect("cannot spawn the child");
         let child_pid = child.id();
-        // The child started *before* the moment the runner would record, so
-        // it is not ours to kill.
+        // The pid was recorded earlier, with an older start time; the process
+        // that wears it now started later. That is exactly a reused pid, and
+        // the old rule ("it started after the test began") would kill it.
         let child_started = start_time(child_pid).unwrap_or(0);
-        kill_pids(&[child_pid], child_started + 10_000_000);
+        kill_seen(&[SeenProcess {
+            pid: child_pid,
+            started: child_started.saturating_sub(1),
+        }]);
         // Give the signal a moment to arrive.
         std::thread::sleep(Duration::from_millis(200));
         assert!(
