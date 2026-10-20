@@ -1092,21 +1092,23 @@ impl JsEngine {
         caller_scope::set_entry_scope(entry_pkg_scope.clone());
 
         let code = transpiler::replace_import_meta(&code);
+        // A CommonJS entry is compiled as a module (see below): a shebang or a
+        // BOM are only valid at the beginning of a script.
+        let code = if is_esm {
+            code
+        } else {
+            prepare_cjs_source(&code)
+        };
 
         // CommonJS entry point: Node compiles the entry file as a *module* —
-        // the file body is the body of
-        // `(function (exports, require, module, __filename, __dirname) { … })`.
+        // the file body is the body of a function with the module's
+        // parameters (`exports, require, module, __filename, __dirname`).
         // Running it as a bare script leaks `var`/`const`/`let` into the global
         // scope, and a top-level `const` then shadows a global for *every*
         // dependency loaded afterwards (`const { setTimeout } = require('timers/promises')`
         // in `server.js` used to break `setTimeout` in every module it pulled in).
         // It also makes a top-level `return` a SyntaxError, which Node allows
         // in a CommonJS file. ES module entries keep the module semantics.
-        let code = if is_esm {
-            code
-        } else {
-            cjs_entry_wrapper(&code, &filename)
-        };
 
         {
             let context_global = self.context.clone().expect("engine not initialized");
@@ -1168,24 +1170,105 @@ impl JsEngine {
             let setup_src = v8::String::new(&scope, &setup).unwrap();
             let _ = v8::Script::compile(&scope, setup_src, None).and_then(|s| s.run(&scope));
 
+            // The module's arguments, read before the try/catch scope takes
+            // the scope: `this === module.exports`, as in Node.
+            let global = scope.get_current_context().global(&scope);
+            let module_key = v8::String::new(&scope, "__vvva_entry_module__").unwrap();
+            let module_value: v8::Local<v8::Value> = global
+                .get(&scope, module_key.into())
+                .unwrap_or_else(|| v8::undefined(&scope).into());
+            let module_object = module_value.to_object(&scope);
+            let exports_key = v8::String::new(&scope, "exports").unwrap();
+            let exports_value: v8::Local<v8::Value> = module_object
+                .as_ref()
+                .and_then(|m| m.get(&scope, exports_key.into()))
+                .unwrap_or_else(|| v8::undefined(&scope).into());
+            let require_key = v8::String::new(&scope, "require").unwrap();
+            let require_value: v8::Local<v8::Value> = global
+                .get(&scope, require_key.into())
+                .unwrap_or_else(|| v8::undefined(&scope).into());
+            let filename_value: v8::Local<v8::Value> =
+                v8::String::new(&scope, &filename).unwrap().into();
+            let dirname_value: v8::Local<v8::Value> =
+                v8::String::new(&scope, &dirname).unwrap().into();
+
             let code_src = v8::String::new(&scope, &code).unwrap();
             v8::tc_scope!(let try_catch, &mut scope);
-            let script = match v8::Script::compile(try_catch, code_src, None) {
-                Some(s) => s,
-                None => {
+            if is_esm {
+                let script = match v8::Script::compile(try_catch, code_src, None) {
+                    Some(s) => s,
+                    None => {
+                        let text = try_catch
+                            .exception()
+                            .map(|e| e.to_rust_string_lossy(try_catch))
+                            .unwrap_or_else(|| "unknown error".to_string());
+                        return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Parse));
+                    }
+                };
+                if script.run(try_catch).is_none() {
+                    let text = try_catch
+                        .exception()
+                        .map(|e| format_uncaught(try_catch, e))
+                        .unwrap_or_else(|| "unknown error".to_string());
+                    return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Runtime));
+                }
+            } else {
+                // The CommonJS module function, compiled the way Node compiles
+                // it: the file's own text is the body of a function with the
+                // module's parameters, and the script origin carries the file
+                // name. A stack trace then points at the file with the line
+                // and column of the source, and the frame is the module's
+                // (an anonymous function called on the module's exports, like
+                // in Node: `Object.<anonymous>`).
+                let params = ["exports", "require", "module", "__filename", "__dirname"];
+                let param_handles: Vec<v8::Local<v8::String>> = params
+                    .iter()
+                    .map(|p| v8::String::new(try_catch, p).unwrap())
+                    .collect();
+                let resource: v8::Local<v8::Value> =
+                    v8::String::new(try_catch, &filename).unwrap().into();
+                let origin = v8::ScriptOrigin::new(
+                    try_catch, resource, 0, 0, false, -1, None, false, false, false, None,
+                );
+                let mut source = v8::script_compiler::Source::new(code_src, Some(&origin));
+                let compiled = v8::script_compiler::compile_function(
+                    try_catch,
+                    &mut source,
+                    &param_handles,
+                    &[],
+                    v8::script_compiler::CompileOptions::EagerCompile,
+                    v8::script_compiler::NoCacheReason::NoReason,
+                );
+                let Some(compiled) = compiled else {
                     let text = try_catch
                         .exception()
                         .map(|e| e.to_rust_string_lossy(try_catch))
                         .unwrap_or_else(|| "unknown error".to_string());
                     return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Parse));
+                };
+                let args = [
+                    exports_value,
+                    require_value,
+                    module_value,
+                    filename_value,
+                    dirname_value,
+                ];
+                if compiled.call(try_catch, exports_value, &args).is_none() {
+                    let text = try_catch
+                        .exception()
+                        .map(|e| format_uncaught(try_catch, e))
+                        .unwrap_or_else(|| "unknown error".to_string());
+                    return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Runtime));
                 }
-            };
-            if script.run(try_catch).is_none() {
-                let text = try_catch
-                    .exception()
-                    .map(|e| e.to_rust_string_lossy(try_catch))
-                    .unwrap_or_else(|| "unknown error".to_string());
-                return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Runtime));
+                // The module is loaded now, as in Node.
+                if let Some(module_object) = &module_object {
+                    let loaded_key = v8::String::new(try_catch, "loaded").unwrap();
+                    let _ = module_object.set(
+                        try_catch,
+                        loaded_key.into(),
+                        v8::Boolean::new(try_catch, true).into(),
+                    );
+                }
             }
         }
 
@@ -1491,27 +1574,70 @@ fn has_dynamic_import(line: &str) -> bool {
 /// with `this === module.exports`. The prefix is prepended to the *first line*
 /// of the body (as Node does) so the line numbers of the original file survive
 /// in stack traces.
-fn cjs_entry_wrapper(code: &str, filename: &str) -> String {
-    // A UTF-8 BOM is only valid at the very beginning of a file, and the
-    // wrapper puts the body inside a function: drop it (Node's `stripBOM`).
+/// The report of an uncaught exception, in Node's shape: the file and the
+/// line, the line of code and the caret under it, then the error and its
+/// stack.
+///
+/// ```
+/// /app/server.js:12
+/// throw new Error('boom');
+/// ^
+///
+/// Error: boom
+///     at Object.<anonymous> (/app/server.js:12:7)
+/// ```
+fn format_uncaught(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
+    let text = exception.to_rust_string_lossy(scope);
+    let message = v8::Exception::create_message(scope, exception);
+    let mut out = String::new();
+    if let Some(resource) = message.get_script_resource_name(scope) {
+        let resource = resource.to_rust_string_lossy(scope);
+        if let Some(line) = message.get_line_number(scope) {
+            let column = message.get_start_column();
+            out.push_str(&format!("{resource}:{line}\n"));
+            if let Some(source_line) = message.get_source_line(scope) {
+                let source_line = source_line.to_rust_string_lossy(scope);
+                out.push_str(&source_line);
+                out.push('\n');
+                let caret: String = source_line
+                    .chars()
+                    .take(column)
+                    .map(|c| if c == '\t' { '\t' } else { ' ' })
+                    .collect();
+                out.push_str(&caret);
+                out.push_str("^\n");
+            }
+            out.push('\n');
+        }
+    }
+    out.push_str(&text);
+    // The stack, like Node: the error's own `stack` (3va builds it in
+    // `Error.prepareStackTrace`, with the file and the position of every
+    // frame). It already starts with the message, so it replaces it.
+    if let Some(object) = exception.to_object(scope) {
+        let key = v8::String::new(scope, "stack").unwrap();
+        if let Some(stack) = object.get(scope, key.into()) {
+            let stack = stack.to_rust_string_lossy(scope);
+            if !stack.is_empty() {
+                out.truncate(out.len() - text.len());
+                out.push_str(&stack);
+            }
+        }
+    }
+    out
+}
+
+/// Prepare a CommonJS source for the module wrapper: V8 only accepts `#!`
+/// at the very beginning of a *script* and a UTF-8 BOM only at the very
+/// beginning of a file, and the body of a module is neither. Node does the
+/// same (`stripShebang`, `stripBOM`); the shebang becomes a comment, so the
+/// line numbers do not shift.
+fn prepare_cjs_source(code: &str) -> String {
     let code = code.strip_prefix('\u{feff}').unwrap_or(code);
-    // V8 only accepts `#!` at the very beginning of a script and the wrapper
-    // puts the body inside a function: turn the shebang into a comment, the
-    // way Node's `stripShebang` does, so the line count does not shift.
-    let body = match code.strip_prefix("#!") {
+    match code.strip_prefix("#!") {
         Some(rest) => format!("//{}", rest),
         None => code.to_string(),
-    };
-    let src = filename.replace('\\', "\\\\").replace('\'', "\\'");
-    format!(
-        "(function(){{var __m=globalThis.__vvva_entry_module__;\
-         var __fn=function (exports, require, module, __filename, __dirname) {{ {body}\n}};\
-         var __exp=(__m&&__m.exports)||globalThis.exports||{{}};\
-         var __mod=__m||globalThis.module||{{exports:__exp}};\
-         __fn.call(__exp,__exp,globalThis.require,__mod,\
-                  globalThis.__filename,globalThis.__dirname);\
-         if(__m)__m.loaded=true;}})();\n//# sourceURL={src}"
-    )
+    }
 }
 
 /// The `module.paths` of the entry module: the `node_modules` directories Node

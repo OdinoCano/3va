@@ -18,6 +18,25 @@ static PENDING_DEPRECATION: AtomicBool = AtomicBool::new(false);
 static ZERO_FILL_BUFFERS: AtomicBool = AtomicBool::new(false);
 static INSECURE_HTTP_PARSER: AtomicBool = AtomicBool::new(false);
 static EXPOSE_GC: AtomicBool = AtomicBool::new(false);
+static TEST_REPORTER: OnceLock<Mutex<String>> = OnceLock::new();
+
+/// The reporter `node:test` uses (`--test-reporter`): `spec` (Node's default)
+/// or `tap`.
+pub fn set_test_reporter(reporter: String) {
+    let slot = TEST_REPORTER.get_or_init(|| Mutex::new("spec".to_string()));
+    if let Ok(mut value) = slot.lock() {
+        *value = reporter;
+    }
+}
+
+/// The reporter `node:test` uses.
+pub fn test_reporter() -> String {
+    TEST_REPORTER
+        .get_or_init(|| Mutex::new("spec".to_string()))
+        .lock()
+        .map(|v| v.clone())
+        .unwrap_or_else(|_| "spec".to_string())
+}
 
 /// The runtime flags as they were written on the command line, in order.
 /// Node exposes them as `process.execArgv`, and code (Node's own test suite
@@ -102,11 +121,12 @@ pub fn js_flags_literal() -> String {
     format!(
         "{{ noWarnings: {no_warnings}, pendingDeprecation: {pending_deprecation}, \
            zeroFillBuffers: {zero_fill_buffers}, insecureHttpParser: {insecure_http_parser}, \
-           execArgv: [{argv}] }}",
+           testReporter: '{test_reporter}', execArgv: [{argv}] }}",
         no_warnings = no_warnings(),
         pending_deprecation = pending_deprecation(),
         zero_fill_buffers = zero_fill_buffers(),
         insecure_http_parser = insecure_http_parser(),
+        test_reporter = test_reporter().replace('\\', "\\\\").replace('\'', "\\'"),
         argv = argv,
     )
 }

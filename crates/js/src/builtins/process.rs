@@ -1385,16 +1385,56 @@ pub fn inject_process(
 
             // process.emitWarning — used by Node.js built-ins and drivers (e.g. MongoDB)
             var _warnListeners = [];
-            process.emitWarning = function(message, options) {
-                // `--no-warnings` silences the warning *output*, not the event:
-                // the `warning` event is delivered either way, like in Node.
-                // 3va prints no warnings by default, so the flag only keeps
-                // stderr clean.
-                var code = (options && typeof options === 'object') ? options.code : options;
-                var w = new Error(typeof message === 'string' ? message : String(message));
-                w.name = 'Warning';
+            process.emitWarning = function(message, options, codeArg) {
+                // Node's signature is `emitWarning(warning[, type | { type, code,
+                // detail }])`: a *string* second argument is the type of the
+                // warning, not its code. `emitWarning('x', 'DeprecationWarning')`
+                // is a warning of type `DeprecationWarning` and without code.
+                var isObject = options && typeof options === 'object';
+                var type = 'Warning';
+                var code;
+                if (isObject) {
+                    if (options.type) type = options.type;
+                    if (options.code) code = options.code;
+                } else if (typeof options === 'string') {
+                    type = options;
+                }
+                if (codeArg) code = codeArg;
+                var w = (message instanceof Error)
+                    ? message
+                    : new Error(typeof message === 'string' ? message : String(message));
+                w.name = type;
                 if (code) w.code = code;
-                if (typeof process.emit === 'function') process.emit('warning', w);
+                if (isObject && options.detail) w.detail = options.detail;
+                // Node prints the warning on stderr — `(node:PID) [CODE] Name:
+                // message` — and delivers the 'warning' event in the next tick.
+                // `--no-warnings` silences the printing, not the event.
+                if (!(globalThis.__node_flags__ && globalThis.__node_flags__.noWarnings)) {
+                    var release = process.release || {};
+                    var prefix = '(' + (release.name || 'node') + ':' + process.pid + ') ';
+                    if (code) prefix += '[' + code + '] ';
+                    prefix += w.name + ': ' + w.message;
+                    try {
+                        var line = prefix + '\n';
+                        // Node says where the deprecation comes from when the
+                        // warning is traced.
+                        if (w.name === 'DeprecationWarning') {
+                            line += '(Use `node --trace-deprecation ...` to show where the warning was created)\n';
+                        }
+                        if (process.stderr && typeof process.stderr.write === 'function') {
+                            process.stderr.write(line);
+                        } else if (typeof console !== 'undefined' && console.error) {
+                            console.error(prefix);
+                        }
+                    } catch (e) { /* a warning must never break the program */ }
+                }
+                if (typeof process.nextTick === 'function') {
+                    process.nextTick(function () {
+                        if (typeof process.emit === 'function') process.emit('warning', w);
+                    });
+                } else if (typeof process.emit === 'function') {
+                    process.emit('warning', w);
+                }
                 return w;
             };
 

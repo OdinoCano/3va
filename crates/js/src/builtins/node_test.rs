@@ -29,6 +29,19 @@ const NODE_TEST_JS: &str = r##"
     // The shared argument validators (Node's messages), installed next to
     // this module by the builtins bootstrap.
     var validators = globalThis.__validators || {};
+    // Node's default reporter is `spec` (`✔ name (0.39ms)`); `--test-reporter=tap`
+    // asks for TAP.
+    var reporter = (globalThis.__node_flags__ && globalThis.__node_flags__.testReporter) || 'spec';
+    var startedAt = 0;
+    var suiteCount = 0;
+
+    // Node prints the durations with microsecond precision.
+    function now() {
+        if (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') {
+            return performance.now();
+        }
+        return Date.now();
+    }
 
     // ── TAP output ───────────────────────────────────────────────────────────
     var outLines = [];
@@ -230,6 +243,7 @@ const NODE_TEST_JS: &str = r##"
         if (typeof name !== 'string') name = String(name);
         var suite = new Suite(name, currentSuite, options);
         if (options.only) hasOnly = true;
+        suiteCount += 1;
         currentSuite.children.push({ kind: 'suite', suite: suite });
         var previous = currentSuite;
         currentSuite = suite;
@@ -281,19 +295,38 @@ const NODE_TEST_JS: &str = r##"
         });
     }
 
-    function reportResult(number, name, failed, error) {
+    function reportResult(number, name, failed, error, durationMs) {
+        if (reporter === 'tap') {
+            if (failed) {
+                stats.fail += 1;
+                write('not ok ' + number + ' - ' + name);
+                write('  ---');
+                write('  error:');
+                write('    name: ' + ((error && error.name) || 'Error'));
+                write('    message: ' + ((error && error.message) || String(error)));
+                if (error && error.code) write('    code: ' + error.code);
+                write('  ...');
+            } else {
+                stats.pass += 1;
+                write('ok ' + number + ' - ' + name);
+            }
+            return;
+        }
+        // The `spec` reporter, the default in Node 24.
+        var ms = (typeof durationMs === 'number' ? durationMs : 0).toFixed(6);
         if (failed) {
             stats.fail += 1;
-            write('not ok ' + number + ' - ' + name);
-            write('  ---');
-            write('  error:');
-            write('    name: ' + ((error && error.name) || 'Error'));
-            write('    message: ' + ((error && error.message) || String(error)));
-            if (error && error.code) write('    code: ' + error.code);
-            write('  ...');
+            write('✖ ' + name + ' (' + ms + 'ms)');
+            if (error) {
+                var text = error.stack ? String(error.stack) : (error.name + ': ' + error.message);
+                var lines = text.split('\n');
+                for (var i = 0; i < lines.length; i++) {
+                    write('  ' + lines[i]);
+                }
+            }
         } else {
             stats.pass += 1;
-            write('ok ' + number + ' - ' + name);
+            write('✔ ' + name + ' (' + ms + 'ms)');
         }
     }
 
@@ -355,20 +388,29 @@ const NODE_TEST_JS: &str = r##"
             var number = (testNumber += 1);
             if (options.skip) {
                 stats.skip += 1;
-                write('ok ' + number + ' - ' + name + ' # SKIP');
+                if (reporter === 'tap') {
+                    write('ok ' + number + ' - ' + name + ' # SKIP');
+                } else {
+                    write('﹣ ' + name + ' (SKIP)');
+                }
                 return Promise.resolve(makeContext(name, suite, ancestors));
             }
             if (options.todo) {
                 stats.todo += 1;
-                write('ok ' + number + ' - ' + name + ' # TODO');
+                if (reporter === 'tap') {
+                    write('ok ' + number + ' - ' + name + ' # TODO');
+                } else {
+                    write('✔ ' + name + ' (TODO)');
+                }
                 return Promise.resolve(makeContext(name, suite, ancestors));
             }
-            write('# Subtest: ' + name);
+            if (reporter === 'tap') write('# Subtest: ' + name);
             var restores = [];
             var subCtx = makeContext(name, suite, ancestors);
             subCtx.mock = createMockTracker(restores);
             var failed = false;
             var error = null;
+            var startedAt = now();
             return runEachHooks('beforeEach', ancestors, subCtx)
                 .then(function () { return invoke(fn, subCtx); })
                 .then(function () { return runEachHooks('afterEach', ancestors, subCtx); })
@@ -380,16 +422,24 @@ const NODE_TEST_JS: &str = r##"
                     }
                     if (failed && error && error.code === 'ERR_TEST_SKIP') {
                         stats.skip += 1;
-                        write('ok ' + number + ' - ' + name + ' # SKIP');
+                        if (reporter === 'tap') {
+                            write('ok ' + number + ' - ' + name + ' # SKIP');
+                        } else {
+                            write('﹣ ' + name + ' (SKIP)');
+                        }
                         return;
                     }
                     if (failed && error && error.code === 'ERR_TEST_TODO') {
                         stats.todo += 1;
-                        write('ok ' + number + ' - ' + name + ' # TODO');
+                        if (reporter === 'tap') {
+                            write('ok ' + number + ' - ' + name + ' # TODO');
+                        } else {
+                            write('✔ ' + name + ' (TODO)');
+                        }
                         return;
                     }
                     if (failed) ctx.__failed = true;
-                    reportResult(number, name, failed, error);
+                    reportResult(number, name, failed, error, now() - startedAt);
                 })
                 .then(function () { return subCtx; });
         };
@@ -407,23 +457,32 @@ const NODE_TEST_JS: &str = r##"
         }
         if ((hasOnly && !options.only) || skip) {
             stats.skip += 1;
-            write('ok ' + (testNumber += 1) + ' - ' + node.name + ' # SKIP');
-            return Promise.resolve();
+            if (reporter === 'tap') {
+                write('ok ' + (testNumber += 1) + ' - ' + node.name + ' # SKIP');
+            } else {
+                write('﹣ ' + node.name + ' (SKIP)');
+            }
+            return Promise.resolve(false);
         }
         if (todo) {
             stats.todo += 1;
-            write('ok ' + (testNumber += 1) + ' - ' + node.name + ' # TODO');
-            return Promise.resolve();
+            if (reporter === 'tap') {
+                write('ok ' + (testNumber += 1) + ' - ' + node.name + ' # TODO');
+            } else {
+                write('✔ ' + node.name + ' (TODO)');
+            }
+            return Promise.resolve(false);
         }
 
         var number = (testNumber += 1);
-        write('# Subtest: ' + node.name);
+        if (reporter === 'tap') write('# Subtest: ' + node.name);
         var restores = [];
         var chain = ancestors.concat([suite]);
         var ctx = makeContext(node.name, suite, chain);
         ctx.mock = createMockTracker(restores);
         var failed = false;
         var error = null;
+        var startedAt = now();
 
         return runEachHooks('beforeEach', chain, ctx)
             .then(function () { return invoke(node.fn, ctx); })
@@ -436,25 +495,44 @@ const NODE_TEST_JS: &str = r##"
                 }
                 if (failed && error && error.code === 'ERR_TEST_SKIP') {
                     stats.skip += 1;
-                    write('ok ' + number + ' - ' + node.name + ' # SKIP');
+                    if (reporter === 'tap') {
+                        write('ok ' + number + ' - ' + node.name + ' # SKIP');
+                    } else {
+                        write('﹣ ' + node.name + ' (SKIP)');
+                    }
                     return;
                 }
                 if (failed && error && error.code === 'ERR_TEST_TODO') {
                     stats.todo += 1;
-                    write('ok ' + number + ' - ' + node.name + ' # TODO');
+                    if (reporter === 'tap') {
+                        write('ok ' + number + ' - ' + node.name + ' # TODO');
+                    } else {
+                        write('✔ ' + node.name + ' (TODO)');
+                    }
                     return;
                 }
-                reportResult(number, node.name, failed || ctx.__failed, error);
+                reportResult(number, node.name, failed || ctx.__failed, error, now() - startedAt);
+                return failed || ctx.__failed;
             });
     }
 
     function runSuite(suite, ancestors) {
         var previousIndent = currentIndent;
-        currentIndent = previousIndent + '    ';
         var chain = suite.children.slice();
         var index = 0;
         var suiteName = suite.name || 'suite';
         var own = ancestors.concat([suite]);
+        var suiteStartedAt = now();
+        var suiteFailed = false;
+        // The header and the footer of a suite are written at the level of
+        // its parent; its children are indented (Node's `spec` reporter).
+        if (reporter !== 'tap' && suite.name) {
+            write('▶ ' + suite.name);
+        }
+        // Node's `spec` reporter indents by two spaces, TAP by four. The root
+        // suite has no name and does not indent its children.
+        currentIndent = previousIndent +
+            (suite.name ? (reporter === 'tap' ? '    ' : '  ') : '');
 
         function step() {
             if (index >= chain.length) {
@@ -462,45 +540,89 @@ const NODE_TEST_JS: &str = r##"
                 return runHookList(suite.hooks.after,
                                    makeContext(suiteName, suite, own))
                     .catch(function (e) {
+                        suiteFailed = true;
                         stats.fail += 1;
-                        write('not ok ' + (testNumber += 1) + ' - ' + suiteName + ' (after hook)');
-                        write('  error: ' + ((e && e.message) || String(e)));
+                        if (reporter === 'tap') {
+                            write('not ok ' + (testNumber += 1) + ' - ' + suiteName + ' (after hook)');
+                            write('  error: ' + ((e && e.message) || String(e)));
+                        } else {
+                            write('✖ ' + suiteName + ' (after hook)');
+                        }
+                    })
+                    .then(function () {
+                        currentIndent = previousIndent;
+                        if (reporter !== 'tap' && suite.name) {
+                            write((suiteFailed ? '✖ ' : '✔ ') + suite.name +
+                                  ' (' + (now() - suiteStartedAt).toFixed(6) + 'ms)');
+                        }
                     });
             }
             var child = chain[index];
             index += 1;
             if (child.kind === 'suite') {
-                return runSuite(child.suite, ancestors.concat([suite])).then(step);
+                return runSuite(child.suite, ancestors.concat([suite]))
+                    .then(function (failed) { if (failed) suiteFailed = true; return step(); },
+                          function (e) { throw e; });
             }
-            return runTestNode(child, suite, ancestors).then(step);
+            return runTestNode(child, suite, ancestors)
+                .then(function (failed) { if (failed) suiteFailed = true; return step(); },
+                      function (e) { throw e; });
         }
 
         // The suite's own `before` hooks run once, when it starts.
         return runHookList(suite.hooks.before, makeContext(suiteName, suite, own))
             .catch(function (e) {
+                suiteFailed = true;
                 stats.fail += 1;
-                write('not ok ' + (testNumber += 1) + ' - ' + suiteName + ' (before hook)');
-                write('  error: ' + ((e && e.message) || String(e)));
+                if (reporter === 'tap') {
+                    write('not ok ' + (testNumber += 1) + ' - ' + suiteName + ' (before hook)');
+                    write('  error: ' + ((e && e.message) || String(e)));
+                } else {
+                    write('✖ ' + suiteName + ' (before hook)');
+                }
             })
             .then(step)
-            .then(function () { currentIndent = previousIndent; },
-                  function (e) { currentIndent = previousIndent; throw e; });
+            .then(function (failed) {
+                currentIndent = previousIndent;
+                return suiteFailed || failed;
+            }, function (e) { currentIndent = previousIndent; throw e; });
     }
 
     function runAll() {
-        write('TAP version 13');
+        // The reporter is read when the run starts, not when the module is
+        // installed: the startup snapshot carries the module's code, but the
+        // flag comes from the command line.
+        reporter = (globalThis.__node_flags__ && globalThis.__node_flags__.testReporter) || 'spec';
+        startedAt = now();
+        if (reporter === 'tap') write('TAP version 13');
         return runSuite(rootSuite, [])
             .catch(function (e) {
                 stats.fail += 1;
-                write('not ok ' + (testNumber += 1) + ' - internal error');
-                write('  ' + errText(e));
+                if (reporter === 'tap') {
+                    write('not ok ' + (testNumber += 1) + ' - internal error');
+                    write('  ' + errText(e));
+                } else {
+                    write('✖ internal error (' + errText(e) + ')');
+                }
             })
             .then(function () {
-                write('1..' + testNumber);
-                write('# pass ' + stats.pass);
-                write('# fail ' + stats.fail);
-                write('# skipped ' + stats.skip);
-                write('# todo ' + stats.todo);
+                if (reporter === 'tap') {
+                    write('1..' + testNumber);
+                    write('# pass ' + stats.pass);
+                    write('# fail ' + stats.fail);
+                    write('# skipped ' + stats.skip);
+                    write('# todo ' + stats.todo);
+                } else {
+                    // Node's `spec` summary.
+                    write('ℹ tests ' + (stats.pass + stats.fail + stats.skip + stats.todo));
+                    write('ℹ suites ' + suiteCount);
+                    write('ℹ pass ' + stats.pass);
+                    write('ℹ fail ' + stats.fail);
+                    write('ℹ cancelled 0');
+                    write('ℹ skipped ' + stats.skip);
+                    write('ℹ todo ' + stats.todo);
+                    write('ℹ duration_ms ' + (now() - startedAt).toFixed(6));
+                }
                 flush();
                 if (stats.fail > 0 && typeof process !== 'undefined') {
                     process.exitCode = 1;

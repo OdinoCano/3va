@@ -251,12 +251,87 @@ pub fn inject_require(
                         }
                     }
                 } catch(e) {}
-                lines.push('    at ' + (frame.getFunctionName() || '<anonymous>') + ' (' + fileName + ':' + line + ':' + col + ')');
+                // V8 knows the receiver's type of a frame; Node's own stack
+                // format uses it for the frames without a name
+                // (`Object.<anonymous>`, the frame of a CommonJS module).
+                var name = frame.getFunctionName();
+                if (!name) {
+                    var typeName = (typeof frame.getTypeName === 'function') ? frame.getTypeName() : '';
+                    name = typeName ? (typeName + '.<anonymous>') : '<anonymous>';
+                }
+                lines.push('    at ' + name + ' (' + fileName + ':' + line + ':' + col + ')');
             }
             return lines.join('\n');
         };
     "#;
     crate::builtins::code_cache::bootstrap_js(scope, "require-intro", source_code)?;
+
+    // __vvvaCompileModule(source, filename) — compile a CommonJS module the
+    // way Node does: the file's own text is the body of a function with the
+    // module's parameters, and the script origin carries the file name. A
+    // stack trace then points at the file with the line and column of the
+    // source, and the frame of the module is `Object.<anonymous>`, as in Node.
+    let compile_module_fn = Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let source = args.get(0).to_rust_string_lossy(scope);
+            let filename = args.get(1).to_rust_string_lossy(scope);
+            let params_csv = args.get(2).to_rust_string_lossy(scope);
+            let script_id = args.get(3).int32_value(scope).unwrap_or(-1);
+            let param_handles: Vec<v8::Local<v8::String>> = params_csv
+                .split(',')
+                .filter(|p| !p.is_empty())
+                .map(|p| v8::String::new(scope, p).unwrap())
+                .collect();
+            let resource: v8::Local<v8::Value> = v8::String::new(scope, &filename).unwrap().into();
+            let origin = v8::ScriptOrigin::new(
+                scope, resource, 0, 0, false, script_id, None, false, false, false, None,
+            );
+            let source_str = v8::String::new(scope, &source).unwrap();
+            let mut source_obj = v8::script_compiler::Source::new(source_str, Some(&origin));
+            if let Some(f) = v8::script_compiler::compile_function(
+                scope,
+                &mut source_obj,
+                &param_handles,
+                &[],
+                v8::script_compiler::CompileOptions::EagerCompile,
+                v8::script_compiler::NoCacheReason::NoReason,
+            ) {
+                rv.set(f.into());
+            }
+            // When the compilation fails, the error is pending in the isolate:
+            // leaving the return value unset propagates it to the caller.
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__vvvaCompileModule").unwrap().into(),
+        compile_module_fn.into(),
+    );
+
+    // __vvvaTranspileJs(source) — the fallback for a `.js` file that is not
+    // plain JavaScript (JSX, Flow, …): the loader compiles the file as it is
+    // first, so a stack trace points at the file's own lines, and only
+    // transpiles it when V8 cannot parse it.
+    let transpile_js_fn = Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let source = args.get(0).to_rust_string_lossy(scope);
+            let transpiled = crate::transpiler::transpile_js(&source);
+            rv.set(V8String::new(scope, &transpiled).unwrap().into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__vvvaTranspileJs").unwrap().into(),
+        transpile_js_fn.into(),
+    );
 
     let read_file_fn = Function::new(
         scope,
@@ -350,7 +425,13 @@ pub fn inject_require(
                     {
                         crate::transpiler::transpile(&source)
                     } else {
-                        crate::transpiler::transpile_js(&source)
+                        // A plain JavaScript file is used as it is: the
+                        // transpiler re-prints the code (and reformats it), and
+                        // then the line and column of a stack trace would not
+                        // be the ones of the file. If the file turns out not to
+                        // be plain JavaScript (JSX, Flow, …), the loader
+                        // transpiles it and compiles that instead.
+                        source
                     };
                     if _zod_core_debug {
                         let has_bare = transpiled.lines().any(|l| l.trim().starts_with("export "));
@@ -6818,7 +6899,22 @@ __httpSetHandler(self._id, function() {
                     ? 'file:///' + resolved.replace(/\\/g, '/')
                     : 'file://' + resolved;
                 var __vvva_import_meta__ = {url: ownMetaUrl, env: globalThis.__vvva_meta_env__, hot: undefined, glob: globalThis.__vvva_meta_glob__, resolve: globalThis.__vvva_meta_resolve__, require: localRequire, dirname: moduleDir, filename: resolved, main: false};
-                var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', '__importAsync', '__vvva_import_meta__', source + '\n//# sourceURL=' + resolved);
+                // Compiled natively, with the file's name in the script origin:
+                // a stack trace then points at the file with the right line
+                // and column, as in Node. A file that is not plain JavaScript
+                // (JSX, Flow, …) is transpiled and compiled again.
+                var fn;
+                try {
+                    fn = globalThis.__vvvaCompileModule(
+                        source, resolved,
+                        'exports,module,require,__filename,__dirname,__vvva_meta_url__,__importAsync,__vvva_import_meta__',
+                        -1);
+                } catch (e) {
+                    fn = globalThis.__vvvaCompileModule(
+                        globalThis.__vvvaTranspileJs(source), resolved,
+                        'exports,module,require,__filename,__dirname,__vvva_meta_url__,__importAsync,__vvva_import_meta__',
+                        -1);
+                }
                 // ES modules: evaluate static dependencies first (like ESM linking). If one of
                 // them is still waiting on a top-level await, this module's body must not run
                 // yet: defer it, and expose a promise (mod.__tla) that importers wait on.

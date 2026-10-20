@@ -3391,6 +3391,11 @@ enum Commands {
         #[arg(long = "tls-min-v1.0")]
         tls_min_v1_0: bool,
 
+        /// The reporter `node:test` uses (Node's `--test-reporter`): `spec`
+        /// (the default in Node) or `tap`.
+        #[arg(long = "test-reporter", default_value = "spec")]
+        test_reporter: String,
+
         /// Print each denied permission the moment it is refused, showing what
         /// the script was trying to do and the flag that would allow it.
         /// Without this, denials are collected and reported once at the end.
@@ -4460,6 +4465,7 @@ async fn main() -> anyhow::Result<()> {
             zero_fill_buffers,
             insecure_http_parser,
             tls_min_v1_0,
+            test_reporter,
             trace_denials,
             inspect,
             audit_log,
@@ -4490,6 +4496,7 @@ async fn main() -> anyhow::Result<()> {
             vvva_js::node_flags::set_pending_deprecation(*pending_deprecation);
             vvva_js::node_flags::set_zero_fill_buffers(*zero_fill_buffers);
             vvva_js::node_flags::set_insecure_http_parser(*insecure_http_parser);
+            vvva_js::node_flags::set_test_reporter(test_reporter.clone());
             if *expose_gc {
                 vvva_js::node_flags::set_expose_gc(true);
             }
