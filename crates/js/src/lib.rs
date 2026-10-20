@@ -1595,7 +1595,7 @@ fn has_dynamic_import(line: &str) -> bool {
 /// line, the line of code and the caret under it, then the error and its
 /// stack.
 ///
-/// ```ignore
+/// ```text
 /// /app/server.js:12
 /// throw new Error('boom');
 /// ^
