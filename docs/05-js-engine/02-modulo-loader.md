@@ -160,6 +160,14 @@ A `.js` file is not re-printed by the transpiler when it is loaded (only when
 V8 cannot parse it, as with JSX or Flow), so the positions of a trace are the
 positions of the file.
 
+A file that does have to be transpiled — an ES module (`import`/`export`), JSX,
+TypeScript, or a `.js` that the parser rejects — is re-printed, and 3va does not
+generate a source map for that pass: the position of a frame inside such a
+module is the position in the transpiled code (a `throw` that is on line 3 of
+the file can be line 5 of the trace, and its line is re-quoted), unlike Node,
+which runs an ES module natively. The entry point and plain CommonJS modules are
+exact.
+
 ---
 
 ## 2.6 `require()` — Inline ESM→CJS Conversion

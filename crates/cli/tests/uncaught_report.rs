@@ -74,6 +74,30 @@ fn an_uncaught_error_prints_the_file_the_line_the_code_and_the_caret() {
 }
 
 #[test]
+fn a_required_plain_module_keeps_its_own_line_and_text() {
+    let dir = tempfile::tempdir().unwrap();
+    // Line 1, column 40: the loader must compile the file as it is, not the
+    // transpiler's re-print of it (which would say line 3, column 8).
+    let lib = "                                       throw new Error('kaput');\n";
+    write_script(dir.path(), "lib.js", lib);
+    let script = write_script(dir.path(), "main.js", "require('./lib.js');\n");
+    let (_stdout, stderr, code) = run(&script, &[]);
+    assert_ne!(code, 0, "un error sin capturar debe salir con código ≠ 0");
+    assert!(
+        stderr.contains("lib.js:1"),
+        "el aviso debe dar la línea del archivo: {stderr}"
+    );
+    assert!(
+        stderr.contains("throw new Error('kaput');"),
+        "el aviso debe repetir la línea tal como está escrita: {stderr}"
+    );
+    assert!(
+        stderr.contains("lib.js:1:46"),
+        "la traza debe dar la línea y la columna del archivo: {stderr}"
+    );
+}
+
+#[test]
 fn emit_warning_prints_on_stderr_with_the_type_of_the_warning() {
     let dir = tempfile::tempdir().unwrap();
     let script = write_script(

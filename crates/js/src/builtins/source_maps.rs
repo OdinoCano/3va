@@ -65,22 +65,15 @@ pub fn inject_source_maps(scope: &mut ContextScope<HandleScope>) -> anyhow::Resu
                 }
             };
 
-            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(map_json) else {
-                rv.set(v8::null(scope).into());
-                return;
-            };
-            let first_source = parsed
-                .as_object()
-                .and_then(|obj| obj.get("sources"))
-                .and_then(|s| s.as_array())
-                .and_then(|sources| sources.first())
-                .and_then(|v| v.as_str());
-
-            match first_source {
-                Some(first_source) => {
+            // Decode the mappings, as Node does with a source map: the
+            // position of the generated code is translated to the line and
+            // column the user wrote. Returning the first source with the
+            // input position only renamed the file.
+            match crate::transpiler::apply_source_map_json(map_json, &path, line, col) {
+                Some((source, line, col)) => {
                     let result = serde_json::json!({
-                        "source": first_source,
-                        "line": line.saturating_sub(1),
+                        "source": source,
+                        "line": line,
                         "col": col
                     });
                     rv.set(V8String::new(scope, &result.to_string()).unwrap().into());

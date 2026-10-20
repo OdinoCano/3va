@@ -1611,14 +1611,40 @@ fn format_uncaught(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) ->
         let resource = resource.to_rust_string_lossy(scope);
         if let Some(line) = message.get_line_number(scope) {
             let column = message.get_start_column();
-            out.push_str(&format!("{resource}:{line}\n"));
-            if let Some(source_line) = message.get_source_line(scope) {
-                let source_line = source_line.to_rust_string_lossy(scope);
+            // A transpiled module (an ES module, JSX, TypeScript) is compiled
+            // from a rewritten source: map the position back to the file the
+            // user wrote, so the report names its line and shows its text.
+            let mapped =
+                crate::transpiler::apply_source_map(&resource, line as u32, column as u32 + 1);
+            let (report_file, report_line, report_column, mapped) = match mapped {
+                Some((source, line, column)) => (source, line, column.saturating_sub(1), true),
+                None => (resource, line as u32, column as u32, false),
+            };
+            out.push_str(&format!("{report_file}:{report_line}\n"));
+            // The line of the file on disk, when the position is the one of
+            // the file. A transpiled module has no accurate map (its
+            // transformed source is re-printed), so V8's line is the honest
+            // one there.
+            let original_line = if mapped {
+                std::fs::read_to_string(&report_file).ok().and_then(|text| {
+                    text.lines()
+                        .nth(report_line.saturating_sub(1) as usize)
+                        .map(str::to_string)
+                })
+            } else {
+                None
+            };
+            let source_line = original_line.or_else(|| {
+                message
+                    .get_source_line(scope)
+                    .map(|line| line.to_rust_string_lossy(scope))
+            });
+            if let Some(source_line) = source_line {
                 out.push_str(&source_line);
                 out.push('\n');
                 let caret: String = source_line
                     .chars()
-                    .take(column)
+                    .take(report_column as usize)
                     .map(|c| if c == '\t' { '\t' } else { ' ' })
                     .collect();
                 out.push_str(&caret);
