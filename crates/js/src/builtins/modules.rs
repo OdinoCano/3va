@@ -4703,8 +4703,34 @@ pub fn inject_require(
             };
             httpServerResponse.prototype.hasHeader = function(name) { return Object.prototype.hasOwnProperty.call(this._headers, name); };
             httpServerResponse.prototype.getHeaders = function() { return this._headers; };
+            // Node's REASON_PHRASE (lib/internal/validators.js): a reason
+            // phrase may carry tab, printable ASCII and bytes 0x80-0xff, and
+            // nothing else. Anything with CR/LF (or another control byte)
+            // would split the response in two.
+            var __isValidReasonPhrase = /^[\t\x20-\x7e\x80-\xff]*$/;
+            var __validateReasonPhrase = function(reason) {
+                if (typeof reason === 'string' && reason.length > 0 && !__isValidReasonPhrase.test(reason)) {
+                    var re = new TypeError('Invalid character in statusMessage');
+                    re.code = 'ERR_INVALID_CHAR';
+                    throw re;
+                }
+            };
             httpServerResponse.prototype.writeHead = function(statusCode, statusMessage, headers) {
-                if (typeof statusMessage === 'object' && statusMessage !== null) { headers = statusMessage; statusMessage = undefined; }
+                // Node's signature: the second argument is the reason phrase
+                // only when it is a string; otherwise it is the headers
+                // argument (`writeHead(200, {..})`, `writeHead(200, ['a','b'])`).
+                if (typeof statusMessage !== 'string' && statusMessage !== undefined) {
+                    headers = statusMessage;
+                    statusMessage = undefined;
+                }
+                // Node records the status line before validating the headers:
+                // when a header is rejected, statusCode and statusMessage are
+                // already set and headersSent is still false.
+                this.statusCode = statusCode;
+                this.statusMessage = statusMessage === undefined
+                    ? (HTTP_STATUS_CODES[String(statusCode)] || '')
+                    : statusMessage;
+                __validateReasonPhrase(this.statusMessage);
                 // Node accepts three shapes for the headers: an object, a flat
                 // array of alternating names and values, and an array of
                 // [name, value] pairs.
@@ -4732,8 +4758,8 @@ pub fn inject_require(
                         }
                     }
                 }
-                // Validate before touching any state so a rejected header leaves
-                // the response untouched (same observable behaviour as Node).
+                // Validate the headers before recording any of them, so a
+                // rejected header leaves the header list untouched.
                 if (pairs) {
                     for (var q = 0; q < pairs.length; q++) {
                         __validateHeaderName(pairs[q][0]);
@@ -4746,8 +4772,6 @@ pub fn inject_require(
                         __validateHeaderValue(k, headers[k]);
                     }
                 }
-                this.statusCode = statusCode;
-                this.statusMessage = statusMessage || HTTP_STATUS_CODES[String(statusCode)] || '';
                 if (pairs) {
                     for (var p2 = 0; p2 < pairs.length; p2++) {
                         var lk = pairs[p2][0].toLowerCase();

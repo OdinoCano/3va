@@ -727,6 +727,79 @@ async fn write_head_rejects_crlf_in_headers() {
     assert_eq!(r, "ERR_INVALID_CHAR:false:200");
 }
 
+/// The reason phrase ends up on the status line: a CR/LF there splits the
+/// response (HTTP response splitting). Node rejects it with ERR_INVALID_CHAR.
+#[tokio::test]
+async fn write_head_rejects_crlf_in_status_message() {
+    let mut e = engine_with_net().await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            {setup}
+            try {{
+                res.writeHead(200, 'OK\r\nSet-Cookie: pwned=1');
+                'no-throw';
+            }} catch (err) {{
+                (err instanceof TypeError) + ':' + err.code + ':' + err.message + ':' + res.headersSent;
+            }}
+            "#,
+            setup = standalone_res_js()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        r,
+        "true:ERR_INVALID_CHAR:Invalid character in statusMessage:false"
+    );
+}
+
+/// `res.statusMessage` can also be assigned directly; the native writer is the
+/// last line of defence and refuses to put a CR/LF on the status line.
+#[tokio::test]
+async fn smuggled_status_message_caught_by_native_writer() {
+    let mut e = engine_with_net().await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            {setup}
+            res.statusMessage = 'OK\r\nX-Evil: 1';
+            try {{
+                res.end('x');
+                'no-throw';
+            }} catch (err) {{
+                err.code + ':' + err.message;
+            }}
+            "#,
+            setup = standalone_res_js()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "ERR_INVALID_CHAR:Invalid character in statusMessage");
+}
+
+/// Node's writeHead treats a non-string second argument as the headers object,
+/// and accepts a reason phrase with a tab (REASON_PHRASE).
+#[tokio::test]
+async fn write_head_reason_phrase_follows_node() {
+    let mut e = engine_with_net().await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            {setup}
+            res.writeHead(201, {{ 'X-A': 'b' }});
+            var a = res.statusCode + ':' + JSON.stringify(res.statusMessage);
+            var res2 = new http.ServerResponse(new http.IncomingMessage({{}}));
+            res2.writeHead(200, 'OK\tthere');
+            var b = JSON.stringify(res2.statusMessage);
+            a + '|' + b;
+            "#,
+            setup = standalone_res_js()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, r#"201:"Created"|"OK\tthere""#);
+}
+
 /// Valid headers keep working through both setHeader and writeHead.
 #[tokio::test]
 async fn valid_headers_still_accepted() {

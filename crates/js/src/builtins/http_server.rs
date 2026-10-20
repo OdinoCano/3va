@@ -782,6 +782,17 @@ fn is_valid_header_value(value: &str) -> bool {
         .all(|b| b == b'\t' || !(0x00..=0x1F).contains(&b) && b != 0x7F)
 }
 
+/// Reason-phrase validity, as Node's `REASON_PHRASE` (internal/validators):
+/// tab, printable ASCII and bytes >= 0x80. Defence in depth: the JS side
+/// validates `writeHead`, but `res.statusMessage` can also be assigned
+/// directly. An invalid phrase would end up on the status line and split the
+/// response (HTTP response splitting).
+fn is_valid_status_text(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (0x20..=0x7e).contains(&b) || b >= 0x80)
+}
+
 /// A request head (request line + headers), with the body framing left to be
 /// streamed separately by `pump_body`.
 #[derive(Debug)]
@@ -2517,6 +2528,15 @@ pub fn inject_http_server(
                 let status: u32 = status_arg.uint32_value(scope).unwrap_or(200);
                 let status_text_arg = args.get(2);
                 let status_text = status_text_arg.to_rust_string_lossy(scope);
+                if !is_valid_status_text(&status_text) {
+                    let err = js_type_error_with_code(
+                        scope,
+                        "ERR_INVALID_CHAR",
+                        "Invalid character in statusMessage",
+                    );
+                    scope.throw_exception(err);
+                    return;
+                }
                 let headers_json_arg = args.get(3);
                 let headers_json = headers_json_arg.to_rust_string_lossy(scope);
                 let body_arg = args.get(4);
@@ -2611,6 +2631,15 @@ pub fn inject_http_server(
                 let status: u32 = status_arg.uint32_value(scope).unwrap_or(200);
                 let status_text_arg = args.get(2);
                 let status_text = status_text_arg.to_rust_string_lossy(scope);
+                if !is_valid_status_text(&status_text) {
+                    let err = js_type_error_with_code(
+                        scope,
+                        "ERR_INVALID_CHAR",
+                        "Invalid character in statusMessage",
+                    );
+                    scope.throw_exception(err);
+                    return;
+                }
                 let headers_json_arg = args.get(3);
                 let headers_json = headers_json_arg.to_rust_string_lossy(scope);
                 let body_arg = args.get(4);
@@ -2722,6 +2751,15 @@ pub fn inject_http_server(
                 let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
                 let status = args.get(1).uint32_value(scope).unwrap_or(100);
                 let status_text = args.get(2).to_rust_string_lossy(scope);
+                if !is_valid_status_text(&status_text) {
+                    let err = js_type_error_with_code(
+                        scope,
+                        "ERR_INVALID_CHAR",
+                        "Invalid character in statusMessage",
+                    );
+                    scope.throw_exception(err);
+                    return;
+                }
                 let headers_json = args.get(3).to_rust_string_lossy(scope);
 
                 let extra = parse_extra_headers(&headers_json);
