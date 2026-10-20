@@ -6944,7 +6944,12 @@ __httpSetHandler(self._id, function() {
                 var esmDeps = __isEsm ? __esmTopRequires(source) : [];
                 if (esmDeps.length) {
                     __loadingStack.push(mod);
-                    try { esmDeps.forEach(function(d) { localRequire(d); }); } finally { __loadingStack.pop(); }
+                    try {
+                        var prevDepth = globalThis.__vvvaImportDepth || 0;
+                        globalThis.__vvvaImportDepth = prevDepth + 1;
+                        try { esmDeps.forEach(function(d) { localRequire(d); }); }
+                        finally { globalThis.__vvvaImportDepth = prevDepth; }
+                    } finally { __loadingStack.pop(); }
                 }
                 var runBody = function() {
                     __loadingStack.push(mod);
@@ -7040,7 +7045,13 @@ __httpSetHandler(self._id, function() {
         globalThis.__esmEntryPreload = function(specs) {
             var entry = {};
             __loadingStack.push(entry);
-            try { specs.forEach(function(sp) { __entryRequire(sp); }); } finally { __loadingStack.pop(); }
+            var prevDepth = globalThis.__vvvaImportDepth || 0;
+            globalThis.__vvvaImportDepth = prevDepth + 1;
+            try { specs.forEach(function(sp) { __entryRequire(sp); }); }
+            finally {
+                globalThis.__vvvaImportDepth = prevDepth;
+                __loadingStack.pop();
+            }
             if (entry.__deps && entry.__deps.length) {
                 return __RealPromise.all(entry.__deps.map(function(d) { return __waitTla(d); }));
             }
