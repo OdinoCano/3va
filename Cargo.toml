@@ -77,7 +77,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 inferno = { version = "0.12", default-features = false, features = ["nameattr"] }
 hickory-resolver = "0.26"
 socket2 = "0.6"
-russh = { version = "0.63", features = ["ring"] }
+russh = { version = "0.64", features = ["ring"] }
 russh-sftp = "2.3"
 
 
