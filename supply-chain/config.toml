@@ -13,6 +13,45 @@ url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
 [imports.mozilla]
 url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 
+[policy.inferno]
+audit-as-crates-io = false
+
+[policy.quick-xml]
+audit-as-crates-io = false
+
+[policy.vvva_bundler]
+audit-as-crates-io = false
+
+[policy.vvva_cli]
+audit-as-crates-io = false
+
+[policy.vvva_config]
+audit-as-crates-io = false
+
+[policy.vvva_core]
+audit-as-crates-io = false
+
+[policy.vvva_crypto]
+audit-as-crates-io = false
+
+[policy.vvva_firewall]
+audit-as-crates-io = false
+
+[policy.vvva_js]
+audit-as-crates-io = false
+
+[policy.vvva_permissions]
+audit-as-crates-io = false
+
+[policy.vvva_pm]
+audit-as-crates-io = false
+
+[policy.vvva_test]
+audit-as-crates-io = false
+
+[policy.vvva_wasm]
+audit-as-crates-io = false
+
 [[exemptions.addr2line]]
 version = "0.17.0"
 criteria = "safe-to-deploy"
@@ -1971,6 +2010,10 @@ criteria = "safe-to-deploy"
 version = "0.103.13"
 criteria = "safe-to-deploy"
 
+[[exemptions.rustls-webpki]]
+version = "0.103.16"
+criteria = "safe-to-deploy"
+
 [[exemptions.rustversion]]
 version = "1.0.23"
 criteria = "safe-to-deploy"
@@ -2577,6 +2620,10 @@ notes = "cargo update wasmparser 0.258.0 -> 0.261.0 (minor); diff 28 files, +277
 version = "36.0.18"
 criteria = "safe-to-deploy"
 
+[[exemptions.wasmtime-internal-asm-macros]]
+version = "36.0.19"
+criteria = "safe-to-deploy"
+
 [[exemptions.wast]]
 version = "261.0.0"
 criteria = "safe-to-deploy"
@@ -2602,6 +2649,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.webpki-roots]]
 version = "1.0.9"
+criteria = "safe-to-deploy"
+
+[[exemptions.webpki-roots]]
+version = "1.0.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.webrtc]]
