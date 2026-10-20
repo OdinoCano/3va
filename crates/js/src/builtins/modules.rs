@@ -6894,23 +6894,6 @@ __httpSetHandler(self._id, function() {
             // of the transpiled source — and of its source map.
             var __isEsm = source.indexOf('/*__3va_esm__*/') === 0;
             if (__isEsm) source = source.slice(16);
-            // Rewrite bare import() calls so they use our runtime's __importAsync.
-            // V8's new Function() doesn't support native dynamic import(), so any
-            // import( that wasn't already rewritten by the Rust transpiler (e.g. raw
-            // .cjs files) would throw "Not supported" at runtime.
-            source = source.replace(/(?<![a-zA-Z0-9_$\.])import\s*\(/g, function(match, offset, str) {
-                // Don't replace shorthand method definitions: { import(params) { ... } }
-                var rest = str.slice(offset + match.length);
-                var depth = 1, i = 0;
-                while (i < rest.length && depth > 0) {
-                    var c = rest[i];
-                    if (c === '(') depth++;
-                    else if (c === ')') depth--;
-                    i++;
-                }
-                if (depth === 0 && /^\s*\{/.test(rest.slice(i))) return match;
-                return '__importAsync(';
-            });
             try {
                 // A required file's own `import.meta.url` must be ITS path,
                 // not the entry script's — replace_import_meta() rewrites
