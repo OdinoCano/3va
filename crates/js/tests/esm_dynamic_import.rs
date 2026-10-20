@@ -6,8 +6,8 @@
 // delegates to the same `__importAsync`/`require()` path the transpiled ESM
 // route uses. Before this hook existed, `import()` in a script threw
 // `Error: Not supported` (V8 had no module loader to call). These fixtures are
-// plain `.js` (ESM syntax detected by content) because requiring a `.mjs`
-// still hits the intentional `ERR_REQUIRE_ESM` guard.
+// plain `.js` (ESM syntax detected by content) and `.mjs` (Node 22+ also lets
+// require() load those; a graph with top-level await still needs import()).
 //
 // Run: cargo test -p vvva_js --test esm_dynamic_import
 
@@ -43,6 +43,22 @@ async fn run(code: &str) -> String {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("classic-script import() never settled");
+}
+
+#[tokio::test]
+async fn import_from_classic_script_loads_mjs() {
+    let out = run("globalThis.__out = 'pending';\n\
+         import('./x.mjs').then(m => { globalThis.__out = m.value + ':' + m.default; });\n")
+    .await;
+    assert_eq!(out, "mjs:x");
+}
+
+#[tokio::test]
+async fn import_from_classic_script_waits_for_mjs_tla() {
+    let out = run("globalThis.__out = 'pending';\n\
+         import('./tla.mjs').then(m => { globalThis.__out = m.before + ':' + m.after; });\n")
+    .await;
+    assert_eq!(out, "1:2");
 }
 
 #[tokio::test]

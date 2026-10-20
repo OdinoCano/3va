@@ -354,24 +354,6 @@ pub fn inject_require(
                 return;
             }
 
-            // Node.js: require() of a .mjs file throws ERR_REQUIRE_ESM
-            // instead of silently transpiling it. Match that contract so
-            // user code (and the test suite) can branch on e.code.
-            if path_str.ends_with(".mjs") {
-                let msg = format!(
-                    "require() of ES module {} not supported. Use import() instead.",
-                    full_path.display()
-                );
-                let err_str = V8String::new(scope, &msg).unwrap();
-                let err = v8::Exception::error(scope, err_str);
-                let err_obj = err.to_object(scope).unwrap();
-                let code_key = V8String::new(scope, "code").unwrap();
-                let code_val = V8String::new(scope, "ERR_REQUIRE_ESM").unwrap();
-                err_obj.set(scope, code_key.into(), code_val.into());
-                scope.throw_exception(err);
-                return;
-            }
-
             match std::fs::read_to_string(&full_path) {
                 Ok(mut source) => {
                     // Strip shebang so V8 doesn't see it as a syntax error.
@@ -6612,11 +6594,23 @@ __httpSetHandler(self._id, function() {
         // require(x) would return, with `.default` guaranteed present — the
         // async equivalent of the `.default` unwrap static default-imports
         // already get in convert_import() (transpiler.rs).
+        // Node 22+ requires an ES module synchronously unless its graph has
+        // top-level await (ERR_REQUIRE_ASYNC_MODULE). `import()` goes through
+        // the same loader and *may* wait, so the loader reads this depth: a
+        // plain require() that finds a pending `__tla` throws, an import()
+        // waits for it.
+        globalThis.__vvvaImportDepth = globalThis.__vvvaImportDepth || 0;
         function __makeImportAsync(requireFn) {
             return function(specifier) {
                 return new __RealPromise(function(resolve, reject) {
                     try {
-                        var mod = requireFn(specifier);
+                        globalThis.__vvvaImportDepth++;
+                        var mod;
+                        try {
+                            mod = requireFn(specifier);
+                        } finally {
+                            globalThis.__vvvaImportDepth--;
+                        }
                         // A module with top-level await may still be evaluating
                         // (real async work): wait for it, then re-read its exports.
                         var rec = null;
@@ -6895,6 +6889,11 @@ __httpSetHandler(self._id, function() {
 
             // `3va test --coverage` installs instrumented copies of the project's sources.
             var source = (globalThis.__3va_covSources && globalThis.__3va_covSources[resolved]) || __readFile(resolved);
+            // The ESM marker is metadata for the loader, not code: take it out
+            // before compiling so the columns of the first line are the ones
+            // of the transpiled source — and of its source map.
+            var __isEsm = source.indexOf('/*__3va_esm__*/') === 0;
+            if (__isEsm) source = source.slice(16);
             // Rewrite bare import() calls so they use our runtime's __importAsync.
             // V8's new Function() doesn't support native dynamic import(), so any
             // import( that wasn't already rewritten by the Rust transpiler (e.g. raw
@@ -6942,7 +6941,7 @@ __httpSetHandler(self._id, function() {
                 // ES modules: evaluate static dependencies first (like ESM linking). If one of
                 // them is still waiting on a top-level await, this module's body must not run
                 // yet: defer it, and expose a promise (mod.__tla) that importers wait on.
-                var esmDeps = source.indexOf('/*__3va_esm__*/') === 0 ? __esmTopRequires(source) : [];
+                var esmDeps = __isEsm ? __esmTopRequires(source) : [];
                 if (esmDeps.length) {
                     __loadingStack.push(mod);
                     try { esmDeps.forEach(function(d) { localRequire(d); }); } finally { __loadingStack.pop(); }
@@ -6956,6 +6955,9 @@ __httpSetHandler(self._id, function() {
                     }
                 };
                 if (mod.__deps && mod.__deps.length) {
+                    if (globalThis.__vvvaImportDepth === 0) {
+                        throw __requireAsyncModuleError(resolved);
+                    }
                     var innerTla, finalTla;
                     Object.defineProperty(mod, '__tla', { configurable: true, get: function() { return finalTla; }, set: function(v) { innerTla = v; } });
                     finalTla = __RealPromise.all(mod.__deps.map(function(d) { return __waitTla(d, [mod]); }))
@@ -6967,6 +6969,11 @@ __httpSetHandler(self._id, function() {
                 runBody();
                 __noteTlaDep(mod);
                 if (mod.__tla) {
+                    // Node: require() cannot be used on an ESM graph with
+                    // top-level await; import() waits for it instead.
+                    if (globalThis.__vvvaImportDepth === 0) {
+                        throw __requireAsyncModuleError(resolved);
+                    }
                     // Top-level await: run microtask-only awaits to completion so a
                     // static importer sees full exports. Real async work (timers, I/O)
                     // stays pending; importers defer and import() waits on mod.__tla.
@@ -6982,6 +6989,15 @@ __httpSetHandler(self._id, function() {
                 throw e;
             }
             return mod.exports;
+        }
+
+        function __requireAsyncModuleError(resolved) {
+            var err = new Error(
+                'require() cannot be used on an ESM graph with top-level await. ' +
+                'Use import() instead.\n  From ' + resolved +
+                ' \n  Requiring ' + resolved + ' ');
+            err.code = 'ERR_REQUIRE_ASYNC_MODULE';
+            return err;
         }
 
         globalThis.__vvva_require_from = requireFrom;
