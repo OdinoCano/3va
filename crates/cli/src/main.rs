@@ -3289,6 +3289,79 @@ enum PermissionsAction {
     },
 }
 
+/// Whether the event loop has seen the signal and delivered it to the script
+/// (or taken the default action). The watchdog below only forces the exit when
+/// this is still false after its grace period: a script with a `SIGTERM`
+/// listener may spend as long as it needs draining its connections, as in
+/// Node.
+#[cfg(unix)]
+static SIGNAL_ACKNOWLEDGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Ends the process if a SIGTERM or a SIGINT does not reach the event loop.
+///
+/// The signal handlers of the runtime replace the default action of the
+/// signals, so a script stuck in a busy loop (which never gives the event
+/// loop a turn) would ignore them. The watchdog waits in its own thread —
+/// the signal reaches it even while the script spins — and, if the event loop
+/// has not acknowledged the signal after the grace period, ends it with the
+/// conventional status (128 + the signal number). When the loop does answer,
+/// the watchdog leaves the decision to the application.
+#[cfg(unix)]
+fn spawn_signal_watchdog() -> Option<std::thread::JoinHandle<()>> {
+    use std::sync::atomic::Ordering;
+    const GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+    std::thread::Builder::new()
+        .name("3va-signal-watchdog".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            runtime.block_on(async {
+                let mut term =
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                let mut int =
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                let code = tokio::select! {
+                    _ = term.recv() => 143,
+                    _ = int.recv() => 130,
+                };
+                // The event loop had its chance to see the signal and run the
+                // script's handler. If it never got a turn (a busy loop), the
+                // process has to end here; if it did, the application decides
+                // when to stop and the watchdog is done.
+                tokio::time::sleep(GRACE).await;
+                if SIGNAL_ACKNOWLEDGED.load(Ordering::SeqCst) {
+                    return;
+                }
+                eprintln!(
+                    "[3va] the script did not stop after the signal; ending the process ({code})"
+                );
+                std::process::exit(code);
+            });
+        })
+        .ok()
+}
+
+/// Marks that the event loop has seen the signal, so the watchdog leaves the
+/// exit to the runtime from now on.
+#[cfg(unix)]
+fn signal_acknowledge() {
+    SIGNAL_ACKNOWLEDGED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// The Node-compatible runtime flags as they were written on the command
 /// line, in order. Node exposes the same list as `process.execArgv`.
 fn node_exec_argv() -> Vec<String> {
@@ -4680,20 +4753,62 @@ async fn main() -> anyhow::Result<()> {
                 let mut sigterm =
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
+                // A script that never yields (a busy loop) does not let the
+                // select below see the signal, and the handler tokio installs
+                // replaces the default action of SIGTERM: the process would
+                // spin for ever and ignore the signal. This watchdog runs in
+                // its own thread (the signal is delivered to it even while the
+                // script spins) and ends the process if it is still alive a
+                // few seconds after the signal.
+                #[cfg(unix)]
+                let _watchdog = spawn_signal_watchdog();
+
                 let __t = std::time::Instant::now();
                 let mut run_result = Ok(());
                 let mut interrupted = false;
+                // Set when the script has a listener for the signal: Node then
+                // disables the default action and the application decides when
+                // to exit, so the event loop keeps running below.
+                let mut signal_handled = false;
+                // Node's status for the default action (128 + the signal).
+                let mut signal_exit_code: Option<i32> = None;
                 #[cfg(unix)]
                 tokio::select! {
                     result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
-                    _ = tokio::signal::ctrl_c() => { interrupted = true; engine.drain_ws_connections().await; }
-                    _ = sigterm.recv() => { interrupted = true; engine.drain_ws_connections().await; }
+                    _ = tokio::signal::ctrl_c() => {
+                        signal_acknowledge();
+                        match engine.emit_process_signal("SIGINT").await {
+                            Ok(true) => signal_handled = true,
+                            _ => {
+                                interrupted = true;
+                                signal_exit_code = Some(130);
+                                engine.drain_ws_connections().await;
+                            }
+                        }
+                    }
+                    _ = sigterm.recv() => {
+                        signal_acknowledge();
+                        match engine.emit_process_signal("SIGTERM").await {
+                            Ok(true) => signal_handled = true,
+                            _ => {
+                                interrupted = true;
+                                signal_exit_code = Some(143);
+                                engine.drain_ws_connections().await;
+                            }
+                        }
+                    }
                 }
 
                 #[cfg(not(unix))]
                 tokio::select! {
                     result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
                     _ = tokio::signal::ctrl_c() => { interrupted = true; engine.drain_ws_connections().await; }
+                }
+                // With a signal listener, Node keeps the loop alive: the
+                // handler decides when the process ends (it may drain
+                // connections for as long as it needs).
+                if run_result.is_ok() && signal_handled && !interrupted {
+                    run_result = engine.run_event_loop().await;
                 }
                 // Node's natural end: 'beforeExit' (which may schedule more
                 // work), then 'exit', then process.exitCode as the status.
@@ -4705,6 +4820,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 report_denials(&permissions);
                 run_result?;
+                if let Some(code) = signal_exit_code {
+                    run_exit_code = Some(code);
+                }
                 if __trace {
                     eprintln!("[startup] eval_file_with_args: {:?}", __t.elapsed());
                     eprintln!("[startup] total main() time: {:?}", __t_main.elapsed());

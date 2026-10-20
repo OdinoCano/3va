@@ -1321,6 +1321,23 @@ impl JsEngine {
         self.server_mode = enabled;
     }
 
+    /// Delivers a process signal event (`SIGTERM`, `SIGINT`) to the listeners
+    /// the script registered, as Node does when the signal arrives.
+    ///
+    /// Returns whether there was a listener. Node disables the default action
+    /// of the signal when a listener exists: the application decides when to
+    /// exit, and the runtime must keep its event loop running.
+    pub async fn emit_process_signal(&mut self, signal: &str) -> anyhow::Result<bool> {
+        let src = format!(
+            "(function () {{ var p = globalThis.process; \
+             if (!p || typeof p.listenerCount !== 'function' || \
+             p.listenerCount({signal:?}) === 0) return 'false'; \
+             if (typeof p.emit === 'function') p.emit({signal:?}, {signal:?}); \
+             return 'true'; }})()"
+        );
+        Ok(self.eval_to_string(&src).await?.trim() == "true")
+    }
+
     /// Installs caller_scope's promise hook the first time package-scoped
     /// rules are active. Rules are normally set before the engine is
     /// created; the event loop re-checks in case they are added later.
