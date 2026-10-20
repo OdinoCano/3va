@@ -86,6 +86,9 @@ jobs:
       - name: Run the compatibility suite
         env:
           THREEVA_BIN: ${{ github.workspace }}/target/debug/3va
+          # The GitHub runners have 4 cores: the suite runs that many test
+          # files at the same time.
+          NODE_TESTS_JOBS: 4
           # Full lists, for diffing a regression against the baseline.
           NODE_TESTS_FAILURES_OUT: ${{ github.workspace }}/node-tests-failures.txt
           NODE_TESTS_SKIPPED_OUT: ${{ github.workspace }}/node-tests-skipped.txt

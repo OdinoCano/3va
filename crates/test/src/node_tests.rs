@@ -119,19 +119,20 @@ fn declared_flags(src: &str) -> Vec<String> {
 /// * `--expose-gc` / `--expose_gc` — exposes `globalThis.gc()`.
 /// * `--zero-fill-buffers` — `Buffer.allocUnsafe()` hands out zeroed memory.
 /// * `--insecure-http-parser` — the lenient HTTP header parser.
+/// * `--pending-deprecation` — the pending deprecation warnings are emitted.
 ///
 /// The flags left out are the ones 3va cannot honor yet, and a test that
 /// needs them is skipped with its reason instead of being run and failed:
 /// `--expose-internals` and `--allow-natives-syntax` reach into Node's
-/// internals, `--experimental-stream-iter` is an experimental Node API,
-/// `--pending-deprecation` has nothing to activate (3va emits no pending
-/// deprecations) and `--tls-min-v1.0` is below rustls' TLS 1.2 floor.
+/// internals, `--experimental-stream-iter` is an experimental Node API and
+/// `--tls-min-v1.0` is below rustls' TLS 1.2 floor.
 const SUPPORTED_FLAGS: &[&str] = &[
     "--no-warnings",
     "--expose-gc",
     "--expose_gc",
     "--zero-fill-buffers",
     "--insecure-http-parser",
+    "--pending-deprecation",
 ];
 
 /// The declared flags 3va can pass to `3va run`.
@@ -251,6 +252,83 @@ fn is_zombie(pid: u32) -> bool {
     rest.split_whitespace().next() == Some("Z")
 }
 
+/// The pids of the processes that descend from `pid`.
+///
+/// Linux keeps the list of children of each thread in
+/// `/proc/<pid>/task/<tid>/children`. A test that forks a child which does
+/// not end (and that leaves the test's process group) would stay alive after
+/// the group is killed: the run of 2026-10-19 left 44 `3va run` processes of
+/// `test-child-process-dgram-reuseport.js` behind, hanging on to the machine.
+///
+/// The list is read *while the test is still alive*: when it exits, its
+/// children are re-parented and the list is empty.
+fn descendants(pid: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut queue = vec![pid];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(current) = queue.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{current}/task")) else {
+            continue;
+        };
+        for task in tasks.flatten() {
+            let Ok(children) = std::fs::read_to_string(task.path().join("children")) else {
+                continue;
+            };
+            for child in children.split_whitespace() {
+                if let Ok(child) = child.parse::<u32>() {
+                    if child > 1 {
+                        queue.push(child);
+                        found.push(child);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The moment a process started, in clock ticks since the boot (field 22 of
+/// `/proc/<pid>/stat`).
+///
+/// It tells a process we saw from one that reused its number: a pid we are
+/// about to signal is only ours if it started after the test did.
+fn start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Kill the processes in `pids` that are still alive.
+///
+/// Only the pids that started at or after `since` are killed: a pid that was
+/// reused by an unrelated process must not be touched.
+#[allow(unsafe_code)]
+fn kill_pids(pids: &[u32], since: u64) {
+    for &child in pids {
+        if child <= 1 {
+            continue;
+        }
+        match start_time(child) {
+            Some(started) if started >= since => {
+                // Safety: `kill(2)` with a positive pid signals that process
+                // only. The `child > 1` guard keeps it away from init.
+                unsafe {
+                    libc::kill(child as i32, libc::SIGKILL);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Kill the processes that descend from `pid` and are still alive.
+fn kill_descendants(pid: u32, since: u64) {
+    kill_pids(&descendants(pid), since);
+}
+
 /// Run one test file with a timeout, returning `(passed, reason)`.
 ///
 /// `worker` is the index of the parallel worker running it: it decides the
@@ -262,9 +340,16 @@ fn run_one(
     file: &Path,
     flags: &[String],
     worker: usize,
+    stderr_dir: Option<&Path>,
 ) -> (bool, String) {
+    let name = file
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     use std::os::unix::process::CommandExt;
 
+    let stderr_path = stderr_dir.map(|dir| dir.join(format!("{name}.log")));
     let mut cmd = Command::new(&opts.threeva_bin);
     cmd.arg("run").arg("--no-prompt");
     for p in &opts.perms {
@@ -287,44 +372,43 @@ fn run_one(
         // temporary directory delete each other's files.
         .env("TEST_THREAD_ID", worker.to_string())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::null());
     // Own process group, so a test that leaves a detached child (fork/spawn)
     // does not leak it into the run: the whole group is killed afterwards.
     cmd.process_group(0);
+
+    // The stderr of the test goes to a file: a pipe that nobody reads blocks
+    // the test as soon as it writes more than the pipe buffer (64 KB), and a
+    // thread per test does not fit in the task limit of the scope.
+    let stderr_file = match &stderr_path {
+        Some(path) => std::fs::File::create(path).ok(),
+        None => None,
+    };
+    match stderr_file {
+        Some(file) => {
+            cmd.stderr(Stdio::from(file));
+        }
+        None => {
+            cmd.stderr(Stdio::null());
+        }
+    }
 
     let mut child = match spawn_with_retry(&mut cmd) {
         Ok(c) => c,
         Err(e) => return (false, format!("spawn failed: {e}")),
     };
     let pid = child.id();
+    // The moment the test started: a pid that was reused by an unrelated
+    // process must not be killed with it.
+    let started = start_time(pid).unwrap_or(0);
+    // The descendants of the test, noted while it runs: the ones that leave
+    // its process group survive the group kill, and when the test exits its
+    // children are re-parented and the list is gone.
+    let mut orphans: Vec<u32> = Vec::new();
+    let mut next_scan = Instant::now();
     // The stderr of the test is drained while it runs: nobody read the pipe,
     // so a test that writes more than the pipe buffer (64 KB) blocked
     // forever and the runner waited for it until the end of the session.
-    let stderr_tail = child.stderr.take().map(|mut pipe| {
-        let tail = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let sink = tail.clone();
-        std::thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = [0u8; 8192];
-            loop {
-                match pipe.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let mut sink = sink.lock().expect("stderr sink mutex");
-                        sink.push_str(&String::from_utf8_lossy(&buf[..n]));
-                        // Only the tail is kept: the whole stderr of a test
-                        // would fill the memory of the runner.
-                        if sink.len() > 8192 {
-                            let cut = sink.len() - 8192;
-                            sink.drain(..cut);
-                        }
-                    }
-                }
-            }
-        });
-        tail
-    });
 
     // Wait for the test to finish *without* reaping it: while the child is a
     // zombie its pid is still reserved, so killing its process group below
@@ -341,6 +425,14 @@ fn run_one(
             timed_out = true;
             break;
         }
+        if Instant::now() >= next_scan {
+            next_scan = Instant::now() + Duration::from_millis(200);
+            for child_pid in descendants(pid) {
+                if !orphans.contains(&child_pid) {
+                    orphans.push(child_pid);
+                }
+            }
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
 
@@ -350,6 +442,11 @@ fn run_one(
     // (the process is in a state that cannot be signalled) and a runner that
     // waits for ever is worse than a leaked process.
     let group_killed = kill_group(pid);
+    // The descendants that left the group are killed by pid: the group signal
+    // does not reach them, and they would keep the machine busy. The ones
+    // that appeared after the last scan are caught here.
+    kill_descendants(pid, started);
+    kill_pids(&orphans, started);
     let _ = child.kill();
     let status = wait_bounded(&mut child, Duration::from_secs(2));
     if timed_out {
@@ -369,12 +466,17 @@ fn run_one(
         Some(c) => format!("exit {c}"),
         None => "killed by signal".to_string(),
     };
-    if let Some(tail) = stderr_tail {
-        let text = tail.lock().expect("stderr sink mutex").trim().to_string();
-        if !text.is_empty() {
-            let text: String = text.chars().take(400).collect();
-            reason.push_str(": ");
-            reason.push_str(&text);
+    if let Some(path) = &stderr_path {
+        if let Ok(bytes) = std::fs::read(path) {
+            // Only the tail: the whole stderr of a test would fill the memory
+            // of the runner.
+            let start = bytes.len().saturating_sub(4096);
+            let text = String::from_utf8_lossy(&bytes[start..]).trim().to_string();
+            if !text.is_empty() {
+                let text: String = text.chars().take(400).collect();
+                reason.push_str(": ");
+                reason.push_str(&text);
+            }
         }
     }
     (false, reason)
@@ -487,6 +589,11 @@ pub fn run_suite(root: &Path, opts: &Options) -> Summary {
         .collect();
 
     let jobs = opts.jobs.max(1);
+    // One directory for the stderr of the tests; it is removed at the end of
+    // the run.
+    let stderr_dir = std::env::temp_dir().join(format!("3va-node-tests-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&stderr_dir);
+    let stderr_dir = stderr_dir.is_dir().then_some(stderr_dir);
     let next = AtomicUsize::new(0);
     let outcomes: Mutex<Vec<Option<Outcome>>> =
         Mutex::new((0..planned.len()).map(|_| None).collect());
@@ -496,6 +603,7 @@ pub fn run_suite(root: &Path, opts: &Options) -> Summary {
     let outcomes = &outcomes;
     std::thread::scope(|scope| {
         for worker in 0..jobs {
+            let stderr_dir = stderr_dir.clone();
             scope.spawn(move || {
                 // One port and one temporary directory per worker.
                 loop {
@@ -513,12 +621,19 @@ pub fn run_suite(root: &Path, opts: &Options) -> Summary {
                             // Printed BEFORE running: if a test kills the batch,
                             // the last START line names the culprit.
                             eprintln!("NODE_TEST_START\t{}", planned.name);
-                            let (passed, reason) =
-                                run_one(opts, root, &planned.file, &planned.flags, worker);
+                            let (passed, reason) = run_one(
+                                opts,
+                                root,
+                                &planned.file,
+                                &planned.flags,
+                                worker,
+                                stderr_dir.as_deref(),
+                            );
                             eprintln!(
-                                "NODE_TEST_DONE\t{}\t{}",
+                                "NODE_TEST_DONE\t{}\t{}\t{}",
                                 planned.name,
-                                if passed { "ok" } else { "fail" }
+                                if passed { "ok" } else { "fail" },
+                                reason
                             );
                             if passed {
                                 Outcome::Passed
@@ -533,6 +648,46 @@ pub fn run_suite(root: &Path, opts: &Options) -> Summary {
         }
     });
 
+    // The tests that hit the timeout are run again, one at a time: with
+    // several tests running at the same time a slow one can miss the deadline
+    // that it would meet alone, and a test that only fails under that
+    // contention does not belong in the baseline (it would make the ratchet
+    // fail at random, in the CI too).
+    let timed_out: Vec<usize> = {
+        let outcomes = outcomes.lock().expect("outcomes mutex");
+        planned
+            .iter()
+            .enumerate()
+            .filter_map(|(index, _)| match &outcomes[index] {
+                Some(Outcome::Failed(reason)) if reason.starts_with("timeout after") => Some(index),
+                _ => None,
+            })
+            .collect()
+    };
+    for index in timed_out {
+        let planned = &planned[index];
+        eprintln!("NODE_TEST_RETRY\t{}", planned.name);
+        let (passed, reason) = run_one(
+            opts,
+            root,
+            &planned.file,
+            &planned.flags,
+            0,
+            stderr_dir.as_deref(),
+        );
+        eprintln!(
+            "NODE_TEST_DONE\t{}\t{}\t{}",
+            planned.name,
+            if passed { "ok" } else { "fail" },
+            reason
+        );
+        outcomes.lock().expect("outcomes mutex")[index] = Some(if passed {
+            Outcome::Passed
+        } else {
+            Outcome::Failed(reason)
+        });
+    }
+
     // The tests that must run alone, one after the other, with the machine to
     // themselves.
     for (index, planned) in planned.iter().enumerate() {
@@ -543,7 +698,14 @@ pub fn run_suite(root: &Path, opts: &Options) -> Summary {
             Some(reason) => Outcome::Skipped(reason.clone()),
             None => {
                 eprintln!("NODE_TEST_START\t{}", planned.name);
-                let (passed, reason) = run_one(opts, root, &planned.file, &planned.flags, 0);
+                let (passed, reason) = run_one(
+                    opts,
+                    root,
+                    &planned.file,
+                    &planned.flags,
+                    0,
+                    stderr_dir.as_deref(),
+                );
                 eprintln!(
                     "NODE_TEST_DONE\t{}\t{}",
                     planned.name,
@@ -557,6 +719,10 @@ pub fn run_suite(root: &Path, opts: &Options) -> Summary {
             }
         };
         outcomes.lock().expect("outcomes mutex")[index] = Some(outcome);
+    }
+
+    if let Some(dir) = &stderr_dir {
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     let mut summary = Summary {
@@ -640,4 +806,86 @@ pub fn write_baseline(path: &Path, failed: &[Failed], header: &str) {
         out.push('\n');
     }
     std::fs::write(path, out).unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// The two tests below look at the descendants of *this* process, so they
+    /// cannot run at the same time: one of them kills the children of the
+    /// other.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    /// A test that forks a child that never ends must not leave it alive.
+    ///
+    /// The child leaves the process group of the test (that is what the
+    /// regression was about: 44 processes of `3va run` were still running
+    /// fifteen minutes after the suite ended), so only the pids of the
+    /// descendants reach it.
+    #[test]
+    fn the_descendants_of_a_test_are_killed() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // A child that does not end on its own.
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cannot spawn the child");
+        let child_pid = child.id();
+        let parent = std::process::id();
+        let started = start_time(parent).unwrap_or(0);
+
+        // The child is a descendant of this process.
+        let found = descendants(parent);
+        assert!(
+            found.contains(&child_pid),
+            "el hijo debe aparecer entre los descendientes: {found:?}"
+        );
+
+        kill_pids(&[child_pid], started);
+
+        // The child is gone: a process that nobody reaped is a zombie, and
+        // that is already dead.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if is_zombie(child_pid) || start_time(child_pid).is_none() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("el hijo {child_pid} sigue vivo");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.wait();
+    }
+
+    /// A pid that was reused by an unrelated process must not be killed: the
+    /// start time tells one from the other.
+    #[test]
+    fn a_pid_that_started_before_the_test_is_not_killed() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cannot spawn the child");
+        let child_pid = child.id();
+        // The child started *before* the moment the runner would record, so
+        // it is not ours to kill.
+        let child_started = start_time(child_pid).unwrap_or(0);
+        kill_pids(&[child_pid], child_started + 10_000_000);
+        // Give the signal a moment to arrive.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !is_zombie(child_pid) && start_time(child_pid).is_some(),
+            "un proceso que empezó antes no debe recibir la señal"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
