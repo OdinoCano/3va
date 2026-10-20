@@ -14,9 +14,11 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   suite oficial de nodejs/node y una suite de proyecto típica: `test`/`it`,
   `describe`/`suite`, `before`/`after`/`beforeEach`/`afterEach`, `t.test()`
   anidado, `{ skip, todo, only }`, funciones `async` y con callback `done`,
-  `t.mock.fn()`/`t.mock.method()` y `t.assert`. Salida TAP y código de salida
-  ≠ 0 si algo falla. Lo que no se implementa (`mock.timers`, `snapshot`, `run()`)
-  lanza `ERR_NOT_SUPPORTED`, no queda `undefined`.
+  `t.mock.fn()`/`t.mock.method()` y `t.assert`. La salida usa el reporter
+  `spec` de Node (`✔ nombre (0.39ms)`, `ℹ tests 5`) y el código de salida es
+  ≠ 0 si algo falla; `--test-reporter=tap` da la salida TAP. Lo que no se
+  implementa (`mock.timers`, `snapshot`, `run()`) lanza `ERR_NOT_SUPPORTED`, no
+  queda `undefined`.
 - **Módulos heredados `_http_*` y `_stream_*`**: `_http_common`, `_http_server`,
   `_http_agent`, `_http_client`, `_http_incoming`, `_http_outgoing`,
   `_stream_readable`, `_stream_writable`, `_stream_duplex`, `_stream_transform`
@@ -25,8 +27,9 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   tiene un equivalente.
 - **Flags de Node en `3va run`**: `--no-warnings`, `--pending-deprecation`,
   `--expose-gc` (y su alias `--expose_gc`), `--zero-fill-buffers` e
-  `--insecure-http-parser`. `--tls-min-v1.0` se rechaza con un error claro: el
-  TLS de 3va (rustls) tiene un suelo de TLS 1.2.
+  `--insecure-http-parser`, más `--test-reporter` para `node:test`.
+  `--tls-min-v1.0` se rechaza con un error claro: el TLS de 3va (rustls) tiene
+  un suelo de TLS 1.2.
 
 ### Fixed
 
@@ -42,6 +45,17 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   `globalThis`). Las entradas ESM (`.mjs`, `import`/`export`) conservan la
   semántica de módulo: allí un `return` de nivel superior sigue siendo un
   error de sintaxis.
+- **Las trazas dicen dónde está el error**: el archivo y la línea, la línea de
+  código y el `^` debajo (como en Node), y cada fotograma de la pila lleva el
+  archivo y la posición exactos. Antes las trazas no tenían nombre de archivo
+  y las columnas de la primera línea iban desplazadas. Node compila el archivo
+  de entrada y cada módulo requerido como una función con los parámetros del
+  módulo y con el nombre del archivo en el `ScriptOrigin`; 3va deja de
+  reformatear un `.js` al cargarlo, así que las posiciones son las del archivo.
+- **`process.emitWarning`** imprime el aviso en stderr
+  (`(node:PID) [CÓDIGO] Nombre: mensaje`) y entrega el evento `warning` en el
+  siguiente tick, como en Node. Con `--no-warnings` solo se silencia la
+  impresión, no el evento.
 
 ---
 

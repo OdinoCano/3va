@@ -142,6 +142,24 @@ semantics: there, a top-level `return` *is* a `SyntaxError`, as in Node.
 `-e`/`--eval` and the REPL are not modules (as in Node): they run as scripts,
 with `require` available.
 
+### 2.3.2 The traces say where the error is
+
+The entry point and every file loaded with `require()` are compiled with the
+file's own text as the body of a function with the module's parameters
+(`exports, require, module, __filename, __dirname`), and the file's name goes
+in the `ScriptOrigin`. So:
+
+- a stack trace points at the file with the line and the column of the source
+  (`at boom (/app/server.js:12:9)`), and the frame of the module is
+  `Object.<anonymous>`, as in Node;
+- an exception that reaches the top of the program is reported the way Node
+  reports it: the file and the line, the line of code, the `^` under the
+  column, and then the error with its trace.
+
+A `.js` file is not re-printed by the transpiler when it is loaded (only when
+V8 cannot parse it, as with JSX or Flow), so the positions of a trace are the
+positions of the file.
+
 ---
 
 ## 2.6 `require()` — Inline ESM→CJS Conversion
