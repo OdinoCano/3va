@@ -320,23 +320,25 @@ fn start_time(pid: u32) -> Option<u64> {
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
-/// Kill the processes we saw, if they are still the same ones.
+/// Whether the process we recorded is still the one wearing that pid.
 ///
 /// The pid alone is not enough: with several tests running at once, an
 /// unrelated process (from another worker or the desktop) can reuse the number
-/// between the scan and the signal. Only when the current start time is still
-/// the recorded one is the process ours.
+/// between the scan and the signal (or the memory read). Only when the current
+/// start time is still the recorded one is the process ours.
+fn still_ours(p: &SeenProcess) -> bool {
+    p.pid > 1 && p.started != 0 && start_time(p.pid) == Some(p.started)
+}
+
+/// Kill the processes we saw, if they are still the same ones.
 #[allow(unsafe_code)]
 fn kill_seen(procs: &[SeenProcess]) {
     for proc_ in procs {
-        if proc_.pid <= 1 || proc_.started == 0 {
-            continue;
-        }
-        if start_time(proc_.pid) != Some(proc_.started) {
+        if !still_ours(proc_) {
             continue;
         }
         // Safety: `kill(2)` with a positive pid signals that process only.
-        // The `pid > 1` guard keeps it away from init.
+        // The `pid > 1` guard (inside `still_ours`) keeps it away from init.
         unsafe {
             libc::kill(proc_.pid as i32, libc::SIGKILL);
         }
@@ -370,7 +372,14 @@ fn rss_kb(pid: u32) -> Option<u64> {
 /// them behind, the ones in `seen`) spends memory in each of them, so the
 /// budget is per test, not per process.
 fn group_rss_kb(pid: u32, seen: &[SeenProcess]) -> u64 {
-    rss_kb(pid).unwrap_or(0) + seen.iter().filter_map(|p| rss_kb(p.pid)).sum::<u64>()
+    // A descendant whose pid was reused by another process is not ours any
+    // more: its memory must not count against the test's budget. The same
+    // start-time check as `kill_seen` tells one from the other.
+    let children = seen
+        .iter()
+        .filter(|p| still_ours(p))
+        .filter_map(|p| rss_kb(p.pid));
+    rss_kb(pid).unwrap_or(0) + children.sum::<u64>()
 }
 
 /// Run one test file with a timeout, returning `(passed, reason)`.
@@ -987,5 +996,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!passed, "un test que pasa de 32 MB no puede pasar");
         assert_eq!(reason, "memory limit 32 MB");
+    }
+
+    /// The memory of a descendant whose pid was reused must not count against
+    /// the test's budget: the start-time check is the same one that guards the
+    /// kill. Without it, a pid reused by another worker (or the desktop) would
+    /// add its memory and the runner could kill an innocent test.
+    #[test]
+    fn a_reused_pid_does_not_count_towards_the_memory_budget() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // A child that holds ~64 MB resident, so its RSS is large and stable:
+        // the assertions below compare a counted entry against a skipped one
+        // and a small page-in fluctuation must not mask the difference.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("a=$(head -c 67108864 /dev/zero | tr '\\0' x); sleep 300")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cannot spawn the child");
+        let child_pid = child.id();
+        // Give the shell a moment to allocate the 64 MB before reading it.
+        std::thread::sleep(Duration::from_millis(200));
+        let child_started = start_time(child_pid).unwrap_or(0);
+        assert!(child_started > 0, "el hijo debe tener hora de arranque");
+
+        // The pid we saw is only ours while its start time matches; a reused
+        // pid (recorded earlier, so `started` is off by one) must be ignored.
+        let ours = SeenProcess {
+            pid: child_pid,
+            started: child_started,
+        };
+        let reused = SeenProcess {
+            pid: child_pid,
+            started: child_started.saturating_sub(1),
+        };
+        let not_seen = SeenProcess {
+            pid: child_pid,
+            started: 0,
+        };
+
+        assert!(still_ours(&ours), "el descendiente que vimos es nuestro");
+        assert!(!still_ours(&reused), "un pid reutilizado ya no es nuestro");
+        assert!(!still_ours(&not_seen), "sin hora de arranque no es nuestro");
+
+        // The memory budget must apply the same check: a reused pid adds
+        // nothing, the one we saw adds its resident memory (~64 MB, far above
+        // any page-in noise). Comparing the two groups, not exact RSS values,
+        // keeps the assertion deterministic.
+        let with_reused = group_rss_kb(child_pid, &[reused]);
+        let with_ours = group_rss_kb(child_pid, &[ours]);
+        assert!(
+            with_ours > with_reused + 32 * 1024,
+            "el descendiente que vimos debe sumar su memoria: {with_ours} vs {with_reused}"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
