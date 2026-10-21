@@ -211,12 +211,20 @@ async fn request(e: &mut JsEngine, url: &str, options: &str) -> String {
         .unwrap_or_default()
 }
 
+/// `vvva_permissions::set_allow_insecure` is process-global, and the tests in
+/// this file that toggle it run in parallel: without this lock one test's
+/// `set_allow_insecure(true)` leaked into another's assertion (flaky reds when
+/// the whole suite runs). Hold it around the whole request.
+static INSECURE_GLOBAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test(flavor = "multi_thread")]
 async fn skipping_the_verification_needs_the_permission() {
     if !openssl_available() {
         eprintln!("skipping: openssl is not on PATH");
         return;
     }
+    let _guard = INSECURE_GLOBAL.lock().await;
+    vvva_permissions::set_allow_insecure(false);
     // A host that is not loopback: the permission is required.
     let mut e = engine_with_net().await;
     let err = request(
@@ -237,6 +245,7 @@ async fn skipping_the_verification_is_allowed_with_the_permission() {
         eprintln!("skipping: openssl is not on PATH");
         return;
     }
+    let _guard = INSECURE_GLOBAL.lock().await;
     // With the permission the request goes on (and fails later, at the
     // network, not at the permission).
     vvva_permissions::set_allow_insecure(true);
