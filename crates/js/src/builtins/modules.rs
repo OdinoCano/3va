@@ -4611,8 +4611,15 @@ pub fn inject_require(
                 if (st && st.waiting && st.step) st.step();
                 return r;
             };
-            // ponytail: no-op by design — the effective timeout is applied by the server/firewall; see docs/05-js-engine/07-inventario-stubs.md §7.3.
-            httpIncomingMessage.prototype.setTimeout = function() { return this; };
+            // Node's `IncomingMessage.setTimeout` (lib/_http_incoming.js):
+            // the callback listens on the message and the socket's inactivity
+            // timer is re-armed.
+            httpIncomingMessage.prototype.setTimeout = function(ms, cb) {
+                if (typeof cb === 'function') this.on('timeout', cb);
+                this.timeout = ms;
+                if (this.socket && typeof this.socket.setTimeout === 'function') this.socket.setTimeout(ms);
+                return this;
+            };
             httpIncomingMessage.prototype.destroy = function() {
                 var st = this[kIncomingBody];
                 if (st) { st.done = true; this[kIncomingBody] = null; }
@@ -4648,6 +4655,8 @@ pub fn inject_require(
                 // there, fine as long as .end() is never called on it.
                 this.req = req;
                 this._connId = req && req.socket && req.socket._connId;
+                this.socket = req && req.socket;
+                this.connection = this.socket;
                 this.statusCode = 200;
                 this.statusMessage = '';
                 this._headers = {};
@@ -4849,12 +4858,27 @@ pub fn inject_require(
                 }
                 // A microtask, not a 0 ms timer: it still runs after the handler
                 // returns, without a timer round-trip per response.
-                queueMicrotask(function() { self.emit('finish'); self.emit('close'); if (typeof callback === 'function') callback(); });
+                queueMicrotask(function() {
+                    self.emit('finish');
+                    self.emit('close');
+                    httpConnResponseDone(self);
+                    if (typeof callback === 'function') callback();
+                });
                 return this;
             };
-            // ponytail: no-op by design — see docs/05-js-engine/07-inventario-stubs.md §7.3.
-            httpServerResponse.prototype.setTimeout = function() { return this; };
-            httpServerResponse.prototype.destroy = function() { return this; };
+            // Node's `OutgoingMessage.setTimeout` (lib/_http_outgoing.js):
+            // the callback listens on the response and the socket's inactivity
+            // timer is re-armed, so an unanswered response can time out.
+            httpServerResponse.prototype.setTimeout = function(ms, cb) {
+                if (typeof cb === 'function') this.on('timeout', cb);
+                this.timeout = ms;
+                if (this.socket && typeof this.socket.setTimeout === 'function') this.socket.setTimeout(ms);
+                return this;
+            };
+            httpServerResponse.prototype.destroy = function(err) {
+                if (this.socket && typeof this.socket.destroy === 'function') this.socket.destroy(err);
+                return this;
+            };
             // ponytail: no-op by design — the head and the body are written
             // together in end(); see docs/05-js-engine/07-inventario-stubs.md §7.3.
             httpServerResponse.prototype.flushHeaders = function() {};
@@ -4923,6 +4947,114 @@ pub fn inject_require(
                 __httpRespondInformational(this._connId, statusCode, statusText, JSON.stringify(headers || {}));
             };
 
+            // Per-connection socket, as seen by the request/response objects.
+            // Node hands the application the real net.Socket, whose timeout
+            // is an inactivity timer: when it fires, 'timeout' goes to the
+            // current request (if it has not completed), the current
+            // response, and the server; the socket is only destroyed when
+            // nobody listened (lib/_http_server.js: socketOnTimeout). The
+            // TCP connection itself lives in the native connection task, so
+            // `destroy()` asks it to close through __httpCloseConn.
+            var httpConnSocket = function(connId, remote, server) {
+                EventEmitter.call(this);
+                this._connId = connId;
+                this.remoteAddress = remote;
+                this.remotePort = undefined;
+                // `on-finished` (body-parser, express.json()) treats a request
+                // whose socket is not `readable` as already finished and skips
+                // parsing the body: req.body stayed undefined. A live
+                // connection is readable/writable.
+                this.readable = true;
+                this.writable = true;
+                this.destroyed = false;
+                this._server = server;
+                this._req = null;
+                this._resps = [];
+                this._timer = null;
+                this._timeoutMs = 0;
+            };
+            util.inherits(httpConnSocket, EventEmitter);
+            // ponytail: like UpgradeSocket (docs/05-js-engine/07-inventario-stubs.md
+            // §7.2), the local side of an accepted HTTP connection is not tracked, so
+            // report the peer we do know.
+            httpConnSocket.prototype.address = function() {
+                return { address: this.remoteAddress || '0.0.0.0', port: this.remotePort || 0, family: this.remoteAddress && this.remoteAddress.indexOf(':') !== -1 ? 'IPv6' : 'IPv4' };
+            };
+            httpConnSocket.prototype._arm = function(ms) {
+                var self = this;
+                if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+                if (!ms || this.destroyed) return this;
+                this._timer = setTimeout(function() {
+                    self._timer = null;
+                    if (self.destroyed) return;
+                    var req = self._req, res = null, i;
+                    if (req && req.complete) req = null;
+                    for (i = 0; i < self._resps.length; i++) {
+                        if (!self._resps[i].finished) { res = self._resps[i]; break; }
+                    }
+                    var handled = false;
+                    if (req) handled = req.emit('timeout', self) || handled;
+                    if (res) handled = res.emit('timeout', self) || handled;
+                    handled = self._server.emit('timeout', self) || handled;
+                    if (!handled) self.destroy();
+                }, ms);
+                return this;
+            };
+            // `socket.setTimeout(msecs, cb)`: re-arms the inactivity timer.
+            // A request or response passes its own listener; the event is
+            // emitted by `_arm` on whichever of them is still incomplete.
+            httpConnSocket.prototype.setTimeout = function(ms, cb) {
+                if (typeof cb === 'function') this.once('timeout', cb);
+                this._timeoutMs = ms | 0;
+                return this._arm(this._timeoutMs);
+            };
+            // ponytail: no-op by design — the TCP options belong to the native
+            // connection task, as with UpgradeSocket (docs/05-js-engine/07-inventario-stubs.md §7.2).
+            httpConnSocket.prototype.setNoDelay = function() { return this; };
+            httpConnSocket.prototype.setKeepAlive = function() { return this; };
+            httpConnSocket.prototype.ref = function() { return this; };
+            httpConnSocket.prototype.unref = function() { return this; };
+            httpConnSocket.prototype.destroy = function(err) {
+                if (this.destroyed) return this;
+                this.destroyed = true;
+                if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+                if (this._server && this._server._conns[this._connId] === this) {
+                    delete this._server._conns[this._connId];
+                }
+                if (typeof __httpCloseConn === 'function') __httpCloseConn(this._connId);
+                this.emit('close');
+                if (err) this.emit('error', err);
+                return this;
+            };
+            // A response that finished frees its slot; if the connection
+            // stays open, the socket's inactivity timeout becomes the
+            // server's keep-alive timeout, as `resetSocketTimeout` does in
+            // Node (lib/_http_server.js).
+            var httpConnResponseDone = function(res) {
+                var sock = res.socket;
+                if (!sock || !sock._resps) return;
+                var i = sock._resps.indexOf(res);
+                if (i !== -1) sock._resps.splice(i, 1);
+                var server = sock._server;
+                // `Connection: close`: the native task closes the connection
+                // right after this response, so drop the inactivity timer with
+                // it (a spurious 'timeout' would otherwise fire later).
+                if (res._closeAfter) {
+                    sock._timeoutMs = 0;
+                    sock._arm(0);
+                    return;
+                }
+                // The native keep-alive timeout already closes an idle
+                // connection; the JS timer is only needed when the
+                // application listens for 'timeout' (otherwise this would
+                // allocate a timer on every response, on the hot path).
+                if (server && server.keepAliveTimeout && server.listenerCount('timeout') > 0) {
+                    var ms = server.keepAliveTimeout + (server.keepAliveTimeoutBuffer || 0);
+                    sock._timeoutMs = ms;
+                    sock._arm(ms);
+                }
+            };
+
             // ── Server — real listener backed by __httpListen/__httpAcceptPoll.
             var httpServer = function(opts, requestListener) {
                 // Node allows `http.Server(fn)` without `new`.
@@ -4936,6 +5068,12 @@ pub fn inject_require(
                 this.listening = false;
                 this._port = 0;
                 this._host = '0.0.0.0';
+                // Node's `server.timeout` (socket inactivity timeout, 0 = off)
+                // and the live connections, keyed by native connection id, so
+                // `server.setTimeout`, `req.setTimeout` and `res.setTimeout`
+                // have a socket to fire on and `close()` can drop idle ones.
+                this.timeout = 0;
+                this._conns = {};
                 // Node's server timeouts (lib/_http_server.js). `requestTimeout`
                 // is the deadline for the whole request, `headersTimeout` for
                 // its head, and `keepAliveTimeout` for an idle keep-alive
@@ -4966,6 +5104,11 @@ pub fn inject_require(
                 }
                 var keepAliveTimeout = opts.keepAliveTimeout !== undefined
                     ? timeout('keepAliveTimeout', opts.keepAliveTimeout) : 5000;
+                // Node keeps the socket `keepAliveTimeoutBuffer` ms longer than
+                // the advertised `keepAliveTimeout` (default 1 s), so a client
+                // that reuses the connection right at the deadline is not reset.
+                this.keepAliveTimeoutBuffer = opts.keepAliveTimeoutBuffer !== undefined
+                    ? timeout('keepAliveTimeoutBuffer', opts.keepAliveTimeoutBuffer) : 1000;
                 var self = this;
                 // What Node reports.
                 var reported = {
@@ -5068,17 +5211,17 @@ __httpSetHandler(self._id, function() {
                     var raw, _n = 0;
                     while (_n++ < 64 && (raw = __httpAcceptPoll(self._id)) !== null && raw !== undefined) {
                         // raw = [method, url, connId, remoteAddress, body, flatHeaders]
-                        var _sock = new EventEmitter();
-                        _sock.remoteAddress = raw[3];
-                        _sock._connId = raw[2];
-                        // `on-finished` (body-parser, express.json()) treats a request whose
-                        // socket is not `readable` as already finished and skips parsing the
-                        // body: req.body stayed undefined. A live connection is readable/writable.
-                        _sock.readable = true;
-                        _sock.writable = true;
-                        // What frameworks read to tell https from http
-                        // (Express: req.secure / req.protocol).
-                        if (self._tls) _sock.encrypted = true;
+                        var _sock = self._conns[raw[2]];
+                        if (!_sock) {
+                            _sock = new httpConnSocket(raw[2], raw[3], self);
+                            self._conns[raw[2]] = _sock;
+                            if (self._tls) _sock.encrypted = true;
+                            // Node: one 'connection' per TCP connection, before
+                            // its first 'request'.
+                            self.emit('connection', _sock);
+                        } else if (raw[3]) {
+                            _sock.remoteAddress = raw[3];
+                        }
                         var req = new httpIncomingMessage(_sock);
                         req.method = raw[0];
                         req.url = raw[1];
@@ -5103,8 +5246,13 @@ __httpSetHandler(self._id, function() {
                         req[kIncomingBody] = { bodyId: raw[4] | 0, started: false, done: false, waiting: false };
                         var res = new httpServerResponse(req);
                         res._closeAfter = raw[7] === true;
+                        _sock._req = req;
+                        _sock._resps.push(res);
+                        // Node's `resetSocketTimeout`: a new request on the
+                        // connection restores the server's socket timeout.
+                        _sock._timeoutMs = self.timeout || 0;
+                        _sock._arm(_sock._timeoutMs);
                         self.emit('request', req, res);
-                        self.emit('connection', req.socket);
                         // The raw body stays in this closure, never on `req`: body-parser 1.x
                         // (Express 4) uses `req._body` as its "already parsed" flag, so a
                         // property of that name made express.json() skip every request.
@@ -5148,6 +5296,14 @@ __httpSetHandler(self._id, function() {
                 if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
                 if (this._id !== null) { __httpClose(this._id); }
                 this.listening = false;
+                // Node 19+: closing the server drops its idle keep-alive
+                // connections; a connection with a response in flight is left
+                // to finish (the native task closes it then).
+                var ids = Object.keys(this._conns);
+                for (var i = 0; i < ids.length; i++) {
+                    var c = this._conns[ids[i]];
+                    if (c._resps.length === 0) c.destroy();
+                }
                 if (typeof callback === 'function') this.once('close', callback);
                 setTimeout(function() { self.emit('close'); }, 0);
                 return this;
@@ -5157,7 +5313,14 @@ __httpSetHandler(self._id, function() {
                 return { port: this._port, address: this._host, family: this._host.indexOf(':') !== -1 ? 'IPv6' : 'IPv4' };
             };
             httpServer.prototype.getConnections = function(cb) { cb(null, 0); };
-            httpServer.prototype.setTimeout = function(ms, cb) { if (cb) this.once('timeout', cb); return this; };
+            httpServer.prototype.setTimeout = function(ms, cb) {
+                // Node (lib/_http_server.js): remember the value for every new
+                // connection and register the callback on the server; the
+                // per-socket timer is what actually fires.
+                this.timeout = ms;
+                if (typeof cb === 'function') this.on('timeout', cb);
+                return this;
+            };
             httpServer.prototype.keepAliveTimeout = 5000;
             // The native server takes its limits from the firewall config
             // (header timeout 10 s by default), not from these properties.

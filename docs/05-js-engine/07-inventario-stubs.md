@@ -54,12 +54,17 @@ y las suites de librerías antes de aterrizar.
 
 | API | Qué hace Node | Qué hacía 3va | Decisión |
 |---|---|---|---|
-| `IncomingMessage.setTimeout(ms, cb)` (`modules.rs:4412`) | Arma un timeout sobre el socket | `return this` | No-op documentado (el timeout efectivo lo aplica el firewall/servidor) |
-| `OutgoingMessage.setTimeout` (`4556`), `ClientRequest.setTimeout` (`4688`, que sí registra el callback) | Idem | `return this` | No-op documentado para `4556`; el de `ClientRequest` registra el callback |
-| `ServerResponse.setTimeout(ms, cb)` (`4556`) y `http.Server.setTimeout` (`4636`) | Idem | `return this` | No-op documentado |
-| `ServerResponse.destroy()` (`4557`) | Destruye la respuesta y cierra el socket | `return this` | **Pendiente de implementar** (hoy un `destroy()` no cierra nada) |
+| `IncomingMessage.setTimeout(ms, cb)` | Arma la inactividad del socket y añade el callback a `'timeout'` | Implementado | El evento llega a `req` si la petición sigue incompleta, a `res`, y al servidor (como `socketOnTimeout`) |
+| `OutgoingMessage.setTimeout` / `ServerResponse.setTimeout(ms, cb)` | Idem | Implementado | Rearma el temporizador de inactividad del socket de la conexión |
+| `http.Server.setTimeout(ms, cb)` | Guarda `server.timeout` y añade el callback a `'timeout'` | Implementado | Cada conexión arma el temporizador con `server.timeout`; tras una respuesta, con `keepAliveTimeout + keepAliveTimeoutBuffer` |
+| `ServerResponse.destroy()` | Destruye la respuesta y cierra el socket | Implementado: destruye el socket de la conexión | |
 | `ServerResponse.addTrailers(headers)` | Añade una sección de trailers al final del cuerpo | No existía | No-op documentado: la respuesta se escribe entera de una vez (con `Content-Length`), así que no hay sección de trailers donde ponerlos. Los valores quedan en `res._trailers` |
 | `ServerResponse.flushHeaders()` | Escribe la cabeza sin el cuerpo | No existía | No-op documentado: la cabeza y el cuerpo se escriben juntos en `end()` (no hay escritura parcial de la respuesta) |
+
+El `socket` que `http` entrega como `req.socket` ya no es un `EventEmitter` por petición: hay uno por
+conexión (clase `httpConnSocket`), con temporizador de inactividad real y `destroy()` que cierra la
+conexión nativa (`__httpCloseConn`). `setNoDelay`/`setKeepAlive`/`ref`/`unref` siguen siendo no-ops
+documentados (§7.2); `address()` informa del par que sí se conoce (igual que `UpgradeSocket`).
 
 ## 7.4 Streams
 
@@ -84,8 +89,7 @@ No son "métodos falsos" y no cambian:
 
 ## 7.6 Qué queda
 
-- Implementar `ServerResponse.destroy()` y `Writable.setDefaultEncoding()`.
-- Evaluar `dgram` (setsockopt) y `IncomingMessage`/`Server` timeouts si una
-  librería real los necesita — con la suite diferencial y `library-suites.sh`
-  como juez, no por completitud.
+- Implementar `Writable.setDefaultEncoding()`.
+- Evaluar `dgram` (setsockopt) si una librería real lo necesita — con la
+  suite diferencial y `library-suites.sh` como juez, no por completitud.
 - El resto son no-ops intencionados con su `// ponytail:` en el código.

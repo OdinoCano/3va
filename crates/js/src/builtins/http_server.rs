@@ -486,6 +486,10 @@ fn bind_one(sockaddr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
 
 struct ConnEntry {
     resp_tx: mpsc::Sender<PendingResponse>,
+    /// Woken by `__httpCloseConn` when JS destroys the socket: the
+    /// connection task drops the stream and closes the TCP connection, even
+    /// while it is idle waiting for the next request head.
+    close: Arc<tokio::sync::Notify>,
 }
 
 struct PendingResponse {
@@ -1434,7 +1438,14 @@ async fn handle_connection<S>(
     };
 
     let (resp_tx, mut resp_rx) = mpsc::channel::<PendingResponse>(16);
-    conns.lock().unwrap().insert(conn_id, ConnEntry { resp_tx });
+    let close_wake = Arc::new(tokio::sync::Notify::new());
+    conns.lock().unwrap().insert(
+        conn_id,
+        ConnEntry {
+            resp_tx,
+            close: close_wake.clone(),
+        },
+    );
 
     // Connection accounting IP. Normally the peer itself, registered by the
     // accept loop before this task started. When the peer is a trusted reverse
@@ -1466,7 +1477,7 @@ async fn handle_connection<S>(
     // next request starts) if JS never drained it.
     let mut my_last_body: Option<u32> = None;
 
-    loop {
+    'conn: loop {
         // The timeouts the application set on the server (Node's
         // `headersTimeout`, `requestTimeout` and `keepAliveTimeout`). They
         // are read per request: the application can change them while the
@@ -1480,7 +1491,13 @@ async fn handle_connection<S>(
             _ => hdr_timeout,
         };
         let keepalive_limit = match app_timeouts.keepalive() {
-            Some(d) if !d.is_zero() => keepalive_timeout.min(d),
+            // Node advertises `keepAliveTimeout` but waits `keepAliveTimeout +
+            // keepAliveTimeoutBuffer` (default 1 s) before dropping an idle
+            // keep-alive socket (lib/_http_server.js), so a client reusing the
+            // connection near the deadline is not reset. The same 1 s of slack
+            // here; the application's own buffer is not forwarded to the native
+            // limit yet, and the firewall's cap still applies.
+            Some(d) if !d.is_zero() => keepalive_timeout.min(d + std::time::Duration::from_secs(1)),
             _ => keepalive_timeout,
         };
         // `requestTimeout` is the deadline for the whole request (head and
@@ -1513,17 +1530,21 @@ async fn handle_connection<S>(
             }
             None => hdr_limit,
         };
-        let head = match parse_request_head(
-            &mut reader,
-            hdr_budget,
-            max_hdr_count,
-            max_hdr_bytes,
-            max_body,
-        )
-        .await
-        {
-            Ok(p) => p,
-            Err(ParseError::Respond(status, msg)) => {
+        let parsed = tokio::select! {
+            _ = close_wake.notified() => None,
+            r = parse_request_head(
+                &mut reader,
+                hdr_budget,
+                max_hdr_count,
+                max_hdr_bytes,
+                max_body,
+            ) => Some(r),
+        };
+        let head = match parsed {
+            // JS destroyed the socket (server.close() or socket.destroy()).
+            None => break,
+            Some(Ok(p)) => p,
+            Some(Err(ParseError::Respond(status, msg))) => {
                 let resp = format!(
                     "HTTP/1.1 {status} {msg}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{msg}",
                     len = msg.len()
@@ -1532,7 +1553,7 @@ async fn handle_connection<S>(
                 let _ = writer.flush().await;
                 break;
             }
-            Err(ParseError::Silent(_)) => {
+            Some(Err(ParseError::Silent(_))) => {
                 // The request timeout expired while the head was still coming
                 // in: Node answers 408 and closes the connection.
                 if request_deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
@@ -1775,7 +1796,11 @@ async fn handle_connection<S>(
                     }
                     // Body fully read: bound the wait for JS's response so a
                     // handler that never answers can't pin the connection open.
-                    match tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx.recv()).await {
+                    let waited = tokio::select! {
+                        _ = close_wake.notified() => break 'conn,
+                        r = tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx.recv()) => r,
+                    };
+                    match waited {
                         Ok(Some(r)) if r.informational => {
                             let _ = writer.write_all(&r.bytes).await;
                             let _ = writer.flush().await;
@@ -1786,6 +1811,7 @@ async fn handle_connection<S>(
                     }
                 }
                 tokio::select! {
+                    _ = close_wake.notified() => break 'conn,
                     r = resp_rx.recv() => {
                         match r {
                             // A 1xx informational response goes out before
@@ -2976,6 +3002,35 @@ pub fn inject_http_server(
             scope,
             V8String::new(scope, "__httpClose").unwrap().into(),
             http_close_fn.into(),
+        );
+    }
+
+    {
+        // `socket.destroy()` on the JS side: wake the connection task, which
+        // drops the stream and closes the TCP connection (also while idle,
+        // waiting for the next request head).
+        let conns_ptr = native_ctx.leak(conns.clone());
+        let external = v8::External::new(scope, conns_ptr);
+        let http_close_conn_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let conns = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const Arc<Mutex<HashMap<u32, ConnEntry>>>)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                if let Some(c) = conns.lock().unwrap().get(&conn_id) {
+                    c.close.notify_one();
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpCloseConn").unwrap().into(),
+            http_close_conn_fn.into(),
         );
     }
 

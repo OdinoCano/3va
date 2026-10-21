@@ -516,6 +516,109 @@ async fn idle_keep_alive_connection_closed_after_keepalive_timeout() {
     );
 }
 
+/// `server.setTimeout(ms, cb)` must arm a real socket inactivity timer: the
+/// callback runs with the socket and `socket.destroy()` closes the
+/// connection. Before, `setTimeout` only stored a listener, so the callback
+/// never ran and the connection stayed open (C02).
+#[tokio::test]
+async fn server_set_timeout_fires_with_the_socket() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__timedOut = 'no';
+        var _server = http.createServer(function(req, res) {{ /* never answer */ }});
+        _server.setTimeout(50, function(socket) {{
+            globalThis.__timedOut = typeof socket.destroy;
+            socket.destroy();
+            _server.close();
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let closed = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 1024];
+        matches!(
+            tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await,
+            Ok(Ok(0))
+        )
+    })
+    .await;
+
+    assert!(
+        closed,
+        "socket.destroy() in the timeout callback must close the connection"
+    );
+    let fired = e.eval_to_string("globalThis.__timedOut").await.unwrap();
+    assert_eq!(
+        fired, "function",
+        "the 'timeout' callback must run with the socket"
+    );
+}
+
+/// `req.setTimeout(ms, cb)` must fire while the request body is still
+/// incomplete (Node: socketOnTimeout only skips the request once it is
+/// complete). Before, both request and response setTimeout were no-ops.
+#[tokio::test]
+async fn request_set_timeout_fires_while_the_body_is_pending() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__reqTimeout = 'no';
+        var _server = http.createServer(function(req, res) {{
+            req.setTimeout(50, function(socket) {{
+                globalThis.__reqTimeout = 'yes';
+                socket.destroy();
+                _server.close();
+            }});
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let closed = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        // A body that never finishes: Content-Length says 10, only 3 arrive.
+        stream
+            .write_all(b"POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 10\r\n\r\nabc")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 1024];
+        matches!(
+            tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await,
+            Ok(Ok(0))
+        )
+    })
+    .await;
+
+    assert!(closed, "the request timeout must destroy the socket");
+    let fired = e.eval_to_string("globalThis.__reqTimeout").await.unwrap();
+    assert_eq!(fired, "yes", "req.setTimeout's callback must run");
+}
+
 /// Verify that `req.headers['content-length']` in JS reflects the bytes that
 /// were actually allocated and read — not the raw value from the request header.
 ///
