@@ -14,8 +14,10 @@
 //   3. with no handler, SIGTERM takes the default action.
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 fn bin() -> &'static str {
@@ -34,6 +36,56 @@ fn run_script(dir: &Path, src: &str) -> Child {
         .env("HOME", &home)
         .spawn()
         .expect("cannot start 3va")
+}
+
+/// Like `run_script`, but with stdout piped, so the test can wait for the
+/// script to announce it is ready (a "listo" line) instead of sleeping a
+/// fixed amount that flakes under load.
+fn run_script_piped(dir: &Path, src: &str) -> (Child, mpsc::Receiver<String>) {
+    let script = dir.join("main.js");
+    fs::write(&script, src).unwrap();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let mut child = Command::new(bin())
+        .arg("run")
+        .arg("--no-prompt")
+        .arg(&script)
+        .env("HOME", &home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("cannot start 3va");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    (child, rx)
+}
+
+/// Wait until the child prints a line containing `expected`, or panic after
+/// `limit`.
+fn wait_for_line(rx: &mpsc::Receiver<String>, expected: &str, limit: Duration) {
+    let started = Instant::now();
+    loop {
+        match rx.try_recv() {
+            Ok(line) if line.contains(expected) => return,
+            Ok(_) => {}
+            Err(mpsc::TryRecvError::Empty) => {
+                if started.elapsed() >= limit {
+                    panic!("the child did not print {expected:?} within {limit:?}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                panic!("the child closed stdout before printing {expected:?}");
+            }
+        }
+    }
 }
 
 /// Send SIGTERM to `pid` with `kill`, as a supervisor (systemd, Kubernetes)
@@ -142,7 +194,7 @@ fn sigterm_without_a_listener_exits_with_128_plus_the_signal() {
 #[test]
 fn a_handler_receives_every_sigint() {
     let (_dir, path) = temp_dir("repeat");
-    let mut child = run_script(
+    let (mut child, rx) = run_script_piped(
         &path,
         r#"
         let n = 0;
@@ -151,9 +203,12 @@ fn a_handler_receives_every_sigint() {
             if (n >= 2) process.exit(0);
         });
         setInterval(() => {}, 1000);
+        console.log('listo');
         "#,
     );
-    std::thread::sleep(Duration::from_secs(1));
+    // Wait for the handler to be registered before the first signal: a fixed
+    // sleep flakes on a loaded debug build.
+    wait_for_line(&rx, "listo", Duration::from_secs(10));
     send_sigint(child.id());
     std::thread::sleep(Duration::from_millis(300));
     send_sigint(child.id());
