@@ -7023,6 +7023,25 @@ __httpSetHandler(self._id, function() {
         };
         globalThis.__importAsync = __makeImportAsync(__entryRequire);
 
+        // Backs native dynamic import() resolved by V8's host callback: the
+        // callback passes the importing script's path (its resource name), so a
+        // required module's `import('./x')` resolves from *its* directory, not
+        // the entry's. The entry-scoped `__importAsync` above stays for scripts
+        // whose resource name is not a path.
+        globalThis.__importAsyncFrom = function(specifier, fromPath) {
+            var dir = '.';
+            if (typeof fromPath === 'string' && fromPath.length) {
+                var i = Math.max(fromPath.lastIndexOf('/'), fromPath.lastIndexOf('\\'));
+                dir = i >= 0 ? fromPath.slice(0, i) : '.';
+            } else {
+                // No resource name (e.g. `eval`): fall back to the entry dir.
+                dir = globalThis.__dirname || '.';
+            }
+            var req = function(s) { return requireFrom(s, dir); };
+            req.resolve = function(s) { return __requireResolve(s, dir); };
+            return __makeImportAsync(req)(specifier);
+        };
+
         // Entry file (ES module): load its static imports first; if any is still waiting on a
         // top-level await, return a promise the entry body must wait for (null otherwise).
         globalThis.__esmEntryPreload = function(specs) {

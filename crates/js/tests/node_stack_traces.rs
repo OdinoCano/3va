@@ -70,6 +70,41 @@ async fn the_stack_of_a_required_module_names_the_file_and_the_line() {
 }
 
 #[tokio::test]
+async fn a_required_module_with_dynamic_import_keeps_its_own_lines() {
+    // A CommonJS module that also uses `import()` must not be recompiled as
+    // an ES module (which reformats it and shifts every line): its stack
+    // trace points at the file's own line and column, as in Node.
+    let (_temp, mut engine) = write_and_eval(
+        &[
+            (
+                "lib.js",
+                "exports.boom = function boom() { throw new Error('kaput'); };\nexports.dyn = async () => (await import('./esm.mjs')).v;\n",
+            ),
+            ("esm.mjs", "export const v = 42;\n"),
+            (
+                "entry.js",
+                "try { require('./lib.js').boom(); } catch (e) { globalThis._stack = e.stack; }\n",
+            ),
+        ],
+        "entry.js",
+    )
+    .await;
+    let stack = engine
+        .eval_to_string("String(globalThis._stack)")
+        .await
+        .unwrap();
+    // node 24: `at boom (/…/lib.js:1:40)`.
+    assert!(
+        stack.contains("lib.js:1:"),
+        "la traza debe decir la línea 1 del archivo, no una reescrita: {stack}"
+    );
+    assert!(
+        !stack.contains("lib.js:3:"),
+        "la traza no debe señalar una línea reescrita: {stack}"
+    );
+}
+
+#[tokio::test]
 async fn the_frame_of_the_module_is_the_anonymous_function_of_the_module() {
     // Node llama `Object.<anonymous>` al fotograma del módulo CommonJS.
     let (_temp, mut engine) = write_and_eval(

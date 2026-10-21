@@ -138,16 +138,31 @@ fn pump_v8_platform_tasks(isolate: &v8::Isolate) {
 fn host_import_module_dynamically<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
     _host_defined_options: v8::Local<'s, v8::Data>,
-    _resource_name: v8::Local<'s, v8::Value>,
+    resource_name: v8::Local<'s, v8::Value>,
     specifier: v8::Local<'s, v8::String>,
     _import_attributes: v8::Local<'s, v8::FixedArray>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
     let context = scope.get_current_context();
     let global = context.global(scope);
+    let recv: v8::Local<'s, v8::Value> = context.global(scope).into();
+
+    // Resolve the specifier relative to the script that issued the import: the
+    // resource name carries its path, so a required module's `import('./x')`
+    // resolves from *its* directory, not the entry's. Fall back to the
+    // entry-scoped helper when the per-path helper is absent (contexts without
+    // the require shim, e.g. test262).
+    let key = v8::String::new(scope, "__importAsyncFrom")?;
+    if let Ok(func) = v8::Local::<v8::Function>::try_from(global.get(scope, key.into())?) {
+        let spec: v8::Local<'s, v8::Value> = specifier.into();
+        let result = func.call(scope, recv, &[spec, resource_name])?;
+        if result.is_promise() {
+            return Some(unsafe { v8::Local::<v8::Promise>::cast_unchecked(result) });
+        }
+        return None;
+    }
     let key = v8::String::new(scope, "__importAsync")?;
     let func = global.get(scope, key.into())?;
     let func = v8::Local::<v8::Function>::try_from(func).ok()?;
-    let recv: v8::Local<'s, v8::Value> = context.global(scope).into();
     let arg: v8::Local<'s, v8::Value> = specifier.into();
     let result = func.call(scope, recv, &[arg])?;
     if result.is_promise() {
@@ -1557,27 +1572,7 @@ fn is_esm_source(code: &str) -> bool {
             || trimmed.starts_with("export ")
             || trimmed.starts_with("export{")
             || trimmed.starts_with("export default")
-            || has_dynamic_import(trimmed)
         {
-            return true;
-        }
-    }
-    false
-}
-
-/// True if `line` contains a bare `import(` call (dynamic import) not
-/// preceded by an identifier character — see the matching helper in
-/// `esm.rs` for why this is needed: without it, a file using only dynamic
-/// `import()` (no static import/export) never gets routed through
-/// transpile_to_cjs, so the transpiler's `import(` → `__importAsync(`
-/// rewrite never fires and V8 chokes on unsupported native dynamic import.
-fn has_dynamic_import(line: &str) -> bool {
-    if let Some(pos) = line.find("import(") {
-        let before_ok = pos == 0 || {
-            let prev = line.as_bytes()[pos - 1];
-            !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'$')
-        };
-        if before_ok {
             return true;
         }
     }

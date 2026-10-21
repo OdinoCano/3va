@@ -96,3 +96,40 @@ async fn import_from_classic_script_rejects_for_missing_module() {
     .await;
     assert_eq!(out, "rejected");
 }
+
+/// A required module's own `import('./x')` resolves from *its* directory, not
+/// the entry's: the host callback uses the importing script's path (the
+/// resource name), so two modules in different directories each find their own
+/// sibling.
+#[tokio::test]
+async fn import_in_a_required_module_resolves_from_that_modules_directory() {
+    let temp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(temp.path().join("sub")).unwrap();
+    std::fs::write(
+        temp.path().join("sub/lib.js"),
+        "exports.dyn = async () => (await import('./esm.mjs')).v;\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("sub/esm.mjs"), "export const v = 99;\n").unwrap();
+    std::fs::write(
+        temp.path().join("entry.js"),
+        "require('./sub/lib.js').dyn().then(v => { globalThis.__out = String(v); });\n",
+    )
+    .unwrap();
+
+    let state = PermissionState::new();
+    state.grant(Capability::FileRead(temp.path().to_path_buf()));
+    let mut e = JsEngine::new(Arc::new(state)).await.unwrap();
+    e.eval_file(&temp.path().join("entry.js")).await.unwrap();
+    for _ in 0..200 {
+        e.pump_timers().await.unwrap();
+        e.idle().await;
+        let out = e.eval_to_string("String(globalThis.__out)").await.unwrap();
+        if out != "undefined" {
+            assert_eq!(out, "99");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("dynamic import() in a required module never settled");
+}
