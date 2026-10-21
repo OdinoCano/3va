@@ -105,6 +105,38 @@ async fn readable_push_null_emits_end() {
     assert_eq!(r, "true");
 }
 
+/// `resume()` with no `'data'` listener must drain the body and emit `'end'`
+/// (Node's `flow()`: a resumed stream flows to nobody). The chunks used to be
+/// buffered, and `_maybeEnd` (which requires an empty buffer) never emitted
+/// `'end'`, so `res.resume()` then `'end'` hung — the idiom the http client
+/// tests use to discard a body.
+#[tokio::test]
+async fn readable_resume_without_data_listener_emits_end() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var Readable = require('stream').Readable;
+        globalThis.__resumed = null;
+        var r = new Readable();
+        r.resume();
+        r.on('end', function() { globalThis.__resumed = 'ended'; });
+        r.push('a');
+        r.push('b');
+        r.push(null);
+        "#,
+    )
+    .await
+    .unwrap();
+    let r = pump_until(
+        &mut e,
+        "globalThis.__resumed !== null ? globalThis.__resumed : 'false'",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("resume() then 'end' never fired");
+    assert_eq!(r, "ended");
+}
+
 // ── Writable stream ───────────────────────────────────────────────────────────
 
 #[tokio::test]

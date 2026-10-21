@@ -2314,7 +2314,7 @@ pub fn inject_require(
             function Readable(opts) {
                 Stream.call(this);
                 this.readable = true;
-                this._readableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, buffer: [], ended: false, _endEmitted: false, flowing: false };
+                this._readableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, buffer: [], ended: false, _endEmitted: false, flowing: false, discard: false };
                 if (opts && typeof opts.read === 'function') this._read = opts.read;
                 // Node: { encoding: 'utf8' } in the constructor is equivalent
                 // to calling setEncoding() — 'data' events carry decoded
@@ -2339,6 +2339,8 @@ pub fn inject_require(
                 // after the attach is delivered in the same turn, which is the
                 // ordering almost all code — and the stream tests — rely on.
                 if (ev === 'data') {
+                    // A consumer is reading, so nothing is dropped.
+                    state.discard = false;
                     if (!state.flowing) state.flowing = true;
                     this._flushIfFlowing();
                     this._maybeEnd();
@@ -2434,6 +2436,11 @@ pub fn inject_require(
                     var hasDataL = this._events && this._events['data'] && this._events['data'].length > 0;
                     if (state.flowing && hasDataL) {
                         this.emit('data', chunk);
+                    } else if (state.flowing && state.discard) {
+                        // Resumed with nobody listening: drop the chunk and
+                        // keep the buffer empty, as Node's flow() does (the
+                        // async iterator and pipe() attach 'data', so they
+                        // never take this branch and keep their backpressure).
                     } else {
                         state.buffer.push(chunk);
                         state.length += state.objectMode ? 1 : _chunkBytes(chunk);
@@ -2472,6 +2479,16 @@ pub fn inject_require(
                 var state = this._readableState;
                 state.flowing = true;
                 state._resumeScheduled = false;
+                // Node's flow(): a resumed stream with no 'data' listener
+                // drains to nobody, so the buffer must not pile up. It used to
+                // stay full and `_maybeEnd` (which requires an empty buffer)
+                // never emitted 'end' — the `res.resume()` then 'end' idiom
+                // that the http client uses. `on('data')` clears this.
+                if (!(this._events && this._events['data'] && this._events['data'].length)) {
+                    state.discard = true;
+                    state.buffer.length = 0;
+                    state.length = 0;
+                }
                 this._flushIfFlowing();
                 this._maybeEnd();
                 this._read(0);
