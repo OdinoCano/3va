@@ -616,8 +616,6 @@ test-http-outgoing-drain-writable-length.js
 test-http-outgoing-end-cork.js
 test-http-outgoing-end-multiple.js
 test-http-outgoing-finish-writable.js
-test-http-outgoing-finish.js
-test-http-outgoing-finished.js
 test-http-outgoing-first-chunk-singlebyte-encoding.js
 test-http-outgoing-flush-drain.js
 test-http-outgoing-message-capture-rejection.js
@@ -659,7 +657,6 @@ test-http-request-lookup-error-catchable.js
 test-http-request-method-delete-payload.js
 test-http-request-signal.js
 test-http-request-smuggling-content-length.js
-test-http-res-write-after-end.js
 test-http-res-write-end-dont-take-array.js
 test-http-response-add-header-after-sent.js
 test-http-response-close.js
