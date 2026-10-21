@@ -126,6 +126,11 @@ fn node_parallel_suite() {
     }
 
     let bin = threeva_bin();
+    // The baseline is read before the run too: a parallel failure that the
+    // baseline already records is expected and is not re-run alone (only the
+    // failures *not* in the baseline are re-run once, to tell a real
+    // regression from a transient one under contention).
+    let known_failures = read_baseline(Path::new(BASELINE));
     let opts = Options {
         prefixes: PREFIXES.iter().map(|s| s.to_string()).collect(),
         threeva_bin: bin.clone(),
@@ -159,6 +164,7 @@ fn node_parallel_suite() {
         .collect(),
         filter: std::env::var("NODE_TESTS_FILTER").ok(),
         skips: read_skips(Path::new(SKIP_LIST)),
+        known_failures,
         // How many test files run at the same time. Half the cores by
         // default (the run is mostly waiting on timeouts), 16 at most.
         jobs: std::env::var("NODE_TESTS_JOBS")

@@ -71,6 +71,9 @@ pub struct Options {
     pub skips: BTreeMap<String, String>,
     /// How many test files to run at the same time.
     pub jobs: usize,
+    /// Tests the baseline already records as failing: a parallel failure in
+    /// one of these is expected and is not re-run alone.
+    pub known_failures: BTreeSet<String>,
 }
 
 /// The module key for a test file, from the longest matching prefix
@@ -711,23 +714,28 @@ pub fn run_suite(root: &Path, opts: &Options) -> Summary {
         }
     });
 
-    // The tests that hit the timeout are run again, one at a time: with
+    // The tests that failed in parallel are run again, one at a time: with
     // several tests running at the same time a slow one can miss the deadline
     // that it would meet alone, and a test that only fails under that
     // contention does not belong in the baseline (it would make the ratchet
-    // fail at random, in the CI too).
-    let timed_out: Vec<usize> = {
+    // fail at random, in the CI too). A test the baseline already records as
+    // failing is expected to fail, so it is not re-run; everything else is
+    // re-run once, whatever the reason ("timeout after" or "exit N"), and
+    // counts as failed only if it also fails alone.
+    let to_retry: Vec<usize> = {
         let outcomes = outcomes.lock().expect("outcomes mutex");
         planned
             .iter()
             .enumerate()
-            .filter_map(|(index, _)| match &outcomes[index] {
-                Some(Outcome::Failed(reason)) if reason.starts_with("timeout after") => Some(index),
+            .filter_map(|(index, planned)| match &outcomes[index] {
+                Some(Outcome::Failed(_)) if !opts.known_failures.contains(&planned.name) => {
+                    Some(index)
+                }
                 _ => None,
             })
             .collect()
     };
-    for index in timed_out {
+    for index in to_retry {
         let planned = &planned[index];
         eprintln!("NODE_TEST_RETRY\t{}", planned.name);
         let (passed, reason) = run_one(
@@ -991,6 +999,7 @@ mod tests {
             filter: None,
             skips: std::collections::BTreeMap::new(),
             jobs: 1,
+            known_failures: BTreeSet::new(),
         };
         let (passed, reason) = run_one(&opts, &dir, &file, &[], 0, None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1053,5 +1062,63 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// A test that only fails under parallel contention must be re-run alone
+    /// and count as passed if it passes there — whatever the reason, not just
+    /// "timeout after". Before this, an "exit 1" under contention went straight
+    /// to the baseline without a retry.
+    #[test]
+    fn a_parallel_failure_not_in_the_baseline_is_retried_alone() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("_3va_retry_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("test/parallel")).unwrap();
+        let counter = dir.join("counter");
+        // A fake "3va" that fails once (exit 1) and then passes: it stands in
+        // for a test that only fails under contention and passes alone.
+        let script = dir.join("fake-3va");
+        let counter_path = counter.to_string_lossy().to_string();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 n=0\n\
+                 [ -f '{counter_path}' ] && n=$(cat '{counter_path}')\n\
+                 n=$((n + 1))\n\
+                 echo \"$n\" > '{counter_path}'\n\
+                 if [ \"$n\" -eq 1 ]; then exit 1; else exit 0; fi\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("test/parallel/test-foo.js"), "// 3va runs this\n").unwrap();
+
+        let opts = Options {
+            prefixes: vec!["test-foo".to_string()],
+            threeva_bin: script,
+            timeout: Duration::from_secs(10),
+            max_rss_mb: 0,
+            perms: vec![],
+            filter: None,
+            skips: BTreeMap::new(),
+            jobs: 2,
+            known_failures: BTreeSet::new(),
+        };
+        let summary = run_suite(&dir, &opts);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            summary.failed.is_empty(),
+            "un fallo 'exit 1' fuera de la línea base debe reintentarse solo y pasar: {:?}",
+            summary
+                .failed
+                .iter()
+                .map(|f| (&f.name, &f.reason))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            summary.passed, 1,
+            "el test debe contar como pasado tras el reintento"
+        );
     }
 }
