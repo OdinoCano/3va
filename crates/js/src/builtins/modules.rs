@@ -3041,23 +3041,50 @@ pub fn inject_require(
             };
             Stream.finished = function(stream, options, cb) {
                 if (typeof options === 'function') { cb = options; options = {}; }
+                options = options || {};
                 cb = cb || function() {};
-                if (!stream || typeof stream.on !== 'function') { cb(); return function() {}; }
+                var noop = function() {};
+                if (!stream || typeof stream.on !== 'function') {
+                    queueMicrotask(function() { cb(); });
+                    return noop;
+                }
                 var settled = false;
                 function onEnd() { done(null); }
                 function onFinish() { done(null); }
                 function onError(err) { done(err); }
+                // Node's eos (which finished() is built on) also completes on
+                // 'close': a stream destroyed before it finished is done as far
+                // as the caller is concerned, and http responses emit 'close'
+                // right after 'finish'.
+                function onClose() { done(null); }
                 function cleanup() {
                     stream.removeListener('end', onEnd);
                     stream.removeListener('finish', onFinish);
                     stream.removeListener('error', onError);
+                    stream.removeListener('close', onClose);
                 }
                 // A Duplex emits both 'end' and 'finish'; without the guard the
                 // callback ran twice (Node calls it exactly once).
-                function done(err) { if (settled) return; settled = true; cleanup(); cb(err); }
+                function done(err) {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+                    // Node documents finished()'s callback as asynchronous, and
+                    // code that emits 'finish' and then 'close' in a row counts
+                    // on the callback running after both (it used to run inside
+                    // the 'finish' emit, so the second one saw a stream that had
+                    // not closed yet).
+                    queueMicrotask(function() { cb(err); });
+                }
+                // Already over: still call back, but on a later tick, like Node.
+                if (stream.readableEnded || stream.writableFinished || stream.destroyed || stream.finished === true) {
+                    queueMicrotask(function() { cb(null); });
+                    return noop;
+                }
                 stream.once('end', onEnd);
                 stream.once('finish', onFinish);
                 stream.once('error', onError);
+                stream.once('close', onClose);
                 return function() { done(new Error('aborted')); };
             };
             globalThis.__requireCache['stream'] = Stream;
@@ -4620,9 +4647,17 @@ pub fn inject_require(
                 if (this.socket && typeof this.socket.setTimeout === 'function') this.socket.setTimeout(ms);
                 return this;
             };
-            httpIncomingMessage.prototype.destroy = function() {
+            httpIncomingMessage.prototype.destroy = function(err) {
+                if (this.destroyed) return this;
+                this.destroyed = true;
                 var st = this[kIncomingBody];
                 if (st) { st.done = true; this[kIncomingBody] = null; }
+                if (this.socket && typeof this.socket.destroy === 'function') this.socket.destroy();
+                var self = this;
+                queueMicrotask(function() {
+                    if (err) self.emit('error', err);
+                    self.emit('close');
+                });
                 return this;
             };
             // Node's `_addHeaderLine` (lib/_http_incoming.js): the raw
@@ -5378,8 +5413,17 @@ __httpSetHandler(self._id, function() {
             util.inherits(ClientIncomingMessage, Readable);
             ClientIncomingMessage.prototype.setTimeout = function(ms, cb) { if (typeof cb === 'function') this.once('timeout', cb); return this; };
             ClientIncomingMessage.prototype.destroy = function(err) {
+                if (this.destroyed) return this;
+                this.destroyed = true;
+                this.aborted = true;
                 if (this.socket && typeof this.socket.destroy === 'function') this.socket.destroy();
-                if (err) this.emit('error', err);
+                var self = this;
+                // Node (Readable.destroy): 'error' (when given) and 'close' are
+                // emitted on a later tick, after the socket has been torn down.
+                queueMicrotask(function() {
+                    if (err) self.emit('error', err);
+                    self.emit('close');
+                });
                 return this;
             };
 

@@ -792,3 +792,68 @@ async fn pipe_resumes_after_destination_drain() {
     .expect("pipe never finished");
     assert_eq!(r, "got:20480");
 }
+
+/// Node documents `stream.finished()`'s callback as asynchronous, and the code
+/// that uses it emits `'finish'` and then `'close'` in a row: the callback must
+/// see both (it used to run inside the `'finish'` emit, so a server response
+/// looked unclosed from it).
+#[tokio::test]
+async fn finished_callback_runs_after_finish_and_close() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var stream = require('stream');
+        var EE = require('events');
+        var target = new EE();
+        var seen = [];
+        globalThis.__eos = null;
+        stream.finished(target, function() { seen.push('cb'); });
+        target.on('finish', function() { seen.push('finish'); });
+        target.on('close', function() { seen.push('close'); });
+        target.emit('finish');
+        seen.push('after-finish');
+        target.emit('close');
+        setTimeout(function() { globalThis.__eos = seen.join(','); }, 5);
+        "#,
+    )
+    .await
+    .unwrap();
+    pump_until(
+        &mut e,
+        "globalThis.__eos !== null ? 'done' : 'false'",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("finished() never called back");
+    let r = e.eval_to_string("globalThis.__eos").await.unwrap();
+    assert_eq!(r, "finish,after-finish,close,cb");
+}
+
+/// `finished()` on a stream that is already over (destroyed before the call)
+/// must still call back, asynchronously, instead of waiting for events that will
+/// never come.
+#[tokio::test]
+async fn finished_on_an_already_finished_stream_calls_back_async() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var stream = require('stream');
+        var EE = require('events');
+        var target = new EE();
+        target.destroyed = true;
+        globalThis.__eos2 = 'sync';
+        stream.finished(target, function() { globalThis.__eos2 = 'cb'; });
+        "#,
+    )
+    .await
+    .unwrap();
+    pump_until(
+        &mut e,
+        "globalThis.__eos2 !== 'sync' ? 'done' : 'false'",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("finished() never called back on an already-destroyed stream");
+    let r = e.eval_to_string("globalThis.__eos2").await.unwrap();
+    assert_eq!(r, "cb");
+}

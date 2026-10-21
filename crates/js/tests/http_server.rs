@@ -1946,3 +1946,62 @@ async fn request_body_is_delivered_to_listeners_attached_later() {
         "full response:\n{resp}"
     );
 }
+
+/// `req.destroy()` must end the request the way Node does: it closes the
+/// connection and emits `'close'`, so `stream.finished(req, cb)` completes
+/// instead of waiting for an `'end'` that will never come.
+#[tokio::test]
+async fn request_destroy_emits_close_and_finishes_the_stream() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var stream = require('stream');
+        globalThis.__closed = 'no';
+        globalThis.__finished = 'no';
+        var _server = http.createServer(function(req, res) {{
+            req.on('close', function() {{ globalThis.__closed = 'yes'; }});
+            stream.finished(req, function() {{
+                globalThis.__finished = 'yes';
+                _server.close();
+            }});
+            req.destroy();
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let closed = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 1024];
+        matches!(
+            tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await,
+            Ok(Ok(0))
+        )
+    })
+    .await;
+
+    assert!(closed, "req.destroy() must close the connection");
+    assert_eq!(
+        e.eval_to_string("globalThis.__closed").await.unwrap(),
+        "yes",
+        "req.destroy() must emit 'close'"
+    );
+    assert_eq!(
+        e.eval_to_string("globalThis.__finished").await.unwrap(),
+        "yes",
+        "req.destroy() must let finished() call back"
+    );
+}
