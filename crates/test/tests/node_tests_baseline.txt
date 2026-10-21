@@ -471,7 +471,6 @@ test-http-agent-keepalive-delay.js
 test-http-agent-keepalive.js
 test-http-agent-keylog-existing-sockets.js
 test-http-agent-maxsockets-respected.js
-test-http-agent-maxsockets.js
 test-http-agent-maxtotalsockets.js
 test-http-agent-remove.js
 test-http-agent-reuse-drained-socket-only.js
@@ -487,7 +486,6 @@ test-http-catch-uncaughtexception.js
 test-http-chunk-extensions-limit.js
 test-http-chunk-problem.js
 test-http-chunked-304.js
-test-http-chunked-smuggling.js
 test-http-client-abort-completed-keepalive.js
 test-http-client-abort-destroy.js
 test-http-client-abort-keep-alive-destroy-res.js
@@ -543,7 +541,6 @@ test-http-connect.js
 test-http-content-length-mismatch.js
 test-http-content-length.js
 test-http-createConnection.js
-test-http-date-header.js
 test-http-debug.js
 test-http-default-port.js
 test-http-destroyed-socket-write2.js
@@ -556,7 +553,6 @@ test-http-dummy-characters-smuggling.js
 test-http-dump-req-when-res-ends.js
 test-http-early-hints-invalid-argument.js
 test-http-early-hints.js
-test-http-end-throw-socket-handling.js
 test-http-exceptions.js
 test-http-expect-continue.js
 test-http-expect-handling.js
@@ -567,7 +563,6 @@ test-http-generic-streams.js
 test-http-head-throw-on-response-body-write.js
 test-http-header-badrequest.js
 test-http-header-overflow.js
-test-http-header-read.js
 test-http-header-validators.js
 test-http-header-value-relaxed.js
 test-http-headers-distinct-proto.js
@@ -591,7 +586,6 @@ test-http-keep-alive-close-on-header.js
 test-http-keep-alive-drop-requests.js
 test-http-keep-alive-max-requests.js
 test-http-keep-alive-pipeline-max-requests.js
-test-http-keep-alive-timeout-race-condition.js
 test-http-keep-alive-timeout.js
 test-http-keep-alive.js
 test-http-keepalive-client.js
@@ -658,7 +652,6 @@ test-http-req-res-close.js
 test-http-request-agent.js
 test-http-request-arguments.js
 test-http-request-dont-override-options.js
-test-http-request-end-twice.js
 test-http-request-host-header.js
 test-http-request-invalid-method-error.js
 test-http-request-join-authorization-headers.js
@@ -738,7 +731,6 @@ test-http-set-trailers.js
 test-http-should-keep-alive.js
 test-http-socket-encoding-error.js
 test-http-socket-error-listeners.js
-test-http-status-code.js
 test-http-status-reason-invalid-chars.js
 test-http-sync-write-error-during-continue.js
 test-http-timeout-client-warning.js
