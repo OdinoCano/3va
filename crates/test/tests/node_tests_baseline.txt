@@ -490,7 +490,6 @@ test-http-chunked-304.js
 test-http-chunked-smuggling.js
 test-http-client-abort-completed-keepalive.js
 test-http-client-abort-destroy.js
-test-http-client-abort-event.js
 test-http-client-abort-keep-alive-destroy-res.js
 test-http-client-abort-keep-alive-queued-tcp-socket.js
 test-http-client-abort-keep-alive-queued-unix-socket.js
