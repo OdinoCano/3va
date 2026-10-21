@@ -2005,3 +2005,49 @@ async fn request_destroy_emits_close_and_finishes_the_stream() {
         "req.destroy() must let finished() call back"
     );
 }
+
+/// `write()` must report backpressure (false past the 16 KiB high-water mark),
+/// or `while (res.write(buf))` never stops — that loop is what made
+/// test-http-outgoing-finish.js run out of memory — and the write callbacks
+/// must run before `'finish'` (C03).
+#[tokio::test]
+async fn response_write_reports_backpressure_and_calls_back_before_finish() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__srv = 'none';
+        var _server = http.createServer(function(req, res) {{
+            var buf = Buffer.alloc(16 * 1024, 120);
+            res.writeHead(200, {{ 'Content-Length': String(16 * 1024 * 2 + 1) }});
+            var first = res.write(buf);
+            var second = res.write(buf);
+            var writeCb = false;
+            res.write('x', function() {{ writeCb = true; }});
+            res.on('finish', function() {{
+                globalThis.__srv = String(first) + ',' + String(second) +
+                    ',' + (writeCb ? 'write-cb-before-finish' : 'finish-before-write-cb');
+            }});
+            res.end();
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let resp = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert!(
+        resp.starts_with("HTTP/1.1 200"),
+        "the response must still be sent: {resp:?}"
+    );
+    assert_eq!(
+        e.eval_to_string("globalThis.__srv").await.unwrap(),
+        "false,false,write-cb-before-finish",
+        "res.write() must report backpressure and its callback must run before 'finish'"
+    );
+}

@@ -4837,11 +4837,36 @@ pub fn inject_require(
             // `this.writeHead(this.statusCode)` — the actual bytes are only flushed
             // at end(), so recording the head here is sufficient.
             httpServerResponse.prototype._implicitHeader = function() { this.writeHead(this.statusCode); };
+            // Bytes of a chunk, for the writable high-water mark below. A
+            // string's byte length is what counts, not its character length.
+            var __httpBytes = function(c) {
+                if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.byteLength(c) : c.length;
+                return (c && typeof c.length === 'number') ? c.length : 0;
+            };
             httpServerResponse.prototype.write = function(chunk, encoding, callback) {
                 if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
-                if (chunk !== undefined) this._chunks.push(chunk);
-                if (typeof callback === 'function') setTimeout(callback, 0);
-                return true;
+                if (this.finished) {
+                    var err = new Error('write after end');
+                    err.code = 'ERR_STREAM_WRITE_AFTER_END';
+                    if (typeof callback === 'function') queueMicrotask(function() { callback(err); });
+                    this.emit('error', err);
+                    return false;
+                }
+                if (chunk !== undefined && chunk !== null) {
+                    this._chunks.push(chunk);
+                    this._buffered = (this._buffered || 0) + __httpBytes(chunk);
+                    if (typeof callback === 'function') {
+                        (this._writeCallbacks || (this._writeCallbacks = [])).push(callback);
+                    }
+                } else if (typeof callback === 'function') {
+                    queueMicrotask(callback);
+                }
+                // Writable's high-water mark (16 KiB by default). The response
+                // is flushed as one write at end(), so everything written so
+                // far is still pending here: `while (res.write(buf))` has to
+                // see the false once the mark is passed, or the loop never
+                // stops (test-http-outgoing-finish.js ran out of memory).
+                return (this._buffered || 0) < (this.writableHighWaterMark || 16384);
             };
             httpServerResponse.prototype.end = function(chunk, encoding, callback) {
                 var self = this;
@@ -4894,6 +4919,21 @@ pub fn inject_require(
                 // A microtask, not a 0 ms timer: it still runs after the handler
                 // returns, without a timer round-trip per response.
                 queueMicrotask(function() {
+                    // Node calls the write callbacks before 'finish', and
+                    // 'drain' once a backpressured response has been flushed.
+                    var writeCbs = self._writeCallbacks;
+                    if (writeCbs) {
+                        self._writeCallbacks = null;
+                        for (var i = 0; i < writeCbs.length; i++) writeCbs[i]();
+                    }
+                    // `_buffered` is 0 for the usual "write nothing, just
+                    // end(body)" response: skip the writableHighWaterMark
+                    // getter there, this runs once per response.
+                    var buffered = self._buffered || 0;
+                    if (buffered) {
+                        self._buffered = 0;
+                        if (buffered >= (self.writableHighWaterMark || 16384)) self.emit('drain');
+                    }
                     self.emit('finish');
                     self.emit('close');
                     httpConnResponseDone(self);
@@ -5656,29 +5696,43 @@ __httpSetHandler(self._id, function() {
                 if (chunk === undefined || chunk === null) { if (cb) cb(); return true; }
                 var buf = __reqChunkToBuffer(chunk, encoding);
                 this._bodyLen += buf.length;
-                if (this._headerSent && this._socket) this._sendChunk(buf);
-                else this._body.push(buf);
+                var flushed = true;
+                if (this._headerSent && this._socket) {
+                    flushed = this._sendChunk(buf);
+                } else {
+                    this._body.push(buf);
+                    this._pendingLen = (this._pendingLen || 0) + buf.length;
+                }
                 if (cb) cb();
-                return true;
+                // Same contract as any Writable: false once the pending bytes
+                // pass the high-water mark (the body is only flushed at
+                // end(), so a `while (req.write(buf))` loop must stop here).
+                return flushed && (this._pendingLen || 0) < (this.writableHighWaterMark || 16384);
             };
             ClientRequest.prototype._sendChunk = function(buf) {
                 var socket = this._socket;
-                if (!socket || socket.destroyed) return;
+                if (!socket || socket.destroyed) return false;
                 if (this._encodeChunked) {
-                    socket.write(Buffer.concat([Buffer.from(buf.length.toString(16) + '\r\n'), buf, Buffer.from('\r\n')]));
-                } else {
-                    socket.write(buf);
+                    return socket.write(Buffer.concat([Buffer.from(buf.length.toString(16) + '\r\n'), buf, Buffer.from('\r\n')]));
                 }
+                return socket.write(buf);
             };
             ClientRequest.prototype._flushBody = function() {
                 var body = this._body;
                 this._body = [];
+                this._pendingLen = 0;
                 for (var i = 0; i < body.length; i++) this._sendChunk(body[i]);
             };
             ClientRequest.prototype.end = function(chunk, encoding, cb) {
                 if (typeof chunk === 'function') { cb = chunk; chunk = null; }
                 if (typeof encoding === 'function') { cb = encoding; encoding = null; }
-                if (this._ended) { if (cb) cb(); return this; }
+                if (this._ended) {
+                    if (typeof cb === 'function') {
+                        if (this._finishEmitted) queueMicrotask(cb);
+                        else this.once('finish', cb);
+                    }
+                    return this;
+                }
                 this._ended = true;
                 this.writableEnded = true;
                 this.finished = true;
@@ -5692,8 +5746,11 @@ __httpSetHandler(self._id, function() {
                     else this._body.push(buf);
                 }
                 this._ensureConnected();
+                // Node calls end()'s callback from 'finish', after the last
+                // byte of the request is out; it used to run synchronously,
+                // before 'finish' had been emitted.
+                if (typeof cb === 'function') this.once('finish', cb);
                 this._maybeFinishRequest();
-                if (cb) cb();
                 return this;
             };
             ClientRequest.prototype.flushHeaders = function() {
@@ -5843,6 +5900,14 @@ __httpSetHandler(self._id, function() {
                 if (this._encodeChunked && !this._chunkTerminated && this._socket && !this._socket.destroyed) {
                     this._chunkTerminated = true;
                     this._socket.write('0\r\n\r\n');
+                }
+                // The request has been fully written: Node's ClientRequest is a
+                // Writable, so 'finish' is emitted (once) at this point and the
+                // end() callback runs after it.
+                if (!this._finishEmitted) {
+                    this._finishEmitted = true;
+                    var self = this;
+                    queueMicrotask(function() { self.emit('finish'); });
                 }
             };
             ClientRequest.prototype._sendHead = function() {
