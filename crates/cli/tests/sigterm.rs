@@ -47,6 +47,16 @@ fn send_sigterm(pid: u32) {
     assert!(status.success(), "kill -TERM {pid} failed");
 }
 
+/// Send SIGINT to `pid`, the signal a second Ctrl+C produces.
+fn send_sigint(pid: u32) {
+    let status = Command::new("kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .expect("cannot run kill");
+    assert!(status.success(), "kill -INT {pid} failed");
+}
+
 /// Wait for the child to exit, killing it if it takes longer than `limit`.
 fn wait_bounded(child: &mut Child, limit: Duration) -> (ExitStatus, Duration) {
     let started = Instant::now();
@@ -124,4 +134,32 @@ fn sigterm_without_a_listener_exits_with_128_plus_the_signal() {
         elapsed < Duration::from_secs(4),
         "the exit took {elapsed:?}"
     );
+}
+
+/// Every signal reaches the handler, not just the first: a second Ctrl+C (the
+/// one a person sends to cut a stuck shutdown) must emit `SIGINT` again. Node
+/// re-emits the event for each signal.
+#[test]
+fn a_handler_receives_every_sigint() {
+    let (_dir, path) = temp_dir("repeat");
+    let mut child = run_script(
+        &path,
+        r#"
+        let n = 0;
+        process.on('SIGINT', () => {
+            n += 1;
+            if (n >= 2) process.exit(0);
+        });
+        setInterval(() => {}, 1000);
+        "#,
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    send_sigint(child.id());
+    std::thread::sleep(Duration::from_millis(300));
+    send_sigint(child.id());
+    // The handler counts two signals and exits; if the second is lost the
+    // process keeps running and the watchdog would not help (the first signal
+    // was already acknowledged).
+    let (status, _elapsed) = wait_bounded(&mut child, Duration::from_secs(10));
+    assert_eq!(status.code(), Some(0), "status: {status:?}");
 }

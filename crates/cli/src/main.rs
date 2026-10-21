@@ -3362,6 +3362,15 @@ fn signal_acknowledge() {
     SIGNAL_ACKNOWLEDGED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Deliver a signal to the script's listeners, as Node does. Returns whether
+/// one was registered: without a listener the caller takes the default action
+/// (drain and stop with 128 + the signal).
+#[cfg(unix)]
+async fn deliver_signal(engine: &mut vvva_js::JsEngine, signal: &str) -> anyhow::Result<bool> {
+    signal_acknowledge();
+    engine.emit_process_signal(signal).await
+}
+
 /// The Node-compatible runtime flags as they were written on the command
 /// line, in order. Node exposes the same list as `process.execArgv`.
 fn node_exec_argv() -> Vec<String> {
@@ -4752,6 +4761,12 @@ async fn main() -> anyhow::Result<()> {
                 #[cfg(unix)]
                 let mut sigterm =
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+                // SIGINT as a stream too, not the one-shot `ctrl_c()` future:
+                // a second Ctrl+C has to reach the handler while it drains, so
+                // the signal must be re-armed between deliveries.
+                #[cfg(unix)]
+                let mut sigint =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
                 // A script that never yields (a busy loop) does not let the
                 // select below see the signal, and the handler tokio installs
@@ -4773,28 +4788,87 @@ async fn main() -> anyhow::Result<()> {
                 // Node's status for the default action (128 + the signal).
                 let mut signal_exit_code: Option<i32> = None;
                 #[cfg(unix)]
-                tokio::select! {
-                    result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
-                    _ = tokio::signal::ctrl_c() => {
-                        signal_acknowledge();
-                        match engine.emit_process_signal("SIGINT").await {
-                            Ok(true) => signal_handled = true,
-                            _ => {
-                                interrupted = true;
-                                signal_exit_code = Some(130);
-                                engine.drain_ws_connections().await;
-                            }
+                {
+                    // Deliver *each* signal, not just the first: the first one
+                    // interrupts the entry evaluation (a script awaiting a slow
+                    // import, or a busy loop that still yields), and later ones
+                    // reach the handler while it drains. A one-shot `select!`
+                    // delivered only the first, so a second Ctrl+C — the one a
+                    // person sends to cut a stuck shutdown — was lost.
+                    let mut eval_done = false;
+                    loop {
+                        if interrupted {
+                            break;
                         }
-                    }
-                    _ = sigterm.recv() => {
-                        signal_acknowledge();
-                        match engine.emit_process_signal("SIGTERM").await {
-                            Ok(true) => signal_handled = true,
-                            _ => {
-                                interrupted = true;
-                                signal_exit_code = Some(143);
-                                engine.drain_ws_connections().await;
+                        if !eval_done {
+                            tokio::select! {
+                                result = engine.eval_file_with_args(file, script_args) => {
+                                    run_result = result;
+                                    eval_done = true;
+                                }
+                                _ = sigint.recv() => {
+                                    match deliver_signal(&mut engine, "SIGINT").await {
+                                        Ok(true) => {
+                                            signal_handled = true;
+                                            eval_done = true;
+                                        }
+                                        _ => {
+                                            interrupted = true;
+                                            signal_exit_code = Some(130);
+                                            engine.drain_ws_connections().await;
+                                            break;
+                                        }
+                                    }
+                                }
+                                _ = sigterm.recv() => {
+                                    match deliver_signal(&mut engine, "SIGTERM").await {
+                                        Ok(true) => {
+                                            signal_handled = true;
+                                            eval_done = true;
+                                        }
+                                        _ => {
+                                            interrupted = true;
+                                            signal_exit_code = Some(143);
+                                            engine.drain_ws_connections().await;
+                                            break;
+                                        }
+                                    }
+                                }
                             }
+                        } else if run_result.is_ok() && signal_handled {
+                            // The handler keeps the loop alive: run it, still
+                            // delivering every signal that arrives (a second
+                            // Ctrl+C must reach the application).
+                            tokio::select! {
+                                result = engine.run_event_loop() => {
+                                    run_result = result;
+                                    break;
+                                }
+                                _ = sigint.recv() => {
+                                    match deliver_signal(&mut engine, "SIGINT").await {
+                                        Ok(true) => signal_handled = true,
+                                        _ => {
+                                            interrupted = true;
+                                            signal_exit_code = Some(130);
+                                            engine.drain_ws_connections().await;
+                                            break;
+                                        }
+                                    }
+                                }
+                                _ = sigterm.recv() => {
+                                    match deliver_signal(&mut engine, "SIGTERM").await {
+                                        Ok(true) => signal_handled = true,
+                                        _ => {
+                                            interrupted = true;
+                                            signal_exit_code = Some(143);
+                                            engine.drain_ws_connections().await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            break;
                         }
                     }
                 }
@@ -4803,12 +4877,6 @@ async fn main() -> anyhow::Result<()> {
                 tokio::select! {
                     result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
                     _ = tokio::signal::ctrl_c() => { interrupted = true; engine.drain_ws_connections().await; }
-                }
-                // With a signal listener, Node keeps the loop alive: the
-                // handler decides when the process ends (it may drain
-                // connections for as long as it needs).
-                if run_result.is_ok() && signal_handled && !interrupted {
-                    run_result = engine.run_event_loop().await;
                 }
                 // Node's natural end: 'beforeExit' (which may schedule more
                 // work), then 'exit', then process.exitCode as the status.
