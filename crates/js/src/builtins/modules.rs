@@ -4050,8 +4050,20 @@ pub fn inject_require(
             Socket.prototype._write = function(chunk, encoding, cb) {
                 if (this._connId === null) { cb(new Error('Socket is not connected')); return; }
                 var data = (chunk instanceof Uint8Array) ? chunk : new TextEncoder().encode(String(chunk));
-                var result = __tcpWrite(this._connId, data);
-                if (result === undefined) cb(); else cb(_netErr(result));
+                var self = this;
+                // __tcpWrite returns a number when the socket took only part of
+                // the data (its send buffer is full): retry the rest shortly.
+                var attempt = function(buf) {
+                    if (self._connId === null) { cb(); return; }   // destroyed meanwhile
+                    var result = __tcpWrite(self._connId, buf);
+                    if (typeof result === 'number') {
+                        var rest = buf.subarray(result);
+                        setTimeout(function() { attempt(rest); }, 1);
+                        return;
+                    }
+                    if (result === undefined) cb(); else cb(_netErr(result));
+                };
+                attempt(data);
             };
 
             Socket.prototype.connect = function(port, host, cb) {
@@ -4311,6 +4323,14 @@ pub fn inject_require(
 
             Server.prototype.listen = function(port, host, backlog, cb) {
                 var self = this;
+                // `listen(callback)` and `listen(options[, callback])`.
+                if (typeof port === 'function') { cb = port; port = 0; host = undefined; backlog = undefined; }
+                else if (port !== null && typeof port === 'object') {
+                    var lopts = port;
+                    if (typeof host === 'function') cb = host;
+                    port = lopts.port || 0; host = lopts.host; backlog = undefined;
+                    self._reusePort = !!lopts.reusePort;
+                }
                 // Real Node accepts listen(port, host, backlog, callback) —
                 // Metro's own earlyPortCheck calls it exactly that way
                 // (backlog explicitly undefined, callback as the 4th arg).
@@ -4321,7 +4341,7 @@ pub fn inject_require(
                 if (typeof backlog === 'function') { cb = backlog; backlog = undefined; }
                 if (typeof host === 'function') { cb = host; host = '0.0.0.0'; }
                 host = host || '0.0.0.0';
-                var result = __netListen(port, host);
+                var result = __netListen(port, host, self._reusePort === true);
                 if (typeof result === 'number') {
                     self._listenerId = result;
                     self.listening = true;
@@ -4369,7 +4389,16 @@ pub fn inject_require(
                 return this;
             };
             Server.prototype.address = function() {
-                return this.listening ? { address: '0.0.0.0', port: 0, family: 'IPv4' } : null;
+                if (!this.listening) return null;
+                // The bound address (the real port after `listen(0)`).
+                var bound = (this._listenerId !== null && typeof __netListenerAddr === 'function')
+                    ? __netListenerAddr(this._listenerId) : null;
+                if (typeof bound === 'string') {
+                    var i = bound.lastIndexOf(':');
+                    var ip = bound.slice(0, i).replace(/^\[|\]$/g, '');
+                    return { address: ip, family: ip.indexOf(':') !== -1 ? 'IPv6' : 'IPv4', port: parseInt(bound.slice(i + 1), 10) };
+                }
+                return { address: '0.0.0.0', port: 0, family: 'IPv4' };
             };
             // ponytail: ref/unref are no-ops — see docs/05-js-engine/07-inventario-stubs.md §7.2.
             Server.prototype.unref = function() { return this; };
@@ -5058,10 +5087,14 @@ pub fn inject_require(
             };
             // Whether the response can stream incrementally: HTTP/1.1 with no
             // Content-Length or Transfer-Encoding set (Node frames it chunked).
+            // A response streams when the framing is known: chunked (HTTP/1.1,
+            // no Content-Length) or the application's own numeric
+            // Content-Length (bytes go out as they are written, as in Node).
             var __httpCanStream = function(res) {
-                return res.req && res.req.httpVersionMinor >= 1
-                    && res.getHeader('Content-Length') === undefined
-                    && res.getHeader('Transfer-Encoding') === undefined;
+                if (!res.req || res.getHeader('Transfer-Encoding') !== undefined) return false;
+                var cl = res.getHeader('Content-Length');
+                if (cl === undefined) return res.req.httpVersionMinor >= 1;
+                return /^\d+$/.test(String(cl).trim());
             };
             // Flush the head to the socket and switch the response into
             // streaming mode. The native side builds the status line and
@@ -5072,7 +5105,7 @@ pub fn inject_require(
                 if (this._headSent) return;
                 if (!this.headersSent) this._implicitHeader();
                 if (!this.statusMessage) this.statusMessage = HTTP_STATUS_CODES[String(this.statusCode)] || '';
-                this._chunked = __httpCanStream(this);
+                this._chunked = this.getHeader('Content-Length') === undefined;
                 this._headSent = true;
                 this.headersSent = true;
                 var cl = this.getHeader('Content-Length');
@@ -5534,6 +5567,8 @@ pub fn inject_require(
             util.inherits(httpServer, EventEmitter);
             httpServer.prototype.listen = function(port, hostname, backlog, callback) {
                 var self = this;
+                // `listen(callback)`: no port, so an OS-assigned one.
+                if (typeof port === 'function') { callback = port; port = 0; hostname = undefined; }
                 if (typeof port === 'object' && port !== null) {
                     var opts = port;
                     callback = hostname;
@@ -5805,7 +5840,14 @@ __httpSetHandler(self._id, function() {
                 this.req = null;
             }
             util.inherits(ClientIncomingMessage, Readable);
-            ClientIncomingMessage.prototype.setTimeout = function(ms, cb) { if (typeof cb === 'function') this.once('timeout', cb); return this; };
+            // Node's IncomingMessage.setTimeout: the callback listens for the
+            // response's 'timeout', and the socket carries the deadline (the
+            // client relays the socket's timeout to the response as well).
+            ClientIncomingMessage.prototype.setTimeout = function(ms, cb) {
+                if (typeof cb === 'function') this.on('timeout', cb);
+                if (this.socket && typeof this.socket.setTimeout === 'function') this.socket.setTimeout(ms);
+                return this;
+            };
             ClientIncomingMessage.prototype.destroy = function(err) {
                 if (this.destroyed) return this;
                 this.destroyed = true;
@@ -5952,7 +5994,15 @@ __httpSetHandler(self._id, function() {
                 this._silentAbort = false;
                 var _selfT = this;
                 (typeof process !== 'undefined' && typeof process.nextTick === 'function'
-                    ? process.nextTick : function(f) { queueMicrotask(f); })(function() { _selfT._sameTurn = false; });
+                    ? process.nextTick : function(f) { queueMicrotask(f); })(function() {
+                    _selfT._sameTurn = false;
+                    // Node connects as soon as the request exists (the socket is
+                    // assigned on a later tick), not when end() is called: a
+                    // request that only calls setTimeout() still gets its
+                    // 'socket' and 'timeout'. The head goes out on the first
+                    // write()/end()/flushHeaders(), which set `_started`.
+                    if (!_selfT.destroyed && !_selfT._socket) _selfT._ensureConnected();
+                });
                 this._body = [];
                 this._bodyLen = 0;
                 this._encodeChunked = false;
@@ -6117,6 +6167,7 @@ __httpSetHandler(self._id, function() {
                 // wants the request in flight before the body is complete)
                 // otherwise never reaches the server: this is why
                 // `req.write('hello')` without end() used to hang.
+                this._started = true;
                 if (!this._headerSent) {
                     this._ensureConnected();
                     if (this._connected) this._sendHead();
@@ -6170,7 +6221,9 @@ __httpSetHandler(self._id, function() {
                     if (this._headerSent && this._socket) this._sendChunk(buf);
                     else this._body.push(buf);
                 }
+                this._started = true;
                 this._ensureConnected();
+                if (this._connected) { this._sendHead(); this._flushBody(); }
                 // Node calls end()'s callback from 'finish', after the last
                 // byte of the request is out; it used to run synchronously,
                 // before 'finish' had been emitted.
@@ -6179,6 +6232,7 @@ __httpSetHandler(self._id, function() {
                 return this;
             };
             ClientRequest.prototype.flushHeaders = function() {
+                this._started = true;
                 this._ensureConnected();
                 if (this._connected) this._sendHead();
                 return this;
@@ -6215,7 +6269,11 @@ __httpSetHandler(self._id, function() {
                 return this;
             };
             ClientRequest.prototype._ensureConnected = function() {
-                if (this._socket || this.destroyed) return;
+                // `_connecting`: a `createConnection` that hands the socket over
+                // later (a callback) must not be asked for a second one when
+                // end() follows the eager connect.
+                if (this._socket || this.destroyed || this._connecting) return;
+                this._connecting = true;
                 var self = this;
                 this._keepAliveKey = (self._secure ? 'https:' : 'http:') + '//' + self._host + ':' + self._port;
                 var reused = (self._agent && typeof self._agent._getFreeSocket === 'function')
@@ -6233,9 +6291,11 @@ __httpSetHandler(self._id, function() {
                     }
                     self._attachSocket(reused);
                     self.emit('socket', reused);
-                    self._sendHead();
-                    self._flushBody();
-                    self._maybeFinishRequest();
+                    if (self._started) {
+                        self._sendHead();
+                        self._flushBody();
+                        self._maybeFinishRequest();
+                    }
                     self._armTimeout();
                     return;
                 }
@@ -6317,16 +6377,24 @@ __httpSetHandler(self._id, function() {
                     self._connected = true;
                     self.emit('socket', socket);
                     self._attachSocket(socket);
-                    self._sendHead();
-                    self._flushBody();
-                    self._maybeFinishRequest();
+                    if (self._started) {
+                        self._sendHead();
+                        self._flushBody();
+                        self._maybeFinishRequest();
+                    }
                     self._armTimeout();
                 };
                 // The socket reports its own timeout; the request turns it
                 // into its 'timeout' event, as in Node.
-                if (this._timeoutMs > 0 && typeof socket.setTimeout === 'function') {
-                    socket.setTimeout(this._timeoutMs);
-                    socket.once('timeout', function() { self._emitTimeout(); });
+                // Always relayed: `req.setTimeout()` can come after the socket
+                // exists (even after the response started).
+                if (typeof socket.setTimeout === 'function') {
+                    if (this._timeoutMs > 0) socket.setTimeout(this._timeoutMs);
+                    socket.on('timeout', function() {
+                        if (self._socket !== socket) return;
+                        self._emitTimeout();
+                        if (self._response) self._response.emit('timeout');
+                    });
                 }
                 if (socket._3vaSocket && socket._connId === null) socket.once('connect', go);
                 else go();

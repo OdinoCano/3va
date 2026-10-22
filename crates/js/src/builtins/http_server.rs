@@ -467,10 +467,19 @@ where
 /// hardcodes 128, so a burst of more simultaneous connects than that had
 /// SYNs dropped and waited out a 1 s retransmit (Node uses 511).
 pub(crate) fn bind_listener(addr: &str) -> std::io::Result<std::net::TcpListener> {
+    bind_listener_opts(addr, false)
+}
+
+/// `reuse_port` is Node's `reusePort` listen option (SO_REUSEPORT): several
+/// sockets may bind the same port. Off unless the application asks for it.
+pub(crate) fn bind_listener_opts(
+    addr: &str,
+    reuse_port: bool,
+) -> std::io::Result<std::net::TcpListener> {
     use std::net::ToSocketAddrs;
     let mut last_err = None;
     for sockaddr in addr.to_socket_addrs()? {
-        match bind_one(sockaddr) {
+        match bind_one(sockaddr, reuse_port) {
             Ok(l) => return Ok(l),
             Err(e) => last_err = Some(e),
         }
@@ -483,7 +492,7 @@ pub(crate) fn bind_listener(addr: &str) -> std::io::Result<std::net::TcpListener
     }))
 }
 
-fn bind_one(sockaddr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+fn bind_one(sockaddr: SocketAddr, reuse_port: bool) -> std::io::Result<std::net::TcpListener> {
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(sockaddr),
         socket2::Type::STREAM,
@@ -493,7 +502,7 @@ fn bind_one(sockaddr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
     #[cfg(unix)]
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
-    if std::env::var_os("VVVA_CLUSTER").is_some() {
+    if reuse_port || std::env::var_os("VVVA_CLUSTER").is_some() {
         socket.set_reuse_port(true)?;
     }
     socket.bind(&sockaddr.into())?;

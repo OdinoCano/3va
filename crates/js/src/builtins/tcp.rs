@@ -30,11 +30,13 @@ impl TcpConn {
             TcpConn::PqTls(s) => s.read(buf),
         }
     }
-    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+    /// One write of as many bytes as the socket takes right now. The sockets
+    /// are nonblocking, so a full send buffer is `WouldBlock`, not an error.
+    fn write_some(&mut self, data: &[u8]) -> io::Result<usize> {
         match self {
-            TcpConn::Plain(s) => s.write_all(data),
-            TcpConn::Tls(s) => s.write_all(data),
-            TcpConn::PqTls(s) => s.write_all(data),
+            TcpConn::Plain(s) => s.write(data),
+            TcpConn::Tls(s) => s.write(data),
+            TcpConn::PqTls(s) => s.write(data),
         }
     }
     fn set_nodelay(&self, on: bool) {
@@ -489,11 +491,37 @@ pub fn inject_tcp(
                 let mut guard = pool().lock().unwrap();
                 match guard.get_mut(&id) {
                     Some(conn) => {
-                        if let Err(e) = conn.write_all(&data) {
+                        // Write what the socket takes now. When its send buffer
+                        // is full, return how many bytes went out (a number)
+                        // and let JS retry the rest on a later tick: blocking
+                        // here would deadlock a peer that lives in this same
+                        // event loop, and `write_all` on a nonblocking socket
+                        // failed with EAGAIN ("Resource temporarily
+                        // unavailable") on any large write.
+                        let mut off = 0usize;
+                        let mut failure: Option<std::io::Error> = None;
+                        while off < data.len() {
+                            match conn.write_some(&data[off..]) {
+                                Ok(0) => {
+                                    failure = Some(std::io::ErrorKind::WriteZero.into());
+                                    break;
+                                }
+                                Ok(n) => off += n,
+                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                                Err(e) => {
+                                    failure = Some(e);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(e) = failure {
                             let err = js_code_err(_scope, "EPIPE", e.to_string());
                             rv.set(err);
-                        } else {
+                        } else if off == data.len() {
                             rv.set(v8::undefined(_scope).into());
+                        } else {
+                            rv.set(v8::Integer::new_from_unsigned(_scope, off as u32).into());
                         }
                     }
                     None => {
@@ -666,6 +694,34 @@ pub fn inject_tcp(
     TCP_NEXT_LISTENER_ID.set(Arc::new(Mutex::new(0))).ok();
 
     {
+        // `__netListenerAddr(id)`: the bound "ip:port" of a listener (the real
+        // port after `listen(0)`), or null.
+        let net_listener_addr_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let id = args.get(0).uint32_value(_scope).unwrap_or(0);
+                let addr = listeners()
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .and_then(|l| l.local_addr().ok());
+                match addr {
+                    Some(a) => rv.set(V8String::new(_scope, &a.to_string()).unwrap().into()),
+                    None => rv.set(v8::null(_scope).into()),
+                }
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__netListenerAddr").unwrap().into(),
+            net_listener_addr_fn.into(),
+        );
+    }
+
+    {
         let net_listen_fn = Function::new(
             scope,
             move |_scope: &mut v8::PinScope,
@@ -686,7 +742,11 @@ pub fn inject_tcp(
                     return;
                 };
 
-                match crate::builtins::http_server::bind_listener(&format!("{}:{}", host, port)) {
+                let reuse_port = args.get(2).boolean_value(_scope);
+                match crate::builtins::http_server::bind_listener_opts(
+                    &format!("{}:{}", host, port),
+                    reuse_port,
+                ) {
                     Ok(std_l) => {
                         if let Err(e) = std_l.set_nonblocking(true) {
                             let err = js_err(_scope, &e.to_string());
