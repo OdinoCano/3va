@@ -677,9 +677,7 @@ test-http-server-options-incoming-message.js
 test-http-server-options-server-response.js
 test-http-server-reject-chunked-with-content-length.js
 test-http-server-reject-cr-no-lf.js
-test-http-server-request-timeout-delayed-body.js
 test-http-server-request-timeout-delayed-headers.js
-test-http-server-request-timeout-interrupted-body.js
 test-http-server-request-timeout-interrupted-headers.js
 test-http-server-request-timeout-keepalive.js
 test-http-server-request-timeout-upgrade.js
