@@ -24,6 +24,14 @@ const HARD_MAX_BODY: usize = 100 * 1024 * 1024;
 /// only whether *any* server is listening). Like libuv's active-handle
 /// count: an open listener has to keep `run_event_loop` alive while idle,
 /// since "waiting for the next connection" isn't a pending timer or task.
+/// Server ids the application `unref()`'d: not counted in
+/// `HTTP_ACTIVE_LISTENERS`, so they do not keep the process alive.
+fn unref_servers() -> &'static Mutex<std::collections::HashSet<u32>> {
+    static SET: std::sync::OnceLock<Mutex<std::collections::HashSet<u32>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
 static HTTP_ACTIVE_LISTENERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
@@ -3389,7 +3397,9 @@ pub fn inject_http_server(
                 };
                 let server_id_arg = args.get(0);
                 let server_id = server_id_arg.uint32_value(scope).unwrap_or(0);
-                if servers.lock().unwrap().remove(&server_id).is_some() {
+                if servers.lock().unwrap().remove(&server_id).is_some()
+                    && !unref_servers().lock().unwrap().remove(&server_id)
+                {
                     HTTP_ACTIVE_LISTENERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 if let Some(d) = scope.get_slot_mut::<HttpDispatch>() {
@@ -3434,6 +3444,42 @@ pub fn inject_http_server(
             scope,
             V8String::new(scope, "__httpCloseConn").unwrap().into(),
             http_close_conn_fn.into(),
+        );
+    }
+
+    {
+        // `__httpRef(serverId, ref)`: server.ref() / server.unref().
+        let servers_ptr = native_ctx.leak(servers.clone());
+        let external = v8::External::new(scope, servers_ptr);
+        let http_ref_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let servers = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const Arc<Mutex<HashMap<u32, Arc<TcpListener>>>>)
+                };
+                let id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let refd = args.get(1).boolean_value(scope);
+                if servers.lock().unwrap().contains_key(&id) {
+                    let mut set = unref_servers().lock().unwrap();
+                    if !refd {
+                        if set.insert(id) {
+                            HTTP_ACTIVE_LISTENERS
+                                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    } else if set.remove(&id) {
+                        HTTP_ACTIVE_LISTENERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpRef").unwrap().into(),
+            http_ref_fn.into(),
         );
     }
 

@@ -298,6 +298,14 @@ fn listeners() -> &'static Arc<Mutex<HashMap<u32, Arc<std::net::TcpListener>>>> 
 static TCP_ACTIVE_LISTENERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Listener ids the application `unref()`'d: they no longer count in
+/// `TCP_ACTIVE_LISTENERS`, so they do not keep the process alive.
+fn unref_listeners() -> &'static Mutex<std::collections::HashSet<u32>> {
+    static SET: std::sync::OnceLock<Mutex<std::collections::HashSet<u32>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
 pub fn has_active_listeners() -> bool {
     TCP_ACTIVE_LISTENERS.load(std::sync::atomic::Ordering::Relaxed) > 0
 }
@@ -843,6 +851,36 @@ pub fn inject_tcp(
     }
 
     {
+        // `__netRef(id, ref)`: server.ref() / server.unref().
+        let net_ref_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let id = args.get(0).uint32_value(_scope).unwrap_or(0);
+                let refd = args.get(1).boolean_value(_scope);
+                if listeners().lock().unwrap().contains_key(&id) {
+                    let mut set = unref_listeners().lock().unwrap();
+                    if !refd {
+                        if set.insert(id) {
+                            TCP_ACTIVE_LISTENERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    } else if set.remove(&id) {
+                        TCP_ACTIVE_LISTENERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                rv.set(v8::undefined(_scope).into());
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__netRef").unwrap().into(),
+            net_ref_fn.into(),
+        );
+    }
+
+    {
         let net_close_fn = Function::new(
             scope,
             move |_scope: &mut v8::PinScope,
@@ -850,7 +888,9 @@ pub fn inject_tcp(
                   mut rv: v8::ReturnValue| {
                 let server_id_arg = args.get(0);
                 let server_id = server_id_arg.uint32_value(_scope).unwrap_or(0);
-                if listeners().lock().unwrap().remove(&server_id).is_some() {
+                if listeners().lock().unwrap().remove(&server_id).is_some()
+                    && !unref_listeners().lock().unwrap().remove(&server_id)
+                {
                     TCP_ACTIVE_LISTENERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 rv.set(v8::undefined(_scope).into());

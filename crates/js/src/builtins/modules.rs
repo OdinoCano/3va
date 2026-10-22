@@ -4038,10 +4038,12 @@ pub fn inject_require(
                     // re-arm then (the timer could never be cancelled).
                     if (self.destroyed || self._connId === null) { self._pollTimer = null; return; }
                     self._pollTimer = setTimeout(step, idleTicks < 8 ? 1 : 5);
+                    if (self._unrefd) self._pollTimer.unref();
                 };
                 // A chain of timeouts, not intervals: clearing an interval from
                 // inside its own callback leaks the callback entry in the engine.
                 self._pollTimer = setTimeout(step, 5);
+                if (self._unrefd) self._pollTimer.unref();
             };
             Socket.prototype._stopPoll = function() {
                 if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
@@ -4141,8 +4143,17 @@ pub fn inject_require(
             Socket.prototype.setKeepAlive = function() { return this; };
             // ponytail: no-ops — pg-pool/pg call socket.ref()/unref() on idle clients; unref() does not
             // yet release the event loop (a pool with idle clients keeps the process alive until pool.end()).
-            Socket.prototype.ref = function() { return this; };
-            Socket.prototype.unref = function() { return this; };
+            // socket.unref(): its read poll no longer keeps the process alive.
+            Socket.prototype.ref = function() {
+                this._unrefd = false;
+                if (this._pollTimer && this._pollTimer.ref) this._pollTimer.ref();
+                return this;
+            };
+            Socket.prototype.unref = function() {
+                this._unrefd = true;
+                if (this._pollTimer && this._pollTimer.unref) this._pollTimer.unref();
+                return this;
+            };
             Socket.prototype.destroy = function(err) {
                 this._stopPoll();
                 if (this._abortSignal && this._abortListener) {
@@ -4344,9 +4355,11 @@ pub fn inject_require(
                 var result = __netListen(port, host, self._reusePort === true);
                 if (typeof result === 'number') {
                     self._listenerId = result;
+                    if (self._unrefd && typeof __netRef === 'function') __netRef(result, false);
                     self.listening = true;
                     if (typeof cb === 'function') self.once('listening', cb);
                     self._acceptLoop();
+                    if (self._unrefd && self._acceptTimer && self._acceptTimer.unref) self._acceptTimer.unref();
                     setTimeout(function() { self.emit('listening'); }, 0);
                 } else {
                     setTimeout(function() { self.emit('error', _netErr(result)); }, 0);
@@ -4401,8 +4414,18 @@ pub fn inject_require(
                 return { address: '0.0.0.0', port: 0, family: 'IPv4' };
             };
             // ponytail: ref/unref are no-ops — see docs/05-js-engine/07-inventario-stubs.md §7.2.
-            Server.prototype.unref = function() { return this; };
-            Server.prototype.ref = function() { return this; };
+            Server.prototype.unref = function() {
+                this._unrefd = true;
+                if (this._listenerId !== null && typeof __netRef === 'function') __netRef(this._listenerId, false);
+                if (this._acceptTimer && this._acceptTimer.unref) this._acceptTimer.unref();
+                return this;
+            };
+            Server.prototype.ref = function() {
+                this._unrefd = false;
+                if (this._listenerId !== null && typeof __netRef === 'function') __netRef(this._listenerId, true);
+                if (this._acceptTimer && this._acceptTimer.ref) this._acceptTimer.ref();
+                return this;
+            };
             Server.prototype.getConnections = function(cb) { if (cb) cb(null, 0); };
 
             function netCreateServer(opts, connListener) { return new Server(opts, connListener); }
@@ -5603,6 +5626,7 @@ pub fn inject_require(
                     return self;
                 }
                 self._id = result;
+                if (self._unrefd && typeof __httpRef === 'function') __httpRef(result, false);
                 self._port = __httpServerPort(result);
                 self._host = __httpServerAddress(result) || hostname;
                 self.listening = true;
@@ -5800,8 +5824,17 @@ __httpSetHandler(self._id, function() {
                 });
             });
             // ponytail: ref/unref/timeout are no-ops — see docs/05-js-engine/07-inventario-stubs.md §7.2-7.3.
-            httpServer.prototype.ref = function() { return this; };
-            httpServer.prototype.unref = function() { return this; };
+            // server.unref(): the listener no longer keeps the process alive.
+            httpServer.prototype.ref = function() {
+                this._unrefd = false;
+                if (this._id !== null && typeof __httpRef === 'function') __httpRef(this._id, true);
+                return this;
+            };
+            httpServer.prototype.unref = function() {
+                this._unrefd = true;
+                if (this._id !== null && typeof __httpRef === 'function') __httpRef(this._id, false);
+                return this;
+            };
             httpServer.prototype.listenOnServerHandler = function(socket) {};
 
             var httpOutgoingMessage = function() {
