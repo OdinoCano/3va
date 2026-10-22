@@ -1,11 +1,4 @@
 {
-  "http-request-streaming": {
-    "node/3va": "3va buffers an incrementally-written request body and sends Content-Length; node sends Transfer-Encoding: chunked. Status and body bytes are identical, only the framing header differs. Listed as a 2.13.0 target (streaming/flushHeaders semantics). Remove this entry when 3va frames incremental writes as chunked.",
-    "3va/3va": "same as node/3va: the 3va client buffers the incrementally-written body and frames it with Content-Length instead of chunked."
-  },
-  "esm-mjs-import": {
-    "3va": "a relative import whose target ends in .mjs fails with `require() of ES module ... not supported. Use import() instead.`; .js targets resolve as ESM. The CLI dispatches the .mjs dependency through the CJS loader. Listed as a 2.13.0 target. Remove this entry when importing a relative .mjs works."
-  },
   "esm-cyclic-import": {
     "3va": "in an import cycle the binding read from the other module stays undefined instead of the live binding node exposes: main prints cycle-a's aValue correctly (`a->b`) but cycle-b's seenA() returns `undefined` instead of `a->b`. Listed as a 2.13.0 target. Remove this entry when cycles expose live bindings."
   }
