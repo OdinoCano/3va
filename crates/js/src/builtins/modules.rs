@@ -2298,13 +2298,28 @@ pub fn inject_require(
                     }
                     return buf.slice(0, complete).toString('utf8');
                 }
+                if (this.encoding === 'base64' || this.encoding === 'base64url') {
+                    // Hold back the bytes that do not fill a group of 3 until
+                    // the next write() (or end()), as Node does: the encoded
+                    // text of a split input must equal that of the whole.
+                    if (this._incomplete) {
+                        buf = Buffer.concat([this._incomplete, buf]);
+                        this._incomplete = null;
+                    }
+                    var rem = buf.length % 3;
+                    if (rem) {
+                        this._incomplete = buf.slice(buf.length - rem);
+                        buf = buf.slice(0, buf.length - rem);
+                    }
+                    return buf.length ? buf.toString(this.encoding) : '';
+                }
                 return buf.toString(this.encoding);
             };
             StringDecoder.prototype.end = function(buf) {
                 var ret = '';
                 if (buf) ret = this.write(buf);
                 if (this._incomplete) {
-                    ret += this._incomplete.toString('utf8');
+                    ret += this._incomplete.toString(this.encoding === 'base64' || this.encoding === 'base64url' ? this.encoding : 'utf8');
                     this._incomplete = null;
                 }
                 return ret;
@@ -2345,6 +2360,7 @@ pub fn inject_require(
             function Readable(opts) {
                 Stream.call(this);
                 this.readable = true;
+                this.destroyed = false;
                 this._readableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, buffer: [], ended: false, _endEmitted: false, flowing: false, discard: false };
                 if (opts && typeof opts.read === 'function') this._read = opts.read;
                 // Node: { encoding: 'utf8' } in the constructor is equivalent
@@ -2604,11 +2620,16 @@ pub fn inject_require(
             function Writable(opts) {
                 Stream.call(this);
                 this.writable = true;
+                this.destroyed = false;
                 this._writableState = {
                     objectMode: !!(opts && opts.objectMode),
                     highWaterMark: (opts && opts.highWaterMark) || 16384,
                     length: 0, corked: 0, ended: false, finished: false,
                     needDrain: false, pendingcb: 0, buffered: [],
+                    defaultEncoding: 'utf8',
+                    // Node: a string handed to write() reaches _write() as a Buffer
+                    // unless the stream asked for decodeStrings: false.
+                    decodeStrings: !(opts && opts.decodeStrings === false),
                 };
                 if (opts && typeof opts.write === 'function') this._write = opts.write;
                 if (opts && typeof opts.final === 'function') this._final = opts.final;
@@ -2617,6 +2638,31 @@ pub fn inject_require(
             Object.defineProperty(Writable, Symbol.hasInstance, {
                 value: function(instance) { return !!(instance && instance._writableState); }
             });
+            // Node's Writable runs one _write() at a time: a write() made while
+            // a previous _write() has not called back is queued and runs when it
+            // does (state.writing). Calling _write() for each write() at once
+            // reordered async sinks and ignored a sink that holds its callback
+            // (test-fs-read-stream-encoding relies on that).
+            function __writableRun(stream, chunk, encoding, onflush) {
+                var state = stream._writableState;
+                if (state.writing) {
+                    (state.queue || (state.queue = [])).push({ chunk: chunk, encoding: encoding, onflush: onflush });
+                    return;
+                }
+                state.writing = true;
+                var called = false;
+                stream._write(chunk, encoding || 'utf8', function(err) {
+                    if (called) { onflush(err); return; }
+                    called = true;
+                    state.writing = false;
+                    onflush(err);
+                    var q = state.queue;
+                    if (q && q.length && !state.writing && !(state.corked > 0)) {
+                        var next = q.shift();
+                        __writableRun(stream, next.chunk, next.encoding, next.onflush);
+                    }
+                });
+            }
             Writable.prototype._write = function(chunk, encoding, callback) { callback(); };
             Writable.prototype._final = function(callback) { callback(); };
             Writable.prototype.write = function(chunk, encoding, cb) {
@@ -2634,6 +2680,10 @@ pub fn inject_require(
                     next(function() { self.emit('error', err); });
                     if (cb) cb(err);
                     return false;
+                }
+                if (!state.objectMode && state.decodeStrings && typeof chunk === 'string') {
+                    chunk = Buffer.from(chunk, encoding || state.defaultEncoding);
+                    encoding = 'buffer';
                 }
                 var chunkLen = 1;
                 if (chunk instanceof Uint8Array) {
@@ -2666,7 +2716,7 @@ pub fn inject_require(
                     state.buffered.push({ chunk: chunk, encoding: encoding, cb: cb, onflush: onflush, chunkLen: chunkLen });
                     return true;
                 }
-                this._write(chunk, encoding || 'utf8', onflush);
+                __writableRun(this, chunk, encoding, onflush);
                 return ret;
             };
             Writable.prototype.end = function(chunk, encoding, cb) {
@@ -2707,7 +2757,17 @@ pub fn inject_require(
             };
             Writable.prototype.destroy = function(err) { return __destroyStream(this, err); };
             // TODO(2.13.0): implement — setDefaultEncoding must set the encoding used by write(string); see docs/05-js-engine/07-inventario-stubs.md §7.4.
-            Writable.prototype.setDefaultEncoding = function() { return this; };
+            Writable.prototype.setDefaultEncoding = function(encoding) {
+                if (typeof encoding === 'string') encoding = encoding.toLowerCase();
+                if (encoding === undefined || encoding === null || encoding === '') encoding = 'utf8';
+                if (!Buffer.isEncoding(encoding)) {
+                    var e = new TypeError('Unknown encoding: ' + String(encoding));
+                    e.code = 'ERR_UNKNOWN_ENCODING';
+                    throw e;
+                }
+                this._writableState.defaultEncoding = encoding;
+                return this;
+            };
             Writable.prototype.cork = function() { this._writableState.corked++; };
             Writable.prototype.uncork = function() {
                 var state = this._writableState;
@@ -2716,7 +2776,7 @@ pub fn inject_require(
                     var buf = state.buffered.splice(0);
                     var self = this;
                     buf.forEach(function(item) {
-                        self._write(item.chunk, item.encoding || 'utf8', item.onflush);
+                        __writableRun(self, item.chunk, item.encoding, item.onflush);
                     });
                 }
             };
@@ -3961,6 +4021,13 @@ pub fn inject_require(
                         if (!self._allowHalfOpen) { self.destroy(); }
                         else { self._maybeClose(); }
                         return;
+                    } else if (/unknown socket/.test(String(chunk instanceof Error ? chunk.message : chunk))) {
+                        // The native handle was already closed by its other
+                        // owner (a socket wrapped by a TLSSocket and destroyed
+                        // underneath it): that is a close, not an 'error'.
+                        self._stopPoll();
+                        self.destroy();
+                        return;
                     } else {
                         self._stopPoll();
                         self.emit('error', _netErr(chunk));
@@ -5034,10 +5101,31 @@ pub fn inject_require(
                         // used to send nothing at all.
                         if (!this._headSent) this._sendHeadStreaming();
                         var sbuf = __httpChunkToBytes(chunk, encoding);
-                        if (this._chunked) {
-                            sbuf = Buffer.concat([Buffer.from(sbuf.length.toString(16) + '\r\n'), sbuf, Buffer.from('\r\n')]);
+                        // An empty chunk sends the head but no body: framed
+                        // as chunked it would be `0\r\n\r\n`, the terminator
+                        // (Node's write_ skips it: `chunk.length !== 0`).
+                        if (sbuf.length > 0) {
+                            if (this._chunked) {
+                                sbuf = Buffer.concat([Buffer.from(sbuf.length.toString(16) + '\r\n'), sbuf, Buffer.from('\r\n')]);
+                            }
+                            __httpRespondChunk(this._connId, sbuf);
                         }
-                        __httpRespondChunk(this._connId, sbuf);
+                        // Backpressure for a streamed response: the bytes go to
+                        // the connection task at once, so count what was written
+                        // since the last flush and report false past the
+                        // high-water mark, then emit 'drain' on the next
+                        // turn. Without this `while (res.write(buf))` never
+                        // stops (test-http-outgoing-finish.js ran out of memory).
+                        this._buffered = (this._buffered || 0) + sbuf.length;
+                        if (this._buffered >= (this.writableHighWaterMark || 16384) && !this._drainScheduled) {
+                            var selfW = this;
+                            this._drainScheduled = true;
+                            setImmediate(function() {
+                                selfW._drainScheduled = false;
+                                selfW._buffered = 0;
+                                selfW.emit('drain');
+                            });
+                        }
                         if (typeof callback === 'function') queueMicrotask(callback);
                     } else {
                         // Not streamable (HTTP/1.0, or an explicit Content-Length
@@ -5855,6 +5943,16 @@ __httpSetHandler(self._id, function() {
                 this._connected = false;
                 this._ended = false;
                 this._aborted = false;
+                // Node assigns the socket on a later tick, so a request aborted
+                // in the turn that created it (`req.end(); req.abort()`) never
+                // had one: no 'socket hang up' (lib/_http_client.js `_destroy`:
+                // `if (!req.aborted && !err)`). 3va opens the socket at once,
+                // so remember the turn.
+                this._sameTurn = true;
+                this._silentAbort = false;
+                var _selfT = this;
+                (typeof process !== 'undefined' && typeof process.nextTick === 'function'
+                    ? process.nextTick : function(f) { queueMicrotask(f); })(function() { _selfT._sameTurn = false; });
                 this._body = [];
                 this._bodyLen = 0;
                 this._encodeChunked = false;
@@ -6092,6 +6190,7 @@ __httpSetHandler(self._id, function() {
             ClientRequest.prototype.abort = function() {
                 if (this.aborted) return this;
                 this.aborted = true;
+                if (this._sameTurn) this._silentAbort = true;
                 var self = this;
                 (typeof process !== 'undefined' && typeof process.nextTick === 'function'
                     ? process.nextTick : function(f) { queueMicrotask(f); })(function() { self.emit('abort'); });
@@ -6342,7 +6441,7 @@ __httpSetHandler(self._id, function() {
                 var res = this._response;
                 if (res && !res.complete) {
                     res.destroy(__connReset('aborted'));
-                } else if (!this._heardResponse && !this._hadError) {
+                } else if (!this._heardResponse && !this._hadError && !this._silentAbort) {
                     this._fail(__connReset('socket hang up'));
                 }
                 if (this.outputData) this.outputData.length = 0;
@@ -6511,7 +6610,7 @@ __httpSetHandler(self._id, function() {
             ClientRequest.prototype._onSocketEnd = function() {
                 var st = this._parserState;
                 if (!this._heardResponse) {
-                    if (!this._aborted) this._fail(__connReset('socket hang up'));
+                    if (!this._aborted && !this._silentAbort) this._fail(__connReset('socket hang up'));
                     return;
                 }
                 var res = this._response;

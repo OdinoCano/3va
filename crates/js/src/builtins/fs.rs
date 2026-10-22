@@ -1490,7 +1490,8 @@ pub fn inject_fs(
         // callable on a foreign `this` and carry a Writable/Readable prototype.
         function ReadStream(path, opts) {
             if (!(this instanceof ReadStream)) return new ReadStream(path, opts);
-            var ropts = (typeof opts === 'object' && opts !== null) ? opts : {};
+            // Node: a string for `options` is the encoding.
+            var ropts = (typeof opts === 'string') ? { encoding: opts } : (typeof opts === 'object' && opts !== null) ? opts : {};
             var encoding = ropts.encoding;
             if (encoding === 'buffer' || encoding === null) encoding = undefined;
             var Readable = require('stream').Readable;
@@ -1588,10 +1589,11 @@ pub fn inject_fs(
 
         function WriteStream(path, opts) {
             if (!(this instanceof WriteStream)) return new WriteStream(path, opts);
-            var wopts = (typeof opts === 'object' && opts !== null) ? opts : {};
+            var wopts = (typeof opts === 'string') ? { encoding: opts } : (typeof opts === 'object' && opts !== null) ? opts : {};
             var flags = wopts.flags || 'w';
             var Writable = require('stream').Writable;
-            Writable.call(this, { highWaterMark: wopts.highWaterMark || 16384 });
+            Writable.call(this, { highWaterMark: wopts.highWaterMark || 16384, decodeStrings: wopts.decodeStrings });
+            if (wopts.encoding) this.setDefaultEncoding(wopts.encoding);
             this.path = path;
             this.flags = flags;
             this.mode = wopts.mode;
