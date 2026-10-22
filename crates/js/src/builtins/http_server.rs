@@ -1679,10 +1679,20 @@ async fn handle_connection<S>(
                 let _ = writer.flush().await;
                 break;
             }
-            Some(Err(ParseError::Silent(_))) => {
+            Some(Err(ParseError::Silent(msg))) => {
                 // The request timeout expired while the head was still coming
-                // in: Node answers 408 and closes the connection.
-                if request_deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+                // in: Node answers 408 and closes the connection. So it does
+                // when the application's own `headersTimeout` was the limit
+                // that ran out (not the firewall's slowloris cap, which keeps
+                // closing silently).
+                let app_headers_timed_out = requests_served == 0
+                    && msg.starts_with("timeout:")
+                    && app_timeouts
+                        .headers()
+                        .is_some_and(|d| !d.is_zero() && d <= hdr_timeout);
+                if app_headers_timed_out
+                    || request_deadline.is_some_and(|d| tokio::time::Instant::now() >= d)
+                {
                     let _ = writer
                         .write_all(b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n")
                         .await;
@@ -1983,7 +1993,17 @@ async fn handle_connection<S>(
 
         // The request timeout expired while the request was still incomplete:
         // Node answers 408 and closes the connection.
-        if !body_done && request_deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+        // (A body that ended with a timeout error counts as incomplete too:
+        // `body_done` is set when the reader gives up.) A body that stalled
+        // past the firewall's own limit gets the same 408 before the
+        // connection closes, instead of a silent drop the client cannot
+        // explain; the limit itself is unchanged.
+        let body_timed_out =
+            matches!(&body_err, Some(ParseError::Silent(m)) if m.starts_with("timeout:"));
+        if body_timed_out
+            || ((!body_done || body_err.is_some())
+                && request_deadline.is_some_and(|d| tokio::time::Instant::now() >= d))
+        {
             let _ = writer
                 .write_all(b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n")
                 .await;

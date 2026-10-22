@@ -2305,3 +2305,41 @@ async fn close_idle_spares_a_half_received_request_and_close_all_drops_it() {
         "closeAllConnections() must drop the half-received one"
     );
 }
+
+// Node answers `408 Request Timeout` (and closes) when the application's
+// `headersTimeout` runs out on a half-received head. 3va only did it for
+// `requestTimeout`, so a head that never finished was dropped without a word
+// (test-http-server-headers-timeout-*).
+#[tokio::test]
+async fn headers_timeout_answers_408() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer({{ headersTimeout: 300, requestTimeout: 0, keepAliveTimeout: 0 }},
+            function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let response = drive_until(&mut e, async {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        // A head that never ends.
+        s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n").await.unwrap();
+        let mut got = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut got)).await;
+        String::from_utf8_lossy(&got).to_string()
+    })
+    .await;
+    assert_eq!(
+        response,
+        "HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n"
+    );
+}
