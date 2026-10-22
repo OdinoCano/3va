@@ -56,6 +56,34 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
   (`(node:PID) [CÓDIGO] Nombre: mensaje`) y entrega el evento `warning` en el
   siguiente tick, como en Node. Con `--no-warnings` solo se silencia la
   impresión, no el evento.
+- **`unref()` y `ref()` funcionan**: eran no-ops en timers, intervalos, servidores
+  `http`/`net` y sockets, así que un proceso que solo conservaba handles con
+  `unref()` nunca terminaba. Ahora el bucle de eventos los ignora, como en Node.
+- **`server.listen(callback)`** (sin puerto) en `http` y `net` no llamaba al
+  callback y dejaba el proceso vivo; `net.Server.address()` devolvía siempre el
+  puerto 0 en lugar del puerto real tras `listen(0)`; `listen({ reusePort })`
+  activa `SO_REUSEPORT` (solo si se pide).
+- **Escrituras grandes a un socket**: fallaban con `EAGAIN` ("Resource
+  temporarily unavailable") cuando superaban el búfer de envío; ahora el resto se
+  reintenta en el siguiente turno.
+- **`http`, servidor**: la respuesta es incremental (`write()` y `flushHeaders()`
+  envían antes de `end()`, también con `Content-Length` explícito) y avisa de la
+  contrapresión; una escritura vacía ya no manda el terminador `chunked`;
+  `server.closeIdleConnections()` y `closeAllConnections()` existen; responde
+  `408` cuando vence `headersTimeout` o el cuerpo no llega a tiempo (los límites
+  del cortafuegos no cambian); `close()` respeta las conexiones con una petición
+  a medias.
+- **`http`, cliente**: `abort()`/`destroy()` de peticiones y respuestas con la
+  semántica de Node (`'abort'`, `'aborted'`, `'close'`, `ECONNRESET`),
+  `req.setTimeout()` y `res.setTimeout()` también después de abierto el socket, la
+  conexión se abre al crear la petición (como en Node) y `abort()` en el mismo
+  turno ya no dice `socket hang up`.
+- **`stream`**: `Writable` ejecuta un `_write()` a la vez, convierte strings a
+  `Buffer` (`decodeStrings`), `setDefaultEncoding()` funciona, `destroyed`
+  empieza en `false`, `EventEmitter#emit('error')` sin oyente lanza como en Node, y
+  `StringDecoder('base64')` retiene los grupos de 3 bytes incompletos.
+  `fs.createReadStream/createWriteStream` aceptan un string como `options` (el
+  encoding).
 
 ---
 
@@ -104,8 +132,9 @@ de comportamiento visibles.
 ### Medido
 
 Compatibilidad con Node medida con `test/parallel` de nodejs/node v24.22.0
-(`f14cd3aa`), 3va 2.13.0, 2026-10-16: **198/1275/189 → 13,4 %**
-(pasados/fallados/saltados; los saltados no cuentan). Sustituye al ~97 %
+(`f14cd3aa`), 3va 2.13.0, 2026-10-22: **315/1173/174 → 21,2 %**
+(pasados/fallados/saltados; los saltados no cuentan; el 2026-10-16 eran
+198/1275/189 → 13,4 %). Sustituye al ~97 %
 auto-declarado. Detalle por módulo en `docs/12-roadmap/04-compatibility.md`.
 
 ### Notes

@@ -13,8 +13,8 @@ from a run of nodejs/node's own `test/parallel` suite with 3va
 passed / (passed + failed); tests skipped because they need a Node/V8 flag or
 reach into Node internals are counted separately and excluded.
 
-Measured on 3va 2.12.6 against nodejs/node v24.22.0 (commit `f14cd3aa`),
-2026-10-16, for the 17 modules whose baseline is committed (`test/parallel`
+Measured on 3va 2.13.0 against nodejs/node v24.22.0 (commit `f14cd3aa`),
+2026-10-22, for the 17 modules whose baseline is committed (`test/parallel`
 prefixes `buffer`, `child-process`, `crypto`, `events`, `fs`, `http`, `https`,
 `net`, `os`, `path`, `querystring`, `stream`, `string-decoder`, `timers`, `url`,
 `util`, `zlib`). This is the pass rate of Node's own tests for a module, not a
@@ -22,24 +22,24 @@ per-function claim.
 
 | Module | Passed | Failed | Skipped | Compatibility |
 |---|---:|---:|---:|---:|
-| `buffer` | 9 | 49 | 11 | 15.5% |
-| `child-process` | 9 | 93 | 11 | 8.8% |
-| `crypto` | 15 | 120 | 22 | 11.1% |
+| `buffer` | 11 | 51 | 7 | 17.7% |
+| `child-process` | 9 | 94 | 10 | 8.7% |
+| `crypto` | 17 | 122 | 18 | 12.2% |
 | `events` | 0 | 5 | 3 | 0.0% |
-| `fs` | 56 | 181 | 38 | 23.6% |
-| `http` | 54 | 335 | 14 | 13.9% |
-| `https` | 2 | 63 | 2 | 3.1% |
-| `net` | 9 | 138 | 11 | 6.1% |
-| `os` | 0 | 5 | 2 | 0.0% |
+| `fs` | 60 | 179 | 36 | 25.1% |
+| `http` | 120 | 271 | 12 | 30.7% |
+| `https` | 8 | 57 | 2 | 12.3% |
+| `net` | 31 | 116 | 11 | 21.1% |
+| `os` | 1 | 4 | 2 | 20.0% |
 | `path` | 5 | 11 | 0 | 31.2% |
 | `querystring` | 0 | 3 | 0 | 0.0% |
-| `stream` | 17 | 150 | 48 | 10.2% |
+| `stream` | 21 | 147 | 47 | 12.5% |
 | `string-decoder` | 0 | 2 | 0 | 0.0% |
-| `timers` | 16 | 30 | 12 | 34.8% |
+| `timers` | 23 | 23 | 12 | 50.0% |
 | `url` | 0 | 14 | 1 | 0.0% |
-| `util` | 2 | 16 | 13 | 11.1% |
-| `zlib` | 4 | 60 | 1 | 6.2% |
-| **total** | **198** | **1275** | **189** | **13.4%** |
+| `util` | 3 | 15 | 13 | 16.7% |
+| `zlib` | 6 | 59 | 0 | 9.2% |
+| **total** | **315** | **1173** | **174** | **21.2%** |
 
 An earlier version of this section carried hand-written "self-reported"
 percentages (e.g. `buffer` 100%, `crypto` 97%, `http` 99%). They were never
