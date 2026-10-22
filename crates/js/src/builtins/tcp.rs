@@ -188,7 +188,7 @@ fn pq_tls_client_config_with_ca(
     pq_tls_client_config_from_roots(roots)
 }
 
-fn pq_tls_client_config_from_roots(
+pub(crate) fn pq_tls_client_config_from_roots(
     roots: rustls::RootCertStore,
 ) -> std::result::Result<Arc<rustls::ClientConfig>, String> {
     let provider = super::tls::provider();

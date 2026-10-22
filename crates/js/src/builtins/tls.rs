@@ -18,10 +18,10 @@ pub use native_tls::TlsStream;
 #[cfg(not(feature = "fips"))]
 pub struct TlsConnector;
 
-#[cfg(not(feature = "fips"))]
 /// The TLS options a request named: the trust anchors it asked for (`ca`),
 /// the client certificate (`cert`/`key`) and whether it wants the peer
-/// verified (`rejectUnauthorized`).
+/// verified (`rejectUnauthorized`). Shared by the native-tls (default) and
+/// rustls/FIPS connectors, so it is always compiled.
 #[derive(Debug, Clone, Default)]
 pub struct TlsOptions {
     /// The PEM bundles the request trusts. In Node, `ca` *replaces* the
@@ -82,6 +82,7 @@ impl TlsOptions {
 /// variable the rustls/ureq path already honours (add_extra_ca_certs in
 /// tcp.rs). Without this, `https`/`tls` cannot verify a private CA that
 /// `fetch` and Node trust.
+#[cfg(not(feature = "fips"))]
 fn add_extra_ca_certs(builder: &mut native_tls::TlsConnectorBuilder) {
     let Ok(path) = std::env::var("NODE_EXTRA_CA_CERTS") else {
         return;
@@ -102,6 +103,7 @@ fn add_extra_ca_certs(builder: &mut native_tls::TlsConnectorBuilder) {
     }
 }
 
+#[cfg(not(feature = "fips"))]
 impl TlsConnector {
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> native_tls::Result<native_tls::TlsConnector> {
