@@ -1,0 +1,5 @@
+{
+  "kind": "client-server",
+  "timeout_s": 30,
+  "description": "express 4 request-body matrix: express.json/urlencoded/text, with and without an async middleware before the parser; JSON, empty, no body, malformed (400)."
+}

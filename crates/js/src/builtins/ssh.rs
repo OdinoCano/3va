@@ -1230,6 +1230,7 @@ pub fn inject_ssh(
         };
 
         Client.prototype.shell = function(options, callback) {
+            // ponytail: no-op by design — auxiliary object with no state to manage; see docs/05-js-engine/07-inventario-stubs.md §7.5.
             var sh = { on: function() { return this; }, stdin: { write: function() { return this; } } };
             if (typeof options === 'function') options(null, sh);
             else if (callback) callback(null, sh);

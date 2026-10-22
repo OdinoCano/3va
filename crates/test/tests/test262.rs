@@ -30,7 +30,7 @@ const INTL402_KNOWN_FAILURES: usize = 72;
 // results, sloppy and strict) fail in a non-UTC zone, so the same commit gave
 // 2654 on a laptop in CST and 2642 on the UTC CI runner. The test refuses to run
 // unless TZ=UTC, so the number means the same thing everywhere.
-const NON_MODULE_KNOWN_FAILURES: usize = 2247;
+const NON_MODULE_KNOWN_FAILURES: usize = 2244;
 
 #[test]
 #[ignore]

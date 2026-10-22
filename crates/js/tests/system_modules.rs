@@ -1212,12 +1212,14 @@ async fn source_maps_apply_returns_original_location() {
     let r = e
         .eval_to_string(
             r#"
+            // Nine empty generated lines, then a segment that maps line 10,
+            // column 1 to line 1, column 1 of original.js.
             var map = JSON.stringify({
                 sources: ["original.js"],
-                mappings: "AAAA"
+                mappings: ";;;;;;;;;AAAA"
             });
             __storeSourceMap("transformed.js.map", map);
-            var result = __applySourceMap("transformed.js.map", 10, 5);
+            var result = __applySourceMap("transformed.js.map", 10, 1);
             String(result)
             "#,
         )
@@ -1227,6 +1229,10 @@ async fn source_maps_apply_returns_original_location() {
     assert!(
         r.contains("original.js"),
         "applySourceMap must return original source"
+    );
+    assert!(
+        r.contains(r#""line":1"#),
+        "applySourceMap must decode the mapped line: {r}"
     );
 }
 

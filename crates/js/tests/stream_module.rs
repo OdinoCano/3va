@@ -105,6 +105,38 @@ async fn readable_push_null_emits_end() {
     assert_eq!(r, "true");
 }
 
+/// `resume()` with no `'data'` listener must drain the body and emit `'end'`
+/// (Node's `flow()`: a resumed stream flows to nobody). The chunks used to be
+/// buffered, and `_maybeEnd` (which requires an empty buffer) never emitted
+/// `'end'`, so `res.resume()` then `'end'` hung — the idiom the http client
+/// tests use to discard a body.
+#[tokio::test]
+async fn readable_resume_without_data_listener_emits_end() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var Readable = require('stream').Readable;
+        globalThis.__resumed = null;
+        var r = new Readable();
+        r.resume();
+        r.on('end', function() { globalThis.__resumed = 'ended'; });
+        r.push('a');
+        r.push('b');
+        r.push(null);
+        "#,
+    )
+    .await
+    .unwrap();
+    let r = pump_until(
+        &mut e,
+        "globalThis.__resumed !== null ? globalThis.__resumed : 'false'",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("resume() then 'end' never fired");
+    assert_eq!(r, "ended");
+}
+
 // ── Writable stream ───────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -759,4 +791,110 @@ async fn pipe_resumes_after_destination_drain() {
     .await
     .expect("pipe never finished");
     assert_eq!(r, "got:20480");
+}
+
+/// Node documents `stream.finished()`'s callback as asynchronous, and the code
+/// that uses it emits `'finish'` and then `'close'` in a row: the callback must
+/// see both (it used to run inside the `'finish'` emit, so a server response
+/// looked unclosed from it).
+#[tokio::test]
+async fn finished_callback_runs_after_finish_and_close() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var stream = require('stream');
+        var EE = require('events');
+        var target = new EE();
+        var seen = [];
+        globalThis.__eos = null;
+        stream.finished(target, function() { seen.push('cb'); });
+        target.on('finish', function() { seen.push('finish'); });
+        target.on('close', function() { seen.push('close'); });
+        target.emit('finish');
+        seen.push('after-finish');
+        target.emit('close');
+        setTimeout(function() { globalThis.__eos = seen.join(','); }, 5);
+        "#,
+    )
+    .await
+    .unwrap();
+    pump_until(
+        &mut e,
+        "globalThis.__eos !== null ? 'done' : 'false'",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("finished() never called back");
+    let r = e.eval_to_string("globalThis.__eos").await.unwrap();
+    assert_eq!(r, "finish,after-finish,close,cb");
+}
+
+/// `finished()` on a stream that is already over (destroyed before the call)
+/// must still call back, asynchronously, instead of waiting for events that will
+/// never come.
+#[tokio::test]
+async fn finished_on_an_already_finished_stream_calls_back_async() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var stream = require('stream');
+        var EE = require('events');
+        var target = new EE();
+        target.destroyed = true;
+        globalThis.__eos2 = 'sync';
+        stream.finished(target, function() { globalThis.__eos2 = 'cb'; });
+        "#,
+    )
+    .await
+    .unwrap();
+    pump_until(
+        &mut e,
+        "globalThis.__eos2 !== 'sync' ? 'done' : 'false'",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("finished() never called back on an already-destroyed stream");
+    let r = e.eval_to_string("globalThis.__eos2").await.unwrap();
+    assert_eq!(r, "cb");
+}
+
+// Node's stream destroy (lib/internal/streams/destroy.js): `destroyed` and
+// `errored` are set synchronously, `closed` flips to true just before 'close',
+// and 'error'/'close' go out on later ticks (an 'error' nobody listens for is
+// the process's uncaught exception, not a silent drop).
+#[tokio::test]
+async fn destroy_sets_state_and_emits_error_then_close() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var Readable = require('stream').Readable;
+        var s = new Readable({ read: function() {} });
+        globalThis.__order = [];
+        s.on('error', function(err) { globalThis.__order.push('error:' + err.message); });
+        s.on('close', function() { globalThis.__order.push('close'); });
+        s.destroy(new Error('boom'));
+        // destroy() is synchronous for the state, async for the events.
+        globalThis.__state = [s.destroyed, s.errored && s.errored.message, s.closed].join(',');
+        "#,
+    )
+    .await
+    .unwrap();
+    // `closed` must be true and 'close' emitted only after a tick.
+    pump_until(
+        &mut e,
+        "globalThis.__order.join('|').indexOf('close') !== -1 ? 'done' : 'false'",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("destroy() never emitted 'close'");
+    let state = e.eval_to_string("globalThis.__state").await.unwrap();
+    assert_eq!(
+        state, "true,boom,false",
+        "destroyed/errored must be set synchronously, closed still false"
+    );
+    let events = e
+        .eval_to_string("globalThis.__order.join('|')")
+        .await
+        .unwrap();
+    assert_eq!(events, "error:boom|close", "'error' must precede 'close'");
 }

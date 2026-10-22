@@ -716,7 +716,7 @@ pub fn inject_process(
     }
 
     let versions = v8::Object::new(scope);
-    set_str(scope, versions, "3va", "2.12.6");
+    set_str(scope, versions, "3va", "2.13.0");
     // Expose fake Node.js-compatible version strings so packages checking
     // process.versions.node / process.versions.v8 don't crash.
     set_str(scope, versions, "node", "22.12.0");
@@ -1211,13 +1211,18 @@ pub fn inject_process(
 
             // setImmediate / clearImmediate — backed by setTimeout(fn, 0) so the
             // timer manager tracks it and the event loop continues to run.
+            // The timer function is captured here, at bootstrap: Node's
+            // `setImmediate` does not depend on the global `setTimeout`, and
+            // code that deletes the global timers (Node's own test suite does)
+            // must still be able to schedule an immediate.
             var _immediateMap = {};
             var _immediateId = 0;
+            var _setTimeoutRef = globalThis.setTimeout;
             globalThis.setImmediate = function(cb) {
                 if (typeof cb !== 'function') throw new TypeError('callback is not a function');
                 var args = Array.prototype.slice.call(arguments, 1);
                 var id = ++_immediateId;
-                var timerId = setTimeout(function() {
+                var timerId = _setTimeoutRef.call(globalThis, function() {
                     if (_immediateMap[id]) {
                         delete _immediateMap[id];
                         cb.apply(null, args);
@@ -1326,7 +1331,6 @@ pub fn inject_process(
 
             // process.execPath / process.execArgv
             if (!process.execPath) process.execPath = process.argv && process.argv[0] || '3va';
-            if (!process.execArgv) process.execArgv = [];
 
             // process.abort() — terminate immediately
             process.abort = function() { process.exit(1); };
@@ -1381,12 +1385,56 @@ pub fn inject_process(
 
             // process.emitWarning — used by Node.js built-ins and drivers (e.g. MongoDB)
             var _warnListeners = [];
-            process.emitWarning = function(message, options) {
-                var code = (options && typeof options === 'object') ? options.code : options;
-                var w = new Error(typeof message === 'string' ? message : String(message));
-                w.name = 'Warning';
+            process.emitWarning = function(message, options, codeArg) {
+                // Node's signature is `emitWarning(warning[, type | { type, code,
+                // detail }])`: a *string* second argument is the type of the
+                // warning, not its code. `emitWarning('x', 'DeprecationWarning')`
+                // is a warning of type `DeprecationWarning` and without code.
+                var isObject = options && typeof options === 'object';
+                var type = 'Warning';
+                var code;
+                if (isObject) {
+                    if (options.type) type = options.type;
+                    if (options.code) code = options.code;
+                } else if (typeof options === 'string') {
+                    type = options;
+                }
+                if (codeArg) code = codeArg;
+                var w = (message instanceof Error)
+                    ? message
+                    : new Error(typeof message === 'string' ? message : String(message));
+                w.name = type;
                 if (code) w.code = code;
-                if (typeof process.emit === 'function') process.emit('warning', w);
+                if (isObject && options.detail) w.detail = options.detail;
+                // Node prints the warning on stderr — `(node:PID) [CODE] Name:
+                // message` — and delivers the 'warning' event in the next tick.
+                // `--no-warnings` silences the printing, not the event.
+                if (!(globalThis.__node_flags__ && globalThis.__node_flags__.noWarnings)) {
+                    var release = process.release || {};
+                    var prefix = '(' + (release.name || 'node') + ':' + process.pid + ') ';
+                    if (code) prefix += '[' + code + '] ';
+                    prefix += w.name + ': ' + w.message;
+                    try {
+                        var line = prefix + '\n';
+                        // Node says where the deprecation comes from when the
+                        // warning is traced.
+                        if (w.name === 'DeprecationWarning') {
+                            line += '(Use `node --trace-deprecation ...` to show where the warning was created)\n';
+                        }
+                        if (process.stderr && typeof process.stderr.write === 'function') {
+                            process.stderr.write(line);
+                        } else if (typeof console !== 'undefined' && console.error) {
+                            console.error(prefix);
+                        }
+                    } catch (e) { /* a warning must never break the program */ }
+                }
+                if (typeof process.nextTick === 'function') {
+                    process.nextTick(function () {
+                        if (typeof process.emit === 'function') process.emit('warning', w);
+                    });
+                } else if (typeof process.emit === 'function') {
+                    process.emit('warning', w);
+                }
                 return w;
             };
 
@@ -1427,7 +1475,14 @@ pub fn inject_process(
         crate::builtins::code_cache::bootstrap_js_per_run(
             scope,
             "process-start",
-            "globalThis.__processStartMs = Date.now();",
+            // `process.execArgv`: the runtime flags the process was started
+            // with, as in Node. Code (Node's own test suite among others)
+            // reads this array to know how the process was started, so it
+            // has to be set on every run — the startup snapshot is built
+            // without it, because it depends on the command line.
+            "globalThis.__processStartMs = Date.now(); \
+             globalThis.process.execArgv = \
+                (globalThis.__node_flags__ && globalThis.__node_flags__.execArgv) || [];",
         )?;
         crate::builtins::code_cache::bootstrap_js(scope, "process-tail", js_src)?;
     }

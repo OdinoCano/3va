@@ -1,0 +1,6 @@
+{
+  "kind": "single",
+  "main": "main.mjs",
+  "timeout_s": 30,
+  "description": "importing a relative .mjs module (the loader case that 3va 2.12.6 gets wrong; see known-differences.json)."
+}

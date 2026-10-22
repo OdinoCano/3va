@@ -1,0 +1,5 @@
+{
+  "kind": "client-server",
+  "timeout_s": 30,
+  "description": "net half-close: end(data) sends FIN and keeps reading the reply the server writes after EOF; and end() after a delayed write."
+}

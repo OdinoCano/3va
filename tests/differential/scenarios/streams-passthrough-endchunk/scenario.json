@@ -1,0 +1,5 @@
+{
+  "kind": "single",
+  "timeout_s": 30,
+  "description": "PassThrough/Transform end(chunk) must write the chunk before ending (2.12.6 fix)."
+}

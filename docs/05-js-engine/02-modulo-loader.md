@@ -113,7 +113,60 @@ Promise.resolve(42)
 
 ## 2.3 CommonJS
 
-Files that do not contain static `import`/`export` are evaluated as plain scripts. `require()` is not available in ESM mode and vice versa.
+Files that do not contain static `import`/`export` are evaluated as CommonJS
+modules. `require()` is not available in ESM mode and vice versa.
+
+### 2.3.1 The entry point is a module too
+
+The file passed to `3va run` (or `3va start`, or a worker) is compiled the way
+Node compiles it: the body of the file is the body of
+
+```javascript
+(function (exports, require, module, __filename, __dirname) { /* … */ })
+```
+
+and it is called with `this === module.exports`. So the entry point has:
+
+- `require.main === module` and `module.id === '.'`;
+- its own `__filename` and `__dirname`;
+- `module.exports` / `exports` bound to the same object;
+- top-level `var`/`const`/`let` local to the module — a top-level `const` no
+  longer shadows a global for the dependencies loaded after it (the bug that
+  made `const { setTimeout } = require('timers/promises')` in `server.js` break
+  `setTimeout` everywhere else);
+- a top-level `return`, which Node allows in a CommonJS file and which used to
+  be a `SyntaxError` here.
+
+ES module entries (`.mjs`, or a file with `import`/`export`) keep the module
+semantics: there, a top-level `return` *is* a `SyntaxError`, as in Node.
+`-e`/`--eval` and the REPL are not modules (as in Node): they run as scripts,
+with `require` available.
+
+### 2.3.2 The traces say where the error is
+
+The entry point and every file loaded with `require()` are compiled with the
+file's own text as the body of a function with the module's parameters
+(`exports, require, module, __filename, __dirname`), and the file's name goes
+in the `ScriptOrigin`. So:
+
+- a stack trace points at the file with the line and the column of the source
+  (`at boom (/app/server.js:12:9)`), and the frame of the module is
+  `Object.<anonymous>`, as in Node;
+- an exception that reaches the top of the program is reported the way Node
+  reports it: the file and the line, the line of code, the `^` under the
+  column, and then the error with its trace.
+
+A `.js` file is not re-printed by the transpiler when it is loaded (only when
+V8 cannot parse it, as with JSX or Flow), so the positions of a trace are the
+positions of the file.
+
+A file that does have to be transpiled — an ES module (`import`/`export`), JSX,
+TypeScript, or a `.js` that the parser rejects — is re-printed, and 3va does not
+generate a source map for that pass: the position of a frame inside such a
+module is the position in the transpiled code (a `throw` that is on line 3 of
+the file can be line 5 of the trace, and its line is re-quoted), unlike Node,
+which runs an ES module natively. The entry point and plain CommonJS modules are
+exact.
 
 ---
 

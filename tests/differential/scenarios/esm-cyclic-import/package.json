@@ -1,0 +1,5 @@
+{
+  "name": "esm-cyclic-import-fixture",
+  "private": true,
+  "type": "module"
+}

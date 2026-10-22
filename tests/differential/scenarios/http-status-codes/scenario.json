@@ -1,0 +1,5 @@
+{
+  "kind": "single",
+  "timeout_s": 30,
+  "description": "http.STATUS_CODES must match node for the common status codes."
+}

@@ -251,12 +251,87 @@ pub fn inject_require(
                         }
                     }
                 } catch(e) {}
-                lines.push('    at ' + (frame.getFunctionName() || '<anonymous>') + ' (' + fileName + ':' + line + ':' + col + ')');
+                // V8 knows the receiver's type of a frame; Node's own stack
+                // format uses it for the frames without a name
+                // (`Object.<anonymous>`, the frame of a CommonJS module).
+                var name = frame.getFunctionName();
+                if (!name) {
+                    var typeName = (typeof frame.getTypeName === 'function') ? frame.getTypeName() : '';
+                    name = typeName ? (typeName + '.<anonymous>') : '<anonymous>';
+                }
+                lines.push('    at ' + name + ' (' + fileName + ':' + line + ':' + col + ')');
             }
             return lines.join('\n');
         };
     "#;
     crate::builtins::code_cache::bootstrap_js(scope, "require-intro", source_code)?;
+
+    // __vvvaCompileModule(source, filename) — compile a CommonJS module the
+    // way Node does: the file's own text is the body of a function with the
+    // module's parameters, and the script origin carries the file name. A
+    // stack trace then points at the file with the line and column of the
+    // source, and the frame of the module is `Object.<anonymous>`, as in Node.
+    let compile_module_fn = Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let source = args.get(0).to_rust_string_lossy(scope);
+            let filename = args.get(1).to_rust_string_lossy(scope);
+            let params_csv = args.get(2).to_rust_string_lossy(scope);
+            let script_id = args.get(3).int32_value(scope).unwrap_or(-1);
+            let param_handles: Vec<v8::Local<v8::String>> = params_csv
+                .split(',')
+                .filter(|p| !p.is_empty())
+                .map(|p| v8::String::new(scope, p).unwrap())
+                .collect();
+            let resource: v8::Local<v8::Value> = v8::String::new(scope, &filename).unwrap().into();
+            let origin = v8::ScriptOrigin::new(
+                scope, resource, 0, 0, false, script_id, None, false, false, false, None,
+            );
+            let source_str = v8::String::new(scope, &source).unwrap();
+            let mut source_obj = v8::script_compiler::Source::new(source_str, Some(&origin));
+            if let Some(f) = v8::script_compiler::compile_function(
+                scope,
+                &mut source_obj,
+                &param_handles,
+                &[],
+                v8::script_compiler::CompileOptions::EagerCompile,
+                v8::script_compiler::NoCacheReason::NoReason,
+            ) {
+                rv.set(f.into());
+            }
+            // When the compilation fails, the error is pending in the isolate:
+            // leaving the return value unset propagates it to the caller.
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__vvvaCompileModule").unwrap().into(),
+        compile_module_fn.into(),
+    );
+
+    // __vvvaTranspileJs(source) — the fallback for a `.js` file that is not
+    // plain JavaScript (JSX, Flow, …): the loader compiles the file as it is
+    // first, so a stack trace points at the file's own lines, and only
+    // transpiles it when V8 cannot parse it.
+    let transpile_js_fn = Function::new(
+        scope,
+        move |scope: &mut PinScope<'_, '_>,
+              args: FunctionCallbackArguments,
+              mut rv: ReturnValue| {
+            let source = args.get(0).to_rust_string_lossy(scope);
+            let transpiled = crate::transpiler::transpile_js(&source);
+            rv.set(V8String::new(scope, &transpiled).unwrap().into());
+        },
+    )
+    .unwrap();
+    global.set(
+        scope,
+        V8String::new(scope, "__vvvaTranspileJs").unwrap().into(),
+        transpile_js_fn.into(),
+    );
 
     let read_file_fn = Function::new(
         scope,
@@ -275,24 +350,6 @@ pub fn inject_require(
                 );
                 let err_str = V8String::new(scope, &msg).unwrap();
                 let err = v8::Exception::error(scope, err_str);
-                scope.throw_exception(err);
-                return;
-            }
-
-            // Node.js: require() of a .mjs file throws ERR_REQUIRE_ESM
-            // instead of silently transpiling it. Match that contract so
-            // user code (and the test suite) can branch on e.code.
-            if path_str.ends_with(".mjs") {
-                let msg = format!(
-                    "require() of ES module {} not supported. Use import() instead.",
-                    full_path.display()
-                );
-                let err_str = V8String::new(scope, &msg).unwrap();
-                let err = v8::Exception::error(scope, err_str);
-                let err_obj = err.to_object(scope).unwrap();
-                let code_key = V8String::new(scope, "code").unwrap();
-                let code_val = V8String::new(scope, "ERR_REQUIRE_ESM").unwrap();
-                err_obj.set(scope, code_key.into(), code_val.into());
                 scope.throw_exception(err);
                 return;
             }
@@ -350,7 +407,13 @@ pub fn inject_require(
                     {
                         crate::transpiler::transpile(&source)
                     } else {
-                        crate::transpiler::transpile_js(&source)
+                        // A plain JavaScript file is used as it is: the
+                        // transpiler re-prints the code (and reformats it), and
+                        // then the line and column of a stack trace would not
+                        // be the ones of the file. If the file turns out not to
+                        // be plain JavaScript (JSX, Flow, …), the loader
+                        // transpiles it and compiles that instead.
+                        source
                     };
                     if _zod_core_debug {
                         let has_bare = transpiled.lines().any(|l| l.trim().starts_with("export "));
@@ -1100,6 +1163,22 @@ pub fn inject_require(
             EventEmitter.prototype.emit = function(ev) {
                 _ensureEvents(this);
                 var args = Array.prototype.slice.call(arguments, 1);
+                // Node: emitting 'error' with no listener throws, so the
+                // runtime reports it as an uncaught exception. A silent no-op
+                // hid every error nobody listened for (and made
+                // `uncaughtException`-based recovery impossible).
+                if (ev === 'error') {
+                    var errListeners = this._events['error'];
+                    if (!errListeners || errListeners.length === 0) {
+                        var er = args[0];
+                        if (!(er instanceof Error)) {
+                            er = new Error('Unhandled error. (' + String(er) + ')');
+                            er.code = 'ERR_UNHANDLED_ERROR';
+                            er.context = args[0];
+                        }
+                        throw er;
+                    }
+                }
                 var listeners = (this._events[ev] || []).slice();
                 listeners.forEach(function(fn) { fn.apply(this, args); }, this);
                 return listeners.length > 0;
@@ -1128,7 +1207,22 @@ pub fn inject_require(
             EventEmitter.defaultMaxListeners = 10;
             EventEmitter.setMaxListeners = function(n) { EventEmitter.defaultMaxListeners = n; };
             EventEmitter.getMaxListeners = function() { return EventEmitter.defaultMaxListeners; };
-            EventEmitter.listenerCount = function(emitter, ev) { return emitter.listenerCount(ev); };
+            // Node's `events.listenerCount(emitter, type)` takes an
+            // EventEmitter *or* an EventTarget: `listenerCount(signal,
+            // 'abort')` is how libraries size the bookkeeping they keep for
+            // an AbortSignal (test-http-agent-abort-controller). 3va's
+            // AbortSignal is an EventTarget whose listeners live in
+            // `_listeners`; 'abort' is the only event it supports.
+            EventEmitter.listenerCount = function(emitter, ev) {
+                if (emitter && typeof emitter.listenerCount === 'function') return emitter.listenerCount(ev);
+                if (emitter && typeof emitter.addEventListener === 'function') {
+                    if (ev === 'abort' && Array.isArray(emitter._listeners)) return emitter._listeners.length;
+                    return 0;
+                }
+                var e = new TypeError('The "emitter" argument must be an instance of EventEmitter or EventTarget. Received ' + String(emitter));
+                e.code = 'ERR_INVALID_ARG_TYPE';
+                throw e;
+            };
             EventEmitter.EventEmitter = EventEmitter;
             EventEmitter.once = function(emitter, ev) {
                 return new Promise(function(resolve, reject) {
@@ -1482,6 +1576,7 @@ pub fn inject_require(
                     if (cb) setTimeout(cb, 0);
                     return this;
                 };
+                // ponytail: ref/unref are no-ops — 3va's event loop does not release the process per handle; see docs/05-js-engine/07-inventario-stubs.md §7.2.
                 Http2Server.prototype.ref = function() { return this; };
                 Http2Server.prototype.unref = function() { return this; };
 
@@ -1685,6 +1780,9 @@ pub fn inject_require(
                 };
                 globalThis.__requireCache['timers/promises'] = timersPromises;
                 globalThis.__requireCache['node:timers/promises'] = timersPromises;
+                // `require('node:timers').promises` is the same object, as in
+                // Node (`timers.promises === require('node:timers/promises')`).
+                timers.promises = timersPromises;
             })();
 
             // ── dns / dns/promises ───────────────────────────────────────────────────
@@ -1927,7 +2025,23 @@ pub fn inject_require(
                     },
                     endianness: function() { return 'LE'; },
                     EOL: __osPlatform() === 'win32' ? '\r\n' : '\n',
-                    constants: { signals: {}, errno: {}, priority: {} },
+                    constants: (function() {
+                        // Node's `os.constants`: the POSIX signal numbers, with
+                        // `signals` frozen (writing to it throws a TypeError in
+                        // strict mode, like in Node).
+                        var signals = {
+                            SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5,
+                            SIGABRT: 6, SIGIOT: 6, SIGBUS: 7, SIGFPE: 8, SIGKILL: 9,
+                            SIGUSR1: 10, SIGSEGV: 11, SIGUSR2: 12, SIGPIPE: 13,
+                            SIGALRM: 14, SIGTERM: 15, SIGCHLD: 17, SIGSTKFLT: 16,
+                            SIGCONT: 18, SIGSTOP: 19, SIGTSTP: 20, SIGTTIN: 21,
+                            SIGTTOU: 22, SIGURG: 23, SIGXCPU: 24, SIGXFSZ: 25,
+                            SIGVTALRM: 26, SIGPROF: 27, SIGWINCH: 28, SIGIO: 29,
+                            SIGPOLL: 29, SIGPWR: 30, SIGSYS: 31
+                        };
+                        Object.freeze(signals);
+                        return { signals: signals, errno: {}, priority: {} };
+                    })(),
                 };
                 globalThis.__requireCache['os'] = os;
                 globalThis.__requireCache['node:os'] = os;
@@ -2055,43 +2169,47 @@ pub fn inject_require(
                 ClusterWorker.prototype.disconnect = function() { this.kill(); };
                 ClusterWorker.prototype.isDead = function() { return this.state === 'dead'; };
 
-                cluster.isPrimary = !process.env.CLUSTER_WORKER;
-                cluster.isMaster = cluster.isPrimary;
-                cluster.isWorker = !!process.env.CLUSTER_WORKER;
+                function _clusterEnvIsWorker() {
+                    return !!(typeof process !== 'undefined' && process.env && process.env.CLUSTER_WORKER);
+                }
+                var _clusterWorkerHandle = null;
+                // Only sets the worker handle; the per-run `fork-ipc` bootstrap
+                // already installs process.send/stdin polling from VVVA_FORKED.
+                function _clusterEnsureWorker() {
+                    if (cluster._workerReady || !_clusterEnvIsWorker()) return;
+                    cluster._workerReady = true;
+                    _clusterWorkerHandle = {
+                        id: parseInt(process.env.NODE_WORKER_ID || '0'),
+                        send: function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
+                    };
+                }
+                // Runtime getters, not values baked into the builtins snapshot:
+                // the snapshot is recorded with an empty environment, so an eager
+                // `cluster.isPrimary = !process.env.CLUSTER_WORKER` froze `true`
+                // for every process and made cluster workers re-fork forever.
+                Object.defineProperty(cluster, 'isPrimary', {
+                    get: function() { return !_clusterEnvIsWorker(); },
+                    enumerable: true, configurable: true,
+                });
+                Object.defineProperty(cluster, 'isMaster', {
+                    get: function() { return cluster.isPrimary; },
+                    enumerable: true, configurable: true,
+                });
+                Object.defineProperty(cluster, 'isWorker', {
+                    get: function() { _clusterEnsureWorker(); return _clusterEnvIsWorker(); },
+                    enumerable: true, configurable: true,
+                });
+                Object.defineProperty(cluster, 'worker', {
+                    get: function() { _clusterEnsureWorker(); return _clusterWorkerHandle; },
+                    enumerable: true, configurable: true,
+                });
                 cluster.workers = _clusterWorkers;
                 cluster.settings = {};
                 cluster.schedulingPolicy = 2;
                 cluster.SCHED_NONE = 1;
                 cluster.SCHED_RR = 2;
 
-                if (cluster.isWorker) {
-                    cluster.worker = {
-                        id: parseInt(process.env.NODE_WORKER_ID || '0'),
-                        send: function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
-                    };
-                    process.send = function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); };
-                    process.connected = true;
-                    // Read IPC messages from stdin (parent writes JSON lines via __clusterSend)
-                    var _ipcBuf = '';
-                    setInterval(function() {
-                        try {
-                            var chunk = __stdinReadPoll();
-                            if (chunk && chunk.length > 0) {
-                                _ipcBuf += Buffer.from(chunk).toString('utf8');
-                                var lines = _ipcBuf.split('\n');
-                                _ipcBuf = lines.pop();
-                                for (var i = 0; i < lines.length; i++) {
-                                    var line = lines[i].trim();
-                                    if (!line) continue;
-                                    try {
-                                        var msg = JSON.parse(line);
-                                        process.emit('message', msg);
-                                    } catch(e) {}
-                                }
-                            }
-                        } catch(e) {}
-                    }, 10);
-                }
+                _clusterEnsureWorker();
 
                 cluster.fork = function(env) {
                     if (!cluster.isPrimary) return null;
@@ -2099,7 +2217,7 @@ pub fn inject_require(
                     w.id = ++_clusterNextId;
                     _clusterWorkers[w.id] = w;
                     var scriptPath = process.argv[1] || cluster.settings.exec || '';
-                    var result = __clusterFork(scriptPath, w.id);
+                    var result = __clusterFork(scriptPath, w.id, JSON.stringify(env || {}), JSON.stringify([]), true);
                     if (result === -1) {
                         delete _clusterWorkers[w.id];
                         return null;
@@ -2180,13 +2298,28 @@ pub fn inject_require(
                     }
                     return buf.slice(0, complete).toString('utf8');
                 }
+                if (this.encoding === 'base64' || this.encoding === 'base64url') {
+                    // Hold back the bytes that do not fill a group of 3 until
+                    // the next write() (or end()), as Node does: the encoded
+                    // text of a split input must equal that of the whole.
+                    if (this._incomplete) {
+                        buf = Buffer.concat([this._incomplete, buf]);
+                        this._incomplete = null;
+                    }
+                    var rem = buf.length % 3;
+                    if (rem) {
+                        this._incomplete = buf.slice(buf.length - rem);
+                        buf = buf.slice(0, buf.length - rem);
+                    }
+                    return buf.length ? buf.toString(this.encoding) : '';
+                }
                 return buf.toString(this.encoding);
             };
             StringDecoder.prototype.end = function(buf) {
                 var ret = '';
                 if (buf) ret = this.write(buf);
                 if (this._incomplete) {
-                    ret += this._incomplete.toString('utf8');
+                    ret += this._incomplete.toString(this.encoding === 'base64' || this.encoding === 'base64url' ? this.encoding : 'utf8');
                     this._incomplete = null;
                 }
                 return ret;
@@ -2227,7 +2360,8 @@ pub fn inject_require(
             function Readable(opts) {
                 Stream.call(this);
                 this.readable = true;
-                this._readableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, buffer: [], ended: false, _endEmitted: false, flowing: false };
+                this.destroyed = false;
+                this._readableState = { objectMode: !!(opts && opts.objectMode), highWaterMark: (opts && opts.highWaterMark) || 16384, length: 0, buffer: [], ended: false, _endEmitted: false, flowing: false, discard: false };
                 if (opts && typeof opts.read === 'function') this._read = opts.read;
                 // Node: { encoding: 'utf8' } in the constructor is equivalent
                 // to calling setEncoding() — 'data' events carry decoded
@@ -2252,6 +2386,8 @@ pub fn inject_require(
                 // after the attach is delivered in the same turn, which is the
                 // ordering almost all code — and the stream tests — rely on.
                 if (ev === 'data') {
+                    // A consumer is reading, so nothing is dropped.
+                    state.discard = false;
                     if (!state.flowing) state.flowing = true;
                     this._flushIfFlowing();
                     this._maybeEnd();
@@ -2347,6 +2483,11 @@ pub fn inject_require(
                     var hasDataL = this._events && this._events['data'] && this._events['data'].length > 0;
                     if (state.flowing && hasDataL) {
                         this.emit('data', chunk);
+                    } else if (state.flowing && state.discard) {
+                        // Resumed with nobody listening: drop the chunk and
+                        // keep the buffer empty, as Node's flow() does (the
+                        // async iterator and pipe() attach 'data', so they
+                        // never take this branch and keep their backpressure).
                     } else {
                         state.buffer.push(chunk);
                         state.length += state.objectMode ? 1 : _chunkBytes(chunk);
@@ -2385,6 +2526,16 @@ pub fn inject_require(
                 var state = this._readableState;
                 state.flowing = true;
                 state._resumeScheduled = false;
+                // Node's flow(): a resumed stream with no 'data' listener
+                // drains to nobody, so the buffer must not pile up. It used to
+                // stay full and `_maybeEnd` (which requires an empty buffer)
+                // never emitted 'end' — the `res.resume()` then 'end' idiom
+                // that the http client uses. `on('data')` clears this.
+                if (!(this._events && this._events['data'] && this._events['data'].length)) {
+                    state.discard = true;
+                    state.buffer.length = 0;
+                    state.length = 0;
+                }
                 this._flushIfFlowing();
                 this._maybeEnd();
                 this._read(0);
@@ -2400,7 +2551,40 @@ pub fn inject_require(
                 this._decoder = (enc && enc !== 'buffer') ? new StringDecoder(enc) : null;
                 return this;
             };
-            Readable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
+            // Node's stream destroy (lib/internal/streams/destroy.js): the
+            // stream is destroyed synchronously (`destroyed` and `errored`
+            // are set before destroy() returns), and 'error'/'close' are
+            // emitted on later ticks, with `closed` set just before 'close'.
+            // An 'error' with no listener is the process's uncaught exception
+            // in Node, not a silent no-op (test-http-client-incomingmessage-
+            // destroy relies on it, and so does any app that installs an
+            // `uncaughtException` handler instead of an error listener).
+            function __destroyStream(self, err) {
+                if (self.destroyed) {
+                    if (err && self.listenerCount('error') > 0) self.emit('error', err);
+                    return self;
+                }
+                self.destroyed = true;
+                self.errored = err === undefined ? null : err;
+                self.closed = false;
+                if (self._readableState) self._readableState.destroyed = true;
+                if (self._writableState) self._writableState.destroyed = true;
+                var next = (typeof process !== 'undefined' && typeof process.nextTick === 'function')
+                    ? process.nextTick : function(f) { queueMicrotask(f); };
+                // Two separate ticks, as in Node: an unhandled 'error' must
+                // not keep 'close' from being emitted.
+                next(function() {
+                    if (!err) return;
+                    // emit() itself throws when nobody listens, as in Node.
+                    self.emit('error', err);
+                });
+                next(function() {
+                    self.closed = true;
+                    self.emit('close');
+                });
+                return self;
+            }
+            Readable.prototype.destroy = function(err) { return __destroyStream(this, err); };
             Readable.prototype[Symbol.asyncIterator] = function() {
                 var self = this;
                 return {
@@ -2436,11 +2620,16 @@ pub fn inject_require(
             function Writable(opts) {
                 Stream.call(this);
                 this.writable = true;
+                this.destroyed = false;
                 this._writableState = {
                     objectMode: !!(opts && opts.objectMode),
                     highWaterMark: (opts && opts.highWaterMark) || 16384,
                     length: 0, corked: 0, ended: false, finished: false,
                     needDrain: false, pendingcb: 0, buffered: [],
+                    defaultEncoding: 'utf8',
+                    // Node: a string handed to write() reaches _write() as a Buffer
+                    // unless the stream asked for decodeStrings: false.
+                    decodeStrings: !(opts && opts.decodeStrings === false),
                 };
                 if (opts && typeof opts.write === 'function') this._write = opts.write;
                 if (opts && typeof opts.final === 'function') this._final = opts.final;
@@ -2449,6 +2638,31 @@ pub fn inject_require(
             Object.defineProperty(Writable, Symbol.hasInstance, {
                 value: function(instance) { return !!(instance && instance._writableState); }
             });
+            // Node's Writable runs one _write() at a time: a write() made while
+            // a previous _write() has not called back is queued and runs when it
+            // does (state.writing). Calling _write() for each write() at once
+            // reordered async sinks and ignored a sink that holds its callback
+            // (test-fs-read-stream-encoding relies on that).
+            function __writableRun(stream, chunk, encoding, onflush) {
+                var state = stream._writableState;
+                if (state.writing) {
+                    (state.queue || (state.queue = [])).push({ chunk: chunk, encoding: encoding, onflush: onflush });
+                    return;
+                }
+                state.writing = true;
+                var called = false;
+                stream._write(chunk, encoding || 'utf8', function(err) {
+                    if (called) { onflush(err); return; }
+                    called = true;
+                    state.writing = false;
+                    onflush(err);
+                    var q = state.queue;
+                    if (q && q.length && !state.writing && !(state.corked > 0)) {
+                        var next = q.shift();
+                        __writableRun(stream, next.chunk, next.encoding, next.onflush);
+                    }
+                });
+            }
             Writable.prototype._write = function(chunk, encoding, callback) { callback(); };
             Writable.prototype._final = function(callback) { callback(); };
             Writable.prototype.write = function(chunk, encoding, cb) {
@@ -2456,9 +2670,20 @@ pub fn inject_require(
                 var state = this._writableState;
                 if (state.ended) {
                     var err = new Error('write after end');
-                    this.emit('error', err);
+                    err.code = 'ERR_STREAM_WRITE_AFTER_END';
+                    // Node reports the error on a later tick (via destroy),
+                    // so `write()` still returns false synchronously and the
+                    // uncaught exception only fires once the loop runs.
+                    var self = this;
+                    var next = (typeof process !== 'undefined' && typeof process.nextTick === 'function')
+                        ? process.nextTick : function(f) { queueMicrotask(f); };
+                    next(function() { self.emit('error', err); });
                     if (cb) cb(err);
                     return false;
+                }
+                if (!state.objectMode && state.decodeStrings && typeof chunk === 'string') {
+                    chunk = Buffer.from(chunk, encoding || state.defaultEncoding);
+                    encoding = 'buffer';
                 }
                 var chunkLen = 1;
                 if (chunk instanceof Uint8Array) {
@@ -2491,7 +2716,7 @@ pub fn inject_require(
                     state.buffered.push({ chunk: chunk, encoding: encoding, cb: cb, onflush: onflush, chunkLen: chunkLen });
                     return true;
                 }
-                this._write(chunk, encoding || 'utf8', onflush);
+                __writableRun(this, chunk, encoding, onflush);
                 return ret;
             };
             Writable.prototype.end = function(chunk, encoding, cb) {
@@ -2530,8 +2755,19 @@ pub fn inject_require(
                 }
                 return this;
             };
-            Writable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
-            Writable.prototype.setDefaultEncoding = function() { return this; };
+            Writable.prototype.destroy = function(err) { return __destroyStream(this, err); };
+            // TODO(2.13.0): implement — setDefaultEncoding must set the encoding used by write(string); see docs/05-js-engine/07-inventario-stubs.md §7.4.
+            Writable.prototype.setDefaultEncoding = function(encoding) {
+                if (typeof encoding === 'string') encoding = encoding.toLowerCase();
+                if (encoding === undefined || encoding === null || encoding === '') encoding = 'utf8';
+                if (!Buffer.isEncoding(encoding)) {
+                    var e = new TypeError('Unknown encoding: ' + String(encoding));
+                    e.code = 'ERR_UNKNOWN_ENCODING';
+                    throw e;
+                }
+                this._writableState.defaultEncoding = encoding;
+                return this;
+            };
             Writable.prototype.cork = function() { this._writableState.corked++; };
             Writable.prototype.uncork = function() {
                 var state = this._writableState;
@@ -2540,7 +2776,7 @@ pub fn inject_require(
                     var buf = state.buffered.splice(0);
                     var self = this;
                     buf.forEach(function(item) {
-                        self._write(item.chunk, item.encoding || 'utf8', item.onflush);
+                        __writableRun(self, item.chunk, item.encoding, item.onflush);
                     });
                 }
             };
@@ -2936,23 +3172,50 @@ pub fn inject_require(
             };
             Stream.finished = function(stream, options, cb) {
                 if (typeof options === 'function') { cb = options; options = {}; }
+                options = options || {};
                 cb = cb || function() {};
-                if (!stream || typeof stream.on !== 'function') { cb(); return function() {}; }
+                var noop = function() {};
+                if (!stream || typeof stream.on !== 'function') {
+                    queueMicrotask(function() { cb(); });
+                    return noop;
+                }
                 var settled = false;
                 function onEnd() { done(null); }
                 function onFinish() { done(null); }
                 function onError(err) { done(err); }
+                // Node's eos (which finished() is built on) also completes on
+                // 'close': a stream destroyed before it finished is done as far
+                // as the caller is concerned, and http responses emit 'close'
+                // right after 'finish'.
+                function onClose() { done(null); }
                 function cleanup() {
                     stream.removeListener('end', onEnd);
                     stream.removeListener('finish', onFinish);
                     stream.removeListener('error', onError);
+                    stream.removeListener('close', onClose);
                 }
                 // A Duplex emits both 'end' and 'finish'; without the guard the
                 // callback ran twice (Node calls it exactly once).
-                function done(err) { if (settled) return; settled = true; cleanup(); cb(err); }
+                function done(err) {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+                    // Node documents finished()'s callback as asynchronous, and
+                    // code that emits 'finish' and then 'close' in a row counts
+                    // on the callback running after both (it used to run inside
+                    // the 'finish' emit, so the second one saw a stream that had
+                    // not closed yet).
+                    queueMicrotask(function() { cb(err); });
+                }
+                // Already over: still call back, but on a later tick, like Node.
+                if (stream.readableEnded || stream.writableFinished || stream.destroyed || stream.finished === true) {
+                    queueMicrotask(function() { cb(null); });
+                    return noop;
+                }
                 stream.once('end', onEnd);
                 stream.once('finish', onFinish);
                 stream.once('error', onError);
+                stream.once('close', onClose);
                 return function() { done(new Error('aborted')); };
             };
             globalThis.__requireCache['stream'] = Stream;
@@ -3688,6 +3951,20 @@ pub fn inject_require(
             // call site below checks the type of the result instead of using try/catch.
             function _netErr(v) { return v instanceof Error ? v : new Error(String(v)); }
 
+            // Node's AbortError (internal/errors.js): name 'AbortError', code
+            // ABORT_ERR, and the signal's reason as `cause`.
+            function __abortError(signal) {
+                var reason = signal && signal.reason;
+                var e;
+                if (reason instanceof Error && reason.name === 'AbortError') e = reason;
+                else {
+                    e = new Error(reason && reason.message ? reason.message : 'The operation was aborted');
+                    e.name = 'AbortError';
+                }
+                if (!e.code) e.code = 'ABORT_ERR';
+                e.cause = reason;
+                return e;
+            }
             function Socket(opts) {
                 if (!(this instanceof Socket)) return new Socket(opts);
                 opts = opts || {};
@@ -3744,6 +4021,13 @@ pub fn inject_require(
                         if (!self._allowHalfOpen) { self.destroy(); }
                         else { self._maybeClose(); }
                         return;
+                    } else if (/unknown socket/.test(String(chunk instanceof Error ? chunk.message : chunk))) {
+                        // The native handle was already closed by its other
+                        // owner (a socket wrapped by a TLSSocket and destroyed
+                        // underneath it): that is a close, not an 'error'.
+                        self._stopPoll();
+                        self.destroy();
+                        return;
                     } else {
                         self._stopPoll();
                         self.emit('error', _netErr(chunk));
@@ -3754,10 +4038,12 @@ pub fn inject_require(
                     // re-arm then (the timer could never be cancelled).
                     if (self.destroyed || self._connId === null) { self._pollTimer = null; return; }
                     self._pollTimer = setTimeout(step, idleTicks < 8 ? 1 : 5);
+                    if (self._unrefd) self._pollTimer.unref();
                 };
                 // A chain of timeouts, not intervals: clearing an interval from
                 // inside its own callback leaks the callback entry in the engine.
                 self._pollTimer = setTimeout(step, 5);
+                if (self._unrefd) self._pollTimer.unref();
             };
             Socket.prototype._stopPoll = function() {
                 if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
@@ -3766,8 +4052,20 @@ pub fn inject_require(
             Socket.prototype._write = function(chunk, encoding, cb) {
                 if (this._connId === null) { cb(new Error('Socket is not connected')); return; }
                 var data = (chunk instanceof Uint8Array) ? chunk : new TextEncoder().encode(String(chunk));
-                var result = __tcpWrite(this._connId, data);
-                if (result === undefined) cb(); else cb(_netErr(result));
+                var self = this;
+                // __tcpWrite returns a number when the socket took only part of
+                // the data (its send buffer is full): retry the rest shortly.
+                var attempt = function(buf) {
+                    if (self._connId === null) { cb(); return; }   // destroyed meanwhile
+                    var result = __tcpWrite(self._connId, buf);
+                    if (typeof result === 'number') {
+                        var rest = buf.subarray(result);
+                        setTimeout(function() { attempt(rest); }, 1);
+                        return;
+                    }
+                    if (result === undefined) cb(); else cb(_netErr(result));
+                };
+                attempt(data);
             };
 
             Socket.prototype.connect = function(port, host, cb) {
@@ -3783,6 +4081,27 @@ pub fn inject_require(
                     host = host || 'localhost';
                 }
                 if (typeof cb === 'function') self.once('connect', cb);
+                // Node's Socket.prototype.connect honours `options.signal`:
+                // an already-aborted signal fails the connection on the next
+                // tick and a later abort destroys it with an AbortError. Net
+                // code (and http.Agent.createConnection, which forwards the
+                // request's signal) relies on it.
+                var signal = (opts && opts.signal) || null;
+                if (signal) {
+                    if (signal.aborted) {
+                        setTimeout(function() { self.destroy(__abortError(signal)); }, 0);
+                        return self;
+                    }
+                    var onAbort = function() {
+                        if (self._abortSignal !== signal) return;
+                        self._abortSignal = null;
+                        self._abortListener = null;
+                        self.destroy(__abortError(signal));
+                    };
+                    self._abortSignal = signal;
+                    self._abortListener = onAbort;
+                    if (typeof signal.addEventListener === 'function') signal.addEventListener('abort', onAbort);
+                }
                 self.connecting = true;
                 var result = __tcpConnect(host, port);
                 self.connecting = false;
@@ -3799,7 +4118,19 @@ pub fn inject_require(
             };
 
             Socket.prototype.setTimeout = function(ms, cb) {
+                if (typeof ms === 'function') { cb = ms; ms = 0; }
                 if (typeof cb === 'function') this.once('timeout', cb);
+                // Node keeps the current timeout in `socket.timeout` and
+                // fires the 'timeout' event when it expires.
+                this.timeout = ms;
+                if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
+                if (ms > 0) {
+                    var self = this;
+                    this._timeoutTimer = setTimeout(function() {
+                        self._timeoutTimer = null;
+                        self.emit('timeout');
+                    }, ms);
+                }
                 return this;
             };
             Socket.prototype.setNoDelay = function(on) {
@@ -3808,15 +4139,35 @@ pub fn inject_require(
                 if (this._connId !== null) __tcpSetNoDelay(this._connId, on === false ? 0 : 1);
                 return this;
             };
+            // ponytail: no-op by design — TCP socket options (SO_KEEPALIVE / TCP_NODELAY) are performance hints, not semantics; see docs/05-js-engine/07-inventario-stubs.md §7.2.
             Socket.prototype.setKeepAlive = function() { return this; };
             // ponytail: no-ops — pg-pool/pg call socket.ref()/unref() on idle clients; unref() does not
             // yet release the event loop (a pool with idle clients keeps the process alive until pool.end()).
-            Socket.prototype.ref = function() { return this; };
-            Socket.prototype.unref = function() { return this; };
+            // socket.unref(): its read poll no longer keeps the process alive.
+            Socket.prototype.ref = function() {
+                this._unrefd = false;
+                if (this._pollTimer && this._pollTimer.ref) this._pollTimer.ref();
+                return this;
+            };
+            Socket.prototype.unref = function() {
+                this._unrefd = true;
+                if (this._pollTimer && this._pollTimer.unref) this._pollTimer.unref();
+                return this;
+            };
             Socket.prototype.destroy = function(err) {
                 this._stopPoll();
+                if (this._abortSignal && this._abortListener) {
+                    var sig = this._abortSignal, fn = this._abortListener;
+                    this._abortSignal = null;
+                    this._abortListener = null;
+                    if (sig && typeof sig.removeEventListener === 'function') sig.removeEventListener('abort', fn);
+                }
+                if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
                 if (this._connId !== null) { __tcpClose(this._connId); this._connId = null; }
-                this.destroyed = true;
+                // __destroyStream sets `destroyed`/`errored` and schedules
+                // 'error'/'close'; setting it here first made destroy(err)
+                // drop the error (the guard in __destroyStream saw it as an
+                // already-destroyed stream with no listener yet).
                 return Duplex.prototype.destroy.call(this, err);
             };
             // Close once the read side has ended *and* the write side is done
@@ -3948,7 +4299,6 @@ pub fn inject_require(
             UpgradeSocket.prototype.destroy = function(err) {
                 this._stopPoll();
                 if (this._connId !== null) { __upgradeClose(this._connId); this._connId = null; }
-                this.destroyed = true;
                 return Duplex.prototype.destroy.call(this, err);
             };
             UpgradeSocket.prototype.end = function(chunk, encoding, cb) {
@@ -3958,6 +4308,7 @@ pub fn inject_require(
                     if (cb) cb(err);
                 });
             };
+            // ponytail: no-op by design — see docs/05-js-engine/07-inventario-stubs.md §7.2.
             UpgradeSocket.prototype.setNoDelay = function() { return this; };
             UpgradeSocket.prototype.setTimeout = function(ms, cb) {
                 if (typeof cb === 'function') this.once('timeout', cb);
@@ -3983,6 +4334,14 @@ pub fn inject_require(
 
             Server.prototype.listen = function(port, host, backlog, cb) {
                 var self = this;
+                // `listen(callback)` and `listen(options[, callback])`.
+                if (typeof port === 'function') { cb = port; port = 0; host = undefined; backlog = undefined; }
+                else if (port !== null && typeof port === 'object') {
+                    var lopts = port;
+                    if (typeof host === 'function') cb = host;
+                    port = lopts.port || 0; host = lopts.host; backlog = undefined;
+                    self._reusePort = !!lopts.reusePort;
+                }
                 // Real Node accepts listen(port, host, backlog, callback) —
                 // Metro's own earlyPortCheck calls it exactly that way
                 // (backlog explicitly undefined, callback as the 4th arg).
@@ -3993,12 +4352,14 @@ pub fn inject_require(
                 if (typeof backlog === 'function') { cb = backlog; backlog = undefined; }
                 if (typeof host === 'function') { cb = host; host = '0.0.0.0'; }
                 host = host || '0.0.0.0';
-                var result = __netListen(port, host);
+                var result = __netListen(port, host, self._reusePort === true);
                 if (typeof result === 'number') {
                     self._listenerId = result;
+                    if (self._unrefd && typeof __netRef === 'function') __netRef(result, false);
                     self.listening = true;
                     if (typeof cb === 'function') self.once('listening', cb);
                     self._acceptLoop();
+                    if (self._unrefd && self._acceptTimer && self._acceptTimer.unref) self._acceptTimer.unref();
                     setTimeout(function() { self.emit('listening'); }, 0);
                 } else {
                     setTimeout(function() { self.emit('error', _netErr(result)); }, 0);
@@ -4041,10 +4402,30 @@ pub fn inject_require(
                 return this;
             };
             Server.prototype.address = function() {
-                return this.listening ? { address: '0.0.0.0', port: 0, family: 'IPv4' } : null;
+                if (!this.listening) return null;
+                // The bound address (the real port after `listen(0)`).
+                var bound = (this._listenerId !== null && typeof __netListenerAddr === 'function')
+                    ? __netListenerAddr(this._listenerId) : null;
+                if (typeof bound === 'string') {
+                    var i = bound.lastIndexOf(':');
+                    var ip = bound.slice(0, i).replace(/^\[|\]$/g, '');
+                    return { address: ip, family: ip.indexOf(':') !== -1 ? 'IPv6' : 'IPv4', port: parseInt(bound.slice(i + 1), 10) };
+                }
+                return { address: '0.0.0.0', port: 0, family: 'IPv4' };
             };
-            Server.prototype.unref = function() { return this; };
-            Server.prototype.ref = function() { return this; };
+            // ponytail: ref/unref are no-ops — see docs/05-js-engine/07-inventario-stubs.md §7.2.
+            Server.prototype.unref = function() {
+                this._unrefd = true;
+                if (this._listenerId !== null && typeof __netRef === 'function') __netRef(this._listenerId, false);
+                if (this._acceptTimer && this._acceptTimer.unref) this._acceptTimer.unref();
+                return this;
+            };
+            Server.prototype.ref = function() {
+                this._unrefd = false;
+                if (this._listenerId !== null && typeof __netRef === 'function') __netRef(this._listenerId, true);
+                if (this._acceptTimer && this._acceptTimer.ref) this._acceptTimer.ref();
+                return this;
+            };
             Server.prototype.getConnections = function(cb) { if (cb) cb(null, 0); };
 
             function netCreateServer(opts, connListener) { return new Server(opts, connListener); }
@@ -4055,9 +4436,12 @@ pub fn inject_require(
                 // the flag.
                 if (port && typeof port === 'object') {
                     var sock = new Socket(port);
+                    sock._3vaSocket = true;
                     return sock.connect(port, host);
                 }
-                return new Socket({}).connect(port, host, cb);
+                var s = new Socket({});
+                s._3vaSocket = true;
+                return s.connect(port, host, cb);
             }
 
             var __autoSelectFamilyAttemptTimeout = 250;
@@ -4111,8 +4495,16 @@ pub fn inject_require(
                 if (typeof opts === 'function') { cb = opts; opts = {}; }
                 host = host || (opts && opts.host) || 'localhost';
                 var s = new TLSSocket(null, opts || {});
+                s._3vaSocket = true;
                 if (typeof cb === 'function') s.once('secureConnect', cb);
-                var result = __tcpConnectTls(host, port);
+                var tlsOpts = {
+                    ca: opts && opts.ca !== undefined ? opts.ca : undefined,
+                    cert: opts && opts.cert !== undefined ? opts.cert : undefined,
+                    key: opts && opts.key !== undefined ? opts.key : undefined,
+                    passphrase: opts && opts.passphrase !== undefined ? opts.passphrase : undefined,
+                    rejectUnauthorized: opts && opts.rejectUnauthorized !== false,
+                };
+                var result = __tcpConnectTls(host, port, JSON.stringify(tlsOpts));
                 if (typeof result === 'number') {
                     s._connId = result;
                     s._startPoll();
@@ -4181,6 +4573,8 @@ pub fn inject_require(
 
             // ── http module ──────────────────────────────────────────────────────────
             var httpAgent = function(options) {
+                // Node allows `http.Agent()` without `new`.
+                if (!(this instanceof httpAgent)) return new httpAgent(options);
                 EventEmitter.call(this);
                 this.options = options || {};
                 this.maxSockets = Infinity;
@@ -4191,12 +4585,62 @@ pub fn inject_require(
                 this.requests = {};
                 this.keepAlive = !!(options && options.keepAlive);
                 this.keepAliveMsecs = (options && options.keepAliveMsecs) || 1000;
+                this.options.keepAlive = this.keepAlive;
+                this.options.keepAliveMsecs = this.keepAliveMsecs;
+                this.maxCachedSessions = this.options.maxCachedSessions || 100;
             };
             httpAgent.prototype = Object.create(EventEmitter.prototype);
             httpAgent.prototype.constructor = httpAgent;
             httpAgent.prototype.addRequest = function(req, options) {};
-            httpAgent.prototype.createConnection = function(options, cb) { if (cb) cb(null, {}); return {}; };
-            httpAgent.prototype.destroy = function() {};
+            // Node's lib/_http_agent.js: the name of the pool a request goes
+            // to. It is the key `agent.sockets` and `agent.freeSockets` are
+            // indexed by, and the value `agent.getName()` returns.
+            httpAgent.prototype.getName = function(options) {
+                options = options || {};
+                var name = options.host || 'localhost';
+                name += ':';
+                if (options.port) name += options.port;
+                name += ':';
+                if (options.localAddress) name += options.localAddress;
+                if (options.family === 4 || options.family === 6) name += ':' + options.family;
+                if (options.socketPath) name += ':' + options.socketPath;
+                return name;
+            };
+            // The socket a request uses. Node's default is a plain TCP
+            // connection (TLS for https). An agent that overrides this is how
+            // the proxy agents work (https-proxy-agent, http-proxy-agent,
+            // tunnel, global-agent): the request has to go through it and not
+            // straight to the origin, or the proxy is bypassed.
+            httpAgent.prototype.createConnection = function(options, cb) {
+                options = options || {};
+                var socket = options.secure
+                    ? tlsConnect(options.port, options.host, {
+                        servername: options.servername || options.host,
+                        ca: options.ca,
+                        rejectUnauthorized: options.rejectUnauthorized,
+                    })
+                    : netConnect({ host: options.host, port: options.port, signal: options.signal });
+                if (typeof cb === 'function') socket.once('connect', function() { cb(null, socket); });
+                return socket;
+            };
+            httpAgent.prototype.destroy = function() {
+                // Node closes every socket the agent holds: the free ones and
+                // the ones a request is using. Without this a keep-alive
+                // socket stays open and the process never exits.
+                var self = this;
+                var close = function(map) {
+                    Object.keys(map || {}).forEach(function(k) {
+                        var list = map[k] || [];
+                        for (var i = 0; i < list.length; i++) {
+                            var s = list[i];
+                            if (s && !s.destroyed && typeof s.destroy === 'function') s.destroy();
+                        }
+                        map[k] = [];
+                    });
+                };
+                close(self.sockets);
+                close(self.freeSockets);
+            };
             httpAgent.prototype.free = function(socket, options) {};
             httpAgent.prototype.getCurrentStatus = function() { return { activeSockets: 0, freeSocketCount: 0, requestCount: 0 }; };
             httpAgent.prototype.keepSocketAlive = function(socket) {};
@@ -4204,8 +4648,89 @@ pub fn inject_require(
             httpAgent.prototype.onFREE = function(socket) {};
             httpAgent.prototype.onConnected = function(socket, options) {};
             httpAgent.prototype.onRemoved = function(socket) {};
+            // Node keeps the sockets of the agent in `agent.sockets` and the
+            // reusable ones in `agent.freeSockets`; the total is what
+            // `totalSocketCount` reports.
+            Object.defineProperty(httpAgent.prototype, 'totalSocketCount', {
+                get: function() {
+                    var self = this;
+                    var count = 0;
+                    Object.keys(self.sockets || {}).forEach(function(k) {
+                        count += (self.sockets[k] || []).length;
+                    });
+                    Object.keys(self.freeSockets || {}).forEach(function(k) {
+                        count += (self.freeSockets[k] || []).length;
+                    });
+                    return count;
+                },
+                configurable: true,
+            });
             var httpGlobalAgent = new httpAgent();
-            var HTTP_STATUS_CODES = { '100': 'Continue', '200': 'OK', '201': 'Created', '204': 'No Content', '301': 'Moved Permanently', '302': 'Found', '304': 'Not Modified', '400': 'Bad Request', '401': 'Unauthorized', '403': 'Forbidden', '404': 'Not Found', '405': 'Method Not Allowed', '500': 'Internal Server Error', '502': 'Bad Gateway', '503': 'Service Unavailable' };
+            var HTTP_STATUS_CODES = {
+                '100': "Continue",
+                '101': "Switching Protocols",
+                '102': "Processing",
+                '103': "Early Hints",
+                '200': "OK",
+                '201': "Created",
+                '202': "Accepted",
+                '203': "Non-Authoritative Information",
+                '204': "No Content",
+                '205': "Reset Content",
+                '206': "Partial Content",
+                '207': "Multi-Status",
+                '208': "Already Reported",
+                '226': "IM Used",
+                '300': "Multiple Choices",
+                '301': "Moved Permanently",
+                '302': "Found",
+                '303': "See Other",
+                '304': "Not Modified",
+                '305': "Use Proxy",
+                '307': "Temporary Redirect",
+                '308': "Permanent Redirect",
+                '400': "Bad Request",
+                '401': "Unauthorized",
+                '402': "Payment Required",
+                '403': "Forbidden",
+                '404': "Not Found",
+                '405': "Method Not Allowed",
+                '406': "Not Acceptable",
+                '407': "Proxy Authentication Required",
+                '408': "Request Timeout",
+                '409': "Conflict",
+                '410': "Gone",
+                '411': "Length Required",
+                '412': "Precondition Failed",
+                '413': "Payload Too Large",
+                '414': "URI Too Long",
+                '415': "Unsupported Media Type",
+                '416': "Range Not Satisfiable",
+                '417': "Expectation Failed",
+                '418': "I'm a Teapot",
+                '421': "Misdirected Request",
+                '422': "Unprocessable Entity",
+                '423': "Locked",
+                '424': "Failed Dependency",
+                '425': "Too Early",
+                '426': "Upgrade Required",
+                '428': "Precondition Required",
+                '429': "Too Many Requests",
+                '431': "Request Header Fields Too Large",
+                '451': "Unavailable For Legal Reasons",
+                '500': "Internal Server Error",
+                '501': "Not Implemented",
+                '502': "Bad Gateway",
+                '503': "Service Unavailable",
+                '504': "Gateway Timeout",
+                '505': "HTTP Version Not Supported",
+                '506': "Variant Also Negotiates",
+                '507': "Insufficient Storage",
+                '508': "Loop Detected",
+                '509': "Bandwidth Limit Exceeded",
+                '510': "Not Extended",
+                '511': "Network Authentication Required",
+            };
 
             // ── IncomingMessage — the request body streams from the native
             // connection task (see http_server.rs): headers/method/url are set
@@ -4214,6 +4739,8 @@ pub fn inject_require(
             // the stream. The producer keeps at most 1 MiB buffered ahead, so a
             // large upload never grows memory with its size.
             var httpIncomingMessage = function(socket) {
+                // Node allows `http.IncomingMessage(socket)` without `new`.
+                if (!(this instanceof httpIncomingMessage)) return new httpIncomingMessage(socket);
                 Readable.call(this);
                 this.socket = socket || {};
                 this.connection = this.socket;
@@ -4223,7 +4750,10 @@ pub fn inject_require(
                 this.method = 'GET';
                 this.url = '/';
                 this.headers = {};
+                this.rawHeaders = [];
                 this.complete = false;
+                this.aborted = false;
+                this._headerLines = [];
             };
             util.inherits(httpIncomingMessage, Readable);
             // The body is delivered when something starts consuming the stream
@@ -4243,6 +4773,16 @@ pub fn inject_require(
                 req.readable = false;
                 req.readableEnded = true;
                 req.push(null);
+            }
+            // The native body reader reports "the client went away" as a coded
+            // error. Node turns that into IncomingMessage.destroy(ConnReset):
+            // 'aborted' first, then 'error' only if the application listens
+            // (the server's socket absorbs it otherwise) and 'close'.
+            function abortIncomingRequest(req, err) {
+                if (req.destroyed) return;
+                var e = err;
+                if (!e || e.code === 'ECONNRESET') e = __connReset('aborted');
+                req.destroy(e);
             }
             function pumpIncoming(req, st) {
                 var state = req._readableState;
@@ -4274,25 +4814,14 @@ pub fn inject_require(
                     try {
                         chunk = __httpReadBody(st.bodyId, 65536);
                     } catch (e) {
-                        st.done = true;
-                        req.complete = true;
-                        req.readable = false;
-                        req.readableEnded = true;
-                        req.emit('error', e);
-                        req.push(null);
+                        // The native reader reported a body error (stall,
+                        // RUDY, abort): the request is aborted, not completed.
+                        abortIncomingRequest(req, e);
                         return;
                     }
                     if (chunk === null) { finishIncoming(req, st); return; }
                     if (chunk instanceof Error) {
-                        // The native reader reported a body error (stall, RUDY,
-                        // abort). Surface it on the request stream instead of
-                        // handing an Error to Buffer.from.
-                        st.done = true;
-                        req.complete = true;
-                        req.readable = false;
-                        req.readableEnded = true;
-                        req.emit('error', chunk);
-                        req.push(null);
+                        abortIncomingRequest(req, chunk);
                         return;
                     }
                     if (chunk === undefined) { st.waiting = true; scheduleRetry(); return; }
@@ -4341,16 +4870,71 @@ pub fn inject_require(
                 if (st && st.waiting && st.step) st.step();
                 return r;
             };
-            httpIncomingMessage.prototype.setTimeout = function() { return this; };
-            httpIncomingMessage.prototype.destroy = function() {
+            // Node's `IncomingMessage.setTimeout` (lib/_http_incoming.js):
+            // the callback listens on the message and the socket's inactivity
+            // timer is re-armed.
+            httpIncomingMessage.prototype.setTimeout = function(ms, cb) {
+                if (typeof cb === 'function') this.on('timeout', cb);
+                this.timeout = ms;
+                if (this.socket && typeof this.socket.setTimeout === 'function') this.socket.setTimeout(ms);
+                return this;
+            };
+            // Node's `IncomingMessage._destroy` (lib/_http_incoming.js): an
+            // incomplete message is `aborted` and emits 'aborted' before
+            // 'error'/'close'. On the server, the error only surfaces as an
+            // 'error' event when someone listens for it (the socket absorbs
+            // it otherwise), so `req.destroy(err)` does not crash the process
+            // — test-http-server-incomingmessage-destroy relies on that.
+            httpIncomingMessage.prototype.destroy = function(err) {
+                if (this.destroyed) return this;
+                this.destroyed = true;
+                this.errored = err === undefined ? null : err;
+                this.closed = false;
+                if (!this.readableEnded || !this.complete) {
+                    this.aborted = true;
+                    this.emit('aborted');
+                }
                 var st = this[kIncomingBody];
                 if (st) { st.done = true; this[kIncomingBody] = null; }
+                if (this.socket && typeof this.socket.destroy === 'function' && !this.socket.destroyed) {
+                    this.socket.destroy(err);
+                }
+                var self = this;
+                var next = (typeof process !== 'undefined' && typeof process.nextTick === 'function')
+                    ? process.nextTick : function(f) { queueMicrotask(f); };
+                if (err) {
+                    next(function() {
+                        if (self.listenerCount('error') > 0) self.emit('error', err);
+                    });
+                }
+                next(function() {
+                    self.closed = true;
+                    self.emit('close');
+                });
+                return this;
+            };
+            // Node's `_addHeaderLine` (lib/_http_incoming.js): the raw
+            // `name: value` line a header arrived in. Node's IncomingMessage
+            // has no `getHeader`/`setHeader`/... — those belong to
+            // OutgoingMessage — so nothing else is added here.
+            httpIncomingMessage.prototype._addHeaderLine = function(field, value, dest) {
+                if (this._headerLines === undefined) this._headerLines = [];
+                this._headerLines.push(field, value);
+                if (dest && typeof dest === 'object') {
+                    var lk = String(field).toLowerCase();
+                    var current = dest[lk];
+                    if (current === undefined) dest[lk] = value;
+                    else if (Array.isArray(current)) current.push(value);
+                    else dest[lk] = [current, value];
+                }
                 return this;
             };
 
             // ── ServerResponse — buffers writes and flushes as one __httpRespond(Bytes)
             // call on end(), since the native side writes headers+body together.
             var httpServerResponse = function(req) {
+                // Node allows `http.ServerResponse(req)` without `new`.
+                if (!(this instanceof httpServerResponse)) return new httpServerResponse(req);
                 Writable.call(this);
                 // Real usage: constructed internally by the accept loop with a
                 // req whose `socket._connId` names the native connection to
@@ -4359,12 +4943,25 @@ pub fn inject_require(
                 // there, fine as long as .end() is never called on it.
                 this.req = req;
                 this._connId = req && req.socket && req.socket._connId;
+                this.socket = req && req.socket;
+                this.connection = this.socket;
                 this.statusCode = 200;
                 this.statusMessage = '';
                 this._headers = {};
                 this._chunks = [];
                 this.finished = false;
                 this.headersSent = false;
+                // Streaming state: once the head has been flushed to the socket
+                // (first write/flushHeaders), further writes go out incrementally
+                // as chunked frames instead of buffering until end().
+                this._headSent = false;
+                this._chunked = false;
+                // Node sends a `Date` header unless the application turns it
+                // off (`res.sendDate = false`).
+                this.sendDate = true;
+                // Set when the application removes the `Connection` header:
+                // the server must not add one back.
+                this._removedConnection = false;
             };
             util.inherits(httpServerResponse, Writable);
             // Header validation — same rules as Node's lib/_http_outgoing.js:
@@ -4398,22 +4995,94 @@ pub fn inject_require(
                 return this;
             };
             httpServerResponse.prototype.getHeader = function(name) { return this._headers[name]; };
-            httpServerResponse.prototype.removeHeader = function(name) { delete this._headers[name]; return this; };
+            httpServerResponse.prototype.removeHeader = function(name) {
+                delete this._headers[name];
+                // Node: removing the `Connection` header keeps the server
+                // from adding one back (lib/_http_outgoing.js).
+                if (String(name).toLowerCase() === 'connection') this._removedConnection = true;
+                return this;
+            };
             httpServerResponse.prototype.hasHeader = function(name) { return Object.prototype.hasOwnProperty.call(this._headers, name); };
             httpServerResponse.prototype.getHeaders = function() { return this._headers; };
+            // Node's REASON_PHRASE (lib/internal/validators.js): a reason
+            // phrase may carry tab, printable ASCII and bytes 0x80-0xff, and
+            // nothing else. Anything with CR/LF (or another control byte)
+            // would split the response in two.
+            var __isValidReasonPhrase = /^[\t\x20-\x7e\x80-\xff]*$/;
+            var __validateReasonPhrase = function(reason) {
+                if (typeof reason === 'string' && reason.length > 0 && !__isValidReasonPhrase.test(reason)) {
+                    var re = new TypeError('Invalid character in statusMessage');
+                    re.code = 'ERR_INVALID_CHAR';
+                    throw re;
+                }
+            };
             httpServerResponse.prototype.writeHead = function(statusCode, statusMessage, headers) {
-                if (typeof statusMessage === 'object' && statusMessage !== null) { headers = statusMessage; statusMessage = undefined; }
-                // Validate before touching any state so a rejected header leaves
-                // the response untouched (same observable behaviour as Node).
-                if (headers) {
+                // Node's signature: the second argument is the reason phrase
+                // only when it is a string; otherwise it is the headers
+                // argument (`writeHead(200, {..})`, `writeHead(200, ['a','b'])`).
+                if (typeof statusMessage !== 'string' && statusMessage !== undefined) {
+                    headers = statusMessage;
+                    statusMessage = undefined;
+                }
+                // Node records the status line before validating the headers:
+                // when a header is rejected, statusCode and statusMessage are
+                // already set and headersSent is still false.
+                this.statusCode = statusCode;
+                this.statusMessage = statusMessage === undefined
+                    ? (HTTP_STATUS_CODES[String(statusCode)] || '')
+                    : statusMessage;
+                __validateReasonPhrase(this.statusMessage);
+                // Node accepts three shapes for the headers: an object, a flat
+                // array of alternating names and values, and an array of
+                // [name, value] pairs.
+                var pairs = null;
+                if (Array.isArray(headers)) {
+                    pairs = [];
+                    if (headers.length && Array.isArray(headers[0])) {
+                        for (var pi = 0; pi < headers.length; pi++) {
+                            var p = headers[pi];
+                            if (!Array.isArray(p) || p.length !== 2) {
+                                var pe = new TypeError('Invalid header value: ' + String(p));
+                                pe.code = 'ERR_INVALID_ARG_VALUE';
+                                throw pe;
+                            }
+                            pairs.push([String(p[0]), p[1]]);
+                        }
+                    } else {
+                        if (headers.length % 2 !== 0) {
+                            var oe = new TypeError('Invalid header value: ' + JSON.stringify(headers));
+                            oe.code = 'ERR_INVALID_ARG_VALUE';
+                            throw oe;
+                        }
+                        for (var ai = 0; ai < headers.length; ai += 2) {
+                            pairs.push([String(headers[ai]), headers[ai + 1]]);
+                        }
+                    }
+                }
+                // Validate the headers before recording any of them, so a
+                // rejected header leaves the header list untouched.
+                if (pairs) {
+                    for (var q = 0; q < pairs.length; q++) {
+                        __validateHeaderName(pairs[q][0]);
+                        __validateHeaderValue(pairs[q][0], pairs[q][1]);
+                    }
+                }
+                if (headers && !pairs) {
                     for (var k in headers) if (Object.prototype.hasOwnProperty.call(headers, k)) {
                         __validateHeaderName(k);
                         __validateHeaderValue(k, headers[k]);
                     }
                 }
-                this.statusCode = statusCode;
-                this.statusMessage = statusMessage || HTTP_STATUS_CODES[String(statusCode)] || '';
-                if (headers) {
+                if (pairs) {
+                    for (var p2 = 0; p2 < pairs.length; p2++) {
+                        var lk = pairs[p2][0].toLowerCase();
+                        var value = pairs[p2][1];
+                        if (this._headers[lk] === undefined) this._headers[lk] = value;
+                        else if (Array.isArray(this._headers[lk])) this._headers[lk].push(value);
+                        else this._headers[lk] = [this._headers[lk], value];
+                    }
+                }
+                if (headers && !pairs) {
                     for (var k2 in headers) if (Object.prototype.hasOwnProperty.call(headers, k2)) this._headers[k2] = headers[k2];
                 }
                 this.headersSent = true;
@@ -4426,83 +5095,503 @@ pub fn inject_require(
             // `this.writeHead(this.statusCode)` — the actual bytes are only flushed
             // at end(), so recording the head here is sufficient.
             httpServerResponse.prototype._implicitHeader = function() { this.writeHead(this.statusCode); };
+            // Bytes of a chunk, for the writable high-water mark below. A
+            // string's byte length is what counts, not its character length.
+            var __httpBytes = function(c) {
+                if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.byteLength(c) : c.length;
+                return (c && typeof c.length === 'number') ? c.length : 0;
+            };
+            // A chunk as bytes, for the streaming write path.
+            var __httpChunkToBytes = function(chunk, encoding) {
+                if (typeof Buffer !== 'undefined' && Buffer.isBuffer(chunk)) return chunk;
+                if (chunk instanceof Uint8Array) return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+                if (typeof chunk === 'string') return Buffer.from(chunk, encoding || 'utf8');
+                return Buffer.from(String(chunk), encoding || 'utf8');
+            };
+            // Whether the response can stream incrementally: HTTP/1.1 with no
+            // Content-Length or Transfer-Encoding set (Node frames it chunked).
+            // A response streams when the framing is known: chunked (HTTP/1.1,
+            // no Content-Length) or the application's own numeric
+            // Content-Length (bytes go out as they are written, as in Node).
+            var __httpCanStream = function(res) {
+                if (!res.req || res.getHeader('Transfer-Encoding') !== undefined) return false;
+                var cl = res.getHeader('Content-Length');
+                if (cl === undefined) return res.req.httpVersionMinor >= 1;
+                return /^\d+$/.test(String(cl).trim());
+            };
+            // Flush the head to the socket and switch the response into
+            // streaming mode. The native side builds the status line and
+            // headers (Date, Connection, validation) exactly like the one-shot
+            // responder; only the framing differs: chunked when the app set no
+            // Content-Length.
+            httpServerResponse.prototype._sendHeadStreaming = function() {
+                if (this._headSent) return;
+                if (!this.headersSent) this._implicitHeader();
+                if (!this.statusMessage) this.statusMessage = HTTP_STATUS_CODES[String(this.statusCode)] || '';
+                this._chunked = this.getHeader('Content-Length') === undefined;
+                this._headSent = true;
+                this.headersSent = true;
+                var cl = this.getHeader('Content-Length');
+                var declaredCL = (cl !== undefined && /^\d+$/.test(String(cl).trim()))
+                    ? parseInt(String(cl).trim(), 10) : -1;
+                __httpRespondStream(this._connId, this.statusCode, this.statusMessage,
+                    JSON.stringify(this._headers), this.sendDate !== false,
+                    !this._removedConnection, this._closeAfter === true,
+                    this._chunked ? -1 : declaredCL);
+            };
             httpServerResponse.prototype.write = function(chunk, encoding, callback) {
                 if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
-                if (chunk !== undefined) this._chunks.push(chunk);
-                if (typeof callback === 'function') setTimeout(callback, 0);
-                return true;
+                if (this.finished) {
+                    var err = new Error('write after end');
+                    err.code = 'ERR_STREAM_WRITE_AFTER_END';
+                    if (typeof callback === 'function') queueMicrotask(function() { callback(err); });
+                    this.emit('error', err);
+                    return false;
+                }
+                if (chunk !== undefined && chunk !== null) {
+                    if (this._headSent || __httpCanStream(this)) {
+                        // Incremental: flush the head on the first write and send
+                        // this chunk to the socket right away (chunked framing
+                        // when there is no Content-Length), so the client sees
+                        // it before end() — `res.write('asd')` without end()
+                        // used to send nothing at all.
+                        if (!this._headSent) this._sendHeadStreaming();
+                        var sbuf = __httpChunkToBytes(chunk, encoding);
+                        // An empty chunk sends the head but no body: framed
+                        // as chunked it would be `0\r\n\r\n`, the terminator
+                        // (Node's write_ skips it: `chunk.length !== 0`).
+                        if (sbuf.length > 0) {
+                            if (this._chunked) {
+                                sbuf = Buffer.concat([Buffer.from(sbuf.length.toString(16) + '\r\n'), sbuf, Buffer.from('\r\n')]);
+                            }
+                            __httpRespondChunk(this._connId, sbuf);
+                        }
+                        // Backpressure for a streamed response: the bytes go to
+                        // the connection task at once, so count what was written
+                        // since the last flush and report false past the
+                        // high-water mark, then emit 'drain' on the next
+                        // turn. Without this `while (res.write(buf))` never
+                        // stops (test-http-outgoing-finish.js ran out of memory).
+                        this._buffered = (this._buffered || 0) + sbuf.length;
+                        if (this._buffered >= (this.writableHighWaterMark || 16384) && !this._drainScheduled) {
+                            var selfW = this;
+                            this._drainScheduled = true;
+                            setImmediate(function() {
+                                selfW._drainScheduled = false;
+                                selfW._buffered = 0;
+                                selfW.emit('drain');
+                            });
+                        }
+                        if (typeof callback === 'function') queueMicrotask(callback);
+                    } else {
+                        // Not streamable (HTTP/1.0, or an explicit Content-Length
+                        // / Transfer-Encoding): buffer and send as one response
+                        // at end(), as before.
+                        this._chunks.push(chunk);
+                        this._buffered = (this._buffered || 0) + __httpBytes(chunk);
+                        if (typeof callback === 'function') {
+                            (this._writeCallbacks || (this._writeCallbacks = [])).push(callback);
+                        }
+                    }
+                } else if (typeof callback === 'function') {
+                    queueMicrotask(callback);
+                }
+                // Writable's high-water mark (16 KiB by default). A buffered
+                // response is flushed as one write at end(), so everything
+                // written so far is still pending here: `while (res.write(buf))`
+                // has to see false once the mark is passed, or the loop never
+                // stops (test-http-outgoing-finish.js ran out of memory).
+                return (this._buffered || 0) < (this.writableHighWaterMark || 16384);
             };
             httpServerResponse.prototype.end = function(chunk, encoding, callback) {
                 var self = this;
                 if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
                 if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
-                if (chunk !== undefined) this._chunks.push(chunk);
                 if (this.finished) { if (callback) setTimeout(callback, 0); return this; }
                 this.finished = true;
 
-                var headersJson = JSON.stringify(this._headers);
-                // Node sends the standard reason phrase when none was set.
-                if (!this.statusMessage) this.statusMessage = HTTP_STATUS_CODES[String(this.statusCode)] || '';
-                var isBinary = this._chunks.some(function(c) {
-                    return c instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(c));
-                });
-                if (isBinary) {
-                    var parts = this._chunks.map(function(c) {
-                        if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.from(c) : new TextEncoder().encode(c);
-                        return c;
-                    });
-                    var total = parts.reduce(function(n, p) { return n + p.length; }, 0);
-                    var merged = new Uint8Array(total);
-                    var off = 0;
-                    parts.forEach(function(p) { merged.set(p, off); off += p.length; });
-                    __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged);
-                } else {
-                    // Route through __httpRespondBytes (JS-side TextEncoder,
-                    // not the native __httpRespond(string) path) even for a
-                    // plain string body. __httpRespond converts the V8
-                    // string to a Rust String via to_rust_string_lossy(),
-                    // which for a large multi-megabyte string containing
-                    // multi-byte UTF-8 sequences (e.g. Metro serving a JS
-                    // bundle as a single ~4M-character string) was silently
-                    // corrupting individual characters — not consistently,
-                    // and not in a way curl-from-localhost's own single-shot
-                    // fetch always reproduced, which is what made it look
-                    // connection/cache-dependent. TextEncoder is a
-                    // spec'd, well-exercised primitive with no such issue at
-                    // this scale, so encoding here in JS and always calling
-                    // the byte-safe responder sidesteps the native
-                    // conversion entirely rather than depending on finding
-                    // the exact defect in it.
-                    var __finalS = this._chunks.join('');
-                    if (typeof Buffer !== 'undefined') {
-                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'));
+                if (this._headSent) {
+                    // The head is already out: send the final chunk (framed if
+                    // chunked) plus the terminator, and finish.
+                    var fbuf = chunk !== undefined ? __httpChunkToBytes(chunk, encoding) : null;
+                    if (this._chunked) {
+                        var fparts = [];
+                        if (fbuf && fbuf.length) fparts.push(Buffer.from(fbuf.length.toString(16) + '\r\n'), fbuf, Buffer.from('\r\n'));
+                        fparts.push(Buffer.from('0\r\n\r\n'));
+                        __httpRespondEnd(this._connId, Buffer.concat(fparts));
                     } else {
-                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS));
+                        __httpRespondEnd(this._connId, fbuf || new Uint8Array(0));
+                    }
+                } else {
+                    if (chunk !== undefined) this._chunks.push(chunk);
+                    var headersJson = JSON.stringify(this._headers);
+                    // Node sends the standard reason phrase when none was set.
+                    if (!this.statusMessage) this.statusMessage = HTTP_STATUS_CODES[String(this.statusCode)] || '';
+                    var isBinary = this._chunks.some(function(c) {
+                        return c instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(c));
+                    });
+                    if (isBinary) {
+                        var parts = this._chunks.map(function(c) {
+                            if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.from(c) : new TextEncoder().encode(c);
+                            return c;
+                        });
+                        var total = parts.reduce(function(n, p) { return n + p.length; }, 0);
+                        var merged = new Uint8Array(total);
+                        var off = 0;
+                        parts.forEach(function(p) { merged.set(p, off); off += p.length; });
+                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged, this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                    } else {
+                        // Route through __httpRespondBytes (JS-side TextEncoder,
+                        // not the native __httpRespond(string) path) even for a
+                        // plain string body. __httpRespond converts the V8
+                        // string to a Rust String via to_rust_string_lossy(),
+                        // which for a large multi-megabyte string containing
+                        // multi-byte UTF-8 sequences (e.g. Metro serving a JS
+                        // bundle as a single ~4M-character string) was silently
+                        // corrupting individual characters — not consistently,
+                        // and not in a way curl-from-localhost's own single-shot
+                        // fetch always reproduced, which is what made it look
+                        // connection/cache-dependent. TextEncoder is a
+                        // spec'd, well-exercised primitive with no such issue at
+                        // this scale, so encoding here in JS and always calling
+                        // the byte-safe responder sidesteps the native
+                        // conversion entirely rather than depending on finding
+                        // the exact defect in it.
+                        var __finalS = this._chunks.join('');
+                        if (typeof Buffer !== 'undefined') {
+                            __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'), this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                        } else {
+                            __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS), this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                        }
                     }
                 }
                 // A microtask, not a 0 ms timer: it still runs after the handler
                 // returns, without a timer round-trip per response.
-                queueMicrotask(function() { self.emit('finish'); self.emit('close'); if (typeof callback === 'function') callback(); });
+                queueMicrotask(function() {
+                    // Node calls the write callbacks before 'finish', and
+                    // 'drain' once a backpressured response has been flushed.
+                    var writeCbs = self._writeCallbacks;
+                    if (writeCbs) {
+                        self._writeCallbacks = null;
+                        for (var i = 0; i < writeCbs.length; i++) writeCbs[i]();
+                    }
+                    // `_buffered` is 0 for the usual "write nothing, just
+                    // end(body)" response: skip the writableHighWaterMark
+                    // getter there, this runs once per response.
+                    var buffered = self._buffered || 0;
+                    if (buffered) {
+                        self._buffered = 0;
+                        if (buffered >= (self.writableHighWaterMark || 16384)) self.emit('drain');
+                    }
+                    self.emit('finish');
+                    self.emit('close');
+                    httpConnResponseDone(self);
+                    if (typeof callback === 'function') callback();
+                });
                 return this;
             };
-            httpServerResponse.prototype.setTimeout = function() { return this; };
-            httpServerResponse.prototype.destroy = function() { return this; };
-            httpServerResponse.prototype.flushHeaders = function() {};
+            // Node's `OutgoingMessage.setTimeout` (lib/_http_outgoing.js):
+            // the callback listens on the response and the socket's inactivity
+            // timer is re-armed, so an unanswered response can time out.
+            httpServerResponse.prototype.setTimeout = function(ms, cb) {
+                if (typeof cb === 'function') this.on('timeout', cb);
+                this.timeout = ms;
+                if (this.socket && typeof this.socket.setTimeout === 'function') this.socket.setTimeout(ms);
+                return this;
+            };
+            httpServerResponse.prototype.destroy = function(err) {
+                if (this.socket && typeof this.socket.destroy === 'function') this.socket.destroy(err);
+                return this;
+            };
+            // Node's `OutgoingMessage.flushHeaders`: send the head to the socket
+            // now, without waiting for the first write()/end(). A streaming
+            // response uses it to put the head on the wire immediately.
+            httpServerResponse.prototype.flushHeaders = function() {
+                this._sendHeadStreaming();
+                return this;
+            };
+            // Node's ServerResponse has these (lib/_http_server.js): the
+            // response can be handed a socket it did not come from
+            // (`assignSocket`), give it back (`detachSocket`), and can carry
+            // trailers. Without them, code that moves a response between
+            // sockets (a proxy, a middleware that rewrites the socket)
+            // crashes with "not a function".
+            httpServerResponse.prototype.assignSocket = function(socket) {
+                this.socket = socket;
+                this.connection = socket;
+                this._connId = socket && socket._connId;
+                if (socket && typeof socket.on === 'function') {
+                    var self = this;
+                    // The listener is kept so `detachSocket` can take it back
+                    // out (it is the only one this response added).
+                    this._onSocketClose = function() { self.emit('close'); };
+                    socket.on('close', this._onSocketClose);
+                }
+                return this;
+            };
+            httpServerResponse.prototype.detachSocket = function(socket) {
+                if (socket && typeof socket.removeListener === 'function' && this._onSocketClose) {
+                    socket.removeListener('close', this._onSocketClose);
+                }
+                this._onSocketClose = null;
+                if (this.socket === socket) { this.socket = null; this.connection = null; }
+                return this;
+            };
+            // ponytail: no-op by design — the response is not chunked, so it
+            // has no trailer section; see docs/05-js-engine/07-inventario-stubs.md §7.3.
+            httpServerResponse.prototype.addTrailers = function(headers) {
+                if (!this._trailers) this._trailers = {};
+                var self = this;
+                Object.keys(headers || {}).forEach(function(k) { self._trailers[k] = headers[k]; });
+                return this;
+            };
+            httpServerResponse.prototype.getHeaderNames = function() {
+                return Object.keys(this._headers || {});
+            };
+            // The 1xx informational responses Node can send before the final
+            // one: `writeEarlyHints` (103), `writeProcessing` (102) and
+            // `writeInformation` (any 1xx). They are written to the socket
+            // before the response, as in Node.
+            httpServerResponse.prototype.writeEarlyHints = function(hints, cb) {
+                if (typeof hints === 'function') { cb = hints; hints = {}; }
+                this._writeInformational(103, 'Early Hints', hints || {});
+                if (typeof cb === 'function') setTimeout(cb, 0);
+                return this;
+            };
+            httpServerResponse.prototype.writeProcessing = function() {
+                this._writeInformational(102, 'Processing', {});
+                return this;
+            };
+            httpServerResponse.prototype.writeInformation = function(statusCode, headers, cb) {
+                if (typeof headers === 'function') { cb = headers; headers = {}; }
+                var code = parseInt(statusCode, 10) || 100;
+                this._writeInformational(code, HTTP_STATUS_CODES[String(code)] || '', headers || {});
+                if (typeof cb === 'function') setTimeout(cb, 0);
+                return this;
+            };
+            httpServerResponse.prototype._writeInformational = function(statusCode, statusText, headers) {
+                if (this._connId === undefined || this._connId === null) return;
+                if (typeof __httpRespondInformational !== 'function') return;
+                __httpRespondInformational(this._connId, statusCode, statusText, JSON.stringify(headers || {}));
+            };
+
+            // Per-connection socket, as seen by the request/response objects.
+            // Node hands the application the real net.Socket, whose timeout
+            // is an inactivity timer: when it fires, 'timeout' goes to the
+            // current request (if it has not completed), the current
+            // response, and the server; the socket is only destroyed when
+            // nobody listened (lib/_http_server.js: socketOnTimeout). The
+            // TCP connection itself lives in the native connection task, so
+            // `destroy()` asks it to close through __httpCloseConn.
+            var httpConnSocket = function(connId, remote, server) {
+                EventEmitter.call(this);
+                this._connId = connId;
+                this.remoteAddress = remote;
+                this.remotePort = undefined;
+                // `on-finished` (body-parser, express.json()) treats a request
+                // whose socket is not `readable` as already finished and skips
+                // parsing the body: req.body stayed undefined. A live
+                // connection is readable/writable.
+                this.readable = true;
+                this.writable = true;
+                this.destroyed = false;
+                this._server = server;
+                this._req = null;
+                this._resps = [];
+                this._timer = null;
+                this._timeoutMs = 0;
+            };
+            util.inherits(httpConnSocket, EventEmitter);
+            // ponytail: like UpgradeSocket (docs/05-js-engine/07-inventario-stubs.md
+            // §7.2), the local side of an accepted HTTP connection is not tracked, so
+            // report the peer we do know.
+            httpConnSocket.prototype.address = function() {
+                return { address: this.remoteAddress || '0.0.0.0', port: this.remotePort || 0, family: this.remoteAddress && this.remoteAddress.indexOf(':') !== -1 ? 'IPv6' : 'IPv4' };
+            };
+            httpConnSocket.prototype._arm = function(ms) {
+                var self = this;
+                if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+                if (!ms || this.destroyed) return this;
+                this._timer = setTimeout(function() {
+                    self._timer = null;
+                    if (self.destroyed) return;
+                    var req = self._req, res = null, i;
+                    if (req && req.complete) req = null;
+                    for (i = 0; i < self._resps.length; i++) {
+                        if (!self._resps[i].finished) { res = self._resps[i]; break; }
+                    }
+                    var handled = false;
+                    if (req) handled = req.emit('timeout', self) || handled;
+                    if (res) handled = res.emit('timeout', self) || handled;
+                    handled = self._server.emit('timeout', self) || handled;
+                    if (!handled) self.destroy();
+                }, ms);
+                return this;
+            };
+            // `socket.setTimeout(msecs, cb)`: re-arms the inactivity timer.
+            // A request or response passes its own listener; the event is
+            // emitted by `_arm` on whichever of them is still incomplete.
+            httpConnSocket.prototype.setTimeout = function(ms, cb) {
+                if (typeof cb === 'function') this.once('timeout', cb);
+                this._timeoutMs = ms | 0;
+                return this._arm(this._timeoutMs);
+            };
+            // ponytail: no-op by design — the TCP options belong to the native
+            // connection task, as with UpgradeSocket (docs/05-js-engine/07-inventario-stubs.md §7.2).
+            httpConnSocket.prototype.setNoDelay = function() { return this; };
+            httpConnSocket.prototype.setKeepAlive = function() { return this; };
+            httpConnSocket.prototype.ref = function() { return this; };
+            httpConnSocket.prototype.unref = function() { return this; };
+            httpConnSocket.prototype.destroy = function(err) {
+                if (this.destroyed) return this;
+                this.destroyed = true;
+                if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+                if (this._server && this._server._conns[this._connId] === this) {
+                    delete this._server._conns[this._connId];
+                }
+                if (typeof __httpCloseConn === 'function') __httpCloseConn(this._connId);
+                this.emit('close');
+                // Node's HTTP server owns its sockets: an error destroying one
+                // is absorbed by the server (socketOnError), not thrown at the
+                // application. Only an explicit listener sees it.
+                if (err && this.listenerCount('error') > 0) this.emit('error', err);
+                return this;
+            };
+            // A response that finished frees its slot; if the connection
+            // stays open, the socket's inactivity timeout becomes the
+            // server's keep-alive timeout, as `resetSocketTimeout` does in
+            // Node (lib/_http_server.js).
+            var httpConnResponseDone = function(res) {
+                var sock = res.socket;
+                if (!sock || !sock._resps) return;
+                var i = sock._resps.indexOf(res);
+                if (i !== -1) sock._resps.splice(i, 1);
+                var server = sock._server;
+                // `Connection: close`: the native task closes the connection
+                // right after this response, so drop the inactivity timer with
+                // it (a spurious 'timeout' would otherwise fire later).
+                if (res._closeAfter) {
+                    sock._timeoutMs = 0;
+                    sock._arm(0);
+                    return;
+                }
+                // The native keep-alive timeout already closes an idle
+                // connection; the JS timer is only needed when the
+                // application listens for 'timeout' (otherwise this would
+                // allocate a timer on every response, on the hot path).
+                if (server && server.keepAliveTimeout && server.listenerCount('timeout') > 0) {
+                    var ms = server.keepAliveTimeout + (server.keepAliveTimeoutBuffer || 0);
+                    sock._timeoutMs = ms;
+                    sock._arm(ms);
+                }
+            };
 
             // ── Server — real listener backed by __httpListen/__httpAcceptPoll.
             var httpServer = function(opts, requestListener) {
+                // Node allows `http.Server(fn)` without `new`.
+                if (!(this instanceof httpServer)) return new httpServer(opts, requestListener);
                 EventEmitter.call(this);
                 if (typeof opts === 'function') { requestListener = opts; opts = {}; }
+                opts = opts || {};
                 if (requestListener) this.on('request', requestListener);
                 this._id = null;
                 this._pollTimer = null;
                 this.listening = false;
                 this._port = 0;
                 this._host = '0.0.0.0';
+                // Node's `server.timeout` (socket inactivity timeout, 0 = off)
+                // and the live connections, keyed by native connection id, so
+                // `server.setTimeout`, `req.setTimeout` and `res.setTimeout`
+                // have a socket to fire on and `close()` can drop idle ones.
+                this.timeout = 0;
+                this._conns = {};
+                // Node's server timeouts (lib/_http_server.js). `requestTimeout`
+                // is the deadline for the whole request, `headersTimeout` for
+                // its head, and `keepAliveTimeout` for an idle keep-alive
+                // connection.
+                var V = globalThis.__validators;
+                // The limits 3va really enforces: the firewall's slowloris
+                // protection. The application can tighten them, never loosen
+                // them, and it is told when its value is looser than the
+                // limit in force (the INFO-F guard of the security audit).
+                var limits = (typeof __httpServerLimits === 'function') ? __httpServerLimits() : null;
+                var timeout = function(name, value) {
+                    if (typeof value !== 'number') throw V.invalidArgType(name, 'of type number', value);
+                    if (!(value >= 0) || value > Number.MAX_SAFE_INTEGER) {
+                        throw V.outOfRange(name, value, 0, Number.MAX_SAFE_INTEGER);
+                    }
+                    return value;
+                };
+                var requestTimeout = opts.requestTimeout !== undefined
+                    ? timeout('requestTimeout', opts.requestTimeout) : 300000;
+                var headersTimeout = opts.headersTimeout !== undefined
+                    ? timeout('headersTimeout', opts.headersTimeout)
+                    : Math.min(requestTimeout, 60000);
+                if (requestTimeout > 0 && headersTimeout > requestTimeout) {
+                    var e = new RangeError('The value of "headersTimeout" is out of range. ' +
+                        'It must be <= requestTimeout. Received ' + headersTimeout);
+                    e.code = 'ERR_OUT_OF_RANGE';
+                    throw e;
+                }
+                var keepAliveTimeout = opts.keepAliveTimeout !== undefined
+                    ? timeout('keepAliveTimeout', opts.keepAliveTimeout) : 5000;
+                // Node keeps the socket `keepAliveTimeoutBuffer` ms longer than
+                // the advertised `keepAliveTimeout` (default 1 s), so a client
+                // that reuses the connection right at the deadline is not reset.
+                this.keepAliveTimeoutBuffer = opts.keepAliveTimeoutBuffer !== undefined
+                    ? timeout('keepAliveTimeoutBuffer', opts.keepAliveTimeoutBuffer) : 1000;
+                var self = this;
+                // What Node reports.
+                var reported = {
+                    headersTimeout: headersTimeout,
+                    requestTimeout: requestTimeout,
+                    keepAliveTimeout: keepAliveTimeout,
+                };
+                // Only the values the application set reach the native side:
+                // Node's defaults are not 3va's limits, and the firewall's
+                // own (stricter) limits must not be replaced by them.
+                var applied = {
+                    headersTimeout: opts.headersTimeout !== undefined ? headersTimeout : undefined,
+                    requestTimeout: opts.requestTimeout !== undefined ? requestTimeout : undefined,
+                    keepAliveTimeout: opts.keepAliveTimeout !== undefined ? keepAliveTimeout : undefined,
+                };
+                var warnLooser = function(name, value) {
+                    var limit = limits && limits[name];
+                    if (!limit) return;
+                    if (value > limit || value === 0) {
+                        console.warn('3va: http.Server.' + name + ' is ' + value + ' ms, but the built-in ' +
+                            'firewall limits it to ' + limit + ' ms; the effective limit is ' + limit + ' ms.');
+                    }
+                };
+                var pushTimeouts = function() {
+                    if (self._id === null) return;
+                    if (typeof __httpSetTimeouts === 'function') {
+                        __httpSetTimeouts(self._id, applied.headersTimeout || 0,
+                            applied.requestTimeout || 0, applied.keepAliveTimeout || 0);
+                    }
+                };
+                ['headersTimeout', 'requestTimeout', 'keepAliveTimeout'].forEach(function(name) {
+                    Object.defineProperty(self, name, {
+                        get: function() { return reported[name]; },
+                        set: function(v) {
+                            reported[name] = timeout(name, v);
+                            applied[name] = reported[name];
+                            warnLooser(name, reported[name]);
+                            pushTimeouts();
+                        },
+                        enumerable: true,
+                        configurable: true,
+                    });
+                });
+                if (opts.headersTimeout !== undefined) warnLooser('headersTimeout', headersTimeout);
+                if (opts.keepAliveTimeout !== undefined) warnLooser('keepAliveTimeout', keepAliveTimeout);
+                this._pushTimeouts = pushTimeouts;
             };
             util.inherits(httpServer, EventEmitter);
             httpServer.prototype.listen = function(port, hostname, backlog, callback) {
                 var self = this;
+                // `listen(callback)`: no port, so an OS-assigned one.
+                if (typeof port === 'function') { callback = port; port = 0; hostname = undefined; }
                 if (typeof port === 'object' && port !== null) {
                     var opts = port;
                     callback = hostname;
@@ -4537,9 +5626,13 @@ pub fn inject_require(
                     return self;
                 }
                 self._id = result;
+                if (self._unrefd && typeof __httpRef === 'function') __httpRef(result, false);
                 self._port = __httpServerPort(result);
                 self._host = __httpServerAddress(result) || hostname;
                 self.listening = true;
+                // The timeouts the application configured reach the
+                // connection tasks now that the server has an id.
+                if (typeof self._pushTimeouts === 'function') self._pushTimeouts();
                 // Called by the event loop (http_server.rs dispatch_ready) as
                 // soon as a connection task queues a parsed request — no
                 // polling interval, so no latency floor between arrivals.
@@ -4552,20 +5645,27 @@ __httpSetHandler(self._id, function() {
                     var raw, _n = 0;
                     while (_n++ < 64 && (raw = __httpAcceptPoll(self._id)) !== null && raw !== undefined) {
                         // raw = [method, url, connId, remoteAddress, body, flatHeaders]
-                        var _sock = new EventEmitter();
-                        _sock.remoteAddress = raw[3];
-                        _sock._connId = raw[2];
-                        // `on-finished` (body-parser, express.json()) treats a request whose
-                        // socket is not `readable` as already finished and skips parsing the
-                        // body: req.body stayed undefined. A live connection is readable/writable.
-                        _sock.readable = true;
-                        _sock.writable = true;
-                        // What frameworks read to tell https from http
-                        // (Express: req.secure / req.protocol).
-                        if (self._tls) _sock.encrypted = true;
+                        var _sock = self._conns[raw[2]];
+                        if (!_sock) {
+                            _sock = new httpConnSocket(raw[2], raw[3], self);
+                            self._conns[raw[2]] = _sock;
+                            if (self._tls) _sock.encrypted = true;
+                            // Node: one 'connection' per TCP connection, before
+                            // its first 'request'.
+                            self.emit('connection', _sock);
+                        } else if (raw[3]) {
+                            _sock.remoteAddress = raw[3];
+                        }
                         var req = new httpIncomingMessage(_sock);
                         req.method = raw[0];
                         req.url = raw[1];
+                        // The HTTP version of the request: an HTTP/1.0
+                        // request is reported as such, as in Node.
+                        // The version comes as a number (10 or 11) so the
+                        // hot path does not build a string per request.
+                        req.httpVersion = raw[6] === 10 ? '1.0' : '1.1';
+                        req.httpVersionMajor = 1;
+                        req.httpVersionMinor = raw[6] === 10 ? 0 : 1;
                         // Last duplicate wins, as the JSON object this replaced did.
                         var _flat = raw[5], _rh = {};
                         for (var _i = 0; _i < _flat.length; _i += 2) _rh[_flat[_i]] = _flat[_i + 1];
@@ -4579,8 +5679,14 @@ __httpSetHandler(self._id, function() {
                         // streams from the native pipe named by `raw[4]` (0 = no body).
                         req[kIncomingBody] = { bodyId: raw[4] | 0, started: false, done: false, waiting: false };
                         var res = new httpServerResponse(req);
+                        res._closeAfter = raw[7] === true;
+                        _sock._req = req;
+                        _sock._resps.push(res);
+                        // Node's `resetSocketTimeout`: a new request on the
+                        // connection restores the server's socket timeout.
+                        _sock._timeoutMs = self.timeout || 0;
+                        _sock._arm(_sock._timeoutMs);
                         self.emit('request', req, res);
-                        self.emit('connection', req.socket);
                         // The raw body stays in this closure, never on `req`: body-parser 1.x
                         // (Express 4) uses `req._body` as its "already parsed" flag, so a
                         // property of that name made express.json() skip every request.
@@ -4614,6 +5720,39 @@ __httpSetHandler(self._id, function() {
                             _usock.destroy();
                         }
                     }
+                    // Connections that fully closed: abort whatever was in
+                    // flight on them, as Node's socketOnClose does (the request
+                    // sees 'aborted'/'error'/'close', the socket 'close').
+                    var _c, _cn = 0;
+                    while (_cn++ < 64 && typeof __httpClosedPoll === 'function'
+                           && (_c = __httpClosedPoll(self._id)) !== null && _c !== undefined) {
+                        var _csock = self._conns[_c];
+                        if (_csock) {
+                            if (!_csock.destroyed) {
+                                _csock.destroyed = true;
+                                if (_csock._timer) { clearTimeout(_csock._timer); _csock._timer = null; }
+                                delete self._conns[_c];
+                                var _resps = _csock._resps || [];
+                                for (var _ri = 0; _ri < _resps.length; _ri++) {
+                                    var _r = _resps[_ri];
+                                    if (_r && !_r.finished) {
+                                        _r.finished = true;
+                                        (function(r) {
+                                            queueMicrotask(function() { r.closed = true; r.emit('close'); });
+                                        })(_r);
+                                    }
+                                }
+                                _csock._resps = [];
+                                var _creq = _csock._req;
+                                if (_creq && !_creq.complete) {
+                                    _creq.destroy(__connReset('aborted'));
+                                }
+                                _csock.emit('close');
+                            } else {
+                                delete self._conns[_c];
+                            }
+                        }
+                    }
                     } catch(e) { console.error('[3va-http] request handler threw:', e && (e.stack || e.message || e)); }
                 });
                 setTimeout(function() { self.emit('listening'); }, 0);
@@ -4624,23 +5763,53 @@ __httpSetHandler(self._id, function() {
                 if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
                 if (this._id !== null) { __httpClose(this._id); }
                 this.listening = false;
+                // Node 19+: closing the server drops its idle keep-alive
+                // connections; a connection with a response in flight is left
+                // to finish (the native task closes it then).
+                this.closeIdleConnections();
                 if (typeof callback === 'function') this.once('close', callback);
                 setTimeout(function() { self.emit('close'); }, 0);
                 return this;
+            };
+            // Node 18.2+: drop the connections with no request in progress. A
+            // connection that has received the first byte of a request (even a
+            // half-received head) or still has a response in flight is not idle.
+            httpServer.prototype.closeIdleConnections = function() {
+                var ids = Object.keys(this._conns);
+                for (var i = 0; i < ids.length; i++) {
+                    var c = this._conns[ids[i]];
+                    if (c && c._resps.length === 0 &&
+                        !(typeof __httpConnBusy === 'function' && __httpConnBusy(c._connId))) c.destroy();
+                }
+            };
+            // Node 18.2+: drop every connection, in progress or not.
+            httpServer.prototype.closeAllConnections = function() {
+                if (this._id !== null && typeof __httpCloseAll === 'function') __httpCloseAll(this._id);
+                var ids = Object.keys(this._conns);
+                for (var i = 0; i < ids.length; i++) {
+                    var c = this._conns[ids[i]];
+                    if (c) c.destroy();
+                }
             };
             httpServer.prototype.address = function() {
                 if (!this.listening) return null;
                 return { port: this._port, address: this._host, family: this._host.indexOf(':') !== -1 ? 'IPv6' : 'IPv4' };
             };
             httpServer.prototype.getConnections = function(cb) { cb(null, 0); };
-            httpServer.prototype.setTimeout = function(ms, cb) { if (cb) this.once('timeout', cb); return this; };
+            httpServer.prototype.setTimeout = function(ms, cb) {
+                // Node (lib/_http_server.js): remember the value for every new
+                // connection and register the callback on the server; the
+                // per-socket timer is what actually fires.
+                this.timeout = ms;
+                if (typeof cb === 'function') this.on('timeout', cb);
+                return this;
+            };
             httpServer.prototype.keepAliveTimeout = 5000;
             // The native server takes its limits from the firewall config
             // (header timeout 10 s by default), not from these properties.
             // Report the real value and say so when code sets one, instead
             // of silently accepting e.g. a slowloris `headersTimeout` (INFO-F).
-            [['requestTimeout', 0], ['headersTimeout', 10000],
-             ['maxHeadersCount', null], ['maxConnections', 0]].forEach(function(p) {
+            [['maxHeadersCount', null], ['maxConnections', 0]].forEach(function(p) {
                 var warned = false;
                 Object.defineProperty(httpServer.prototype, p[0], {
                     get: function() { return p[1]; },
@@ -4654,11 +5823,25 @@ __httpSetHandler(self._id, function() {
                     configurable: true,
                 });
             });
-            httpServer.prototype.ref = function() { return this; };
-            httpServer.prototype.unref = function() { return this; };
+            // ponytail: ref/unref/timeout are no-ops — see docs/05-js-engine/07-inventario-stubs.md §7.2-7.3.
+            // server.unref(): the listener no longer keeps the process alive.
+            httpServer.prototype.ref = function() {
+                this._unrefd = false;
+                if (this._id !== null && typeof __httpRef === 'function') __httpRef(this._id, true);
+                return this;
+            };
+            httpServer.prototype.unref = function() {
+                this._unrefd = true;
+                if (this._id !== null && typeof __httpRef === 'function') __httpRef(this._id, false);
+                return this;
+            };
             httpServer.prototype.listenOnServerHandler = function(socket) {};
 
-            var httpOutgoingMessage = function() { EventEmitter.call(this); };
+            var httpOutgoingMessage = function() {
+                // Node allows `http.OutgoingMessage()` without `new`.
+                if (!(this instanceof httpOutgoingMessage)) return new httpOutgoingMessage();
+                EventEmitter.call(this);
+            };
             util.inherits(httpOutgoingMessage, EventEmitter);
             httpOutgoingMessage.prototype.write = function(chunk, encoding, callback) { return true; };
             httpOutgoingMessage.prototype.end = function(chunk, encoding, callback) {};
@@ -4683,18 +5866,68 @@ __httpSetHandler(self._id, function() {
                 this.rawHeaders = [];
                 this.complete = false;
                 this.aborted = false;
+                // The Readable destroy state Node exposes on a message.
+                this.destroyed = false;
+                this.errored = null;
+                this.closed = false;
+                this.req = null;
             }
             util.inherits(ClientIncomingMessage, Readable);
-            ClientIncomingMessage.prototype.setTimeout = function(ms, cb) { if (typeof cb === 'function') this.once('timeout', cb); return this; };
+            // Node's IncomingMessage.setTimeout: the callback listens for the
+            // response's 'timeout', and the socket carries the deadline (the
+            // client relays the socket's timeout to the response as well).
+            ClientIncomingMessage.prototype.setTimeout = function(ms, cb) {
+                if (typeof cb === 'function') this.on('timeout', cb);
+                if (this.socket && typeof this.socket.setTimeout === 'function') this.socket.setTimeout(ms);
+                return this;
+            };
             ClientIncomingMessage.prototype.destroy = function(err) {
-                if (this.socket && typeof this.socket.destroy === 'function') this.socket.destroy();
-                if (err) this.emit('error', err);
+                if (this.destroyed) return this;
+                this.destroyed = true;
+                this.errored = err === undefined ? null : err;
+                this.closed = false;
+                // Node's IncomingMessage._destroy: what is not fully read is
+                // an abort, and 'aborted' goes out before 'error'/'close'.
+                if (!this.readableEnded || !this.complete) {
+                    this.aborted = true;
+                    this.emit('aborted');
+                }
+                if (this.aborted && this.socket && !this.socket.destroyed
+                    && typeof this.socket.destroy === 'function') {
+                    // A live socket carries the error to the request (as in
+                    // Node), which is where an unhandled one reaches
+                    // `uncaughtException`.
+                    this.socket.destroy(err);
+                }
+                var self = this;
+                var next = (typeof process !== 'undefined' && typeof process.nextTick === 'function')
+                    ? process.nextTick : function(f) { queueMicrotask(f); };
+                if (err) {
+                    next(function() {
+                        if (self.listenerCount('error') > 0) self.emit('error', err);
+                    });
+                }
+                next(function() {
+                    self.closed = true;
+                    self.emit('close');
+                });
                 return this;
             };
 
             // Parse one response head (status line + headers). Header names are
             // lower-cased; duplicates are joined with ", " except set-cookie,
             // which stays an array, as in Node.
+            //
+            // The headers Node calls "no-repeat" keep their first value: a
+            // repeated `content-length` or `location` is not a list, and the
+            // first one is the one the client acts on.
+            var __NO_REPEAT_HEADERS = {
+                'age': 1, 'authorization': 1, 'content-length': 1, 'content-type': 1,
+                'etag': 1, 'expires': 1, 'from': 1, 'host': 1, 'if-modified-since': 1,
+                'if-unmodified-since': 1, 'last-modified': 1, 'location': 1,
+                'max-forwards': 1, 'proxy-authorization': 1, 'referer': 1,
+                'retry-after': 1, 'server': 1, 'user-agent': 1,
+            };
             function __parseResponseHead(head) {
                 var lines = head.split('\r\n');
                 var m = /^HTTP\/(\d+)\.(\d+)\s+(\d{3})\s?(.*)$/.exec(lines[0] || '');
@@ -4720,9 +5953,20 @@ __httpSetHandler(self._id, function() {
                     var lk = name.toLowerCase();
                     out.rawHeaders.push(name, value);
                     lastName = lk;
-                    if (out.headers[lk] === undefined) out.headers[lk] = value;
-                    else if (lk === 'set-cookie') out.headers[lk] = [].concat(out.headers[lk], value);
-                    else out.headers[lk] = out.headers[lk] + ', ' + value;
+                    // Node keeps `set-cookie` in an array even when there is
+                    // only one: the header can be repeated and a string would
+                    // lose the difference between "one cookie" and "several".
+                    if (lk === 'set-cookie') {
+                        if (out.headers[lk] === undefined) out.headers[lk] = [value];
+                        else out.headers[lk] = [].concat(out.headers[lk], value);
+                    } else if (out.headers[lk] === undefined) {
+                        out.headers[lk] = value;
+                    } else if (__NO_REPEAT_HEADERS[lk]) {
+                        // The first value wins for the headers Node does not
+                        // repeat.
+                    } else {
+                        out.headers[lk] = out.headers[lk] + ', ' + value;
+                    }
                 }
                 return out;
             }
@@ -4734,6 +5978,16 @@ __httpSetHandler(self._id, function() {
                 return Buffer.from(String(chunk), encoding || 'utf8');
             }
 
+            // Node's ConnResetException (lib/internal/errors.js): an
+            // ECONNRESET whose message says what happened ('aborted' when the
+            // peer went away mid-response, 'socket hang up' when no response
+            // ever arrived).
+            function __connReset(message) {
+                var e = new Error(message);
+                e.code = 'ECONNRESET';
+                return e;
+            }
+
             // ClientRequest — a real HTTP client request: string and binary
             // bodies, several write() + end(), streaming (pipe), chunked vs
             // Content-Length framing, a de-framing response parser, half-close,
@@ -4741,6 +5995,8 @@ __httpSetHandler(self._id, function() {
             // defaultProtocol is 'https:' when called through the https module:
             // those requests must go over TLS, never a plain TCP socket.
             function ClientRequest(options, callback, defaultProtocol) {
+                // Node allows `http.ClientRequest(options)` without `new`.
+                if (!(this instanceof ClientRequest)) return new ClientRequest(options, callback, defaultProtocol);
                 EventEmitter.call(this);
                 if (typeof options === 'string') {
                     var u = new URL(options);
@@ -4762,6 +6018,24 @@ __httpSetHandler(self._id, function() {
                 this._connected = false;
                 this._ended = false;
                 this._aborted = false;
+                // Node assigns the socket on a later tick, so a request aborted
+                // in the turn that created it (`req.end(); req.abort()`) never
+                // had one: no 'socket hang up' (lib/_http_client.js `_destroy`:
+                // `if (!req.aborted && !err)`). 3va opens the socket at once,
+                // so remember the turn.
+                this._sameTurn = true;
+                this._silentAbort = false;
+                var _selfT = this;
+                (typeof process !== 'undefined' && typeof process.nextTick === 'function'
+                    ? process.nextTick : function(f) { queueMicrotask(f); })(function() {
+                    _selfT._sameTurn = false;
+                    // Node connects as soon as the request exists (the socket is
+                    // assigned on a later tick), not when end() is called: a
+                    // request that only calls setTimeout() still gets its
+                    // 'socket' and 'timeout'. The head goes out on the first
+                    // write()/end()/flushHeaders(), which set `_started`.
+                    if (!_selfT.destroyed && !_selfT._socket) _selfT._ensureConnected();
+                });
                 this._body = [];
                 this._bodyLen = 0;
                 this._encodeChunked = false;
@@ -4769,10 +6043,36 @@ __httpSetHandler(self._id, function() {
                 this._response = null;
                 this._responseDone = false;
                 this._heardResponse = false;
+                // The request state Node exposes to applications (and what
+                // `test-http-destroyed-socket-write2` checks after a reset).
+                this.res = null;
+                this.outputData = [];
+                this.aborted = false;
+                this.closed = false;
+                this.errored = null;
+                this._hadError = false;
                 this._omitHost = options.setHost === false;
+                // The TLS options of the request (Node's `https.request`
+                // options). They reach the connection factory, so the
+                // default connection and a proxy agent both honour them.
+                this._ca = options.ca;
+                this._cert = options.cert;
+                this._key = options.key;
+                this._passphrase = options.passphrase;
+                this._servername = options.servername;
+                this._rejectUnauthorized = options.rejectUnauthorized !== false;
+                // The OutgoingMessage state Node exposes on a request.
+                this.destroyed = false;
+                this.writableEnded = false;
+                this.writableFinished = false;
+                this.finished = false;
+                this.headersSent = false;
                 this._parserState = null;
                 this._leftover = null;
                 this._agent = options.agent === undefined ? httpGlobalAgent : (options.agent === false ? null : options.agent);
+                // Node: `options.createConnection` replaces the agent's own
+                // factory for this request.
+                this._createConnection = typeof options.createConnection === 'function' ? options.createConnection : null;
                 this._keepAliveKey = null;
                 this._timeoutMs = options.timeout || 0;
                 this._timeoutTimer = null;
@@ -4822,32 +6122,60 @@ __httpSetHandler(self._id, function() {
                 delete this._headers[lk]; delete this._headerNames[lk];
                 return this;
             };
+            // ponytail: no-op by design — TCP socket options are hints; see docs/05-js-engine/07-inventario-stubs.md §7.2.
             ClientRequest.prototype.setNoDelay = function() { return this; };
             ClientRequest.prototype.setSocketKeepAlive = function() { return this; };
             ClientRequest.prototype.setTimeout = function(ms, cb) {
                 if (typeof ms === 'function') { cb = ms; ms = 0; }
                 this._timeoutMs = ms;
                 if (typeof cb === 'function') this.once('timeout', cb);
+                // Node hands the timeout to the socket; the socket's
+                // 'timeout' event is what the request reports.
+                if (this._socket && typeof this._socket.setTimeout === 'function') {
+                    this._socket.setTimeout(ms);
+                } else {
+                    var self = this;
+                    this.once('socket', function(sock) {
+                        if (sock && typeof sock.setTimeout === 'function') sock.setTimeout(self._timeoutMs);
+                    });
+                }
                 return this;
             };
             ClientRequest.prototype._clearTimer = function() {
                 if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
+            };
+            // The 'timeout' event fires once, no matter whether the deadline
+            // came from the request's own timer or from the socket's.
+            ClientRequest.prototype._emitTimeout = function() {
+                if (this._timeoutFired) return;
+                this._timeoutFired = true;
+                this.emit('timeout');
             };
             ClientRequest.prototype._armTimeout = function() {
                 var self = this;
                 if (self._timeoutMs > 0 && !self._timeoutTimer && !self._responseDone) {
                     self._timeoutTimer = setTimeout(function() {
                         self._timeoutTimer = null;
-                        self.emit('timeout');
+                        self._emitTimeout();
                     }, self._timeoutMs);
                 }
             };
             ClientRequest.prototype._fail = function(err) {
                 if (this._aborted || this._responseDone) return;
                 this._aborted = true;
+                this._hadError = true;
                 this._clearTimer();
                 this.emit('error', err);
                 if (this._socket && !this._socket.destroyed) this._socket.destroy();
+            };
+            // A socket 'error' once the response has been fully received is
+            // the server tearing down a `Connection: close` socket — not a
+            // request error. Before that (or with no response) it is the
+            // request's own error, e.g. the explicit error a caller passed to
+            // `res.destroy(err)` or a genuine ECONNRESET mid-body.
+            ClientRequest.prototype._socketError = function(err) {
+                if (this._response && this._response.complete) return;
+                this._fail(err);
             };
             ClientRequest.prototype.write = function(chunk, encoding, cb) {
                 if (typeof encoding === 'function') { cb = encoding; encoding = 'utf8'; }
@@ -4860,31 +6188,63 @@ __httpSetHandler(self._id, function() {
                 }
                 if (chunk === undefined || chunk === null) { if (cb) cb(); return true; }
                 var buf = __reqChunkToBuffer(chunk, encoding);
+                // An empty write is a no-op, as in Node: it must not send the
+                // head (with Transfer-Encoding: chunked) nor a premature `0`
+                // chunk. `req.write('')` followed by `end()` otherwise framed
+                // the body as two empty chunked terminators, which a Node
+                // server rejects with 400 (the express differential).
+                if (buf.length === 0) { if (cb) queueMicrotask(cb); return true; }
                 this._bodyLen += buf.length;
-                if (this._headerSent && this._socket) this._sendChunk(buf);
-                else this._body.push(buf);
+                // Node's OutgoingMessage: the head goes out on the first
+                // write(), not at end(). A streamed upload (or a proxy that
+                // wants the request in flight before the body is complete)
+                // otherwise never reaches the server: this is why
+                // `req.write('hello')` without end() used to hang.
+                this._started = true;
+                if (!this._headerSent) {
+                    this._ensureConnected();
+                    if (this._connected) this._sendHead();
+                }
+                var flushed = true;
+                if (this._headerSent && this._socket) {
+                    flushed = this._sendChunk(buf);
+                } else {
+                    this._body.push(buf);
+                    this._pendingLen = (this._pendingLen || 0) + buf.length;
+                }
                 if (cb) cb();
-                return true;
+                // Same contract as any Writable: false once the pending bytes
+                // pass the high-water mark (the body is only flushed at
+                // end(), so a `while (req.write(buf))` loop must stop here).
+                return flushed && (this._pendingLen || 0) < (this.writableHighWaterMark || 16384);
             };
             ClientRequest.prototype._sendChunk = function(buf) {
                 var socket = this._socket;
-                if (!socket || socket.destroyed) return;
+                if (!socket || socket.destroyed) return false;
                 if (this._encodeChunked) {
-                    socket.write(Buffer.concat([Buffer.from(buf.length.toString(16) + '\r\n'), buf, Buffer.from('\r\n')]));
-                } else {
-                    socket.write(buf);
+                    return socket.write(Buffer.concat([Buffer.from(buf.length.toString(16) + '\r\n'), buf, Buffer.from('\r\n')]));
                 }
+                return socket.write(buf);
             };
             ClientRequest.prototype._flushBody = function() {
                 var body = this._body;
                 this._body = [];
+                this._pendingLen = 0;
                 for (var i = 0; i < body.length; i++) this._sendChunk(body[i]);
             };
             ClientRequest.prototype.end = function(chunk, encoding, cb) {
                 if (typeof chunk === 'function') { cb = chunk; chunk = null; }
                 if (typeof encoding === 'function') { cb = encoding; encoding = null; }
-                if (this._ended) { if (cb) cb(); return this; }
+                if (this._ended) {
+                    if (typeof cb === 'function') {
+                        if (this._finishEmitted) queueMicrotask(cb);
+                        else this.once('finish', cb);
+                    }
+                    return this;
+                }
                 this._ended = true;
+                this.writableEnded = true;
+                this.finished = true;
                 if (chunk !== undefined && chunk !== null) {
                     var buf = __reqChunkToBuffer(chunk, encoding);
                     this._bodyLen += buf.length;
@@ -4894,36 +6254,59 @@ __httpSetHandler(self._id, function() {
                     if (this._headerSent && this._socket) this._sendChunk(buf);
                     else this._body.push(buf);
                 }
+                this._started = true;
                 this._ensureConnected();
+                if (this._connected) { this._sendHead(); this._flushBody(); }
+                // Node calls end()'s callback from 'finish', after the last
+                // byte of the request is out; it used to run synchronously,
+                // before 'finish' had been emitted.
+                if (typeof cb === 'function') this.once('finish', cb);
                 this._maybeFinishRequest();
-                if (cb) cb();
                 return this;
             };
             ClientRequest.prototype.flushHeaders = function() {
+                this._started = true;
                 this._ensureConnected();
                 if (this._connected) this._sendHead();
                 return this;
             };
+            // Node's ClientRequest.abort (lib/_http_client.js): mark the
+            // request aborted, emit 'abort' on a later tick and destroy it.
+            // The socket's 'close' then reports the response as aborted (or,
+            // with no response, 'socket hang up' on the request).
             ClientRequest.prototype.abort = function() {
-                if (this._aborted) return this;
-                this._aborted = true;
-                this._clearTimer();
-                if (this._socket && !this._socket.destroyed) this._socket.destroy();
-                this.emit('abort');
-                this.emit('close');
-                return this;
+                if (this.aborted) return this;
+                this.aborted = true;
+                if (this._sameTurn) this._silentAbort = true;
+                var self = this;
+                (typeof process !== 'undefined' && typeof process.nextTick === 'function'
+                    ? process.nextTick : function(f) { queueMicrotask(f); })(function() { self.emit('abort'); });
+                return this.destroy();
             };
+            // Node's ClientRequest.destroy: nothing left to cancel once the
+            // request was fully sent and the response fully received; tearing
+            // the socket down then would emit an error on a socket that is
+            // already back in the agent (lib/_http_client.js).
             ClientRequest.prototype.destroy = function(err) {
-                if (this._aborted) { if (err) this.emit('error', err); return this; }
-                this._aborted = true;
+                if (this.destroyed) {
+                    if (err && this.listenerCount('error') > 0) this.emit('error', err);
+                    return this;
+                }
+                this.destroyed = true;
+                this.errored = err === undefined ? null : err;
                 this._clearTimer();
-                if (this._socket && !this._socket.destroyed) this._socket.destroy();
-                if (err) this.emit('error', err);
-                this.emit('close');
+                if (this._response && typeof this._response._dump === 'function') this._response._dump();
+                if (this.writableFinished && this._response && this._response.complete) return this;
+                if (this._socket && !this._socket.destroyed) this._socket.destroy(err);
+                else if (err) this.emit('error', err);
                 return this;
             };
             ClientRequest.prototype._ensureConnected = function() {
-                if (this._socket || this._aborted) return;
+                // `_connecting`: a `createConnection` that hands the socket over
+                // later (a callback) must not be asked for a second one when
+                // end() follows the eager connect.
+                if (this._socket || this.destroyed || this._connecting) return;
+                this._connecting = true;
                 var self = this;
                 this._keepAliveKey = (self._secure ? 'https:' : 'http:') + '//' + self._host + ':' + self._port;
                 var reused = (self._agent && typeof self._agent._getFreeSocket === 'function')
@@ -4931,38 +6314,137 @@ __httpSetHandler(self._id, function() {
                 if (reused) {
                     self._socket = reused;
                     self._connected = true;
-                    self._socketErrorHandler = function(err) { self._fail(err); };
+                    self._socketErrorHandler = function(err) { self._socketError(err); };
                     reused.on('error', self._socketErrorHandler);
+                    var agent = self._agent;
+                    if (agent && agent.sockets) {
+                        var list = agent.sockets[self._keepAliveKey];
+                        if (!list) { list = []; agent.sockets[self._keepAliveKey] = list; }
+                        list.push(reused);
+                    }
                     self._attachSocket(reused);
                     self.emit('socket', reused);
-                    self._sendHead();
-                    self._flushBody();
-                    self._maybeFinishRequest();
+                    if (self._started) {
+                        self._sendHead();
+                        self._flushBody();
+                        self._maybeFinishRequest();
+                    }
                     self._armTimeout();
+                    return;
+                }
+                // Node's lib/_http_client.js: the socket comes from
+                // `options.createConnection` when the caller gave one, from
+                // the agent's `createConnection` when there is an agent, and
+                // from a plain connection otherwise. An agent that replaces
+                // it is how the proxy agents work, so the request has to go
+                // through it and not straight to the origin.
+                // The options the factory gets. The TLS ones come from the
+                // request, so an agent (or a proxy agent) can build the
+                // connection the application asked for.
+                var options = {
+                    host: self._host,
+                    port: self._port,
+                    path: self._path,
+                    method: self._method,
+                    secure: self._secure,
+                    servername: self._servername || self._host,
+                    ca: self._ca,
+                    cert: self._cert,
+                    key: self._key,
+                    passphrase: self._passphrase,
+                    rejectUnauthorized: self._rejectUnauthorized,
+                };
+                var factory = null;
+                if (typeof self._createConnection === 'function') {
+                    factory = self._createConnection;
+                } else if (self._agent && typeof self._agent.createConnection === 'function') {
+                    var agent = self._agent;
+                    factory = function(opts, cb) { return agent.createConnection(opts, cb); };
+                }
+                if (factory) {
+                    // `once`: the factory may both return the socket and call
+                    // the callback, and only the first one counts.
+                    var settled = false;
+                    var oncreate = function(err, socket) {
+                        if (settled) return;
+                        settled = true;
+                        if (err) { self._fail(err); return; }
+                        if (!socket) return;
+                        self._useSocket(socket);
+                    };
+                    var created = null;
+                    try {
+                        created = factory(options, oncreate);
+                    } catch (e) {
+                        this._fail(e);
+                        return;
+                    }
+                    if (created) oncreate(null, created);
                     return;
                 }
                 var socket = self._secure
                     ? tlsConnect(self._port, self._host, { servername: self._host })
                     : netConnect(self._port, self._host);
-                self._socket = socket;
-                self._socketErrorHandler = function(err) { self._fail(err); };
-                socket.on('error', self._socketErrorHandler);
-                socket.once('connect', function() {
-                    if (self._aborted) return;
+                self._useSocket(socket);
+            };
+            // Take the socket the connection produced and start the request on
+            // it. A socket 3va opened waits for its 'connect' event (a write
+            // before the connection is up is lost); a socket the application
+            // brought (a Duplex from `createConnection`) is used right away,
+            // as in Node.
+            ClientRequest.prototype._useSocket = function(socket) {
+                var self = this;
+                this._socket = socket;
+                this._socketErrorHandler = function(err) { self._socketError(err); };
+                socket.on('error', this._socketErrorHandler);
+                // The agent keeps the socket it handed out, so `agent.destroy()`
+                // can close it and `agent.totalSocketCount` can count it.
+                var agent = this._agent;
+                if (agent && agent.sockets) {
+                    var list = agent.sockets[this._keepAliveKey];
+                    if (!list) { list = []; agent.sockets[this._keepAliveKey] = list; }
+                    list.push(socket);
+                }
+                var go = function() {
+                    if (self.destroyed) return;
                     self._connected = true;
                     self.emit('socket', socket);
                     self._attachSocket(socket);
-                    self._sendHead();
-                    self._flushBody();
-                    self._maybeFinishRequest();
+                    if (self._started) {
+                        self._sendHead();
+                        self._flushBody();
+                        self._maybeFinishRequest();
+                    }
                     self._armTimeout();
-                });
+                };
+                // The socket reports its own timeout; the request turns it
+                // into its 'timeout' event, as in Node.
+                // Always relayed: `req.setTimeout()` can come after the socket
+                // exists (even after the response started).
+                if (typeof socket.setTimeout === 'function') {
+                    if (this._timeoutMs > 0) socket.setTimeout(this._timeoutMs);
+                    socket.on('timeout', function() {
+                        if (self._socket !== socket) return;
+                        self._emitTimeout();
+                        if (self._response) self._response.emit('timeout');
+                    });
+                }
+                if (socket._3vaSocket && socket._connId === null) socket.once('connect', go);
+                else go();
             };
             ClientRequest.prototype._maybeFinishRequest = function() {
                 if (!this._ended || !this._headerSent) return;
                 if (this._encodeChunked && !this._chunkTerminated && this._socket && !this._socket.destroyed) {
                     this._chunkTerminated = true;
                     this._socket.write('0\r\n\r\n');
+                }
+                // The request has been fully written: Node's ClientRequest is a
+                // Writable, so 'finish' is emitted (once) at this point and the
+                // end() callback runs after it.
+                if (!this._finishEmitted) {
+                    this._finishEmitted = true;
+                    var self = this;
+                    queueMicrotask(function() { self.emit('finish'); });
                 }
             };
             ClientRequest.prototype._sendHead = function() {
@@ -5032,10 +6514,13 @@ __httpSetHandler(self._id, function() {
                     self._consumeBody(chunk);
                 }
                 function onEnd() { self._onSocketEnd(); }
+                function onClose() { self._onSocketClose(); }
                 st.onData = onData;
                 st.onEnd = onEnd;
+                st.onClose = onClose;
                 socket.on('data', onData);
                 socket.once('end', onEnd);
+                socket.once('close', onClose);
                 socket._httpParserState = st;
             };
             Socket.prototype._detachHttpParser = function() {
@@ -5043,7 +6528,29 @@ __httpSetHandler(self._id, function() {
                 if (!st) return;
                 this.removeListener('data', st.onData);
                 this.removeListener('end', st.onEnd);
+                if (st.onClose) this.removeListener('close', st.onClose);
                 this._httpParserState = null;
+            };
+            // Node's socketCloseListener (lib/_http_client.js): a connection
+            // that goes away with the response still incomplete is an abort
+            // ('aborted' on the response, then 'close' on the request); a
+            // connection that closes before any response is 'socket hang up'.
+            ClientRequest.prototype._onSocketClose = function() {
+                var st = this._parserState;
+                if (!st) return;   // detached: the response completed or the socket was released
+                this._parserState = null;
+                var res = this._response;
+                if (res && !res.complete) {
+                    res.destroy(__connReset('aborted'));
+                } else if (!this._heardResponse && !this._hadError && !this._silentAbort) {
+                    this._fail(__connReset('socket hang up'));
+                }
+                if (this.outputData) this.outputData.length = 0;
+                if (!this._closed) {
+                    this._closed = true;
+                    this.closed = true;
+                    this.emit('close');
+                }
             };
             ClientRequest.prototype._onHeaders = function(parsed, rest) {
                 var self = this;
@@ -5057,6 +6564,8 @@ __httpSetHandler(self._id, function() {
                 res.headers = parsed.headers;
                 res.rawHeaders = parsed.rawHeaders;
                 self._response = res;
+                self.res = res;
+                res.req = self;
 
                 if (parsed.statusCode === 101) {
                     self._clearTimer();
@@ -5177,24 +6686,32 @@ __httpSetHandler(self._id, function() {
                     if (socket._detachHttpParser) socket._detachHttpParser();
                     var connHdr = String(res.headers['connection'] || '').toLowerCase();
                     var keepAlive = res.httpVersionMinor === 0 ? connHdr === 'keep-alive' : connHdr !== 'close';
-                    keepAlive = keepAlive && !this._aborted && !socket.destroyed;
+                    keepAlive = keepAlive && !this.destroyed && !this._aborted && !socket.destroyed;
                     // Release the socket *before* ending the response: the next
                     // request is usually created from this stream's 'end'
                     // handler, and returning it after that made the agent hand
                     // out a fresh connection instead of reusing this one.
-                    if (keepAlive && this._agent && typeof this._agent._returnSocket === 'function') {
-                        this._agent._returnSocket(this._keepAliveKey, socket);
+                    var agent = this._agent;
+                    if (agent && agent.sockets && agent.sockets[this._keepAliveKey]) {
+                        var inUse = agent.sockets[this._keepAliveKey];
+                        var at = inUse.indexOf(socket);
+                        if (at >= 0) inUse.splice(at, 1);
+                    }
+                    if (keepAlive && agent && typeof agent._returnSocket === 'function') {
+                        agent._returnSocket(this._keepAliveKey, socket);
                     } else if (!socket.destroyed) {
                         socket.destroy();
                     }
                 }
                 res.push(null);
+                this.closed = true;
+                this._closed = true;
                 this.emit('close');
             };
             ClientRequest.prototype._onSocketEnd = function() {
                 var st = this._parserState;
                 if (!this._heardResponse) {
-                    if (!this._aborted) this._fail(new Error('socket hang up'));
+                    if (!this._aborted && !this._silentAbort) this._fail(__connReset('socket hang up'));
                     return;
                 }
                 var res = this._response;
@@ -5223,15 +6740,47 @@ __httpSetHandler(self._id, function() {
                 list.push(socket);
             };
 
-            function httpRequest(options, callback) { return new ClientRequest(options, callback); }
-            function httpGet(options, callback) {
-                var req = httpRequest(options, callback);
+            // Node's `http.request(url[, options][, callback])`: the URL can
+            // come first, and the options are merged with it.
+            function __mergeUrlOptions(url, extra) {
+                var u = (url instanceof URL) ? url : new URL(String(url));
+                var opts = {};
+                if (extra) { for (var k in extra) opts[k] = extra[k]; }
+                opts.protocol = u.protocol;
+                opts.hostname = u.hostname;
+                opts.host = u.host;
+                opts.port = u.port || (u.protocol === 'https:' ? 443 : 80);
+                opts.path = (u.pathname || '/') + (u.search || '');
+                if (u.hash) opts.hash = u.hash;
+                if (u.username || u.password) {
+                    opts.auth = decodeURIComponent(u.username) + ':' + decodeURIComponent(u.password);
+                }
+                return opts;
+            }
+            function httpRequest(options, callback, extra) {
+                // http.request(url, options, callback)
+                if (typeof options === 'string' || (typeof URL !== 'undefined' && options instanceof URL)) {
+                    var cb = (typeof callback === 'function') ? callback : (typeof extra === 'function' ? extra : null);
+                    var opts = (typeof callback === 'function') ? {} : (callback || {});
+                    return new ClientRequest(__mergeUrlOptions(options, opts), cb);
+                }
+                return new ClientRequest(options, callback);
+            }
+            function httpGet(options, callback, extra) {
+                var req = httpRequest(options, callback, extra);
                 req.end();
                 return req;
             }
-            function httpsRequest(options, callback) { return new ClientRequest(options, callback, 'https:'); }
-            function httpsGet(options, callback) {
-                var req = httpsRequest(options, callback);
+            function httpsRequest(options, callback, extra) {
+                if (typeof options === 'string' || (typeof URL !== 'undefined' && options instanceof URL)) {
+                    var cb = (typeof callback === 'function') ? callback : (typeof extra === 'function' ? extra : null);
+                    var opts = (typeof callback === 'function') ? {} : (callback || {});
+                    return new ClientRequest(__mergeUrlOptions(options, opts), cb, 'https:');
+                }
+                return new ClientRequest(options, callback, 'https:');
+            }
+            function httpsGet(options, callback, extra) {
+                var req = httpsRequest(options, callback, extra);
                 req.end();
                 return req;
             }
@@ -5240,6 +6789,7 @@ __httpSetHandler(self._id, function() {
                 return new httpServer(opts, requestListener);
             }
 
+            // Node's `http.METHODS` is the list llhttp knows, sorted.
             var HTTP_METHODS = [
                 'ACL','BIND','CHECKOUT','CONNECT','COPY','DELETE',
                 'GET','HEAD','LINK','LOCK','M-SEARCH','MERGE',
@@ -5247,7 +6797,7 @@ __httpSetHandler(self._id, function() {
                 'OPTIONS','PATCH','POST','PRI','PROPFIND','PROPPATCH',
                 'PURGE','PUT','REBIND','REPORT','SEARCH','SOURCE',
                 'SUBSCRIBE','TRACE','UNBIND','UNLINK','UNLOCK','UNSUBSCRIBE'
-            ];
+            ].sort();
 
             var httpModule = {
                 createServer: createServer,
@@ -5315,6 +6865,61 @@ __httpSetHandler(self._id, function() {
             };
             globalThis.__requireCache['https'] = httpsModule;
             globalThis.__requireCache['node:https'] = httpsModule;
+
+            // ── legacy `_http_*` / `_stream_*` modules ───────────────────────────
+            // Node still ships these deprecated aliases and they are public
+            // API (plenty of old code requires them), so they alias what 3va
+            // already implements instead of duplicating an implementation.
+            // `HTTPParser` is not aliased: 3va has no equivalent to expose.
+            (function() {
+                // Node's lib/_http_common.js: a header field name must be an
+                // HTTP token; a header field value must not carry control
+                // characters (except HTAB) nor DEL. The lenient variant
+                // (`--insecure-http-parser`) only rejects NUL, CR, LF and
+                // characters above U+00FF, per the Fetch specification.
+                var httpTokenRegex = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+                var headerCharRegex = /[^\t\x20-\x7e\x80-\xff]/;
+                var lenientHeaderCharRegex = /[\x00\r\n]|[\u0100-\uffff]/;
+                var _checkIsHttpToken = function(val) { return httpTokenRegex.test(val); };
+                var _checkInvalidHeaderChar = function(val, insecureHTTPParser) {
+                    if (insecureHTTPParser) return lenientHeaderCharRegex.test(val);
+                    return headerCharRegex.test(val);
+                };
+                globalThis.__requireCache['_http_common'] = {
+                    methods: HTTP_METHODS,
+                    _checkIsHttpToken: _checkIsHttpToken,
+                    _checkInvalidHeaderChar: _checkInvalidHeaderChar
+                };
+                globalThis.__requireCache['_http_server'] = {
+                    Server: httpModule.Server,
+                    ServerResponse: httpModule.ServerResponse,
+                    STATUS_CODES: HTTP_STATUS_CODES,
+                    kConnectionsCheckingInterval: 30000
+                };
+                globalThis.__requireCache['_http_agent'] = {
+                    Agent: httpModule.Agent,
+                    globalAgent: httpModule.globalAgent
+                };
+                globalThis.__requireCache['_http_client'] = {
+                    ClientRequest: httpModule.ClientRequest
+                };
+                globalThis.__requireCache['_http_incoming'] = {
+                    IncomingMessage: httpModule.IncomingMessage
+                };
+                globalThis.__requireCache['_http_outgoing'] = {
+                    OutgoingMessage: httpModule.OutgoingMessage,
+                    kHighWaterMark: 16384
+                };
+
+                // Node's lib/_stream_*.js export the class itself, so
+                // `require('_stream_readable') === stream.Readable`.
+                var Stream = globalThis.__requireCache['stream'];
+                globalThis.__requireCache['_stream_readable'] = Stream.Readable;
+                globalThis.__requireCache['_stream_writable'] = Stream.Writable;
+                globalThis.__requireCache['_stream_duplex'] = Stream.Duplex;
+                globalThis.__requireCache['_stream_transform'] = Stream.Transform;
+                globalThis.__requireCache['_stream_passthrough'] = Stream.PassThrough;
+            })();
 
             // ── reflect-metadata polyfill ──────────────────────────────────────────
             (function() {
@@ -5549,6 +7154,7 @@ __httpSetHandler(self._id, function() {
                     __acsSet(prevFrame);
                 }
             };
+            // ponytail: no-op by design — 3va has no AsyncResource destroy hooks to run; see docs/05-js-engine/07-inventario-stubs.md §7.5.
             AsyncResource.prototype.emitDestroy = function() { return this; };
             AsyncResource.prototype.asyncId = function() { return 0; };
             AsyncResource.prototype.triggerAsyncId = function() { return 0; };
@@ -5574,6 +7180,7 @@ __httpSetHandler(self._id, function() {
                 triggerAsyncId: function() { return 0; },
                 executionAsyncResource: function() { return {}; },
                 createHook: function() {
+                    // ponytail: no-op by design — diagnostics_channel enable/disable has no state to change; see docs/05-js-engine/07-inventario-stubs.md §7.5.
                     return { enable: function() { return this; }, disable: function() { return this; } };
                 },
             };
@@ -5842,11 +7449,23 @@ __httpSetHandler(self._id, function() {
         // require(x) would return, with `.default` guaranteed present — the
         // async equivalent of the `.default` unwrap static default-imports
         // already get in convert_import() (transpiler.rs).
+        // Node 22+ requires an ES module synchronously unless its graph has
+        // top-level await (ERR_REQUIRE_ASYNC_MODULE). `import()` goes through
+        // the same loader and *may* wait, so the loader reads this depth: a
+        // plain require() that finds a pending `__tla` throws, an import()
+        // waits for it.
+        globalThis.__vvvaImportDepth = globalThis.__vvvaImportDepth || 0;
         function __makeImportAsync(requireFn) {
             return function(specifier) {
                 return new __RealPromise(function(resolve, reject) {
                     try {
-                        var mod = requireFn(specifier);
+                        globalThis.__vvvaImportDepth++;
+                        var mod;
+                        try {
+                            mod = requireFn(specifier);
+                        } finally {
+                            globalThis.__vvvaImportDepth--;
+                        }
                         // A module with top-level await may still be evaluating
                         // (real async work): wait for it, then re-read its exports.
                         var rec = null;
@@ -6125,23 +7744,11 @@ __httpSetHandler(self._id, function() {
 
             // `3va test --coverage` installs instrumented copies of the project's sources.
             var source = (globalThis.__3va_covSources && globalThis.__3va_covSources[resolved]) || __readFile(resolved);
-            // Rewrite bare import() calls so they use our runtime's __importAsync.
-            // V8's new Function() doesn't support native dynamic import(), so any
-            // import( that wasn't already rewritten by the Rust transpiler (e.g. raw
-            // .cjs files) would throw "Not supported" at runtime.
-            source = source.replace(/(?<![a-zA-Z0-9_$\.])import\s*\(/g, function(match, offset, str) {
-                // Don't replace shorthand method definitions: { import(params) { ... } }
-                var rest = str.slice(offset + match.length);
-                var depth = 1, i = 0;
-                while (i < rest.length && depth > 0) {
-                    var c = rest[i];
-                    if (c === '(') depth++;
-                    else if (c === ')') depth--;
-                    i++;
-                }
-                if (depth === 0 && /^\s*\{/.test(rest.slice(i))) return match;
-                return '__importAsync(';
-            });
+            // The ESM marker is metadata for the loader, not code: take it out
+            // before compiling so the columns of the first line are the ones
+            // of the transpiled source — and of its source map.
+            var __isEsm = source.indexOf('/*__3va_esm__*/') === 0;
+            if (__isEsm) source = source.slice(16);
             try {
                 // A required file's own `import.meta.url` must be ITS path,
                 // not the entry script's — replace_import_meta() rewrites
@@ -6153,14 +7760,34 @@ __httpSetHandler(self._id, function() {
                     ? 'file:///' + resolved.replace(/\\/g, '/')
                     : 'file://' + resolved;
                 var __vvva_import_meta__ = {url: ownMetaUrl, env: globalThis.__vvva_meta_env__, hot: undefined, glob: globalThis.__vvva_meta_glob__, resolve: globalThis.__vvva_meta_resolve__, require: localRequire, dirname: moduleDir, filename: resolved, main: false};
-                var fn = new Function('exports', 'module', 'require', '__filename', '__dirname', '__vvva_meta_url__', '__importAsync', '__vvva_import_meta__', source + '\n//# sourceURL=' + resolved);
+                // Compiled natively, with the file's name in the script origin:
+                // a stack trace then points at the file with the right line
+                // and column, as in Node. A file that is not plain JavaScript
+                // (JSX, Flow, …) is transpiled and compiled again.
+                var fn;
+                try {
+                    fn = globalThis.__vvvaCompileModule(
+                        source, resolved,
+                        'exports,module,require,__filename,__dirname,__vvva_meta_url__,__importAsync,__vvva_import_meta__',
+                        -1);
+                } catch (e) {
+                    fn = globalThis.__vvvaCompileModule(
+                        globalThis.__vvvaTranspileJs(source), resolved,
+                        'exports,module,require,__filename,__dirname,__vvva_meta_url__,__importAsync,__vvva_import_meta__',
+                        -1);
+                }
                 // ES modules: evaluate static dependencies first (like ESM linking). If one of
                 // them is still waiting on a top-level await, this module's body must not run
                 // yet: defer it, and expose a promise (mod.__tla) that importers wait on.
-                var esmDeps = source.indexOf('/*__3va_esm__*/') === 0 ? __esmTopRequires(source) : [];
+                var esmDeps = __isEsm ? __esmTopRequires(source) : [];
                 if (esmDeps.length) {
                     __loadingStack.push(mod);
-                    try { esmDeps.forEach(function(d) { localRequire(d); }); } finally { __loadingStack.pop(); }
+                    try {
+                        var prevDepth = globalThis.__vvvaImportDepth || 0;
+                        globalThis.__vvvaImportDepth = prevDepth + 1;
+                        try { esmDeps.forEach(function(d) { localRequire(d); }); }
+                        finally { globalThis.__vvvaImportDepth = prevDepth; }
+                    } finally { __loadingStack.pop(); }
                 }
                 var runBody = function() {
                     __loadingStack.push(mod);
@@ -6171,6 +7798,9 @@ __httpSetHandler(self._id, function() {
                     }
                 };
                 if (mod.__deps && mod.__deps.length) {
+                    if (globalThis.__vvvaImportDepth === 0) {
+                        throw __requireAsyncModuleError(resolved);
+                    }
                     var innerTla, finalTla;
                     Object.defineProperty(mod, '__tla', { configurable: true, get: function() { return finalTla; }, set: function(v) { innerTla = v; } });
                     finalTla = __RealPromise.all(mod.__deps.map(function(d) { return __waitTla(d, [mod]); }))
@@ -6182,6 +7812,11 @@ __httpSetHandler(self._id, function() {
                 runBody();
                 __noteTlaDep(mod);
                 if (mod.__tla) {
+                    // Node: require() cannot be used on an ESM graph with
+                    // top-level await; import() waits for it instead.
+                    if (globalThis.__vvvaImportDepth === 0) {
+                        throw __requireAsyncModuleError(resolved);
+                    }
                     // Top-level await: run microtask-only awaits to completion so a
                     // static importer sees full exports. Real async work (timers, I/O)
                     // stays pending; importers defer and import() waits on mod.__tla.
@@ -6197,6 +7832,15 @@ __httpSetHandler(self._id, function() {
                 throw e;
             }
             return mod.exports;
+        }
+
+        function __requireAsyncModuleError(resolved) {
+            var err = new Error(
+                'require() cannot be used on an ESM graph with top-level await. ' +
+                'Use import() instead.\n  From ' + resolved +
+                ' \n  Requiring ' + resolved + ' ');
+            err.code = 'ERR_REQUIRE_ASYNC_MODULE';
+            return err;
         }
 
         globalThis.__vvva_require_from = requireFrom;
@@ -6234,12 +7878,37 @@ __httpSetHandler(self._id, function() {
         };
         globalThis.__importAsync = __makeImportAsync(__entryRequire);
 
+        // Backs native dynamic import() resolved by V8's host callback: the
+        // callback passes the importing script's path (its resource name), so a
+        // required module's `import('./x')` resolves from *its* directory, not
+        // the entry's. The entry-scoped `__importAsync` above stays for scripts
+        // whose resource name is not a path.
+        globalThis.__importAsyncFrom = function(specifier, fromPath) {
+            var dir = '.';
+            if (typeof fromPath === 'string' && fromPath.length) {
+                var i = Math.max(fromPath.lastIndexOf('/'), fromPath.lastIndexOf('\\'));
+                dir = i >= 0 ? fromPath.slice(0, i) : '.';
+            } else {
+                // No resource name (e.g. `eval`): fall back to the entry dir.
+                dir = globalThis.__dirname || '.';
+            }
+            var req = function(s) { return requireFrom(s, dir); };
+            req.resolve = function(s) { return __requireResolve(s, dir); };
+            return __makeImportAsync(req)(specifier);
+        };
+
         // Entry file (ES module): load its static imports first; if any is still waiting on a
         // top-level await, return a promise the entry body must wait for (null otherwise).
         globalThis.__esmEntryPreload = function(specs) {
             var entry = {};
             __loadingStack.push(entry);
-            try { specs.forEach(function(sp) { __entryRequire(sp); }); } finally { __loadingStack.pop(); }
+            var prevDepth = globalThis.__vvvaImportDepth || 0;
+            globalThis.__vvvaImportDepth = prevDepth + 1;
+            try { specs.forEach(function(sp) { __entryRequire(sp); }); }
+            finally {
+                globalThis.__vvvaImportDepth = prevDepth;
+                __loadingStack.pop();
+            }
             if (entry.__deps && entry.__deps.length) {
                 return __RealPromise.all(entry.__deps.map(function(d) { return __waitTla(d); }));
             }
@@ -6257,7 +7926,7 @@ __httpSetHandler(self._id, function() {
         // When this process is a forked child (child_process.fork or cluster.fork),
         // set up process.send and stdin IPC polling immediately — not gated on
         // require('cluster'), so child scripts that never require cluster still get IPC.
-        if (process.env && process.env.CLUSTER_WORKER === '1' && typeof process.send !== 'function') {
+        if (process.env && process.env.VVVA_FORKED === '1' && typeof process.send !== 'function') {
             process.send = function(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); };
             process.connected = true;
             var __forkIpcBuf = '';

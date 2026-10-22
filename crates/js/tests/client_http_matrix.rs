@@ -450,3 +450,39 @@ async fn process_has_to_string_tag() {
         .unwrap();
     assert_eq!(v, "[object process]");
 }
+
+/// Same writable contract on `ClientRequest`: `write()` returns false past the
+/// 16 KiB high-water mark (a `while (req.write(buf))` loop must stop), and
+/// `end(cb)` calls back after `'finish'`, not before it (C03).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_request_write_reports_backpressure_and_end_callback_runs_after_finish() {
+    let port = free_port();
+    http_echo_server(port, 1, false);
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__done = false; globalThis.__result = null;
+        var req = http.request({{ host: '127.0.0.1', port: {port}, method: 'POST' }}, function(res) {{
+            res.resume();
+            res.on('end', function() {{ globalThis.__done = true; }});
+        }});
+        var buf = Buffer.alloc(16 * 1024, 120);
+        var a = req.write(buf);
+        var b = req.write(buf);
+        var finished = false;
+        req.on('finish', function() {{ finished = true; }});
+        req.end(function() {{
+            globalThis.__result = String(a) + ',' + String(b) + ',' +
+                (finished ? 'finish-before-end-cb' : 'end-cb-before-finish');
+            globalThis.__done = true;
+        }});
+        "#
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        wait_done(&mut e, 10).await,
+        "false,false,finish-before-end-cb"
+    );
+}

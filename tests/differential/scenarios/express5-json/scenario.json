@@ -1,0 +1,5 @@
+{
+  "kind": "client-server",
+  "timeout_s": 30,
+  "description": "express 5 request-body matrix (same cases as express4-json)."
+}

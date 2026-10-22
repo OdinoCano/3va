@@ -849,3 +849,32 @@ async fn buffer_has_internal_slice_helpers() {
         .unwrap();
     assert_eq!(r, "\u{ff}B|A|41ff|QQ==|function|function|function|function");
 }
+
+// events.listenerCount(emitter, type) accepts an EventTarget too, not just an
+// EventEmitter: `listenerCount(signal, 'abort')` is how libraries size the
+// bookkeeping they keep for an AbortSignal (test-http-agent-abort-controller).
+#[tokio::test]
+async fn listener_count_on_abort_signal() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var EE = require('events');
+        var ac = new AbortController();
+        globalThis.__before = EE.listenerCount(ac.signal, 'abort');
+        ac.signal.addEventListener('abort', function() {});
+        globalThis.__after = EE.listenerCount(ac.signal, 'abort');
+        ac.signal.removeEventListener('abort', function() {});
+        globalThis.__removed = EE.listenerCount(ac.signal, 'abort');
+        "#,
+    )
+    .await
+    .unwrap();
+    let r = e
+        .eval_to_string("globalThis.__before + ',' + globalThis.__after")
+        .await
+        .unwrap();
+    assert_eq!(
+        r, "0,1",
+        "listenerCount must count an AbortSignal's abort listeners"
+    );
+}

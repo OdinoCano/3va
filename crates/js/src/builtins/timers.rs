@@ -81,6 +81,15 @@ impl TimerManager {
         );
     }
 
+    /// `timeout.ref()` / `timeout.unref()`: an unref'd timer still fires but no
+    /// longer keeps the loop (and the process) alive, like a background one.
+    pub fn set_ref(&self, id: TimerId, refd: bool) {
+        let mut timers = self.timers.lock().unwrap();
+        if let Some(entry) = timers.get_mut(&id) {
+            entry.background = !refd;
+        }
+    }
+
     pub fn cancel(&self, id: TimerId) {
         let mut timers = self.timers.lock().unwrap();
         if let Some(entry) = timers.get_mut(&id) {
@@ -313,6 +322,21 @@ pub fn inject_timers(
     .build(scope)
     .unwrap();
 
+    let native_ref_timer = v8::Function::builder(
+        |scope: &mut PinScope, args: FunctionCallbackArguments, _rv: ReturnValue| {
+            let mgr = unsafe {
+                let ptr = args.data().cast::<v8::External>().value();
+                &*(ptr as *const Arc<TimerManager>)
+            };
+            let id = args.get(0).uint32_value(scope).unwrap_or(0) as u64;
+            let refd = args.get(1).boolean_value(scope);
+            mgr.set_ref(id, refd);
+        },
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
+
     let context = scope.get_current_context();
     let global = context.global(scope);
     global.set(
@@ -339,6 +363,11 @@ pub fn inject_timers(
         v8::String::new(scope, "__nativeClearTimer").unwrap().into(),
         native_clear_timer.into(),
     );
+    global.set(
+        scope,
+        v8::String::new(scope, "__nativeTimerRef").unwrap().into(),
+        native_ref_timer.into(),
+    );
 
     let js_polyfill = r#"
         globalThis.__timerCallbacks = {};
@@ -360,8 +389,9 @@ pub fn inject_timers(
                 _id: id,
                 _ms: ms,
                 _repeat: repeat,
-                unref: function() { return handle; },
-                ref: function() { return handle; },
+                _unref: false,
+                unref: function() { handle._unref = true; __nativeTimerRef(handle._id, false); return handle; },
+                ref: function() { handle._unref = false; __nativeTimerRef(handle._id, true); return handle; },
                 refresh: function() {
                     // Re-arm: cancel then reschedule with same callback.
                     var cb = globalThis.__timerCallbacks[handle._id];
@@ -371,9 +401,10 @@ pub fn inject_timers(
                     globalThis.__timerCallbacks[handle._id] = cb;
                     if (repeat) __nativeSetInterval(handle._id, ms);
                     else __nativeSetTimeout(handle._id, ms);
+                    if (handle._unref) __nativeTimerRef(handle._id, false);
                     return handle;
                 },
-                hasRef: function() { return true; }
+                hasRef: function() { return !handle._unref; }
             };
             return handle;
         }

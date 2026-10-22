@@ -1,0 +1,5 @@
+{
+  "kind": "client-server",
+  "timeout_s": 30,
+  "description": "Koa + koa-bodyparser: JSON and urlencoded request bodies."
+}

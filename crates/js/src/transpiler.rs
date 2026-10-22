@@ -2575,7 +2575,10 @@ fn try_transpile_inner(
     let code = codegen_out.code;
 
     if let (Some(fp), Some(map)) = (file_path, codegen_out.map) {
-        let sources: Vec<String> = map.get_sources().map(|s| s.to_string()).collect();
+        // The transformer is built with a placeholder path ("input.tsx"), so
+        // the map's `sources` would not name the module. Every token belongs
+        // to the one source the caller is compiling: use its real path.
+        let sources: Vec<String> = vec![fp.to_string()];
         let names: Vec<String> = map.get_names().map(|n| n.to_string()).collect();
         let tokens = map.get_tokens();
 
@@ -2880,6 +2883,17 @@ pub fn get_source_map(file_path: &str) -> Option<String> {
 pub fn apply_source_map(file_path: &str, line: u32, column: u32) -> Option<(String, u32, u32)> {
     let maps = source_maps().lock().unwrap();
     let map_json = maps.get(file_path)?;
+    apply_source_map_json(map_json, file_path, line, column)
+}
+
+/// The decoder behind [`apply_source_map`], for a map that is stored
+/// somewhere else (the JS-visible `__applySourceMap`).
+pub fn apply_source_map_json(
+    map_json: &str,
+    file_path: &str,
+    line: u32,
+    column: u32,
+) -> Option<(String, u32, u32)> {
     let map: serde_json::Value = serde_json::from_str(map_json).ok()?;
     let mappings = map.get("mappings")?.as_str()?;
 

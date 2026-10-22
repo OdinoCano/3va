@@ -7,7 +7,9 @@ pub mod async_context;
 pub mod builtins;
 mod caller_scope;
 pub mod esm;
+pub mod gc;
 pub mod inspector;
+pub mod node_flags;
 pub mod profiler;
 pub mod rejection_tracker;
 pub mod snapshot;
@@ -90,6 +92,11 @@ pub fn ensure_v8_initialized() {
         // idle scavenge task (0.4-3.5 ms) run just before exiting. Also
         // measured faster under HTTP load (fewer early scavenges).
         v8::V8::set_flags_from_string("--min-semi-space-size=2");
+        // `--expose-gc`: V8 aborts `RequestGarbageCollectionForTesting`
+        // unless the flag is set, and flags are only read before V8 starts.
+        if node_flags::expose_gc() {
+            v8::V8::set_flags_from_string("--expose-gc");
+        }
         // 4 background threads (concurrent GC/compilation), Node's default.
         // 0 meant one per core, all spawned on every start.
         let platform = v8::new_default_platform(4, false).make_shared();
@@ -131,16 +138,31 @@ fn pump_v8_platform_tasks(isolate: &v8::Isolate) {
 fn host_import_module_dynamically<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
     _host_defined_options: v8::Local<'s, v8::Data>,
-    _resource_name: v8::Local<'s, v8::Value>,
+    resource_name: v8::Local<'s, v8::Value>,
     specifier: v8::Local<'s, v8::String>,
     _import_attributes: v8::Local<'s, v8::FixedArray>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
     let context = scope.get_current_context();
     let global = context.global(scope);
+    let recv: v8::Local<'s, v8::Value> = context.global(scope).into();
+
+    // Resolve the specifier relative to the script that issued the import: the
+    // resource name carries its path, so a required module's `import('./x')`
+    // resolves from *its* directory, not the entry's. Fall back to the
+    // entry-scoped helper when the per-path helper is absent (contexts without
+    // the require shim, e.g. test262).
+    let key = v8::String::new(scope, "__importAsyncFrom")?;
+    if let Ok(func) = v8::Local::<v8::Function>::try_from(global.get(scope, key.into())?) {
+        let spec: v8::Local<'s, v8::Value> = specifier.into();
+        let result = func.call(scope, recv, &[spec, resource_name])?;
+        if result.is_promise() {
+            return Some(unsafe { v8::Local::<v8::Promise>::cast_unchecked(result) });
+        }
+        return None;
+    }
     let key = v8::String::new(scope, "__importAsync")?;
     let func = global.get(scope, key.into())?;
     let func = v8::Local::<v8::Function>::try_from(func).ok()?;
-    let recv: v8::Local<'s, v8::Value> = context.global(scope).into();
     let arg: v8::Local<'s, v8::Value> = specifier.into();
     let result = func.call(scope, recv, &[arg])?;
     if result.is_promise() {
@@ -622,6 +644,7 @@ async fn sleep_or_wake(d: std::time::Duration, wake: &Option<Arc<tokio::sync::No
 impl Drop for JsEngine {
     fn drop(&mut self) {
         caller_scope::uninstall(&self.isolate);
+        gc::uninstall(&self.isolate);
         // Run Node-API finalizers for objects still alive and free the
         // per-function bridges, before the isolate is disposed (a disposed
         // isolate can no longer call into the addon). Environments that were
@@ -794,6 +817,11 @@ impl JsEngine {
         builtins::code_cache::set_boot_mode(previous);
         let recorded = builtins::code_cache::take_recorded();
         injected?;
+        // `--expose-gc`: Node exposes `globalThis.gc()` with that flag.
+        if node_flags::expose_gc() {
+            gc::install(raw_isolate);
+            gc::install_gc(&mut scope);
+        }
         if recording {
             snapshot::build_in_background(recorded);
         }
@@ -1079,6 +1107,23 @@ impl JsEngine {
         caller_scope::set_entry_scope(entry_pkg_scope.clone());
 
         let code = transpiler::replace_import_meta(&code);
+        // A CommonJS entry is compiled as a module (see below): a shebang or a
+        // BOM are only valid at the beginning of a script.
+        let code = if is_esm {
+            code
+        } else {
+            prepare_cjs_source(&code)
+        };
+
+        // CommonJS entry point: Node compiles the entry file as a *module* —
+        // the file body is the body of a function with the module's
+        // parameters (`exports, require, module, __filename, __dirname`).
+        // Running it as a bare script leaks `var`/`const`/`let` into the global
+        // scope, and a top-level `const` then shadows a global for *every*
+        // dependency loaded afterwards (`const { setTimeout } = require('timers/promises')`
+        // in `server.js` used to break `setTimeout` in every module it pulled in).
+        // It also makes a top-level `return` a SyntaxError, which Node allows
+        // in a CommonJS file. ES module entries keep the module semantics.
 
         {
             let context_global = self.context.clone().expect("engine not initialized");
@@ -1118,38 +1163,127 @@ impl JsEngine {
              {{ globalThis.process.argv.push('{f}'); }}\
              if (typeof globalThis.require !== 'undefined') {{ \
                var __vvva_entry_module__ = {{ \
-                 id: '.', filename: '{f}', loaded: true, \
-                 exports: {{}}, parent: null, children: [], paths: [] \
+                 id: '.', filename: '{f}', path: '{d}', loaded: false, \
+                 exports: {{}}, parent: null, children: [], \
+                 paths: {paths_js}, \
+                 require: function (id) {{ return globalThis.require(id); }} \
                }}; \
+               globalThis.__vvva_entry_module__ = __vvva_entry_module__; \
                globalThis.require.main = __vvva_entry_module__; \
                globalThis.module = __vvva_entry_module__; \
+               globalThis.exports = __vvva_entry_module__.exports; \
+               if (globalThis.__loadedModules) {{ \
+                 globalThis.__loadedModules['{f}'] = __vvva_entry_module__; \
+               }} \
              }}",
                 f = f,
                 d = d,
                 u = u,
+                paths_js = module_paths_js(&dirname),
             );
 
             let setup_src = v8::String::new(&scope, &setup).unwrap();
             let _ = v8::Script::compile(&scope, setup_src, None).and_then(|s| s.run(&scope));
 
+            // The module's arguments, read before the try/catch scope takes
+            // the scope: `this === module.exports`, as in Node.
+            let global = scope.get_current_context().global(&scope);
+            let module_key = v8::String::new(&scope, "__vvva_entry_module__").unwrap();
+            let module_value: v8::Local<v8::Value> = global
+                .get(&scope, module_key.into())
+                .unwrap_or_else(|| v8::undefined(&scope).into());
+            let module_object = module_value.to_object(&scope);
+            let exports_key = v8::String::new(&scope, "exports").unwrap();
+            let exports_value: v8::Local<v8::Value> = module_object
+                .as_ref()
+                .and_then(|m| m.get(&scope, exports_key.into()))
+                .unwrap_or_else(|| v8::undefined(&scope).into());
+            let require_key = v8::String::new(&scope, "require").unwrap();
+            let require_value: v8::Local<v8::Value> = global
+                .get(&scope, require_key.into())
+                .unwrap_or_else(|| v8::undefined(&scope).into());
+            let filename_value: v8::Local<v8::Value> =
+                v8::String::new(&scope, &filename).unwrap().into();
+            let dirname_value: v8::Local<v8::Value> =
+                v8::String::new(&scope, &dirname).unwrap().into();
+
             let code_src = v8::String::new(&scope, &code).unwrap();
             v8::tc_scope!(let try_catch, &mut scope);
-            let script = match v8::Script::compile(try_catch, code_src, None) {
-                Some(s) => s,
-                None => {
+            if is_esm {
+                let script = match v8::Script::compile(try_catch, code_src, None) {
+                    Some(s) => s,
+                    None => {
+                        let text = try_catch
+                            .exception()
+                            .map(|e| e.to_rust_string_lossy(try_catch))
+                            .unwrap_or_else(|| "unknown error".to_string());
+                        return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Parse));
+                    }
+                };
+                if script.run(try_catch).is_none() {
+                    let text = try_catch
+                        .exception()
+                        .map(|e| format_uncaught(try_catch, e))
+                        .unwrap_or_else(|| "unknown error".to_string());
+                    return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Runtime));
+                }
+            } else {
+                // The CommonJS module function, compiled the way Node compiles
+                // it: the file's own text is the body of a function with the
+                // module's parameters, and the script origin carries the file
+                // name. A stack trace then points at the file with the line
+                // and column of the source, and the frame is the module's
+                // (an anonymous function called on the module's exports, like
+                // in Node: `Object.<anonymous>`).
+                let params = ["exports", "require", "module", "__filename", "__dirname"];
+                let param_handles: Vec<v8::Local<v8::String>> = params
+                    .iter()
+                    .map(|p| v8::String::new(try_catch, p).unwrap())
+                    .collect();
+                let resource: v8::Local<v8::Value> =
+                    v8::String::new(try_catch, &filename).unwrap().into();
+                let origin = v8::ScriptOrigin::new(
+                    try_catch, resource, 0, 0, false, -1, None, false, false, false, None,
+                );
+                let mut source = v8::script_compiler::Source::new(code_src, Some(&origin));
+                let compiled = v8::script_compiler::compile_function(
+                    try_catch,
+                    &mut source,
+                    &param_handles,
+                    &[],
+                    v8::script_compiler::CompileOptions::EagerCompile,
+                    v8::script_compiler::NoCacheReason::NoReason,
+                );
+                let Some(compiled) = compiled else {
                     let text = try_catch
                         .exception()
                         .map(|e| e.to_rust_string_lossy(try_catch))
                         .unwrap_or_else(|| "unknown error".to_string());
                     return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Parse));
+                };
+                let args = [
+                    exports_value,
+                    require_value,
+                    module_value,
+                    filename_value,
+                    dirname_value,
+                ];
+                if compiled.call(try_catch, exports_value, &args).is_none() {
+                    let text = try_catch
+                        .exception()
+                        .map(|e| format_uncaught(try_catch, e))
+                        .unwrap_or_else(|| "unknown error".to_string());
+                    return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Runtime));
                 }
-            };
-            if script.run(try_catch).is_none() {
-                let text = try_catch
-                    .exception()
-                    .map(|e| e.to_rust_string_lossy(try_catch))
-                    .unwrap_or_else(|| "unknown error".to_string());
-                return Err(anyhow::anyhow!("[{}] {text}", EvalPhase::Runtime));
+                // The module is loaded now, as in Node.
+                if let Some(module_object) = &module_object {
+                    let loaded_key = v8::String::new(try_catch, "loaded").unwrap();
+                    let _ = module_object.set(
+                        try_catch,
+                        loaded_key.into(),
+                        v8::Boolean::new(try_catch, true).into(),
+                    );
+                }
             }
         }
 
@@ -1200,6 +1334,23 @@ impl JsEngine {
 
     pub fn set_server_mode(&mut self, enabled: bool) {
         self.server_mode = enabled;
+    }
+
+    /// Delivers a process signal event (`SIGTERM`, `SIGINT`) to the listeners
+    /// the script registered, as Node does when the signal arrives.
+    ///
+    /// Returns whether there was a listener. Node disables the default action
+    /// of the signal when a listener exists: the application decides when to
+    /// exit, and the runtime must keep its event loop running.
+    pub async fn emit_process_signal(&mut self, signal: &str) -> anyhow::Result<bool> {
+        let src = format!(
+            "(function () {{ var p = globalThis.process; \
+             if (!p || typeof p.listenerCount !== 'function' || \
+             p.listenerCount({signal:?}) === 0) return 'false'; \
+             if (typeof p.emit === 'function') p.emit({signal:?}, {signal:?}); \
+             return 'true'; }})()"
+        );
+        Ok(self.eval_to_string(&src).await?.trim() == "true")
     }
 
     /// Installs caller_scope's promise hook the first time package-scoped
@@ -1421,7 +1572,6 @@ fn is_esm_source(code: &str) -> bool {
             || trimmed.starts_with("export ")
             || trimmed.starts_with("export{")
             || trimmed.starts_with("export default")
-            || has_dynamic_import(trimmed)
         {
             return true;
         }
@@ -1429,23 +1579,127 @@ fn is_esm_source(code: &str) -> bool {
     false
 }
 
-/// True if `line` contains a bare `import(` call (dynamic import) not
-/// preceded by an identifier character — see the matching helper in
-/// `esm.rs` for why this is needed: without it, a file using only dynamic
-/// `import()` (no static import/export) never gets routed through
-/// transpile_to_cjs, so the transpiler's `import(` → `__importAsync(`
-/// rewrite never fires and V8 chokes on unsupported native dynamic import.
-fn has_dynamic_import(line: &str) -> bool {
-    if let Some(pos) = line.find("import(") {
-        let before_ok = pos == 0 || {
-            let prev = line.as_bytes()[pos - 1];
-            !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'$')
-        };
-        if before_ok {
-            return true;
+/// Wrap a CommonJS entry file in Node's module wrapper.
+///
+/// Node compiles the entry point as a module: the file body is the body of
+/// `(function (exports, require, module, __filename, __dirname) { … })`, called
+/// with `this === module.exports`. The prefix is prepended to the *first line*
+/// of the body (as Node does) so the line numbers of the original file survive
+/// in stack traces.
+/// The report of an uncaught exception, in Node's shape: the file and the
+/// line, the line of code and the caret under it, then the error and its
+/// stack.
+///
+/// ```text
+/// /app/server.js:12
+/// throw new Error('boom');
+/// ^
+///
+/// Error: boom
+///     at Object.<anonymous> (/app/server.js:12:7)
+/// ```
+fn format_uncaught(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
+    let text = exception.to_rust_string_lossy(scope);
+    let message = v8::Exception::create_message(scope, exception);
+    let mut out = String::new();
+    if let Some(resource) = message.get_script_resource_name(scope) {
+        let resource = resource.to_rust_string_lossy(scope);
+        if let Some(line) = message.get_line_number(scope) {
+            let column = message.get_start_column();
+            // A transpiled module (an ES module, JSX, TypeScript) is compiled
+            // from a rewritten source: map the position back to the file the
+            // user wrote, so the report names its line and shows its text.
+            let mapped =
+                crate::transpiler::apply_source_map(&resource, line as u32, column as u32 + 1);
+            let (report_file, report_line, report_column, mapped) = match mapped {
+                Some((source, line, column)) => (source, line, column.saturating_sub(1), true),
+                None => (resource, line as u32, column as u32, false),
+            };
+            out.push_str(&format!("{report_file}:{report_line}\n"));
+            // The line of the file on disk, when the position is the one of
+            // the file. A transpiled module has no accurate map (its
+            // transformed source is re-printed), so V8's line is the honest
+            // one there.
+            let original_line = if mapped {
+                std::fs::read_to_string(&report_file).ok().and_then(|text| {
+                    text.lines()
+                        .nth(report_line.saturating_sub(1) as usize)
+                        .map(str::to_string)
+                })
+            } else {
+                None
+            };
+            let source_line = original_line.or_else(|| {
+                message
+                    .get_source_line(scope)
+                    .map(|line| line.to_rust_string_lossy(scope))
+            });
+            if let Some(source_line) = source_line {
+                out.push_str(&source_line);
+                out.push('\n');
+                let caret: String = source_line
+                    .chars()
+                    .take(report_column as usize)
+                    .map(|c| if c == '\t' { '\t' } else { ' ' })
+                    .collect();
+                out.push_str(&caret);
+                out.push_str("^\n");
+            }
+            out.push('\n');
         }
     }
-    false
+    out.push_str(&text);
+    // The stack, like Node: the error's own `stack` (3va builds it in
+    // `Error.prepareStackTrace`, with the file and the position of every
+    // frame). It already starts with the message, so it replaces it.
+    if let Some(object) = exception.to_object(scope) {
+        let key = v8::String::new(scope, "stack").unwrap();
+        if let Some(stack) = object.get(scope, key.into()) {
+            let stack = stack.to_rust_string_lossy(scope);
+            if !stack.is_empty() {
+                out.truncate(out.len() - text.len());
+                out.push_str(&stack);
+            }
+        }
+    }
+    out
+}
+
+/// Prepare a CommonJS source for the module wrapper: V8 only accepts `#!`
+/// at the very beginning of a *script* and a UTF-8 BOM only at the very
+/// beginning of a file, and the body of a module is neither. Node does the
+/// same (`stripShebang`, `stripBOM`); the shebang becomes a comment, so the
+/// line numbers do not shift.
+fn prepare_cjs_source(code: &str) -> String {
+    let code = code.strip_prefix('\u{feff}').unwrap_or(code);
+    match code.strip_prefix("#!") {
+        Some(rest) => format!("//{}", rest),
+        None => code.to_string(),
+    }
+}
+
+/// The `module.paths` of the entry module: the `node_modules` directories Node
+/// would look up, from the file's own directory up to the root.
+fn module_paths_js(dirname: &str) -> String {
+    let mut dirs: Vec<String> = Vec::new();
+    let mut cur = std::path::Path::new(dirname);
+    loop {
+        if let Some(name) = cur.file_name().and_then(|n| n.to_str())
+            && name != "node_modules"
+        {
+            dirs.push(cur.join("node_modules").to_string_lossy().to_string());
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => break,
+        }
+    }
+    let list = dirs
+        .iter()
+        .map(|d| format!("'{}'", d.replace('\\', "\\\\").replace('\'', "\\'")))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{list}]")
 }
 
 #[cfg(test)]

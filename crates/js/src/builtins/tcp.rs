@@ -30,11 +30,13 @@ impl TcpConn {
             TcpConn::PqTls(s) => s.read(buf),
         }
     }
-    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+    /// One write of as many bytes as the socket takes right now. The sockets
+    /// are nonblocking, so a full send buffer is `WouldBlock`, not an error.
+    fn write_some(&mut self, data: &[u8]) -> io::Result<usize> {
         match self {
-            TcpConn::Plain(s) => s.write_all(data),
-            TcpConn::Tls(s) => s.write_all(data),
-            TcpConn::PqTls(s) => s.write_all(data),
+            TcpConn::Plain(s) => s.write(data),
+            TcpConn::Tls(s) => s.write(data),
+            TcpConn::PqTls(s) => s.write(data),
         }
     }
     fn set_nodelay(&self, on: bool) {
@@ -188,7 +190,7 @@ fn pq_tls_client_config_with_ca(
     pq_tls_client_config_from_roots(roots)
 }
 
-fn pq_tls_client_config_from_roots(
+pub(crate) fn pq_tls_client_config_from_roots(
     roots: rustls::RootCertStore,
 ) -> std::result::Result<Arc<rustls::ClientConfig>, String> {
     let provider = super::tls::provider();
@@ -296,6 +298,14 @@ fn listeners() -> &'static Arc<Mutex<HashMap<u32, Arc<std::net::TcpListener>>>> 
 static TCP_ACTIVE_LISTENERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Listener ids the application `unref()`'d: they no longer count in
+/// `TCP_ACTIVE_LISTENERS`, so they do not keep the process alive.
+fn unref_listeners() -> &'static Mutex<std::collections::HashSet<u32>> {
+    static SET: std::sync::OnceLock<Mutex<std::collections::HashSet<u32>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
 pub fn has_active_listeners() -> bool {
     TCP_ACTIVE_LISTENERS.load(std::sync::atomic::Ordering::Relaxed) > 0
 }
@@ -402,7 +412,27 @@ pub fn inject_tcp(
                     return;
                 }
 
-                let connector = match super::tls::TlsConnector::new() {
+                // The TLS options the request named (`ca`, `cert`, `key`,
+                // `rejectUnauthorized`).
+                let opts_json = args.get(2).to_rust_string_lossy(_scope);
+                let opts = super::tls::TlsOptions::from_json(&opts_json);
+                // Skipping the certificate verification is the TLS version of
+                // a plaintext connection: it needs the user's permission
+                // (`--allow-insecure`), or a loopback host. Without this, a
+                // dependency could turn `rejectUnauthorized: false` into
+                // "accept any certificate" for every host.
+                if !opts.reject_unauthorized
+                    && !vvva_permissions::insecure::insecure_tls_allowed(&host)
+                {
+                    let err = js_code_err(
+                        _scope,
+                        "ERR_TLS_VERIFICATION_SKIPPED",
+                        vvva_permissions::insecure::insecure_tls_denied_message(&host),
+                    );
+                    rv.set(err);
+                    return;
+                }
+                let connector = match super::tls::TlsConnector::with_options(Some(&opts)) {
                     Ok(c) => c,
                     Err(e) => {
                         let err = js_err(_scope, &format!("TLS init failed: {}", e));
@@ -469,11 +499,37 @@ pub fn inject_tcp(
                 let mut guard = pool().lock().unwrap();
                 match guard.get_mut(&id) {
                     Some(conn) => {
-                        if let Err(e) = conn.write_all(&data) {
+                        // Write what the socket takes now. When its send buffer
+                        // is full, return how many bytes went out (a number)
+                        // and let JS retry the rest on a later tick: blocking
+                        // here would deadlock a peer that lives in this same
+                        // event loop, and `write_all` on a nonblocking socket
+                        // failed with EAGAIN ("Resource temporarily
+                        // unavailable") on any large write.
+                        let mut off = 0usize;
+                        let mut failure: Option<std::io::Error> = None;
+                        while off < data.len() {
+                            match conn.write_some(&data[off..]) {
+                                Ok(0) => {
+                                    failure = Some(std::io::ErrorKind::WriteZero.into());
+                                    break;
+                                }
+                                Ok(n) => off += n,
+                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                                Err(e) => {
+                                    failure = Some(e);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(e) = failure {
                             let err = js_code_err(_scope, "EPIPE", e.to_string());
                             rv.set(err);
-                        } else {
+                        } else if off == data.len() {
                             rv.set(v8::undefined(_scope).into());
+                        } else {
+                            rv.set(v8::Integer::new_from_unsigned(_scope, off as u32).into());
                         }
                     }
                     None => {
@@ -522,6 +578,17 @@ pub fn inject_tcp(
                                 || e.kind() == io::ErrorKind::TimedOut =>
                         {
                             let err = js_code_err(_scope, "EAGAIN", "no data available");
+                            rv.set(err);
+                        }
+                        // A peer that reset the connection reads as
+                        // ECONNRESET, not a generic EIO: `http` maps it to the
+                        // documented "socket hang up"/"aborted" and Node tests
+                        // accept ECONNRESET/ECONNABORTED/EPIPE, never EIO.
+                        Err(e)
+                            if e.kind() == io::ErrorKind::ConnectionReset
+                                || e.kind() == io::ErrorKind::ConnectionAborted =>
+                        {
+                            let err = js_code_err(_scope, "ECONNRESET", "connection reset by peer");
                             rv.set(err);
                         }
                         Err(e) => {
@@ -635,6 +702,34 @@ pub fn inject_tcp(
     TCP_NEXT_LISTENER_ID.set(Arc::new(Mutex::new(0))).ok();
 
     {
+        // `__netListenerAddr(id)`: the bound "ip:port" of a listener (the real
+        // port after `listen(0)`), or null.
+        let net_listener_addr_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let id = args.get(0).uint32_value(_scope).unwrap_or(0);
+                let addr = listeners()
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .and_then(|l| l.local_addr().ok());
+                match addr {
+                    Some(a) => rv.set(V8String::new(_scope, &a.to_string()).unwrap().into()),
+                    None => rv.set(v8::null(_scope).into()),
+                }
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__netListenerAddr").unwrap().into(),
+            net_listener_addr_fn.into(),
+        );
+    }
+
+    {
         let net_listen_fn = Function::new(
             scope,
             move |_scope: &mut v8::PinScope,
@@ -655,7 +750,11 @@ pub fn inject_tcp(
                     return;
                 };
 
-                match crate::builtins::http_server::bind_listener(&format!("{}:{}", host, port)) {
+                let reuse_port = args.get(2).boolean_value(_scope);
+                match crate::builtins::http_server::bind_listener_opts(
+                    &format!("{}:{}", host, port),
+                    reuse_port,
+                ) {
                     Ok(std_l) => {
                         if let Err(e) = std_l.set_nonblocking(true) {
                             let err = js_err(_scope, &e.to_string());
@@ -752,6 +851,36 @@ pub fn inject_tcp(
     }
 
     {
+        // `__netRef(id, ref)`: server.ref() / server.unref().
+        let net_ref_fn = Function::new(
+            scope,
+            move |_scope: &mut v8::PinScope,
+                  args: v8::FunctionCallbackArguments,
+                  mut rv: v8::ReturnValue| {
+                let id = args.get(0).uint32_value(_scope).unwrap_or(0);
+                let refd = args.get(1).boolean_value(_scope);
+                if listeners().lock().unwrap().contains_key(&id) {
+                    let mut set = unref_listeners().lock().unwrap();
+                    if !refd {
+                        if set.insert(id) {
+                            TCP_ACTIVE_LISTENERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    } else if set.remove(&id) {
+                        TCP_ACTIVE_LISTENERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                rv.set(v8::undefined(_scope).into());
+            },
+        )
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__netRef").unwrap().into(),
+            net_ref_fn.into(),
+        );
+    }
+
+    {
         let net_close_fn = Function::new(
             scope,
             move |_scope: &mut v8::PinScope,
@@ -759,7 +888,9 @@ pub fn inject_tcp(
                   mut rv: v8::ReturnValue| {
                 let server_id_arg = args.get(0);
                 let server_id = server_id_arg.uint32_value(_scope).unwrap_or(0);
-                if listeners().lock().unwrap().remove(&server_id).is_some() {
+                if listeners().lock().unwrap().remove(&server_id).is_some()
+                    && !unref_listeners().lock().unwrap().remove(&server_id)
+                {
                     TCP_ACTIVE_LISTENERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 rv.set(v8::undefined(_scope).into());

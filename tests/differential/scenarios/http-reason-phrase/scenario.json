@@ -1,0 +1,5 @@
+{
+  "kind": "single",
+  "timeout_s": 30,
+  "description": "The HTTP reason phrase: injected CR/LF is rejected, a tab is allowed and a non-string second argument is the headers object (Node's REASON_PHRASE and writeHead signature)."
+}

@@ -7,8 +7,9 @@
 //            node_modules (debug, ms, proxy-from-env, tr46) now activate
 //            even when __resolvePath throws MODULE_NOT_FOUND.
 //
-//   Bug 3 — ERR_REQUIRE_ESM: require() of a .mjs file now throws with
-//            code === 'ERR_REQUIRE_ESM' instead of a confusing SyntaxError.
+//   Bug 3 — require() of a .mjs file: Node 22+ loads it (transpiled to CJS)
+//            and returns its exports; only a graph with top-level await
+//            throws ERR_REQUIRE_ASYNC_MODULE.
 //
 // Run: cargo test -p vvva_js --test module_resolution_fixes
 
@@ -87,16 +88,48 @@ async fn fallback_module_can_be_a_function() {
     assert_eq!(r, "true");
 }
 
-// ── Bug 3: ERR_REQUIRE_ESM for .mjs files ────────────────────────────────────
+// ── Bug 3: require() of .mjs files ───────────────────────────────────────────
 
-/// require() of an absolute .mjs path must throw with code ERR_REQUIRE_ESM.
+/// require() of an absolute .mjs path loads the module and returns its exports,
+/// as Node 22+ does.
 #[tokio::test]
-async fn require_mjs_throws_err_require_esm() {
+async fn require_mjs_loads_its_exports() {
     let mut e = engine_with_tmp_read().await;
 
-    // Write a temp .mjs file so require() gets past __resolvePath to the ESM check.
     let tmp = std::env::temp_dir().join("_3va_test_esm_mod.mjs");
-    std::fs::write(&tmp, "export default 42;\n").unwrap();
+    std::fs::write(&tmp, "export const value = 42;\nexport default 'esm';\n").unwrap();
+    let path = tmp.to_string_lossy().to_string();
+
+    let script = format!(
+        r#"
+        var code = 'no-throw';
+        try {{
+            var m = require({:?});
+            code = String(m.value) + ':' + String(m.default);
+        }} catch(e) {{
+            code = e.code || 'no-code';
+        }}
+        code
+        "#,
+        path
+    );
+    let r = e.eval_to_string(&script).await.unwrap();
+    let _ = std::fs::remove_file(&tmp);
+    assert_eq!(r, "42:esm");
+}
+
+/// require() cannot synchronously evaluate a graph with top-level await:
+/// Node throws ERR_REQUIRE_ASYNC_MODULE, and import() must be used instead.
+#[tokio::test]
+async fn require_mjs_with_top_level_await_throws_err_require_async_module() {
+    let mut e = engine_with_tmp_read().await;
+
+    let tmp = std::env::temp_dir().join("_3va_test_esm_tla_mod.mjs");
+    std::fs::write(
+        &tmp,
+        "export const before = 1;\nawait Promise.resolve();\nexport const after = 2;\n",
+    )
+    .unwrap();
     let path = tmp.to_string_lossy().to_string();
 
     let script = format!(
@@ -113,11 +146,11 @@ async fn require_mjs_throws_err_require_esm() {
     );
     let r = e.eval_to_string(&script).await.unwrap();
     let _ = std::fs::remove_file(&tmp);
-    assert_eq!(r, "ERR_REQUIRE_ESM");
+    assert_eq!(r, "ERR_REQUIRE_ASYNC_MODULE");
 }
 
-/// A .cjs file with ESM-looking content must NOT throw ERR_REQUIRE_ESM
-/// (extension wins over content; it's loaded as CJS).
+/// A .cjs file is CommonJS no matter what it contains: it must never be
+/// routed through the ES-module loader.
 #[tokio::test]
 async fn require_cjs_extension_never_throws_err_require_esm() {
     let mut e = engine_with_tmp_read().await;

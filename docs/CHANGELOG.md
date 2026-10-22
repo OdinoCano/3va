@@ -7,6 +7,144 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+### Added
+
+- **`node:test`**: `require('node:test')` ya no devuelve un objeto vacío (`test`,
+  `describe` e `it` eran `undefined`). Implementa el subconjunto que usan la
+  suite oficial de nodejs/node y una suite de proyecto típica: `test`/`it`,
+  `describe`/`suite`, `before`/`after`/`beforeEach`/`afterEach`, `t.test()`
+  anidado, `{ skip, todo, only }`, funciones `async` y con callback `done`,
+  `t.mock.fn()`/`t.mock.method()` y `t.assert`. La salida usa el reporter
+  `spec` de Node (`✔ nombre (0.39ms)`, `ℹ tests 5`) y el código de salida es
+  ≠ 0 si algo falla; `--test-reporter=tap` da la salida TAP. Lo que no se
+  implementa (`mock.timers`, `snapshot`, `run()`) lanza `ERR_NOT_SUPPORTED`, no
+  queda `undefined`.
+- **Módulos heredados `_http_*` y `_stream_*`**: `_http_common`, `_http_server`,
+  `_http_agent`, `_http_client`, `_http_incoming`, `_http_outgoing`,
+  `_stream_readable`, `_stream_writable`, `_stream_duplex`, `_stream_transform`
+  y `_stream_passthrough` (deprecados en Node, pero públicos) exponen lo que
+  3va ya implementa, sin duplicar código. `HTTPParser` no se expone: 3va no
+  tiene un equivalente.
+- **Flags de Node en `3va run`**: `--no-warnings`, `--pending-deprecation`,
+  `--expose-gc` (y su alias `--expose_gc`), `--zero-fill-buffers` e
+  `--insecure-http-parser`, más `--test-reporter` para `node:test`.
+  `--tls-min-v1.0` se rechaza con un error claro: el TLS de 3va (rustls) tiene
+  un suelo de TLS 1.2.
+
+### Fixed
+
+- **El archivo de entrada se ejecuta como módulo CommonJS**: antes se evaluaba
+  como script global. Sus `const`/`let` de nivel superior entraban en el ámbito
+  léxico global, así que `const { setTimeout } = require('timers/promises')` en
+  `server.js` dejaba en TDZ el `setTimeout` de *todas* las dependencias que se
+  cargaban después; y un `return` de nivel superior era un error de sintaxis.
+  Ahora la entrada corre dentro del mismo envoltorio que los módulos
+  requeridos, con `require.main === module`, `module.id === '.'`,
+  `this === module.exports`, `__filename`/`__dirname` propios y las variables de
+  nivel superior locales al módulo (un `var` de la entrada ya no aparece en
+  `globalThis`). Las entradas ESM (`.mjs`, `import`/`export`) conservan la
+  semántica de módulo: allí un `return` de nivel superior sigue siendo un
+  error de sintaxis.
+- **Las trazas dicen dónde está el error**: el archivo y la línea, la línea de
+  código y el `^` debajo (como en Node), y cada fotograma de la pila lleva el
+  archivo y la posición exactos. Antes las trazas no tenían nombre de archivo
+  y las columnas de la primera línea iban desplazadas. Node compila el archivo
+  de entrada y cada módulo requerido como una función con los parámetros del
+  módulo y con el nombre del archivo en el `ScriptOrigin`; 3va deja de
+  reformatear un `.js` al cargarlo, así que las posiciones son las del archivo.
+- **`process.emitWarning`** imprime el aviso en stderr
+  (`(node:PID) [CÓDIGO] Nombre: mensaje`) y entrega el evento `warning` en el
+  siguiente tick, como en Node. Con `--no-warnings` solo se silencia la
+  impresión, no el evento.
+- **`unref()` y `ref()` funcionan**: eran no-ops en timers, intervalos, servidores
+  `http`/`net` y sockets, así que un proceso que solo conservaba handles con
+  `unref()` nunca terminaba. Ahora el bucle de eventos los ignora, como en Node.
+- **`server.listen(callback)`** (sin puerto) en `http` y `net` no llamaba al
+  callback y dejaba el proceso vivo; `net.Server.address()` devolvía siempre el
+  puerto 0 en lugar del puerto real tras `listen(0)`; `listen({ reusePort })`
+  activa `SO_REUSEPORT` (solo si se pide).
+- **Escrituras grandes a un socket**: fallaban con `EAGAIN` ("Resource
+  temporarily unavailable") cuando superaban el búfer de envío; ahora el resto se
+  reintenta en el siguiente turno.
+- **`http`, servidor**: la respuesta es incremental (`write()` y `flushHeaders()`
+  envían antes de `end()`, también con `Content-Length` explícito) y avisa de la
+  contrapresión; una escritura vacía ya no manda el terminador `chunked`;
+  `server.closeIdleConnections()` y `closeAllConnections()` existen; responde
+  `408` cuando vence `headersTimeout` o el cuerpo no llega a tiempo (los límites
+  del cortafuegos no cambian); `close()` respeta las conexiones con una petición
+  a medias.
+- **`http`, cliente**: `abort()`/`destroy()` de peticiones y respuestas con la
+  semántica de Node (`'abort'`, `'aborted'`, `'close'`, `ECONNRESET`),
+  `req.setTimeout()` y `res.setTimeout()` también después de abierto el socket, la
+  conexión se abre al crear la petición (como en Node) y `abort()` en el mismo
+  turno ya no dice `socket hang up`.
+- **`stream`**: `Writable` ejecuta un `_write()` a la vez, convierte strings a
+  `Buffer` (`decodeStrings`), `setDefaultEncoding()` funciona, `destroyed`
+  empieza en `false`, `EventEmitter#emit('error')` sin oyente lanza como en Node, y
+  `StringDecoder('base64')` retiene los grupos de 3 bytes incompletos.
+  `fs.createReadStream/createWriteStream` aceptan un string como `options` (el
+  encoding).
+
+---
+
+## [2.13.0] — 2026-10-16
+
+Verificación de compatibilidad con Node con pruebas que la respaldan
+(`docs/09-testing/07-compatibilidad-node.md`). Es una *minor* y no un parche
+porque añade infraestructura de verificación en CI, un gate de release y cambios
+de comportamiento visibles.
+
+### Added
+
+- **Suite diferencial node vs 3va** (`tests/differential/`, `scripts/differential.sh`):
+  25 escenarios con el mismo script ejecutado con `node` 24 y con `3va`,
+  comparando la salida byte a byte, servidor y cliente en procesos distintos y
+  binarios por SHA-256. Job nuevo en `ci.yml`.
+- **Suite oficial de Node con trinquete** (`scripts/setup-node-tests.sh`,
+  `crates/test/src/node_tests.rs`): `test/parallel` de nodejs/node v24.22.0
+  (17 prefijos) con línea base versionada; falla si aparece un fallo nuevo y si
+  uno arreglado sigue en la línea base. Job en `deep-checks.yml`.
+- **Escenario del cliente como gate de release** (`tests/client-scenario/`,
+  `scripts/client-scenario.sh`): app Express + sesión + subida/descarga por
+  SHA-256 + `pg`/SCRAM + axios + nginx con `trustedProxies`, con el binario de
+  release en `debian:bookworm-slim`. Job nuevo en `release.yml` que bloquea la
+  publicación.
+- **Suites de librerías reales** (`scripts/library-suites.sh`): express 4/5,
+  body-parser, axios, pg, multer, ws y fastify; resultados de referencia en
+  `tests/library-suites/results.txt`. Job de referencia en `deep-checks.yml`.
+- Inventario de métodos falsos: `docs/05-js-engine/07-inventario-stubs.md`.
+
+### Fixed
+
+- **`cluster.fork()`**: el worker se creía el primario (`cluster.isPrimary === true`,
+  congelado en el snapshot de builtins) y no recibía el `env`; volvía a forkear
+  sin fin (bomba de procesos). `isPrimary`/`isWorker`/`worker` son ahora getters
+  en tiempo de ejecución y `cluster.fork(env)` propaga el env.
+- **`child_process.fork(path, args)`**: los `args` no llegaban al hijo, así que
+  un hijo que ramifica por `process.argv[2]` volvía a forkear. Ahora se pasan.
+- **`http.STATUS_CODES`**: faltaban entradas (p. ej. `415`), lo que además
+  eliminaba el campo `error` de la respuesta 415 de fastify. Tabla completa de Node.
+- **TLS con CA privada**: el cliente `https`/`tls` no leía `NODE_EXTRA_CA_CERTS`
+  (usaba native-tls/OpenSSL, que solo confía en el almacén del SO). Ahora añade
+  los certificados del bundle como raíces.
+- La suite diferencial ya no deja servidores huérfanos al terminar.
+
+### Medido
+
+Compatibilidad con Node medida con `test/parallel` de nodejs/node v24.22.0
+(`f14cd3aa`), 3va 2.13.0, 2026-10-22: **315/1173/174 → 21,2 %**
+(pasados/fallados/saltados; los saltados no cuentan; el 2026-10-16 eran
+198/1275/189 → 13,4 %). Sustituye al ~97 %
+auto-declarado. Detalle por módulo en `docs/12-roadmap/04-compatibility.md`.
+
+### Notes
+
+- `http`/`https`/`net`/`stream` de `test/parallel` cuelgan en algunos tests y
+  dominan el tiempo; por eso corren en el chequeo semanal y no en cada PR.
+- Diferencias conocidas pendientes en la suite diferencial: import relativo de
+  `.mjs`, live bindings en ciclos ESM y framing `chunked` en escrituras
+  incrementales de `http.request`.
+
 ---
 
 ## [2.12.6] — 2026-10-15

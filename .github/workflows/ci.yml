@@ -66,6 +66,33 @@ jobs:
       - run: test -f target/debug/gn_out/obj/librusty_v8.a || cargo clean -p v8
       - run: cargo test
 
+  # ── Gate 3b: node vs 3va differential suite ──────────────────────────────────
+  # Runs the same scenarios with node 24 and with 3va and fails on any output
+  # difference; server and client in separate processes. See
+  # tests/differential/README.md and docs/09-testing/07-compatibilidad-node.md
+  # (§7.4 step 1). ~30 s once the binary is built.
+  differential:
+    name: Differential (node vs 3va)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.17.0"
+      # Same rust-cache / librusty_v8.a issue as the test job: a partial cache hit
+      # relinks a missing librusty_v8.a, so re-run the v8 build script first.
+      - run: test -f target/debug/gn_out/obj/librusty_v8.a || cargo clean -p v8
+      - run: cargo build --bin 3va
+      - name: Run the differential suite
+        run: THREEVA_BIN="$PWD/target/debug/3va" bash scripts/differential.sh
+
   # ── Gate 4: dependency security & license audit ──────────────────────────────
   deny:
     name: cargo-deny (advisories + licenses + bans)

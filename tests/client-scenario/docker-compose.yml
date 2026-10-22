@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 3va contributors
+#
+# The release-gate scenario: Express app (3va) + postgres 16 (SCRAM) + a mock
+# upstream + nginx in front, with a node client that decides pass/fail. Start it
+# through scripts/client-scenario.sh, which puts the binary under test in place.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: appsecret
+      POSTGRES_DB: appdb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d appdb"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mock:
+    image: node:24-alpine
+    volumes:
+      - ./mock:/mock:ro
+    command: ["node", "/mock/server.js"]
+
+  proxy:
+    image: node:24-alpine
+    volumes:
+      - ./proxy:/proxy:ro
+    environment:
+      PROXY_PORT: "1235"
+    command: ["node", "/proxy/server.js"]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: ${SCENARIO_BASE_IMAGE:-debian:bookworm-slim}
+    environment:
+      PORT: "8080"
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: app
+      PGPASSWORD: appsecret
+      PGDATABASE: appdb
+      MOCK_URL: http://mock:1234
+      PROXY_URL: http://proxy:1235
+      SESSION_SECRET: client-scenario-secret
+    depends_on:
+      db:
+        condition: service_healthy
+      mock:
+        condition: service_started
+      proxy:
+        condition: service_started
+    command:
+      - 3va
+      - run
+      - --no-prompt
+      - --allow-net
+      - --allow-read=/app
+      - --allow-write=/app,/tmp
+      - --allow-env
+      - --allow-insecure
+      - /app/index.js
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+
+  client:
+    image: node:24-alpine
+    volumes:
+      - ./client:/client:ro
+    environment:
+      BASE_URL: http://nginx
+    depends_on:
+      - nginx
+    command: ["node", "/client/test.js"]

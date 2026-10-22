@@ -1,6 +1,6 @@
 [package]
 name = "vvva_test"
-version = "2.12.6"
+version = "2.13.0"
 rust-version.workspace = true
 edition = "2021"
 license = "MIT"
@@ -15,11 +15,14 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-vvva_js = { version = "2.12.6", path = "../js" }
-vvva_permissions = { version = "2.12.6", path = "../permissions" }
+vvva_js = { version = "2.13.0", path = "../js" }
+vvva_permissions = { version = "2.13.0", path = "../permissions" }
 tokio.workspace = true
 tempfile.workspace = true
 lazy_static = "1.4"
+# `kill(-pgid, SIGKILL)`: the runner signals the whole process group of a
+# test. Already in the tree as a transitive dependency.
+libc = "0.2"
 oxc_allocator = "0.132"
 oxc_parser = "0.132"
 oxc_span = "0.132"

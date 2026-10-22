@@ -1,0 +1,5 @@
+{
+  "kind": "client-server",
+  "timeout_s": 30,
+  "description": "fetch request bodies: string, Buffer, Uint8Array, ArrayBuffer and URLSearchParams; binary response. Binary is compared by SHA-256."
+}

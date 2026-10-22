@@ -1,0 +1,6 @@
+{
+  "kind": "client-server",
+  "timeout_s": 30,
+  "server_perms": ["--allow-net=127.0.0.1", "--allow-read=.", "--allow-write=."],
+  "description": "raw http server: `for await (const c of req)` and `pipeline(req, createWriteStream())`, both over a binary body."
+}

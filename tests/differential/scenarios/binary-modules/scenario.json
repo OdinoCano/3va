@@ -1,0 +1,6 @@
+{
+  "kind": "single",
+  "timeout_s": 30,
+  "server_perms": ["--allow-read=.", "--allow-write=."],
+  "description": "Buffer/Uint8Array across fs, crypto and zlib; binary compared by SHA-256 and round-tripped."
+}

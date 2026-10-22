@@ -69,6 +69,8 @@
 - [03-snapshots.md](09-testing/03-snapshots.md) - Snapshots
 - [04-watch-mode.md](09-testing/04-watch-mode.md) - Watch mode
 - [05-scripts.md](09-testing/05-scripts.md) - Test and verification scripts
+- [06-test262.md](09-testing/06-test262.md) - test262 (ECMAScript conformance)
+- [07-compatibilidad-node.md](09-testing/07-compatibilidad-node.md) - Node compatibility verification standard
 
 ## Volume 10: Advanced Security Features
 

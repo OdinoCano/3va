@@ -516,6 +516,109 @@ async fn idle_keep_alive_connection_closed_after_keepalive_timeout() {
     );
 }
 
+/// `server.setTimeout(ms, cb)` must arm a real socket inactivity timer: the
+/// callback runs with the socket and `socket.destroy()` closes the
+/// connection. Before, `setTimeout` only stored a listener, so the callback
+/// never ran and the connection stayed open (C02).
+#[tokio::test]
+async fn server_set_timeout_fires_with_the_socket() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__timedOut = 'no';
+        var _server = http.createServer(function(req, res) {{ /* never answer */ }});
+        _server.setTimeout(50, function(socket) {{
+            globalThis.__timedOut = typeof socket.destroy;
+            socket.destroy();
+            _server.close();
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let closed = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 1024];
+        matches!(
+            tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await,
+            Ok(Ok(0))
+        )
+    })
+    .await;
+
+    assert!(
+        closed,
+        "socket.destroy() in the timeout callback must close the connection"
+    );
+    let fired = e.eval_to_string("globalThis.__timedOut").await.unwrap();
+    assert_eq!(
+        fired, "function",
+        "the 'timeout' callback must run with the socket"
+    );
+}
+
+/// `req.setTimeout(ms, cb)` must fire while the request body is still
+/// incomplete (Node: socketOnTimeout only skips the request once it is
+/// complete). Before, both request and response setTimeout were no-ops.
+#[tokio::test]
+async fn request_set_timeout_fires_while_the_body_is_pending() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__reqTimeout = 'no';
+        var _server = http.createServer(function(req, res) {{
+            req.setTimeout(50, function(socket) {{
+                globalThis.__reqTimeout = 'yes';
+                socket.destroy();
+                _server.close();
+            }});
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let closed = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        // A body that never finishes: Content-Length says 10, only 3 arrive.
+        stream
+            .write_all(b"POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 10\r\n\r\nabc")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 1024];
+        matches!(
+            tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await,
+            Ok(Ok(0))
+        )
+    })
+    .await;
+
+    assert!(closed, "the request timeout must destroy the socket");
+    let fired = e.eval_to_string("globalThis.__reqTimeout").await.unwrap();
+    assert_eq!(fired, "yes", "req.setTimeout's callback must run");
+}
+
 /// Verify that `req.headers['content-length']` in JS reflects the bytes that
 /// were actually allocated and read — not the raw value from the request header.
 ///
@@ -725,6 +828,79 @@ async fn write_head_rejects_crlf_in_headers() {
         .unwrap();
     // Validation happens before writeHead records anything.
     assert_eq!(r, "ERR_INVALID_CHAR:false:200");
+}
+
+/// The reason phrase ends up on the status line: a CR/LF there splits the
+/// response (HTTP response splitting). Node rejects it with ERR_INVALID_CHAR.
+#[tokio::test]
+async fn write_head_rejects_crlf_in_status_message() {
+    let mut e = engine_with_net().await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            {setup}
+            try {{
+                res.writeHead(200, 'OK\r\nSet-Cookie: pwned=1');
+                'no-throw';
+            }} catch (err) {{
+                (err instanceof TypeError) + ':' + err.code + ':' + err.message + ':' + res.headersSent;
+            }}
+            "#,
+            setup = standalone_res_js()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        r,
+        "true:ERR_INVALID_CHAR:Invalid character in statusMessage:false"
+    );
+}
+
+/// `res.statusMessage` can also be assigned directly; the native writer is the
+/// last line of defence and refuses to put a CR/LF on the status line.
+#[tokio::test]
+async fn smuggled_status_message_caught_by_native_writer() {
+    let mut e = engine_with_net().await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            {setup}
+            res.statusMessage = 'OK\r\nX-Evil: 1';
+            try {{
+                res.end('x');
+                'no-throw';
+            }} catch (err) {{
+                err.code + ':' + err.message;
+            }}
+            "#,
+            setup = standalone_res_js()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, "ERR_INVALID_CHAR:Invalid character in statusMessage");
+}
+
+/// Node's writeHead treats a non-string second argument as the headers object,
+/// and accepts a reason phrase with a tab (REASON_PHRASE).
+#[tokio::test]
+async fn write_head_reason_phrase_follows_node() {
+    let mut e = engine_with_net().await;
+    let r = e
+        .eval_to_string(&format!(
+            r#"
+            {setup}
+            res.writeHead(201, {{ 'X-A': 'b' }});
+            var a = res.statusCode + ':' + JSON.stringify(res.statusMessage);
+            var res2 = new http.ServerResponse(new http.IncomingMessage({{}}));
+            res2.writeHead(200, 'OK\tthere');
+            var b = JSON.stringify(res2.statusMessage);
+            a + '|' + b;
+            "#,
+            setup = standalone_res_js()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r, r#"201:"Created"|"OK\tthere""#);
 }
 
 /// Valid headers keep working through both setHeader and writeHead.
@@ -1768,5 +1944,402 @@ async fn request_body_is_delivered_to_listeners_attached_later() {
         response_body(&resp),
         "late body|false|true",
         "full response:\n{resp}"
+    );
+}
+
+/// `req.destroy()` must end the request the way Node does: it closes the
+/// connection and emits `'close'`, so `stream.finished(req, cb)` completes
+/// instead of waiting for an `'end'` that will never come.
+#[tokio::test]
+async fn request_destroy_emits_close_and_finishes_the_stream() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var stream = require('stream');
+        globalThis.__closed = 'no';
+        globalThis.__finished = 'no';
+        var _server = http.createServer(function(req, res) {{
+            req.on('close', function() {{ globalThis.__closed = 'yes'; }});
+            stream.finished(req, function() {{
+                globalThis.__finished = 'yes';
+                _server.close();
+            }});
+            req.destroy();
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let closed = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 1024];
+        matches!(
+            tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await,
+            Ok(Ok(0))
+        )
+    })
+    .await;
+
+    assert!(closed, "req.destroy() must close the connection");
+    assert_eq!(
+        e.eval_to_string("globalThis.__closed").await.unwrap(),
+        "yes",
+        "req.destroy() must emit 'close'"
+    );
+    assert_eq!(
+        e.eval_to_string("globalThis.__finished").await.unwrap(),
+        "yes",
+        "req.destroy() must let finished() call back"
+    );
+}
+
+/// `write()` must report backpressure (false past the 16 KiB high-water mark),
+/// or `while (res.write(buf))` never stops — that loop is what made
+/// test-http-outgoing-finish.js run out of memory — and the write callbacks
+/// must run before `'finish'` (C03).
+#[tokio::test]
+async fn response_write_reports_backpressure_and_calls_back_before_finish() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__srv = 'none';
+        var _server = http.createServer(function(req, res) {{
+            var buf = Buffer.alloc(16 * 1024, 120);
+            res.writeHead(200, {{ 'Content-Length': String(16 * 1024 * 2 + 1) }});
+            var first = res.write(buf);
+            var second = res.write(buf);
+            var writeCb = false;
+            res.write('x', function() {{ writeCb = true; }});
+            res.on('finish', function() {{
+                globalThis.__srv = String(first) + ',' + String(second) +
+                    ',' + (writeCb ? 'write-cb-before-finish' : 'finish-before-write-cb');
+            }});
+            res.end();
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let resp = drive_until(&mut e, raw_http(port, "GET", "/", "")).await;
+    assert!(
+        resp.starts_with("HTTP/1.1 200"),
+        "the response must still be sent: {resp:?}"
+    );
+    assert_eq!(
+        e.eval_to_string("globalThis.__srv").await.unwrap(),
+        "false,false,write-cb-before-finish",
+        "res.write() must report backpressure and its callback must run before 'finish'"
+    );
+}
+
+// req.destroy(err) on the server (test-http-server-incomingmessage-destroy):
+// the request is aborted ('aborted' fires with `req.aborted === true`), the
+// connection is closed so the client sees the reset, and — because the HTTP
+// server owns its sockets — the error does not become an uncaught exception.
+#[tokio::test]
+async fn request_destroy_aborts_and_closes_the_connection() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__aborted = 'none';
+        var _server = http.createServer(function(req, res) {{
+            req.on('aborted', function() {{ globalThis.__aborted = String(req.aborted); }});
+            req.destroy(new Error('Destroy test'));
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    // A raw client: the server must close the connection (read returns 0),
+    // rather than leaving it half-open.
+    let n = drive_until(&mut e, async {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 64];
+        s.read(&mut buf).await.unwrap()
+    })
+    .await;
+    assert_eq!(
+        n, 0,
+        "the server must reset the connection after req.destroy()"
+    );
+
+    let aborted = e.eval_to_string("globalThis.__aborted").await.unwrap();
+    assert_eq!(
+        aborted, "true",
+        "'aborted' must fire with req.aborted === true"
+    );
+
+    e.eval("_server.close()").await.unwrap();
+}
+
+// C14 — `res.write()` streams: the head and the body reach the client before
+// `end()` (Transfer-Encoding: chunked when there is no Content-Length), so a
+// client's 'response'/'data' handlers fire without waiting for end().
+#[tokio::test]
+async fn response_write_streams_before_end() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{
+            res.write('hello');
+            // deliberately no end()
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let got = drive_until(&mut e, async {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let mut total = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            let n = s.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            total.extend_from_slice(&buf[..n]);
+            if total.windows(5).any(|w| w == b"hello") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&total).to_string()
+    })
+    .await;
+    assert!(
+        got.contains("HTTP/1.1 200"),
+        "the head must be sent before end(): {got:?}"
+    );
+    assert!(
+        got.contains("hello"),
+        "the body must stream before end(): {got:?}"
+    );
+
+    e.eval("_server.close()").await.unwrap();
+}
+
+// A client that aborts the connection mid-response must make the server's
+// request emit 'aborted' (with `req.aborted === true`) and 'error' ECONNRESET,
+// as Node's socketOnClose does — not hang until the response timeout.
+#[tokio::test]
+async fn client_abort_emits_aborted_on_the_server_request() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__aborted = 'none';
+        globalThis.__reqerr = 'none';
+        var _server = http.createServer(function(req, res) {{
+            req.on('aborted', function() {{ globalThis.__aborted = String(req.aborted); }});
+            req.on('error', function(err) {{
+                globalThis.__reqerr = err.code;
+                _server.close();
+            }});
+            res.write('hello');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    drive_until(&mut e, async {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let _ = s.read(&mut buf).await.unwrap(); // read the streamed head
+        drop(s); // abort the connection
+    })
+    .await;
+
+    // Drive the loop a little so the closed-connection notification reaches JS.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if e.eval_to_string("globalThis.__aborted").await.unwrap() != "none" {
+            break;
+        }
+        // Bounded: `run_event_loop` does not return while any HTTP listener of
+        // the process is alive, and another test's server may still be.
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(100), e.run_event_loop()).await;
+    }
+    let aborted = e.eval_to_string("globalThis.__aborted").await.unwrap();
+    assert_eq!(aborted, "true", "the server request must report 'aborted'");
+    let code = e.eval_to_string("globalThis.__reqerr").await.unwrap();
+    assert_eq!(
+        code, "ECONNRESET",
+        "the server request must report ECONNRESET"
+    );
+}
+
+// `server.closeIdleConnections()` drops the keep-alive connection that has no
+// request in progress and leaves alone one whose request head is half
+// received; `closeAllConnections()` drops that one too, though its request
+// never reached JS (so it has no JS socket). Node 18.2+ behaviour; before this
+// neither method existed and `test-http(s)-server-close-*` hung.
+#[tokio::test]
+async fn close_idle_spares_a_half_received_request_and_close_all_drops_it() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{
+            if (req.url === '/idle') setTimeout(function() {{ _server.closeIdleConnections(); }}, 50);
+            if (req.url === '/all') setTimeout(function() {{ _server.closeAllConnections(); }}, 50);
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let (idle_closed, partial_open, partial_closed) = drive_until(&mut e, async {
+        // A request head that never finishes.
+        let mut partial = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        partial.write_all(b"GET / HTTP/1.1").await.unwrap();
+
+        // A keep-alive connection that finished its request: idle.
+        let mut idle = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        idle.write_all(b"GET /idle HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 512];
+        // The response, then EOF once closeIdleConnections() runs.
+        let idle_closed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match idle.read(&mut buf).await {
+                    Ok(0) | Err(_) => return true,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        // The half-received one is still open.
+        let partial_open = tokio::time::timeout(Duration::from_millis(300), partial.read(&mut buf))
+            .await
+            .is_err();
+
+        // closeAllConnections() drops it as well.
+        let mut third = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        third
+            .write_all(b"GET /all HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let partial_closed = matches!(
+            tokio::time::timeout(Duration::from_secs(3), partial.read(&mut buf)).await,
+            Ok(Ok(0)) | Ok(Err(_))
+        );
+        (idle_closed, partial_open, partial_closed)
+    })
+    .await;
+
+    assert!(idle_closed, "the idle keep-alive connection must be closed");
+    assert!(
+        partial_open,
+        "a half-received request is not idle: it must stay open"
+    );
+    assert!(
+        partial_closed,
+        "closeAllConnections() must drop the half-received one"
+    );
+}
+
+// Node answers `408 Request Timeout` (and closes) when the application's
+// `headersTimeout` runs out on a half-received head. 3va only did it for
+// `requestTimeout`, so a head that never finished was dropped without a word
+// (test-http-server-headers-timeout-*).
+#[tokio::test]
+async fn headers_timeout_answers_408() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer({{ headersTimeout: 300, requestTimeout: 0, keepAliveTimeout: 0 }},
+            function(req, res) {{ res.end('ok'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let response = drive_until(&mut e, async {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        // A head that never ends.
+        s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n").await.unwrap();
+        let mut got = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut got)).await;
+        String::from_utf8_lossy(&got).to_string()
+    })
+    .await;
+    assert_eq!(
+        response,
+        "HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n"
     );
 }

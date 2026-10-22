@@ -3289,6 +3289,107 @@ enum PermissionsAction {
     },
 }
 
+/// Whether the event loop has seen the signal and delivered it to the script
+/// (or taken the default action). The watchdog below only forces the exit when
+/// this is still false after its grace period: a script with a `SIGTERM`
+/// listener may spend as long as it needs draining its connections, as in
+/// Node.
+#[cfg(unix)]
+static SIGNAL_ACKNOWLEDGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Ends the process if a SIGTERM or a SIGINT does not reach the event loop.
+///
+/// The signal handlers of the runtime replace the default action of the
+/// signals, so a script stuck in a busy loop (which never gives the event
+/// loop a turn) would ignore them. The watchdog waits in its own thread —
+/// the signal reaches it even while the script spins — and, if the event loop
+/// has not acknowledged the signal after the grace period, ends it with the
+/// conventional status (128 + the signal number). When the loop does answer,
+/// the watchdog leaves the decision to the application.
+#[cfg(unix)]
+fn spawn_signal_watchdog() -> Option<std::thread::JoinHandle<()>> {
+    use std::sync::atomic::Ordering;
+    const GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+    std::thread::Builder::new()
+        .name("3va-signal-watchdog".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            runtime.block_on(async {
+                let mut term =
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                let mut int =
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                let code = tokio::select! {
+                    _ = term.recv() => 143,
+                    _ = int.recv() => 130,
+                };
+                // The event loop had its chance to see the signal and run the
+                // script's handler. If it never got a turn (a busy loop), the
+                // process has to end here; if it did, the application decides
+                // when to stop and the watchdog is done.
+                tokio::time::sleep(GRACE).await;
+                if SIGNAL_ACKNOWLEDGED.load(Ordering::SeqCst) {
+                    return;
+                }
+                eprintln!(
+                    "[3va] the script did not stop after the signal; ending the process ({code})"
+                );
+                std::process::exit(code);
+            });
+        })
+        .ok()
+}
+
+/// Marks that the event loop has seen the signal, so the watchdog leaves the
+/// exit to the runtime from now on.
+#[cfg(unix)]
+fn signal_acknowledge() {
+    SIGNAL_ACKNOWLEDGED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Deliver a signal to the script's listeners, as Node does. Returns whether
+/// one was registered: without a listener the caller takes the default action
+/// (drain and stop with 128 + the signal).
+#[cfg(unix)]
+async fn deliver_signal(engine: &mut vvva_js::JsEngine, signal: &str) -> anyhow::Result<bool> {
+    signal_acknowledge();
+    engine.emit_process_signal(signal).await
+}
+
+/// The Node-compatible runtime flags as they were written on the command
+/// line, in order. Node exposes the same list as `process.execArgv`.
+fn node_exec_argv() -> Vec<String> {
+    const NODE_FLAGS: &[&str] = &[
+        "--no-warnings",
+        "--pending-deprecation",
+        "--expose-gc",
+        "--expose_gc",
+        "--zero-fill-buffers",
+        "--insecure-http-parser",
+        "--tls-min-v1.0",
+    ];
+    std::env::args()
+        .skip(1)
+        .filter(|a| NODE_FLAGS.contains(&a.as_str()))
+        .map(|a| a.to_string())
+        .collect()
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
@@ -3338,6 +3439,44 @@ enum Commands {
         /// package.json grants honored and everything else denied without asking.
         #[arg(long = "no-prompt")]
         no_prompt: bool,
+
+        /// Do not print warnings (Node's `--no-warnings`). The `warning` event
+        /// is still delivered, like in Node; 3va prints no warnings by
+        /// default, so the flag only keeps stderr clean.
+        #[arg(long = "no-warnings")]
+        no_warnings: bool,
+
+        /// Enable the pending deprecation warnings (Node's
+        /// `--pending-deprecation`). 3va has no pending deprecations yet, so
+        /// the flag currently changes nothing.
+        #[arg(long = "pending-deprecation")]
+        pending_deprecation: bool,
+
+        /// Expose `globalThis.gc()` (Node's `--expose-gc`).
+        #[arg(long = "expose-gc", alias = "expose_gc")]
+        expose_gc: bool,
+
+        /// Zero-fill the memory `Buffer.allocUnsafe()` hands out (Node's
+        /// `--zero-fill-buffers`). 3va's buffers are always zero-filled, so
+        /// the flag matches the default behavior.
+        #[arg(long = "zero-fill-buffers")]
+        zero_fill_buffers: bool,
+
+        /// Parse HTTP headers leniently, accepting control characters in
+        /// header values (Node's `--insecure-http-parser`). 3va's parser
+        /// already accepts them.
+        #[arg(long = "insecure-http-parser")]
+        insecure_http_parser: bool,
+
+        /// Allow TLS 1.0 (Node's `--tls-min-v1.0`). Not supported: 3va's TLS
+        /// stack (rustls) has a TLS 1.2 floor.
+        #[arg(long = "tls-min-v1.0")]
+        tls_min_v1_0: bool,
+
+        /// The reporter `node:test` uses (Node's `--test-reporter`): `spec`
+        /// (the default in Node) or `tap`.
+        #[arg(long = "test-reporter", default_value = "spec")]
+        test_reporter: String,
 
         /// Print each denied permission the moment it is refused, showing what
         /// the script was trying to do and the flag that would allow it.
@@ -4402,6 +4541,13 @@ async fn main() -> anyhow::Result<()> {
             allow_child_process,
             allow_ffi,
             no_prompt,
+            no_warnings,
+            pending_deprecation,
+            expose_gc,
+            zero_fill_buffers,
+            insecure_http_parser,
+            tls_min_v1_0,
+            test_reporter,
             trace_denials,
             inspect,
             audit_log,
@@ -4420,6 +4566,25 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             let __t = std::time::Instant::now();
+            // Node-compatible runtime flags. They are process-wide switches,
+            // set before the engine (and its snapshot) is built.
+            if *tls_min_v1_0 {
+                anyhow::bail!(
+                    "--tls-min-v1.0 is not supported by 3va: its TLS stack (rustls) \
+                     has a TLS 1.2 floor"
+                );
+            }
+            vvva_js::node_flags::set_no_warnings(*no_warnings);
+            vvva_js::node_flags::set_pending_deprecation(*pending_deprecation);
+            vvva_js::node_flags::set_zero_fill_buffers(*zero_fill_buffers);
+            vvva_js::node_flags::set_insecure_http_parser(*insecure_http_parser);
+            vvva_js::node_flags::set_test_reporter(test_reporter.clone());
+            if *expose_gc {
+                vvva_js::node_flags::set_expose_gc(true);
+            }
+            // `process.execArgv`: the runtime flags as they were written, the
+            // way Node reports them.
+            vvva_js::node_flags::set_exec_argv(node_exec_argv());
             maybe_auto_install(
                 file.parent().unwrap_or(std::path::Path::new(".")),
                 std::io::stderr().is_terminal() && !*no_prompt,
@@ -4596,15 +4761,116 @@ async fn main() -> anyhow::Result<()> {
                 #[cfg(unix)]
                 let mut sigterm =
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+                // SIGINT as a stream too, not the one-shot `ctrl_c()` future:
+                // a second Ctrl+C has to reach the handler while it drains, so
+                // the signal must be re-armed between deliveries.
+                #[cfg(unix)]
+                let mut sigint =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
+                // A script that never yields (a busy loop) does not let the
+                // select below see the signal, and the handler tokio installs
+                // replaces the default action of SIGTERM: the process would
+                // spin for ever and ignore the signal. This watchdog runs in
+                // its own thread (the signal is delivered to it even while the
+                // script spins) and ends the process if it is still alive a
+                // few seconds after the signal.
+                #[cfg(unix)]
+                let _watchdog = spawn_signal_watchdog();
 
                 let __t = std::time::Instant::now();
                 let mut run_result = Ok(());
                 let mut interrupted = false;
+                // Set when the script has a listener for the signal: Node then
+                // disables the default action and the application decides when
+                // to exit, so the event loop keeps running below.
+                let mut signal_handled = false;
+                // Node's status for the default action (128 + the signal).
+                let mut signal_exit_code: Option<i32> = None;
                 #[cfg(unix)]
-                tokio::select! {
-                    result = engine.eval_file_with_args(file, script_args) => { run_result = result; }
-                    _ = tokio::signal::ctrl_c() => { interrupted = true; engine.drain_ws_connections().await; }
-                    _ = sigterm.recv() => { interrupted = true; engine.drain_ws_connections().await; }
+                {
+                    // Deliver *each* signal, not just the first: the first one
+                    // interrupts the entry evaluation (a script awaiting a slow
+                    // import, or a busy loop that still yields), and later ones
+                    // reach the handler while it drains. A one-shot `select!`
+                    // delivered only the first, so a second Ctrl+C — the one a
+                    // person sends to cut a stuck shutdown — was lost.
+                    let mut eval_done = false;
+                    loop {
+                        if interrupted {
+                            break;
+                        }
+                        if !eval_done {
+                            tokio::select! {
+                                result = engine.eval_file_with_args(file, script_args) => {
+                                    run_result = result;
+                                    eval_done = true;
+                                }
+                                _ = sigint.recv() => {
+                                    match deliver_signal(&mut engine, "SIGINT").await {
+                                        Ok(true) => {
+                                            signal_handled = true;
+                                            eval_done = true;
+                                        }
+                                        _ => {
+                                            interrupted = true;
+                                            signal_exit_code = Some(130);
+                                            engine.drain_ws_connections().await;
+                                            break;
+                                        }
+                                    }
+                                }
+                                _ = sigterm.recv() => {
+                                    match deliver_signal(&mut engine, "SIGTERM").await {
+                                        Ok(true) => {
+                                            signal_handled = true;
+                                            eval_done = true;
+                                        }
+                                        _ => {
+                                            interrupted = true;
+                                            signal_exit_code = Some(143);
+                                            engine.drain_ws_connections().await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else if run_result.is_ok() && signal_handled {
+                            // The handler keeps the loop alive: run it, still
+                            // delivering every signal that arrives (a second
+                            // Ctrl+C must reach the application).
+                            tokio::select! {
+                                result = engine.run_event_loop() => {
+                                    run_result = result;
+                                    break;
+                                }
+                                _ = sigint.recv() => {
+                                    match deliver_signal(&mut engine, "SIGINT").await {
+                                        Ok(true) => signal_handled = true,
+                                        _ => {
+                                            interrupted = true;
+                                            signal_exit_code = Some(130);
+                                            engine.drain_ws_connections().await;
+                                            break;
+                                        }
+                                    }
+                                }
+                                _ = sigterm.recv() => {
+                                    match deliver_signal(&mut engine, "SIGTERM").await {
+                                        Ok(true) => signal_handled = true,
+                                        _ => {
+                                            interrupted = true;
+                                            signal_exit_code = Some(143);
+                                            engine.drain_ws_connections().await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
                 }
 
                 #[cfg(not(unix))]
@@ -4622,6 +4888,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 report_denials(&permissions);
                 run_result?;
+                if let Some(code) = signal_exit_code {
+                    run_exit_code = Some(code);
+                }
                 if __trace {
                     eprintln!("[startup] eval_file_with_args: {:?}", __t.elapsed());
                     eprintln!("[startup] total main() time: {:?}", __t_main.elapsed());

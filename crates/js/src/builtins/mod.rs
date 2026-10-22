@@ -24,6 +24,7 @@ pub mod irc;
 pub mod modules;
 pub mod mqtt;
 pub mod napi;
+pub mod node_test;
 pub mod os_info;
 pub mod pop3;
 pub mod process;
@@ -35,6 +36,7 @@ pub mod tcp;
 pub mod timers;
 pub mod tls;
 pub mod v8_compat;
+pub mod validators;
 pub mod vm;
 pub mod web_globals;
 pub mod webrtc;
@@ -146,6 +148,16 @@ pub fn inject_all(
     let require_cache_init = "globalThis.__requireCache = globalThis.__requireCache || {}; globalThis.__loadedModules = globalThis.__loadedModules || {}; globalThis.__fallbackModules = globalThis.__fallbackModules || {};";
     code_cache::bootstrap_js(scope, "require-cache-init", require_cache_init)?;
 
+    // Node-compatible command-line flags (`--no-warnings`, `--pending-deprecation`,
+    // `--zero-fill-buffers`, `--insecure-http-parser`), published for the
+    // builtins that honour them. Per-run, not part of the startup snapshot:
+    // they depend on the command line.
+    let node_flags = format!(
+        "globalThis.__node_flags__ = {};",
+        crate::node_flags::js_flags_literal()
+    );
+    code_cache::bootstrap_js_per_run(scope, "node-flags", &node_flags)?;
+
     t!("buffer", buffer::inject_buffer(scope))?;
     t!(
         "process",
@@ -174,6 +186,8 @@ pub fn inject_all(
         "require",
         modules::inject_require(scope, permissions.clone())
     )?;
+    t!("node_test", node_test::inject_node_test(scope))?;
+    t!("validators", validators::inject_validators(scope))?;
     t!(
         "websocket",
         websocket::inject_websocket(scope, permissions.clone(), ws_pool)

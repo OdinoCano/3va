@@ -1,0 +1,5 @@
+{
+  "kind": "client-server",
+  "timeout_s": 40,
+  "description": "Fastify 5: JSON body, a buffer content-type parser and a binary response."
+}
