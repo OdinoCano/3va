@@ -226,6 +226,9 @@ for name in "${SCENARIOS[@]}"; do
         cli_status=$?
         set -e
       else
+        # Say why: in CI the server's stderr is not kept, and "status=99" alone
+        # cannot tell a missing dependency from a crash.
+        { echo "  [$name $combo] server did not become ready; its stderr:"; head -n 15 "$serr" | sed 's/^/    | /'; } >&2 || true
         printf '<<SERVER-NOT-READY>>\n' > "$clog"
         cli_status=99
         combo_error=1
