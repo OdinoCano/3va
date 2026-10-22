@@ -5888,6 +5888,12 @@ __httpSetHandler(self._id, function() {
                 }
                 if (chunk === undefined || chunk === null) { if (cb) cb(); return true; }
                 var buf = __reqChunkToBuffer(chunk, encoding);
+                // An empty write is a no-op, as in Node: it must not send the
+                // head (with Transfer-Encoding: chunked) nor a premature `0`
+                // chunk. `req.write('')` followed by `end()` otherwise framed
+                // the body as two empty chunked terminators, which a Node
+                // server rejects with 400 (the express differential).
+                if (buf.length === 0) { if (cb) queueMicrotask(cb); return true; }
                 this._bodyLen += buf.length;
                 // Node's OutgoingMessage: the head goes out on the first
                 // write(), not at end(). A streamed upload (or a proxy that
