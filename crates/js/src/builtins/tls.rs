@@ -133,6 +133,11 @@ impl TlsConnector {
                     }
                 }
             }
+            // Only reached for a request that asked `rejectUnauthorized: false`
+            // *and* passed the caller's permission check (tcp.rs refuses the
+            // request with ERR_TLS_VERIFICATION_SKIPPED unless `--allow-insecure`
+            // or a loopback host was granted). The opt-in is enforced before
+            // this connector is built, so the check is never disabled silently.
             if !opts.reject_unauthorized {
                 builder.danger_accept_invalid_certs(true);
                 builder.danger_accept_invalid_hostnames(true);
