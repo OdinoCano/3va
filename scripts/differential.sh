@@ -130,9 +130,15 @@ rm -rf "$WORK_DIR/lib"
 cp -r "$SRC_DIR/lib" "$WORK_DIR/lib"
 cp "$SRC_DIR/package.json" "$SRC_DIR/package-lock.json" "$WORK_DIR/"
 
-if [ ! -d "$WORK_DIR/node_modules" ] || [ "${DIFFERENTIAL_REFRESH:-}" = "1" ]; then
+# Reinstall when the lockfile changed since node_modules was made: a CI cache
+# restores an old node_modules, and a dependency added later (multer) was then
+# missing from every framework scenario, even the node/node baseline.
+lock_sum="$(sha256sum "$SRC_DIR/package-lock.json" | cut -d' ' -f1)"
+if [ ! -d "$WORK_DIR/node_modules" ] || [ "${DIFFERENTIAL_REFRESH:-}" = "1" ] \
+   || [ "$(cat "$WORK_DIR/.lock-sha256" 2>/dev/null)" != "$lock_sum" ]; then
   say "${C_DIM}Installing pinned npm dependencies (npm ci)…${C_OFF}"
   ( cd "$WORK_DIR" && npm ci --no-audit --no-fund >/dev/null 2>&1 )
+  printf '%s' "$lock_sum" > "$WORK_DIR/.lock-sha256"
 fi
 
 # A private CA for the tls-* scenarios; NODE_EXTRA_CA_CERTS points at it.
