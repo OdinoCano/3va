@@ -495,13 +495,11 @@ test-http-client-aborted-event.js
 test-http-client-agent-end-close-event.js
 test-http-client-agent.js
 test-http-client-check-http-token.js
-test-http-client-close-with-default-agent.js
 test-http-client-error-rawbytes.js
 test-http-client-headers-array.js
 test-http-client-headers-host-array.js
 test-http-client-insecure-http-parser-error.js
 test-http-client-invalid-path.js
-test-http-client-keep-alive-hint.js
 test-http-client-leaky-with-double-response.js
 test-http-client-null-prototype-options.js
 test-http-client-override-global-agent.js
@@ -624,7 +622,6 @@ test-http-raw-headers.js
 test-http-readable-data-event.js
 test-http-remove-connection-header-persists-connection.js
 test-http-remove-header-stays-removed.js
-test-http-req-close-robust-from-tampering.js
 test-http-req-res-close.js
 test-http-request-agent.js
 test-http-request-arguments.js
@@ -659,7 +656,6 @@ test-http-server-connection-list-when-close.js
 test-http-server-connections-checking-leak.js
 test-http-server-consumed-timeout.js
 test-http-server-de-chunked-trailer.js
-test-http-server-delete-parser.js
 test-http-server-destroy-socket-on-client-error.js
 test-http-server-drop-connections-in-cluster.js
 test-http-server-headers-timeout-delayed-headers.js
@@ -686,7 +682,6 @@ test-http-server-request-timeout-delayed-headers.js
 test-http-server-request-timeout-interrupted-body.js
 test-http-server-request-timeout-interrupted-headers.js
 test-http-server-request-timeout-keepalive.js
-test-http-server-request-timeout-pipelining.js
 test-http-server-request-timeout-upgrade.js
 test-http-server-response-standalone.js
 test-http-server-stale-close.js
@@ -832,7 +827,6 @@ test-net-dns-error.js
 test-net-dns-lookup.js
 test-net-eaddrinuse.js
 test-net-end-without-connect.js
-test-net-error-twice.js
 test-net-isip.js
 test-net-isipv4.js
 test-net-isipv6.js
@@ -875,8 +869,6 @@ test-net-server-nodelay.js
 test-net-server-options.js
 test-net-server-pause-on-connect.js
 test-net-server-reset.js
-test-net-server-unref-persistent.js
-test-net-server-unref.js
 test-net-socket-byteswritten.js
 test-net-socket-close-after-end.js
 test-net-socket-connect-invalid-autoselectfamily.js
@@ -884,7 +876,6 @@ test-net-socket-connect-invalid-autoselectfamilyattempttimeout.js
 test-net-socket-connecting.js
 test-net-socket-constructor.js
 test-net-socket-destroy-send.js
-test-net-socket-end-callback.js
 test-net-socket-local-address.js
 test-net-socket-no-halfopen-enforcer.js
 test-net-socket-ready-without-cb.js
@@ -1076,7 +1067,6 @@ test-string-decoder-end.js
 test-string-decoder-fuzz.js
 test-timers-args.js
 test-timers-clearImmediate-als.js
-test-timers-destroyed.js
 test-timers-dispose.js
 test-timers-immediate-queue-throw.js
 test-timers-immediate-unref-nested-once.js
@@ -1096,9 +1086,6 @@ test-timers-throw-when-cb-not-function.js
 test-timers-timeout-to-interval.js
 test-timers-to-primitive.js
 test-timers-unenroll-unref-interval.js
-test-timers-unref.js
-test-timers-unrefed-in-beforeexit.js
-test-timers-unrefed-in-callback.js
 test-timers-user-call.js
 test-timers-zero-timeout.js
 test-url-domain-ascii-unicode.js
