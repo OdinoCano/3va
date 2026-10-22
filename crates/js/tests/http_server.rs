@@ -2051,3 +2051,54 @@ async fn response_write_reports_backpressure_and_calls_back_before_finish() {
         "res.write() must report backpressure and its callback must run before 'finish'"
     );
 }
+
+// req.destroy(err) on the server (test-http-server-incomingmessage-destroy):
+// the request is aborted ('aborted' fires with `req.aborted === true`), the
+// connection is closed so the client sees the reset, and — because the HTTP
+// server owns its sockets — the error does not become an uncaught exception.
+#[tokio::test]
+async fn request_destroy_aborts_and_closes_the_connection() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__aborted = 'none';
+        var _server = http.createServer(function(req, res) {{
+            req.on('aborted', function() {{ globalThis.__aborted = String(req.aborted); }});
+            req.destroy(new Error('Destroy test'));
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    // A raw client: the server must close the connection (read returns 0),
+    // rather than leaving it half-open.
+    let n = drive_until(&mut e, async {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 64];
+        s.read(&mut buf).await.unwrap()
+    })
+    .await;
+    assert_eq!(
+        n, 0,
+        "the server must reset the connection after req.destroy()"
+    );
+
+    let aborted = e.eval_to_string("globalThis.__aborted").await.unwrap();
+    assert_eq!(
+        aborted, "true",
+        "'aborted' must fire with req.aborted === true"
+    );
+
+    e.eval("_server.close()").await.unwrap();
+}

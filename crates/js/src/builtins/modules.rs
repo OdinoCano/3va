@@ -1163,6 +1163,22 @@ pub fn inject_require(
             EventEmitter.prototype.emit = function(ev) {
                 _ensureEvents(this);
                 var args = Array.prototype.slice.call(arguments, 1);
+                // Node: emitting 'error' with no listener throws, so the
+                // runtime reports it as an uncaught exception. A silent no-op
+                // hid every error nobody listened for (and made
+                // `uncaughtException`-based recovery impossible).
+                if (ev === 'error') {
+                    var errListeners = this._events['error'];
+                    if (!errListeners || errListeners.length === 0) {
+                        var er = args[0];
+                        if (!(er instanceof Error)) {
+                            er = new Error('Unhandled error. (' + String(er) + ')');
+                            er.code = 'ERR_UNHANDLED_ERROR';
+                            er.context = args[0];
+                        }
+                        throw er;
+                    }
+                }
                 var listeners = (this._events[ev] || []).slice();
                 listeners.forEach(function(fn) { fn.apply(this, args); }, this);
                 return listeners.length > 0;
@@ -1191,7 +1207,22 @@ pub fn inject_require(
             EventEmitter.defaultMaxListeners = 10;
             EventEmitter.setMaxListeners = function(n) { EventEmitter.defaultMaxListeners = n; };
             EventEmitter.getMaxListeners = function() { return EventEmitter.defaultMaxListeners; };
-            EventEmitter.listenerCount = function(emitter, ev) { return emitter.listenerCount(ev); };
+            // Node's `events.listenerCount(emitter, type)` takes an
+            // EventEmitter *or* an EventTarget: `listenerCount(signal,
+            // 'abort')` is how libraries size the bookkeeping they keep for
+            // an AbortSignal (test-http-agent-abort-controller). 3va's
+            // AbortSignal is an EventTarget whose listeners live in
+            // `_listeners`; 'abort' is the only event it supports.
+            EventEmitter.listenerCount = function(emitter, ev) {
+                if (emitter && typeof emitter.listenerCount === 'function') return emitter.listenerCount(ev);
+                if (emitter && typeof emitter.addEventListener === 'function') {
+                    if (ev === 'abort' && Array.isArray(emitter._listeners)) return emitter._listeners.length;
+                    return 0;
+                }
+                var e = new TypeError('The "emitter" argument must be an instance of EventEmitter or EventTarget. Received ' + String(emitter));
+                e.code = 'ERR_INVALID_ARG_TYPE';
+                throw e;
+            };
             EventEmitter.EventEmitter = EventEmitter;
             EventEmitter.once = function(emitter, ev) {
                 return new Promise(function(resolve, reject) {
@@ -2504,7 +2535,40 @@ pub fn inject_require(
                 this._decoder = (enc && enc !== 'buffer') ? new StringDecoder(enc) : null;
                 return this;
             };
-            Readable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
+            // Node's stream destroy (lib/internal/streams/destroy.js): the
+            // stream is destroyed synchronously (`destroyed` and `errored`
+            // are set before destroy() returns), and 'error'/'close' are
+            // emitted on later ticks, with `closed` set just before 'close'.
+            // An 'error' with no listener is the process's uncaught exception
+            // in Node, not a silent no-op (test-http-client-incomingmessage-
+            // destroy relies on it, and so does any app that installs an
+            // `uncaughtException` handler instead of an error listener).
+            function __destroyStream(self, err) {
+                if (self.destroyed) {
+                    if (err && self.listenerCount('error') > 0) self.emit('error', err);
+                    return self;
+                }
+                self.destroyed = true;
+                self.errored = err === undefined ? null : err;
+                self.closed = false;
+                if (self._readableState) self._readableState.destroyed = true;
+                if (self._writableState) self._writableState.destroyed = true;
+                var next = (typeof process !== 'undefined' && typeof process.nextTick === 'function')
+                    ? process.nextTick : function(f) { queueMicrotask(f); };
+                // Two separate ticks, as in Node: an unhandled 'error' must
+                // not keep 'close' from being emitted.
+                next(function() {
+                    if (!err) return;
+                    // emit() itself throws when nobody listens, as in Node.
+                    self.emit('error', err);
+                });
+                next(function() {
+                    self.closed = true;
+                    self.emit('close');
+                });
+                return self;
+            }
+            Readable.prototype.destroy = function(err) { return __destroyStream(this, err); };
             Readable.prototype[Symbol.asyncIterator] = function() {
                 var self = this;
                 return {
@@ -2560,7 +2624,14 @@ pub fn inject_require(
                 var state = this._writableState;
                 if (state.ended) {
                     var err = new Error('write after end');
-                    this.emit('error', err);
+                    err.code = 'ERR_STREAM_WRITE_AFTER_END';
+                    // Node reports the error on a later tick (via destroy),
+                    // so `write()` still returns false synchronously and the
+                    // uncaught exception only fires once the loop runs.
+                    var self = this;
+                    var next = (typeof process !== 'undefined' && typeof process.nextTick === 'function')
+                        ? process.nextTick : function(f) { queueMicrotask(f); };
+                    next(function() { self.emit('error', err); });
                     if (cb) cb(err);
                     return false;
                 }
@@ -2634,7 +2705,7 @@ pub fn inject_require(
                 }
                 return this;
             };
-            Writable.prototype.destroy = function(err) { if (err) this.emit('error', err); this.emit('close'); return this; };
+            Writable.prototype.destroy = function(err) { return __destroyStream(this, err); };
             // TODO(2.13.0): implement — setDefaultEncoding must set the encoding used by write(string); see docs/05-js-engine/07-inventario-stubs.md §7.4.
             Writable.prototype.setDefaultEncoding = function() { return this; };
             Writable.prototype.cork = function() { this._writableState.corked++; };
@@ -3820,6 +3891,20 @@ pub fn inject_require(
             // call site below checks the type of the result instead of using try/catch.
             function _netErr(v) { return v instanceof Error ? v : new Error(String(v)); }
 
+            // Node's AbortError (internal/errors.js): name 'AbortError', code
+            // ABORT_ERR, and the signal's reason as `cause`.
+            function __abortError(signal) {
+                var reason = signal && signal.reason;
+                var e;
+                if (reason instanceof Error && reason.name === 'AbortError') e = reason;
+                else {
+                    e = new Error(reason && reason.message ? reason.message : 'The operation was aborted');
+                    e.name = 'AbortError';
+                }
+                if (!e.code) e.code = 'ABORT_ERR';
+                e.cause = reason;
+                return e;
+            }
             function Socket(opts) {
                 if (!(this instanceof Socket)) return new Socket(opts);
                 opts = opts || {};
@@ -3915,6 +4000,27 @@ pub fn inject_require(
                     host = host || 'localhost';
                 }
                 if (typeof cb === 'function') self.once('connect', cb);
+                // Node's Socket.prototype.connect honours `options.signal`:
+                // an already-aborted signal fails the connection on the next
+                // tick and a later abort destroys it with an AbortError. Net
+                // code (and http.Agent.createConnection, which forwards the
+                // request's signal) relies on it.
+                var signal = (opts && opts.signal) || null;
+                if (signal) {
+                    if (signal.aborted) {
+                        setTimeout(function() { self.destroy(__abortError(signal)); }, 0);
+                        return self;
+                    }
+                    var onAbort = function() {
+                        if (self._abortSignal !== signal) return;
+                        self._abortSignal = null;
+                        self._abortListener = null;
+                        self.destroy(__abortError(signal));
+                    };
+                    self._abortSignal = signal;
+                    self._abortListener = onAbort;
+                    if (typeof signal.addEventListener === 'function') signal.addEventListener('abort', onAbort);
+                }
                 self.connecting = true;
                 var result = __tcpConnect(host, port);
                 self.connecting = false;
@@ -3960,9 +4066,18 @@ pub fn inject_require(
             Socket.prototype.unref = function() { return this; };
             Socket.prototype.destroy = function(err) {
                 this._stopPoll();
+                if (this._abortSignal && this._abortListener) {
+                    var sig = this._abortSignal, fn = this._abortListener;
+                    this._abortSignal = null;
+                    this._abortListener = null;
+                    if (sig && typeof sig.removeEventListener === 'function') sig.removeEventListener('abort', fn);
+                }
                 if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
                 if (this._connId !== null) { __tcpClose(this._connId); this._connId = null; }
-                this.destroyed = true;
+                // __destroyStream sets `destroyed`/`errored` and schedules
+                // 'error'/'close'; setting it here first made destroy(err)
+                // drop the error (the guard in __destroyStream saw it as an
+                // already-destroyed stream with no listener yet).
                 return Duplex.prototype.destroy.call(this, err);
             };
             // Close once the read side has ended *and* the write side is done
@@ -4094,7 +4209,6 @@ pub fn inject_require(
             UpgradeSocket.prototype.destroy = function(err) {
                 this._stopPoll();
                 if (this._connId !== null) { __upgradeClose(this._connId); this._connId = null; }
-                this.destroyed = true;
                 return Duplex.prototype.destroy.call(this, err);
             };
             UpgradeSocket.prototype.end = function(chunk, encoding, cb) {
@@ -4386,7 +4500,7 @@ pub fn inject_require(
                         ca: options.ca,
                         rejectUnauthorized: options.rejectUnauthorized,
                     })
-                    : netConnect(options.port, options.host);
+                    : netConnect({ host: options.host, port: options.port, signal: options.signal });
                 if (typeof cb === 'function') socket.once('connect', function() { cb(null, socket); });
                 return socket;
             };
@@ -4541,6 +4655,16 @@ pub fn inject_require(
                 req.readableEnded = true;
                 req.push(null);
             }
+            // The native body reader reports "the client went away" as a coded
+            // error. Node turns that into IncomingMessage.destroy(ConnReset):
+            // 'aborted' first, then 'error' only if the application listens
+            // (the server's socket absorbs it otherwise) and 'close'.
+            function abortIncomingRequest(req, err) {
+                if (req.destroyed) return;
+                var e = err;
+                if (!e || e.code === 'ECONNRESET') e = __connReset('aborted');
+                req.destroy(e);
+            }
             function pumpIncoming(req, st) {
                 var state = req._readableState;
                 function schedule() {
@@ -4571,25 +4695,14 @@ pub fn inject_require(
                     try {
                         chunk = __httpReadBody(st.bodyId, 65536);
                     } catch (e) {
-                        st.done = true;
-                        req.complete = true;
-                        req.readable = false;
-                        req.readableEnded = true;
-                        req.emit('error', e);
-                        req.push(null);
+                        // The native reader reported a body error (stall,
+                        // RUDY, abort): the request is aborted, not completed.
+                        abortIncomingRequest(req, e);
                         return;
                     }
                     if (chunk === null) { finishIncoming(req, st); return; }
                     if (chunk instanceof Error) {
-                        // The native reader reported a body error (stall, RUDY,
-                        // abort). Surface it on the request stream instead of
-                        // handing an Error to Buffer.from.
-                        st.done = true;
-                        req.complete = true;
-                        req.readable = false;
-                        req.readableEnded = true;
-                        req.emit('error', chunk);
-                        req.push(null);
+                        abortIncomingRequest(req, chunk);
                         return;
                     }
                     if (chunk === undefined) { st.waiting = true; scheduleRetry(); return; }
@@ -4647,15 +4760,36 @@ pub fn inject_require(
                 if (this.socket && typeof this.socket.setTimeout === 'function') this.socket.setTimeout(ms);
                 return this;
             };
+            // Node's `IncomingMessage._destroy` (lib/_http_incoming.js): an
+            // incomplete message is `aborted` and emits 'aborted' before
+            // 'error'/'close'. On the server, the error only surfaces as an
+            // 'error' event when someone listens for it (the socket absorbs
+            // it otherwise), so `req.destroy(err)` does not crash the process
+            // — test-http-server-incomingmessage-destroy relies on that.
             httpIncomingMessage.prototype.destroy = function(err) {
                 if (this.destroyed) return this;
                 this.destroyed = true;
+                this.errored = err === undefined ? null : err;
+                this.closed = false;
+                if (!this.readableEnded || !this.complete) {
+                    this.aborted = true;
+                    this.emit('aborted');
+                }
                 var st = this[kIncomingBody];
                 if (st) { st.done = true; this[kIncomingBody] = null; }
-                if (this.socket && typeof this.socket.destroy === 'function') this.socket.destroy();
+                if (this.socket && typeof this.socket.destroy === 'function' && !this.socket.destroyed) {
+                    this.socket.destroy(err);
+                }
                 var self = this;
-                queueMicrotask(function() {
-                    if (err) self.emit('error', err);
+                var next = (typeof process !== 'undefined' && typeof process.nextTick === 'function')
+                    ? process.nextTick : function(f) { queueMicrotask(f); };
+                if (err) {
+                    next(function() {
+                        if (self.listenerCount('error') > 0) self.emit('error', err);
+                    });
+                }
+                next(function() {
+                    self.closed = true;
                     self.emit('close');
                 });
                 return this;
@@ -5098,7 +5232,10 @@ pub fn inject_require(
                 }
                 if (typeof __httpCloseConn === 'function') __httpCloseConn(this._connId);
                 this.emit('close');
-                if (err) this.emit('error', err);
+                // Node's HTTP server owns its sockets: an error destroying one
+                // is absorbed by the server (socketOnError), not thrown at the
+                // application. Only an explicit listener sees it.
+                if (err && this.listenerCount('error') > 0) this.emit('error', err);
                 return this;
             };
             // A response that finished frees its slot; if the connection
@@ -5449,19 +5586,42 @@ __httpSetHandler(self._id, function() {
                 this.rawHeaders = [];
                 this.complete = false;
                 this.aborted = false;
+                // The Readable destroy state Node exposes on a message.
+                this.destroyed = false;
+                this.errored = null;
+                this.closed = false;
+                this.req = null;
             }
             util.inherits(ClientIncomingMessage, Readable);
             ClientIncomingMessage.prototype.setTimeout = function(ms, cb) { if (typeof cb === 'function') this.once('timeout', cb); return this; };
             ClientIncomingMessage.prototype.destroy = function(err) {
                 if (this.destroyed) return this;
                 this.destroyed = true;
-                this.aborted = true;
-                if (this.socket && typeof this.socket.destroy === 'function') this.socket.destroy();
+                this.errored = err === undefined ? null : err;
+                this.closed = false;
+                // Node's IncomingMessage._destroy: what is not fully read is
+                // an abort, and 'aborted' goes out before 'error'/'close'.
+                if (!this.readableEnded || !this.complete) {
+                    this.aborted = true;
+                    this.emit('aborted');
+                }
+                if (this.aborted && this.socket && !this.socket.destroyed
+                    && typeof this.socket.destroy === 'function') {
+                    // A live socket carries the error to the request (as in
+                    // Node), which is where an unhandled one reaches
+                    // `uncaughtException`.
+                    this.socket.destroy(err);
+                }
                 var self = this;
-                // Node (Readable.destroy): 'error' (when given) and 'close' are
-                // emitted on a later tick, after the socket has been torn down.
-                queueMicrotask(function() {
-                    if (err) self.emit('error', err);
+                var next = (typeof process !== 'undefined' && typeof process.nextTick === 'function')
+                    ? process.nextTick : function(f) { queueMicrotask(f); };
+                if (err) {
+                    next(function() {
+                        if (self.listenerCount('error') > 0) self.emit('error', err);
+                    });
+                }
+                next(function() {
+                    self.closed = true;
                     self.emit('close');
                 });
                 return this;
@@ -5531,6 +5691,16 @@ __httpSetHandler(self._id, function() {
                 return Buffer.from(String(chunk), encoding || 'utf8');
             }
 
+            // Node's ConnResetException (lib/internal/errors.js): an
+            // ECONNRESET whose message says what happened ('aborted' when the
+            // peer went away mid-response, 'socket hang up' when no response
+            // ever arrived).
+            function __connReset(message) {
+                var e = new Error(message);
+                e.code = 'ECONNRESET';
+                return e;
+            }
+
             // ClientRequest — a real HTTP client request: string and binary
             // bodies, several write() + end(), streaming (pipe), chunked vs
             // Content-Length framing, a de-framing response parser, half-close,
@@ -5568,6 +5738,14 @@ __httpSetHandler(self._id, function() {
                 this._response = null;
                 this._responseDone = false;
                 this._heardResponse = false;
+                // The request state Node exposes to applications (and what
+                // `test-http-destroyed-socket-write2` checks after a reset).
+                this.res = null;
+                this.outputData = [];
+                this.aborted = false;
+                this.closed = false;
+                this.errored = null;
+                this._hadError = false;
                 this._omitHost = options.setHost === false;
                 // The TLS options of the request (Node's `https.request`
                 // options). They reach the connection factory, so the
@@ -5680,9 +5858,24 @@ __httpSetHandler(self._id, function() {
             ClientRequest.prototype._fail = function(err) {
                 if (this._aborted || this._responseDone) return;
                 this._aborted = true;
+                this._hadError = true;
                 this._clearTimer();
                 this.emit('error', err);
                 if (this._socket && !this._socket.destroyed) this._socket.destroy();
+            };
+            // A socket 'error' (ECONNRESET/EPIPE) once the response has begun
+            // is the server tearing the connection down — a `Connection:
+            // close` server that resets right after its final bytes — not the
+            // request's own error. The response path finishes it ('end' on a
+            // graceful close, 'close' on a reset), exactly like Node's
+            // socketCloseListener. Before any response it is still a request
+            // error ('socket hang up').
+            ClientRequest.prototype._socketError = function(err) {
+                if (this._heardResponse && this._response && !this._response.complete) {
+                    this._onSocketEnd();
+                    return;
+                }
+                this._fail(err);
             };
             ClientRequest.prototype.write = function(chunk, encoding, cb) {
                 if (typeof encoding === 'function') { cb = encoding; encoding = 'utf8'; }
@@ -5696,6 +5889,15 @@ __httpSetHandler(self._id, function() {
                 if (chunk === undefined || chunk === null) { if (cb) cb(); return true; }
                 var buf = __reqChunkToBuffer(chunk, encoding);
                 this._bodyLen += buf.length;
+                // Node's OutgoingMessage: the head goes out on the first
+                // write(), not at end(). A streamed upload (or a proxy that
+                // wants the request in flight before the body is complete)
+                // otherwise never reaches the server: this is why
+                // `req.write('hello')` without end() used to hang.
+                if (!this._headerSent) {
+                    this._ensureConnected();
+                    if (this._connected) this._sendHead();
+                }
                 var flushed = true;
                 if (this._headerSent && this._socket) {
                     flushed = this._sendChunk(buf);
@@ -5758,28 +5960,38 @@ __httpSetHandler(self._id, function() {
                 if (this._connected) this._sendHead();
                 return this;
             };
+            // Node's ClientRequest.abort (lib/_http_client.js): mark the
+            // request aborted, emit 'abort' on a later tick and destroy it.
+            // The socket's 'close' then reports the response as aborted (or,
+            // with no response, 'socket hang up' on the request).
             ClientRequest.prototype.abort = function() {
-                if (this._aborted) return this;
-                this._aborted = true;
-                this.destroyed = true;
-                this._clearTimer();
-                if (this._socket && !this._socket.destroyed) this._socket.destroy();
-                this.emit('abort');
-                this.emit('close');
-                return this;
+                if (this.aborted) return this;
+                this.aborted = true;
+                var self = this;
+                (typeof process !== 'undefined' && typeof process.nextTick === 'function'
+                    ? process.nextTick : function(f) { queueMicrotask(f); })(function() { self.emit('abort'); });
+                return this.destroy();
             };
+            // Node's ClientRequest.destroy: nothing left to cancel once the
+            // request was fully sent and the response fully received; tearing
+            // the socket down then would emit an error on a socket that is
+            // already back in the agent (lib/_http_client.js).
             ClientRequest.prototype.destroy = function(err) {
-                if (this._aborted) { if (err) this.emit('error', err); return this; }
-                this._aborted = true;
+                if (this.destroyed) {
+                    if (err && this.listenerCount('error') > 0) this.emit('error', err);
+                    return this;
+                }
                 this.destroyed = true;
+                this.errored = err === undefined ? null : err;
                 this._clearTimer();
-                if (this._socket && !this._socket.destroyed) this._socket.destroy();
-                if (err) this.emit('error', err);
-                this.emit('close');
+                if (this._response && typeof this._response._dump === 'function') this._response._dump();
+                if (this.writableFinished && this._response && this._response.complete) return this;
+                if (this._socket && !this._socket.destroyed) this._socket.destroy(err);
+                else if (err) this.emit('error', err);
                 return this;
             };
             ClientRequest.prototype._ensureConnected = function() {
-                if (this._socket || this._aborted) return;
+                if (this._socket || this.destroyed) return;
                 var self = this;
                 this._keepAliveKey = (self._secure ? 'https:' : 'http:') + '//' + self._host + ':' + self._port;
                 var reused = (self._agent && typeof self._agent._getFreeSocket === 'function')
@@ -5787,7 +5999,7 @@ __httpSetHandler(self._id, function() {
                 if (reused) {
                     self._socket = reused;
                     self._connected = true;
-                    self._socketErrorHandler = function(err) { self._fail(err); };
+                    self._socketErrorHandler = function(err) { self._socketError(err); };
                     reused.on('error', self._socketErrorHandler);
                     var agent = self._agent;
                     if (agent && agent.sockets) {
@@ -5866,7 +6078,7 @@ __httpSetHandler(self._id, function() {
             ClientRequest.prototype._useSocket = function(socket) {
                 var self = this;
                 this._socket = socket;
-                this._socketErrorHandler = function(err) { self._fail(err); };
+                this._socketErrorHandler = function(err) { self._socketError(err); };
                 socket.on('error', this._socketErrorHandler);
                 // The agent keeps the socket it handed out, so `agent.destroy()`
                 // can close it and `agent.totalSocketCount` can count it.
@@ -5877,7 +6089,7 @@ __httpSetHandler(self._id, function() {
                     list.push(socket);
                 }
                 var go = function() {
-                    if (self._aborted) return;
+                    if (self.destroyed) return;
                     self._connected = true;
                     self.emit('socket', socket);
                     self._attachSocket(socket);
@@ -5977,10 +6189,13 @@ __httpSetHandler(self._id, function() {
                     self._consumeBody(chunk);
                 }
                 function onEnd() { self._onSocketEnd(); }
+                function onClose() { self._onSocketClose(); }
                 st.onData = onData;
                 st.onEnd = onEnd;
+                st.onClose = onClose;
                 socket.on('data', onData);
                 socket.once('end', onEnd);
+                socket.once('close', onClose);
                 socket._httpParserState = st;
             };
             Socket.prototype._detachHttpParser = function() {
@@ -5988,7 +6203,29 @@ __httpSetHandler(self._id, function() {
                 if (!st) return;
                 this.removeListener('data', st.onData);
                 this.removeListener('end', st.onEnd);
+                if (st.onClose) this.removeListener('close', st.onClose);
                 this._httpParserState = null;
+            };
+            // Node's socketCloseListener (lib/_http_client.js): a connection
+            // that goes away with the response still incomplete is an abort
+            // ('aborted' on the response, then 'close' on the request); a
+            // connection that closes before any response is 'socket hang up'.
+            ClientRequest.prototype._onSocketClose = function() {
+                var st = this._parserState;
+                if (!st) return;   // detached: the response completed or the socket was released
+                this._parserState = null;
+                var res = this._response;
+                if (res && !res.complete) {
+                    res.destroy(__connReset('aborted'));
+                } else if (!this._heardResponse && !this._hadError) {
+                    this._fail(__connReset('socket hang up'));
+                }
+                if (this.outputData) this.outputData.length = 0;
+                if (!this._closed) {
+                    this._closed = true;
+                    this.closed = true;
+                    this.emit('close');
+                }
             };
             ClientRequest.prototype._onHeaders = function(parsed, rest) {
                 var self = this;
@@ -6002,6 +6239,8 @@ __httpSetHandler(self._id, function() {
                 res.headers = parsed.headers;
                 res.rawHeaders = parsed.rawHeaders;
                 self._response = res;
+                self.res = res;
+                res.req = self;
 
                 if (parsed.statusCode === 101) {
                     self._clearTimer();
@@ -6122,7 +6361,7 @@ __httpSetHandler(self._id, function() {
                     if (socket._detachHttpParser) socket._detachHttpParser();
                     var connHdr = String(res.headers['connection'] || '').toLowerCase();
                     var keepAlive = res.httpVersionMinor === 0 ? connHdr === 'keep-alive' : connHdr !== 'close';
-                    keepAlive = keepAlive && !this._aborted && !socket.destroyed;
+                    keepAlive = keepAlive && !this.destroyed && !this._aborted && !socket.destroyed;
                     // Release the socket *before* ending the response: the next
                     // request is usually created from this stream's 'end'
                     // handler, and returning it after that made the agent hand
@@ -6140,12 +6379,14 @@ __httpSetHandler(self._id, function() {
                     }
                 }
                 res.push(null);
+                this.closed = true;
+                this._closed = true;
                 this.emit('close');
             };
             ClientRequest.prototype._onSocketEnd = function() {
                 var st = this._parserState;
                 if (!this._heardResponse) {
-                    if (!this._aborted) this._fail(new Error('socket hang up'));
+                    if (!this._aborted) this._fail(__connReset('socket hang up'));
                     return;
                 }
                 var res = this._response;

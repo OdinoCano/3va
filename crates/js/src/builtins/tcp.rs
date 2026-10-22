@@ -544,6 +544,17 @@ pub fn inject_tcp(
                             let err = js_code_err(_scope, "EAGAIN", "no data available");
                             rv.set(err);
                         }
+                        // A peer that reset the connection reads as
+                        // ECONNRESET, not a generic EIO: `http` maps it to the
+                        // documented "socket hang up"/"aborted" and Node tests
+                        // accept ECONNRESET/ECONNABORTED/EPIPE, never EIO.
+                        Err(e)
+                            if e.kind() == io::ErrorKind::ConnectionReset
+                                || e.kind() == io::ErrorKind::ConnectionAborted =>
+                        {
+                            let err = js_code_err(_scope, "ECONNRESET", "connection reset by peer");
+                            rv.set(err);
+                        }
                         Err(e) => {
                             let err = js_code_err(_scope, "EIO", e.to_string());
                             rv.set(err);

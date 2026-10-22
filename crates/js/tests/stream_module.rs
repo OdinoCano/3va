@@ -857,3 +857,44 @@ async fn finished_on_an_already_finished_stream_calls_back_async() {
     let r = e.eval_to_string("globalThis.__eos2").await.unwrap();
     assert_eq!(r, "cb");
 }
+
+// Node's stream destroy (lib/internal/streams/destroy.js): `destroyed` and
+// `errored` are set synchronously, `closed` flips to true just before 'close',
+// and 'error'/'close' go out on later ticks (an 'error' nobody listens for is
+// the process's uncaught exception, not a silent drop).
+#[tokio::test]
+async fn destroy_sets_state_and_emits_error_then_close() {
+    let mut e = engine().await;
+    e.eval(
+        r#"
+        var Readable = require('stream').Readable;
+        var s = new Readable({ read: function() {} });
+        globalThis.__order = [];
+        s.on('error', function(err) { globalThis.__order.push('error:' + err.message); });
+        s.on('close', function() { globalThis.__order.push('close'); });
+        s.destroy(new Error('boom'));
+        // destroy() is synchronous for the state, async for the events.
+        globalThis.__state = [s.destroyed, s.errored && s.errored.message, s.closed].join(',');
+        "#,
+    )
+    .await
+    .unwrap();
+    // `closed` must be true and 'close' emitted only after a tick.
+    pump_until(
+        &mut e,
+        "globalThis.__order.join('|').indexOf('close') !== -1 ? 'done' : 'false'",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("destroy() never emitted 'close'");
+    let state = e.eval_to_string("globalThis.__state").await.unwrap();
+    assert_eq!(
+        state, "true,boom,false",
+        "destroyed/errored must be set synchronously, closed still false"
+    );
+    let events = e
+        .eval_to_string("globalThis.__order.join('|')")
+        .await
+        .unwrap();
+    assert_eq!(events, "error:boom|close", "'error' must precede 'close'");
+}
