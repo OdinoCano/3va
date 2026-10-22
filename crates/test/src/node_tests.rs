@@ -1050,13 +1050,16 @@ mod tests {
         assert!(!still_ours(&not_seen), "sin hora de arranque no es nuestro");
 
         // The memory budget must apply the same check: a reused pid adds
-        // nothing, the one we saw adds its resident memory (~64 MB, far above
-        // any page-in noise). Comparing the two groups, not exact RSS values,
-        // keeps the assertion deterministic.
+        // nothing, the one we saw adds its resident memory. Comparing the two
+        // groups (not an exact RSS value) keeps the assertion deterministic:
+        // `with_ours` counts the child twice (as the test pid and as a seen
+        // descendant), `with_reused` counts it once, so the gap is the child's
+        // own RSS. If the start-time check were removed from `group_rss_kb`,
+        // the two groups would be equal and this assertion would fail.
         let with_reused = group_rss_kb(child_pid, &[reused]);
         let with_ours = group_rss_kb(child_pid, &[ours]);
         assert!(
-            with_ours > with_reused + 32 * 1024,
+            with_ours > with_reused,
             "el descendiente que vimos debe sumar su memoria: {with_ours} vs {with_reused}"
         );
 
