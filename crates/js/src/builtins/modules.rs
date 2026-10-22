@@ -5619,14 +5619,30 @@ __httpSetHandler(self._id, function() {
                 // Node 19+: closing the server drops its idle keep-alive
                 // connections; a connection with a response in flight is left
                 // to finish (the native task closes it then).
-                var ids = Object.keys(this._conns);
-                for (var i = 0; i < ids.length; i++) {
-                    var c = this._conns[ids[i]];
-                    if (c._resps.length === 0) c.destroy();
-                }
+                this.closeIdleConnections();
                 if (typeof callback === 'function') this.once('close', callback);
                 setTimeout(function() { self.emit('close'); }, 0);
                 return this;
+            };
+            // Node 18.2+: drop the connections with no request in progress. A
+            // connection that has received the first byte of a request (even a
+            // half-received head) or still has a response in flight is not idle.
+            httpServer.prototype.closeIdleConnections = function() {
+                var ids = Object.keys(this._conns);
+                for (var i = 0; i < ids.length; i++) {
+                    var c = this._conns[ids[i]];
+                    if (c && c._resps.length === 0 &&
+                        !(typeof __httpConnBusy === 'function' && __httpConnBusy(c._connId))) c.destroy();
+                }
+            };
+            // Node 18.2+: drop every connection, in progress or not.
+            httpServer.prototype.closeAllConnections = function() {
+                if (this._id !== null && typeof __httpCloseAll === 'function') __httpCloseAll(this._id);
+                var ids = Object.keys(this._conns);
+                for (var i = 0; i < ids.length; i++) {
+                    var c = this._conns[ids[i]];
+                    if (c) c.destroy();
+                }
             };
             httpServer.prototype.address = function() {
                 if (!this.listening) return null;

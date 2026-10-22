@@ -507,6 +507,34 @@ struct ConnEntry {
     /// connection task drops the stream and closes the TCP connection, even
     /// while it is idle waiting for the next request head.
     close: Arc<tokio::sync::Notify>,
+    /// True from the first byte of a request until its response is done: a
+    /// connection with a request in progress (even half-received) is not idle,
+    /// which is what `closeIdleConnections()` and `close()` must leave alone.
+    busy: Arc<std::sync::atomic::AtomicBool>,
+    /// The server this connection belongs to, for `__httpCloseAll`.
+    server_id: u32,
+}
+
+/// Wraps the read half so the connection knows when the peer has sent bytes,
+/// without the request parser having to report it.
+struct Tracked<R> {
+    inner: R,
+    busy: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Tracked<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let poll = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        if matches!(poll, std::task::Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            self.busy.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        poll
+    }
 }
 
 struct PendingResponse {
@@ -1495,7 +1523,11 @@ async fn handle_connection<S>(
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let (mut read_half, mut writer) = tokio::io::split(stream);
-    let mut reader = BufReader::new(&mut read_half);
+    let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut reader = BufReader::new(Tracked {
+        inner: &mut read_half,
+        busy: busy.clone(),
+    });
 
     let conn_id = {
         let mut n = conn_nid.lock().unwrap();
@@ -1514,6 +1546,8 @@ async fn handle_connection<S>(
         ConnEntry {
             resp_tx,
             close: close_wake.clone(),
+            busy: busy.clone(),
+            server_id,
         },
     );
 
@@ -1548,6 +1582,11 @@ async fn handle_connection<S>(
     let mut my_last_body: Option<u32> = None;
 
     'conn: loop {
+        // Between requests the connection is idle, unless the next request
+        // (pipelined) is already in the buffer.
+        if reader.buffer().is_empty() {
+            busy.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         // The timeouts the application set on the server (Node's
         // `headersTimeout`, `requestTimeout` and `keepAliveTimeout`). They
         // are read per request: the application can change them while the
@@ -3386,6 +3425,68 @@ pub fn inject_http_server(
             scope,
             V8String::new(scope, "__httpCloseConn").unwrap().into(),
             http_close_conn_fn.into(),
+        );
+    }
+
+    {
+        // `__httpCloseAll(serverId)`: `server.closeAllConnections()` — wake
+        // every connection task of that server, including those whose request
+        // has not reached JS yet (a half-received head has no JS socket).
+        let conns_ptr = native_ctx.leak(conns.clone());
+        let external = v8::External::new(scope, conns_ptr);
+        let http_close_all_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let conns = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const Arc<Mutex<HashMap<u32, ConnEntry>>>)
+                };
+                let server_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                for c in conns.lock().unwrap().values() {
+                    if c.server_id == server_id {
+                        c.close.notify_one();
+                    }
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpCloseAll").unwrap().into(),
+            http_close_all_fn.into(),
+        );
+    }
+
+    {
+        // `__httpConnBusy(connId)`: true while the connection has a request in
+        // progress (first byte received, response not done); false when it is
+        // idle between keep-alive requests or unknown.
+        let conns_ptr = native_ctx.leak(conns.clone());
+        let external = v8::External::new(scope, conns_ptr);
+        let http_conn_busy_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let conns = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const Arc<Mutex<HashMap<u32, ConnEntry>>>)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let busy = conns
+                    .lock()
+                    .unwrap()
+                    .get(&conn_id)
+                    .is_some_and(|c| c.busy.load(std::sync::atomic::Ordering::Relaxed));
+                rv.set(v8::Boolean::new(scope, busy).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpConnBusy").unwrap().into(),
+            http_conn_busy_fn.into(),
         );
     }
 

@@ -2220,3 +2220,88 @@ async fn client_abort_emits_aborted_on_the_server_request() {
         "the server request must report ECONNRESET"
     );
 }
+
+// `server.closeIdleConnections()` drops the keep-alive connection that has no
+// request in progress and leaves alone one whose request head is half
+// received; `closeAllConnections()` drops that one too, though its request
+// never reached JS (so it has no JS socket). Node 18.2+ behaviour; before this
+// neither method existed and `test-http(s)-server-close-*` hung.
+#[tokio::test]
+async fn close_idle_spares_a_half_received_request_and_close_all_drops_it() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{
+            if (req.url === '/idle') setTimeout(function() {{ _server.closeIdleConnections(); }}, 50);
+            if (req.url === '/all') setTimeout(function() {{ _server.closeAllConnections(); }}, 50);
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let (idle_closed, partial_open, partial_closed) = drive_until(&mut e, async {
+        // A request head that never finishes.
+        let mut partial = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        partial.write_all(b"GET / HTTP/1.1").await.unwrap();
+
+        // A keep-alive connection that finished its request: idle.
+        let mut idle = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        idle.write_all(b"GET /idle HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 512];
+        // The response, then EOF once closeIdleConnections() runs.
+        let idle_closed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match idle.read(&mut buf).await {
+                    Ok(0) | Err(_) => return true,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        // The half-received one is still open.
+        let partial_open = tokio::time::timeout(Duration::from_millis(300), partial.read(&mut buf))
+            .await
+            .is_err();
+
+        // closeAllConnections() drops it as well.
+        let mut third = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        third
+            .write_all(b"GET /all HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let partial_closed = matches!(
+            tokio::time::timeout(Duration::from_secs(3), partial.read(&mut buf)).await,
+            Ok(Ok(0)) | Ok(Err(_))
+        );
+        (idle_closed, partial_open, partial_closed)
+    })
+    .await;
+
+    assert!(idle_closed, "the idle keep-alive connection must be closed");
+    assert!(
+        partial_open,
+        "a half-received request is not idle: it must stay open"
+    );
+    assert!(
+        partial_closed,
+        "closeAllConnections() must drop the half-received one"
+    );
+}
