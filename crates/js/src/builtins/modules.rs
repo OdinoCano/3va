@@ -4832,6 +4832,11 @@ pub fn inject_require(
                 this._chunks = [];
                 this.finished = false;
                 this.headersSent = false;
+                // Streaming state: once the head has been flushed to the socket
+                // (first write/flushHeaders), further writes go out incrementally
+                // as chunked frames instead of buffering until end().
+                this._headSent = false;
+                this._chunked = false;
                 // Node sends a `Date` header unless the application turns it
                 // off (`res.sendDate = false`).
                 this.sendDate = true;
@@ -4977,6 +4982,40 @@ pub fn inject_require(
                 if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.byteLength(c) : c.length;
                 return (c && typeof c.length === 'number') ? c.length : 0;
             };
+            // A chunk as bytes, for the streaming write path.
+            var __httpChunkToBytes = function(chunk, encoding) {
+                if (typeof Buffer !== 'undefined' && Buffer.isBuffer(chunk)) return chunk;
+                if (chunk instanceof Uint8Array) return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+                if (typeof chunk === 'string') return Buffer.from(chunk, encoding || 'utf8');
+                return Buffer.from(String(chunk), encoding || 'utf8');
+            };
+            // Whether the response can stream incrementally: HTTP/1.1 with no
+            // Content-Length or Transfer-Encoding set (Node frames it chunked).
+            var __httpCanStream = function(res) {
+                return res.req && res.req.httpVersionMinor >= 1
+                    && res.getHeader('Content-Length') === undefined
+                    && res.getHeader('Transfer-Encoding') === undefined;
+            };
+            // Flush the head to the socket and switch the response into
+            // streaming mode. The native side builds the status line and
+            // headers (Date, Connection, validation) exactly like the one-shot
+            // responder; only the framing differs: chunked when the app set no
+            // Content-Length.
+            httpServerResponse.prototype._sendHeadStreaming = function() {
+                if (this._headSent) return;
+                if (!this.headersSent) this._implicitHeader();
+                if (!this.statusMessage) this.statusMessage = HTTP_STATUS_CODES[String(this.statusCode)] || '';
+                this._chunked = __httpCanStream(this);
+                this._headSent = true;
+                this.headersSent = true;
+                var cl = this.getHeader('Content-Length');
+                var declaredCL = (cl !== undefined && /^\d+$/.test(String(cl).trim()))
+                    ? parseInt(String(cl).trim(), 10) : -1;
+                __httpRespondStream(this._connId, this.statusCode, this.statusMessage,
+                    JSON.stringify(this._headers), this.sendDate !== false,
+                    !this._removedConnection, this._closeAfter === true,
+                    this._chunked ? -1 : declaredCL);
+            };
             httpServerResponse.prototype.write = function(chunk, encoding, callback) {
                 if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
                 if (this.finished) {
@@ -4987,18 +5026,36 @@ pub fn inject_require(
                     return false;
                 }
                 if (chunk !== undefined && chunk !== null) {
-                    this._chunks.push(chunk);
-                    this._buffered = (this._buffered || 0) + __httpBytes(chunk);
-                    if (typeof callback === 'function') {
-                        (this._writeCallbacks || (this._writeCallbacks = [])).push(callback);
+                    if (this._headSent || __httpCanStream(this)) {
+                        // Incremental: flush the head on the first write and send
+                        // this chunk to the socket right away (chunked framing
+                        // when there is no Content-Length), so the client sees
+                        // it before end() — `res.write('asd')` without end()
+                        // used to send nothing at all.
+                        if (!this._headSent) this._sendHeadStreaming();
+                        var sbuf = __httpChunkToBytes(chunk, encoding);
+                        if (this._chunked) {
+                            sbuf = Buffer.concat([Buffer.from(sbuf.length.toString(16) + '\r\n'), sbuf, Buffer.from('\r\n')]);
+                        }
+                        __httpRespondChunk(this._connId, sbuf);
+                        if (typeof callback === 'function') queueMicrotask(callback);
+                    } else {
+                        // Not streamable (HTTP/1.0, or an explicit Content-Length
+                        // / Transfer-Encoding): buffer and send as one response
+                        // at end(), as before.
+                        this._chunks.push(chunk);
+                        this._buffered = (this._buffered || 0) + __httpBytes(chunk);
+                        if (typeof callback === 'function') {
+                            (this._writeCallbacks || (this._writeCallbacks = [])).push(callback);
+                        }
                     }
                 } else if (typeof callback === 'function') {
                     queueMicrotask(callback);
                 }
-                // Writable's high-water mark (16 KiB by default). The response
-                // is flushed as one write at end(), so everything written so
-                // far is still pending here: `while (res.write(buf))` has to
-                // see the false once the mark is passed, or the loop never
+                // Writable's high-water mark (16 KiB by default). A buffered
+                // response is flushed as one write at end(), so everything
+                // written so far is still pending here: `while (res.write(buf))`
+                // has to see false once the mark is passed, or the loop never
                 // stops (test-http-outgoing-finish.js ran out of memory).
                 return (this._buffered || 0) < (this.writableHighWaterMark || 16384);
             };
@@ -5006,48 +5063,62 @@ pub fn inject_require(
                 var self = this;
                 if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
                 if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
-                if (chunk !== undefined) this._chunks.push(chunk);
                 if (this.finished) { if (callback) setTimeout(callback, 0); return this; }
                 this.finished = true;
 
-                var headersJson = JSON.stringify(this._headers);
-                // Node sends the standard reason phrase when none was set.
-                if (!this.statusMessage) this.statusMessage = HTTP_STATUS_CODES[String(this.statusCode)] || '';
-                var isBinary = this._chunks.some(function(c) {
-                    return c instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(c));
-                });
-                if (isBinary) {
-                    var parts = this._chunks.map(function(c) {
-                        if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.from(c) : new TextEncoder().encode(c);
-                        return c;
-                    });
-                    var total = parts.reduce(function(n, p) { return n + p.length; }, 0);
-                    var merged = new Uint8Array(total);
-                    var off = 0;
-                    parts.forEach(function(p) { merged.set(p, off); off += p.length; });
-                    __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged, this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
-                } else {
-                    // Route through __httpRespondBytes (JS-side TextEncoder,
-                    // not the native __httpRespond(string) path) even for a
-                    // plain string body. __httpRespond converts the V8
-                    // string to a Rust String via to_rust_string_lossy(),
-                    // which for a large multi-megabyte string containing
-                    // multi-byte UTF-8 sequences (e.g. Metro serving a JS
-                    // bundle as a single ~4M-character string) was silently
-                    // corrupting individual characters — not consistently,
-                    // and not in a way curl-from-localhost's own single-shot
-                    // fetch always reproduced, which is what made it look
-                    // connection/cache-dependent. TextEncoder is a
-                    // spec'd, well-exercised primitive with no such issue at
-                    // this scale, so encoding here in JS and always calling
-                    // the byte-safe responder sidesteps the native
-                    // conversion entirely rather than depending on finding
-                    // the exact defect in it.
-                    var __finalS = this._chunks.join('');
-                    if (typeof Buffer !== 'undefined') {
-                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'), this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                if (this._headSent) {
+                    // The head is already out: send the final chunk (framed if
+                    // chunked) plus the terminator, and finish.
+                    var fbuf = chunk !== undefined ? __httpChunkToBytes(chunk, encoding) : null;
+                    if (this._chunked) {
+                        var fparts = [];
+                        if (fbuf && fbuf.length) fparts.push(Buffer.from(fbuf.length.toString(16) + '\r\n'), fbuf, Buffer.from('\r\n'));
+                        fparts.push(Buffer.from('0\r\n\r\n'));
+                        __httpRespondEnd(this._connId, Buffer.concat(fparts));
                     } else {
-                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS), this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                        __httpRespondEnd(this._connId, fbuf || new Uint8Array(0));
+                    }
+                } else {
+                    if (chunk !== undefined) this._chunks.push(chunk);
+                    var headersJson = JSON.stringify(this._headers);
+                    // Node sends the standard reason phrase when none was set.
+                    if (!this.statusMessage) this.statusMessage = HTTP_STATUS_CODES[String(this.statusCode)] || '';
+                    var isBinary = this._chunks.some(function(c) {
+                        return c instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(c));
+                    });
+                    if (isBinary) {
+                        var parts = this._chunks.map(function(c) {
+                            if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.from(c) : new TextEncoder().encode(c);
+                            return c;
+                        });
+                        var total = parts.reduce(function(n, p) { return n + p.length; }, 0);
+                        var merged = new Uint8Array(total);
+                        var off = 0;
+                        parts.forEach(function(p) { merged.set(p, off); off += p.length; });
+                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged, this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                    } else {
+                        // Route through __httpRespondBytes (JS-side TextEncoder,
+                        // not the native __httpRespond(string) path) even for a
+                        // plain string body. __httpRespond converts the V8
+                        // string to a Rust String via to_rust_string_lossy(),
+                        // which for a large multi-megabyte string containing
+                        // multi-byte UTF-8 sequences (e.g. Metro serving a JS
+                        // bundle as a single ~4M-character string) was silently
+                        // corrupting individual characters — not consistently,
+                        // and not in a way curl-from-localhost's own single-shot
+                        // fetch always reproduced, which is what made it look
+                        // connection/cache-dependent. TextEncoder is a
+                        // spec'd, well-exercised primitive with no such issue at
+                        // this scale, so encoding here in JS and always calling
+                        // the byte-safe responder sidesteps the native
+                        // conversion entirely rather than depending on finding
+                        // the exact defect in it.
+                        var __finalS = this._chunks.join('');
+                        if (typeof Buffer !== 'undefined') {
+                            __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'), this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                        } else {
+                            __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS), this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                        }
                     }
                 }
                 // A microtask, not a 0 ms timer: it still runs after the handler
@@ -5088,9 +5159,13 @@ pub fn inject_require(
                 if (this.socket && typeof this.socket.destroy === 'function') this.socket.destroy(err);
                 return this;
             };
-            // ponytail: no-op by design — the head and the body are written
-            // together in end(); see docs/05-js-engine/07-inventario-stubs.md §7.3.
-            httpServerResponse.prototype.flushHeaders = function() {};
+            // Node's `OutgoingMessage.flushHeaders`: send the head to the socket
+            // now, without waiting for the first write()/end(). A streaming
+            // response uses it to put the head on the wire immediately.
+            httpServerResponse.prototype.flushHeaders = function() {
+                this._sendHeadStreaming();
+                return this;
+            };
             // Node's ServerResponse has these (lib/_http_server.js): the
             // response can be handed a socket it did not come from
             // (`assignSocket`), give it back (`detachSocket`), and can carry
@@ -5498,6 +5573,39 @@ __httpSetHandler(self._id, function() {
                             _usock.destroy();
                         }
                     }
+                    // Connections that fully closed: abort whatever was in
+                    // flight on them, as Node's socketOnClose does (the request
+                    // sees 'aborted'/'error'/'close', the socket 'close').
+                    var _c, _cn = 0;
+                    while (_cn++ < 64 && typeof __httpClosedPoll === 'function'
+                           && (_c = __httpClosedPoll(self._id)) !== null && _c !== undefined) {
+                        var _csock = self._conns[_c];
+                        if (_csock) {
+                            if (!_csock.destroyed) {
+                                _csock.destroyed = true;
+                                if (_csock._timer) { clearTimeout(_csock._timer); _csock._timer = null; }
+                                delete self._conns[_c];
+                                var _resps = _csock._resps || [];
+                                for (var _ri = 0; _ri < _resps.length; _ri++) {
+                                    var _r = _resps[_ri];
+                                    if (_r && !_r.finished) {
+                                        _r.finished = true;
+                                        (function(r) {
+                                            queueMicrotask(function() { r.closed = true; r.emit('close'); });
+                                        })(_r);
+                                    }
+                                }
+                                _csock._resps = [];
+                                var _creq = _csock._req;
+                                if (_creq && !_creq.complete) {
+                                    _creq.destroy(__connReset('aborted'));
+                                }
+                                _csock.emit('close');
+                            } else {
+                                delete self._conns[_c];
+                            }
+                        }
+                    }
                     } catch(e) { console.error('[3va-http] request handler threw:', e && (e.stack || e.message || e)); }
                 });
                 setTimeout(function() { self.emit('listening'); }, 0);
@@ -5863,18 +5971,13 @@ __httpSetHandler(self._id, function() {
                 this.emit('error', err);
                 if (this._socket && !this._socket.destroyed) this._socket.destroy();
             };
-            // A socket 'error' (ECONNRESET/EPIPE) once the response has begun
-            // is the server tearing the connection down — a `Connection:
-            // close` server that resets right after its final bytes — not the
-            // request's own error. The response path finishes it ('end' on a
-            // graceful close, 'close' on a reset), exactly like Node's
-            // socketCloseListener. Before any response it is still a request
-            // error ('socket hang up').
+            // A socket 'error' once the response has been fully received is
+            // the server tearing down a `Connection: close` socket — not a
+            // request error. Before that (or with no response) it is the
+            // request's own error, e.g. the explicit error a caller passed to
+            // `res.destroy(err)` or a genuine ECONNRESET mid-body.
             ClientRequest.prototype._socketError = function(err) {
-                if (this._heardResponse && this._response && !this._response.complete) {
-                    this._onSocketEnd();
-                    return;
-                }
+                if (this._response && this._response.complete) return;
                 this._fail(err);
             };
             ClientRequest.prototype.write = function(chunk, encoding, cb) {

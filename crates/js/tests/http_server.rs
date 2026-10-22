@@ -2102,3 +2102,121 @@ async fn request_destroy_aborts_and_closes_the_connection() {
 
     e.eval("_server.close()").await.unwrap();
 }
+
+// C14 — `res.write()` streams: the head and the body reach the client before
+// `end()` (Transfer-Encoding: chunked when there is no Content-Length), so a
+// client's 'response'/'data' handlers fire without waiting for end().
+#[tokio::test]
+async fn response_write_streams_before_end() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{
+            res.write('hello');
+            // deliberately no end()
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let got = drive_until(&mut e, async {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let mut total = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            let n = s.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            total.extend_from_slice(&buf[..n]);
+            if total.windows(5).any(|w| w == b"hello") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&total).to_string()
+    })
+    .await;
+    assert!(
+        got.contains("HTTP/1.1 200"),
+        "the head must be sent before end(): {got:?}"
+    );
+    assert!(
+        got.contains("hello"),
+        "the body must stream before end(): {got:?}"
+    );
+
+    e.eval("_server.close()").await.unwrap();
+}
+
+// A client that aborts the connection mid-response must make the server's
+// request emit 'aborted' (with `req.aborted === true`) and 'error' ECONNRESET,
+// as Node's socketOnClose does — not hang until the response timeout.
+#[tokio::test]
+async fn client_abort_emits_aborted_on_the_server_request() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        globalThis.__aborted = 'none';
+        globalThis.__reqerr = 'none';
+        var _server = http.createServer(function(req, res) {{
+            req.on('aborted', function() {{ globalThis.__aborted = String(req.aborted); }});
+            req.on('error', function(err) {{
+                globalThis.__reqerr = err.code;
+                _server.close();
+            }});
+            res.write('hello');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    drive_until(&mut e, async {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let _ = s.read(&mut buf).await.unwrap(); // read the streamed head
+        drop(s); // abort the connection
+    })
+    .await;
+
+    // Drive the loop a little so the closed-connection notification reaches JS.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if e.eval_to_string("globalThis.__aborted").await.unwrap() != "none" {
+            break;
+        }
+        // Bounded: `run_event_loop` does not return while any HTTP listener of
+        // the process is alive, and another test's server may still be.
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(100), e.run_event_loop()).await;
+    }
+    let aborted = e.eval_to_string("globalThis.__aborted").await.unwrap();
+    assert_eq!(aborted, "true", "the server request must report 'aborted'");
+    let code = e.eval_to_string("globalThis.__reqerr").await.unwrap();
+    assert_eq!(
+        code, "ECONNRESET",
+        "the server request must report ECONNRESET"
+    );
+}

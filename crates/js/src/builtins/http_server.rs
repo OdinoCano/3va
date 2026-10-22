@@ -36,6 +36,11 @@ pub fn has_active_listeners() -> bool {
 /// `__httpListen`; drained by the non-blocking `__httpAcceptPoll`.
 type ReadyQueue = Arc<Mutex<HashMap<u32, std::collections::VecDeque<ReadyRequest>>>>;
 
+/// Connection ids that have fully closed (keyed by server id), so JS can
+/// abort the in-flight request/response on them. Populated by the connection
+/// task when it exits; drained by `__httpClosedPoll`.
+type ClosedQueue = Arc<Mutex<HashMap<u32, std::collections::VecDeque<u32>>>>;
+
 /// A parsed request waiting for JS. Handed over as plain values (see
 /// `__httpAcceptPoll`) rather than a JSON string JS would have to re-parse.
 struct ReadyRequest {
@@ -58,6 +63,7 @@ struct ReadyRequest {
 struct HttpDispatch {
     ready: ReadyQueue,
     upgrades: UpgradeQueue,
+    closed: ClosedQueue,
     wake: Arc<tokio::sync::Notify>,
     handlers: HashMap<u32, (v8::Global<v8::Function>, Vec<String>)>,
 }
@@ -74,12 +80,16 @@ pub fn has_ready(isolate: &v8::Isolate) -> bool {
     isolate.get_slot::<HttpDispatch>().is_some_and(|d| {
         let ready = d.ready.lock().unwrap();
         let upgrades = d.upgrades.lock().unwrap();
+        let closed = d.closed.lock().unwrap();
         d.handlers
             .keys()
             .any(|id| ready.get(id).is_some_and(|q| !q.is_empty()))
             || d.handlers
                 .keys()
                 .any(|id| upgrades.get(id).is_some_and(|q| !q.is_empty()))
+            || d.handlers
+                .keys()
+                .any(|id| closed.get(id).is_some_and(|q| !q.is_empty()))
     })
 }
 
@@ -92,11 +102,13 @@ pub fn dispatch_ready(scope: &mut v8::ContextScope<v8::HandleScope>) -> anyhow::
         };
         let ready = d.ready.lock().unwrap();
         let upgrades = d.upgrades.lock().unwrap();
+        let closed = d.closed.lock().unwrap();
         d.handlers
             .iter()
             .filter(|(id, _)| {
                 ready.get(id).is_some_and(|q| !q.is_empty())
                     || upgrades.get(id).is_some_and(|q| !q.is_empty())
+                    || closed.get(id).is_some_and(|q| !q.is_empty())
             })
             .map(|(_, h)| h.clone())
             .collect()
@@ -189,6 +201,7 @@ struct HttpListenCtx {
     ready: ReadyQueue,
     upgrades: UpgradeRegistry,
     upgrades_q: UpgradeQueue,
+    closed: ClosedQueue,
     wake: Arc<tokio::sync::Notify>,
     /// The timeouts the application set, per server.
     timeouts: Arc<Mutex<HashMap<u32, Arc<ServerTimeouts>>>>,
@@ -196,6 +209,10 @@ struct HttpListenCtx {
 
 struct HttpAcceptCtx {
     ready: ReadyQueue,
+}
+
+struct HttpClosedCtx {
+    closed: ClosedQueue,
 }
 
 /// The per-server timeout cells the application configures.
@@ -1386,6 +1403,55 @@ fn tls_acceptor(cert_pem: &str, key_pem: &str) -> Result<tokio_rustls::TlsAccept
 /// defeating the firewall's connection-exhaustion protection.
 const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Resolves when the peer closes the connection (EOF or a read error). Used
+/// only in the window after the request body is done and before the final
+/// response: a client that hangs up while the server streams a response must
+/// abort the request, not pin the connection open. It only peeks (`fill_buf`)
+/// and never consumes: if bytes are already waiting they are a pipelined
+/// request, which must stay in the buffer for the next loop turn, so the watch
+/// stops instead of discarding them.
+async fn watch_peer_close<R: AsyncBufRead + Unpin>(reader: &mut R) {
+    match reader.fill_buf().await {
+        Ok(buf) if !buf.is_empty() => std::future::pending::<()>().await,
+        _ => {}
+    }
+}
+
+/// Outcome of waiting for the final response after the body is read.
+enum WaitFinal {
+    /// A final response (or `None` if the response timeout elapsed).
+    Response(Option<PendingResponse>),
+    /// The peer closed the connection, or JS destroyed the socket.
+    Closed,
+}
+
+/// Wait for the final response once the body is done, writing informational
+/// and streamed chunks straight through and watching for the peer closing
+/// (read EOF) and for `__httpCloseConn` (close_wake).
+async fn wait_final<R: AsyncBufRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
+    reader: &mut R,
+    resp_rx: &mut tokio::sync::mpsc::Receiver<PendingResponse>,
+    writer: &mut W,
+    close_wake: &Arc<tokio::sync::Notify>,
+) -> WaitFinal {
+    loop {
+        let waited = tokio::select! {
+            _ = close_wake.notified() => return WaitFinal::Closed,
+            r = tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx.recv()) => r,
+            _ = watch_peer_close(reader) => return WaitFinal::Closed,
+        };
+        match waited {
+            Ok(Some(r)) if r.informational => {
+                let _ = writer.write_all(&r.bytes).await;
+                let _ = writer.flush().await;
+                continue;
+            }
+            Ok(r) => return WaitFinal::Response(r),
+            Err(_) => return WaitFinal::Response(None),
+        }
+    }
+}
+
 /// Human-readable message for a body-read failure, delivered to JS as the
 /// request stream's `'error'`.
 fn parse_error_message(e: &ParseError) -> String {
@@ -1422,6 +1488,7 @@ async fn handle_connection<S>(
     ready: ReadyQueue,
     upgrades: UpgradeRegistry,
     upgrades_q: UpgradeQueue,
+    closed: ClosedQueue,
     wake: Arc<tokio::sync::Notify>,
     app_timeouts: Arc<ServerTimeouts>,
 ) where
@@ -1437,7 +1504,10 @@ async fn handle_connection<S>(
         cid
     };
 
-    let (resp_tx, mut resp_rx) = mpsc::channel::<PendingResponse>(16);
+    // Sized for a streamed response (head + body chunks + terminator), so a
+    // normal incremental write never fills it before the connection task
+    // drains it to the socket.
+    let (resp_tx, mut resp_rx) = mpsc::channel::<PendingResponse>(256);
     let close_wake = Arc::new(tokio::sync::Notify::new());
     conns.lock().unwrap().insert(
         conn_id,
@@ -1761,73 +1831,81 @@ async fn handle_connection<S>(
             None => body_timeout,
         };
         let resp = {
-            let pump_pipe = body.as_ref().map(|(_, p)| p.clone());
-            let mut pump = Box::pin(async {
-                let pipe = pump_pipe?;
-                let mut sink = BodySink::Pipe(&pipe);
-                match pump_body(
-                    &mut reader,
-                    framing,
-                    &mut sink,
-                    body_budget,
-                    max_body,
-                    min_body_rate,
-                    max_hdr_bytes,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        pipe.finish();
-                        None
+            // Phase 1 — read the request body (if any) into its pipe,
+            // passing streamed chunks through as they come, until the body
+            // completes or the final response arrives first (the body is then
+            // abandoned: an unread body would be misparsed as the next
+            // request). After the body, `pump` is dropped so `wait_final` can
+            // borrow `reader` again to watch for the peer closing.
+            if has_body {
+                let (_, pipe) = body.as_ref().unwrap();
+                let mut sink = BodySink::Pipe(pipe);
+                let mut pump = Box::pin(async {
+                    match pump_body(
+                        &mut reader,
+                        framing,
+                        &mut sink,
+                        body_budget,
+                        max_body,
+                        min_body_rate,
+                        max_hdr_bytes,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            pipe.finish();
+                            None
+                        }
+                        Err(e) => {
+                            pipe.fail(parse_error_message(&e));
+                            Some(e)
+                        }
                     }
-                    Err(e) => {
-                        pipe.fail(parse_error_message(&e));
-                        Some(e)
-                    }
-                }
-            });
-            loop {
-                if body_done {
-                    // A silent body failure (stall, RUDY, client abort) means
-                    // the request can never complete: close now instead of
-                    // waiting out the response timeout.
-                    if body_err.is_some() {
-                        break None;
-                    }
-                    // Body fully read: bound the wait for JS's response so a
-                    // handler that never answers can't pin the connection open.
-                    let waited = tokio::select! {
+                });
+                let mut early_final: Option<PendingResponse> = None;
+                loop {
+                    tokio::select! {
                         _ = close_wake.notified() => break 'conn,
-                        r = tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx.recv()) => r,
-                    };
-                    match waited {
-                        Ok(Some(r)) if r.informational => {
-                            let _ = writer.write_all(&r.bytes).await;
-                            let _ = writer.flush().await;
-                            continue;
+                        r = resp_rx.recv() => {
+                            match r {
+                                // A 1xx informational response (or a streamed
+                                // chunk) goes out before the final one.
+                                Some(r) if r.informational => {
+                                    let _ = writer.write_all(&r.bytes).await;
+                                    let _ = writer.flush().await;
+                                    continue;
+                                }
+                                Some(r) => { early_final = Some(r); break; }
+                                None => break 'conn,
+                            }
                         }
-                        Ok(r) => break r,
-                        Err(_) => break None,
+                        res = &mut pump => {
+                            body_done = true;
+                            body_err = res;
+                            break;
+                        }
                     }
                 }
-                tokio::select! {
-                    _ = close_wake.notified() => break 'conn,
-                    r = resp_rx.recv() => {
-                        match r {
-                            // A 1xx informational response goes out before
-                            // the final one; the wait goes on.
-                            Some(r) if r.informational => {
-                                let _ = writer.write_all(&r.bytes).await;
-                                let _ = writer.flush().await;
-                                continue;
-                            }
-                            other => break other,
-                        }
+                drop(pump); // release the `&mut reader` borrow
+                if let Some(r) = early_final {
+                    // The final response arrived before the body finished:
+                    // abandon the body (body_done stays false, so the
+                    // connection closes after this response).
+                    Some(r)
+                } else if body_err.is_some() {
+                    None
+                } else {
+                    match wait_final(&mut reader, &mut resp_rx, &mut writer, &close_wake).await {
+                        WaitFinal::Response(r) => r,
+                        WaitFinal::Closed => break 'conn,
                     }
-                    res = &mut pump => {
-                        body_done = true;
-                        body_err = res;
-                    }
+                }
+            } else {
+                // No body: wait for the response with the peer-close watch so
+                // a client that hangs up mid-stream aborts the request.
+                match wait_final(&mut reader, &mut resp_rx, &mut writer, &close_wake).await {
+                    WaitFinal::Response(r) => r,
+                    WaitFinal::Closed => break 'conn,
                 }
             }
         };
@@ -1874,6 +1952,16 @@ async fn handle_connection<S>(
     }
 
     conns.lock().unwrap().remove(&conn_id);
+    // Tell JS this connection is gone so it can abort the in-flight request
+    // and response on it ('aborted'/'error'/'close'), as Node's
+    // socketOnClose does when the client hangs up.
+    closed
+        .lock()
+        .unwrap()
+        .entry(server_id)
+        .or_default()
+        .push_back(conn_id);
+    wake.notify_one();
     if let Some(id) = my_last_body {
         bodies.lock().unwrap().remove(&id);
     }
@@ -1904,12 +1992,14 @@ pub fn inject_http_server(
     let ready: ReadyQueue = Arc::new(Mutex::new(HashMap::new()));
     let upgrades: UpgradeRegistry = Arc::new(Mutex::new(HashMap::new()));
     let upgrades_q: UpgradeQueue = Arc::new(Mutex::new(HashMap::new()));
+    let closed: ClosedQueue = Arc::new(Mutex::new(HashMap::new()));
     let wake = Arc::new(tokio::sync::Notify::new());
     let timeouts: Arc<Mutex<HashMap<u32, Arc<ServerTimeouts>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     scope.set_slot(HttpDispatch {
         ready: ready.clone(),
         upgrades: upgrades_q.clone(),
+        closed: closed.clone(),
         wake: wake.clone(),
         handlers: HashMap::new(),
     });
@@ -1927,6 +2017,7 @@ pub fn inject_http_server(
             ready: ready.clone(),
             upgrades: upgrades.clone(),
             upgrades_q: upgrades_q.clone(),
+            closed: closed.clone(),
             wake: wake.clone(),
             nid: next_server_id.clone(),
             fw: fw.clone(),
@@ -2022,6 +2113,7 @@ pub fn inject_http_server(
                                 let ready = ctx.ready.clone();
                                 let upgrades = ctx.upgrades.clone();
                                 let upgrades_q = ctx.upgrades_q.clone();
+                                let closed = ctx.closed.clone();
                                 let wake = ctx.wake.clone();
                                 tokio::spawn(async move {
                                     loop {
@@ -2135,6 +2227,7 @@ pub fn inject_http_server(
                                         let tls2 = tls.clone();
                                         let upgrades2 = upgrades.clone();
                                         let upgrades_q2 = upgrades_q.clone();
+                                        let closed2 = closed.clone();
                                         let timeouts2 = server_timeouts.clone();
                                         tokio::spawn(async move {
                                             // TLS: handshake first, bounded by
@@ -2180,6 +2273,7 @@ pub fn inject_http_server(
                                                     ready2,
                                                     upgrades2,
                                                     upgrades_q2,
+                                                    closed2.clone(),
                                                     wake2,
                                                     timeouts2,
                                                 )
@@ -2206,6 +2300,7 @@ pub fn inject_http_server(
                                                 ready2,
                                                 upgrades2,
                                                 upgrades_q2,
+                                                closed2,
                                                 wake2,
                                                 timeouts2,
                                             )
@@ -2306,6 +2401,45 @@ pub fn inject_http_server(
             scope,
             V8String::new(scope, "__httpAcceptPoll").unwrap().into(),
             http_accept_fn.into(),
+        );
+    }
+
+    {
+        let ctx_ptr = native_ctx.leak(HttpClosedCtx {
+            closed: closed.clone(),
+        });
+        let external = v8::External::new(scope, ctx_ptr);
+        // Non-blocking: pops one closed connection id for `server_id`, or
+        // null. The connection task pushes here on exit; JS drains it to abort
+        // the request/response that was in flight on that connection.
+        let http_closed_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpClosedCtx)
+                };
+                let server_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let popped = ctx
+                    .closed
+                    .lock()
+                    .unwrap()
+                    .get_mut(&server_id)
+                    .and_then(|q| q.pop_front());
+                match popped {
+                    Some(conn_id) => {
+                        rv.set(v8::Integer::new_from_unsigned(scope, conn_id).into());
+                    }
+                    None => rv.set(v8::null(scope).into()),
+                }
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpClosedPoll").unwrap().into(),
+            http_closed_fn.into(),
         );
     }
 
@@ -2758,6 +2892,227 @@ pub fn inject_http_server(
             scope,
             V8String::new(scope, "__httpRespondBytes").unwrap().into(),
             http_respond_bytes_fn.into(),
+        );
+    }
+
+    // ── Streamed responses ──────────────────────────────────────────────────
+    // Node's OutgoingMessage sends the head on the first write()/end() and the
+    // body in subsequent chunks (Transfer-Encoding: chunked when no
+    // Content-Length was given). A `res.write()` before `end()` must therefore
+    // reach the client incrementally, not wait for `end()`: that is what lets
+    // `res.on('readable')`/`res.on('data')` fire on the client and, on the
+    // server, what a streaming response needs.
+    //
+    // The head is built here (status line, header validation, Date, Connection)
+    // for the same depth-in-defence as the one-shot responder; only the
+    // framing differs: chunked when the application did not set Content-Length.
+    {
+        let ctx_ptr = native_ctx.leak(HttpRespondCtx {
+            conns: conns.clone(),
+        });
+        let external = v8::External::new(scope, ctx_ptr);
+        let http_respond_stream_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpRespondCtx)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let status = args.get(1).uint32_value(scope).unwrap_or(200);
+                let status_text = args.get(2).to_rust_string_lossy(scope);
+                if !is_valid_status_text(&status_text) {
+                    let err = js_type_error_with_code(
+                        scope,
+                        "ERR_INVALID_CHAR",
+                        "Invalid character in statusMessage",
+                    );
+                    scope.throw_exception(err);
+                    return;
+                }
+                let headers_json = args.get(3).to_rust_string_lossy(scope);
+                let send_date = args.get(4).boolean_value(scope);
+                let send_connection = args.get(5).boolean_value(scope);
+                let close_after = args.get(6).boolean_value(scope);
+                // The declared body length: -1 means "no Content-Length yet"
+                // (chunked); anything else is the application's Content-Length.
+                let content_length = args.get(7).number_value(scope).unwrap_or(-1.0);
+
+                let extra = parse_extra_headers(&headers_json);
+                let mut resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
+                for (k, v) in &extra {
+                    let kl = k.to_lowercase();
+                    if kl == "content-length"
+                        || kl == "connection"
+                        || kl == "transfer-encoding"
+                        || kl == "date"
+                    {
+                        continue;
+                    }
+                    if !is_valid_header_name(k) || !is_valid_header_value(v) {
+                        let err = js_type_error_with_code(
+                            scope,
+                            "ERR_INVALID_CHAR",
+                            &format!("Invalid character in header content [\"{kl}\"]"),
+                        );
+                        scope.throw_exception(err);
+                        return;
+                    }
+                    resp.push_str(&format!("{}: {}\r\n", k, v));
+                }
+                if send_date {
+                    push_date_header(&mut resp);
+                }
+                if send_connection {
+                    resp.push_str(if close_after {
+                        "Connection: close\r\n"
+                    } else {
+                        "Connection: keep-alive\r\n"
+                    });
+                }
+                if content_length >= 0.0 {
+                    resp.push_str(&format!("Content-Length: {}\r\n", content_length as u64));
+                } else {
+                    resp.push_str("Transfer-Encoding: chunked\r\n");
+                }
+                resp.push_str("\r\n");
+
+                let guard = ctx.conns.lock().unwrap();
+                match guard.get(&conn_id) {
+                    Some(conn) => {
+                        let ok = conn.resp_tx.try_send(PendingResponse {
+                            conn_id,
+                            bytes: resp.into_bytes(),
+                            informational: true,
+                        });
+                        drop(guard);
+                        if ok.is_err() {
+                            let err = js_code_err(scope, "ENOENT", "connection closed");
+                            rv.set(err);
+                            return;
+                        }
+                    }
+                    None => {
+                        let err = js_code_err(scope, "ENOENT", "unknown conn_id");
+                        rv.set(err);
+                        return;
+                    }
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpRespondStream").unwrap().into(),
+            http_respond_stream_fn.into(),
+        );
+    }
+
+    {
+        let ctx_ptr = native_ctx.leak(HttpRespondCtx {
+            conns: conns.clone(),
+        });
+        let external = v8::External::new(scope, ctx_ptr);
+        let http_respond_chunk_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpRespondCtx)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let body_arg = args.get(1);
+                let bytes: Vec<u8> =
+                    if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(body_arg) {
+                        uint8array_to_vec(scope, arr)
+                    } else {
+                        vec![]
+                    };
+                let guard = ctx.conns.lock().unwrap();
+                match guard.get(&conn_id) {
+                    Some(conn) => {
+                        let ok = conn.resp_tx.try_send(PendingResponse {
+                            conn_id,
+                            bytes,
+                            informational: true,
+                        });
+                        drop(guard);
+                        if ok.is_err() {
+                            let err = js_code_err(scope, "ENOENT", "connection closed");
+                            rv.set(err);
+                            return;
+                        }
+                    }
+                    None => {
+                        let err = js_code_err(scope, "ENOENT", "unknown conn_id");
+                        rv.set(err);
+                        return;
+                    }
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpRespondChunk").unwrap().into(),
+            http_respond_chunk_fn.into(),
+        );
+    }
+
+    {
+        let ctx_ptr = native_ctx.leak(HttpRespondCtx {
+            conns: conns.clone(),
+        });
+        let external = v8::External::new(scope, ctx_ptr);
+        let http_respond_end_fn = v8::Function::builder(
+            |scope: &mut PinScope<'_, '_>, args: FunctionCallbackArguments, mut rv: ReturnValue| {
+                let ctx = unsafe {
+                    let ptr = args.data().cast::<v8::External>().value();
+                    &*(ptr as *const HttpRespondCtx)
+                };
+                let conn_id = args.get(0).uint32_value(scope).unwrap_or(0);
+                let body_arg = args.get(1);
+                let bytes: Vec<u8> =
+                    if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(body_arg) {
+                        uint8array_to_vec(scope, arr)
+                    } else {
+                        vec![]
+                    };
+                let guard = ctx.conns.lock().unwrap();
+                match guard.get(&conn_id) {
+                    Some(conn) => {
+                        let ok = conn.resp_tx.try_send(PendingResponse {
+                            conn_id,
+                            bytes,
+                            informational: false,
+                        });
+                        drop(guard);
+                        if ok.is_err() {
+                            let err = js_code_err(scope, "ENOENT", "connection closed");
+                            rv.set(err);
+                            return;
+                        }
+                    }
+                    None => {
+                        let err = js_code_err(scope, "ENOENT", "unknown conn_id");
+                        rv.set(err);
+                        return;
+                    }
+                }
+                rv.set(v8::undefined(scope).into());
+            },
+        )
+        .data(external.into())
+        .build(scope)
+        .unwrap();
+        global.set(
+            scope,
+            V8String::new(scope, "__httpRespondEnd").unwrap().into(),
+            http_respond_end_fn.into(),
         );
     }
 
