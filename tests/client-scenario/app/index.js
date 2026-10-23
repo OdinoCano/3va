@@ -104,7 +104,9 @@ app.get('/upstream-via-proxy', async (req, res) => {
   };
   try {
     const body = await new Promise((resolve, reject) => {
-      const r = http.get(process.env.MOCK_URL || 'http://mock:1234', { agent }, (res) => {
+      // `/data` is the mock's only JSON route: the bare URL asked for `/` and got
+      // an empty 404, which no runtime (Node included) can parse.
+      const r = http.get((process.env.MOCK_URL || 'http://mock:1234') + '/data', { agent }, (res) => {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));

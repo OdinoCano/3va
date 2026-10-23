@@ -11,6 +11,9 @@
 
 pub mod coverage;
 pub mod framework;
+// The Node suite runner supervises its tests through /proc, signals and
+// process groups: Unix only (it is a CI/developer harness, not part of `3va test`).
+#[cfg(unix)]
 pub mod node_tests;
 pub mod runner;
 pub mod security;
