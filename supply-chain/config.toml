@@ -2389,6 +2389,11 @@ version = "1.53.2"
 criteria = "safe-to-deploy"
 notes = "cargo update tokio 1.53.1 -> 1.53.2 (patch); diff 62 files, +1457/-407 lines; build.rs changed: False; unsafe lines added: 8. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): 8 unsafe lines in internal sync/list code and a Windows-only `unsafe impl Send`; no new dependencies."
 
+[[exemptions.tokio]]
+version = "1.53.3"
+criteria = "safe-to-deploy"
+notes = "cargo update tokio 1.53.2 -> 1.53.3 for RUSTSEC-2026-0386 (AsyncFd::new violates I/O safety; fixed in >= 1.53.3 and 1.51.6); diff 34 files, 1625 changed lines, 50 added lines containing `unsafe`; build.rs: none; Cargo.toml: version only, no new dependencies. The changelog lists: AsyncFd::register/register_with_interest added and the old constructors deprecated (io/async_fd.rs), wakers dropped outside the lock in DuplexStream and the semaphore, join!/try_join! Infallible lint, paused-time fix on current_thread, and an unstable io_uring op fix. Reviewed 2026-10-23 (diff scan against the changelog; NOT a line-by-line audit)."
+
 [[exemptions.tokio-macros]]
 version = "2.7.2"
 criteria = "safe-to-deploy"
