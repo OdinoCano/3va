@@ -14,6 +14,9 @@
 //!
 //! See docs/09-testing/07-compatibilidad-node.md (§7.4 step 2).
 
+// Unix only: the runner it drives uses /proc, signals and process groups.
+#![cfg(unix)]
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
