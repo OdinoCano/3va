@@ -4110,7 +4110,13 @@ pub fn inject_require(
                     self.remoteAddress = host;
                     self.remotePort = port;
                     self._startPoll();
-                    setTimeout(function() { self.emit('connect'); }, 0);
+                    setTimeout(function() {
+                        self.emit('connect');
+                        // Node's net.Socket emits 'ready' right after
+                        // 'connect' (and after the connect callback); several
+                        // HTTP tests wait for it before writing.
+                        self.emit('ready');
+                    }, 0);
                 } else {
                     setTimeout(function() { self.emit('error', _netErr(result)); }, 0);
                 }
@@ -4753,6 +4759,11 @@ pub fn inject_require(
                 this.rawHeaders = [];
                 this.complete = false;
                 this.aborted = false;
+                // Node's IncomingMessage: true once the application reads the
+                // body (`read`, `resume`, a 'data'/'readable' listener). An
+                // unread body is dumped when the response finishes, like
+                // `resOnFinish` does.
+                this._consuming = false;
                 this._headerLines = [];
             };
             util.inherits(httpIncomingMessage, Readable);
@@ -4772,6 +4783,17 @@ pub fn inject_require(
                 req.complete = true;
                 req.readable = false;
                 req.readableEnded = true;
+                // `req.socket.parser.incoming` is the request Node's parser is
+                // on: it points at `req` during its 'end' and is cleared right
+                // after, so the parser does not retain the request object.
+                var parser = req.socket && req.socket.parser;
+                if (parser) {
+                    req.prependListener('end', function() {
+                        process.nextTick(function() {
+                            if (parser.incoming === req) parser.incoming = null;
+                        });
+                    });
+                }
                 req.push(null);
             }
             // The native body reader reports "the client went away" as a coded
@@ -4847,6 +4869,7 @@ pub fn inject_require(
                 var st = this[kIncomingBody];
                 if (st && ev === 'end' && st.done) { var self = this; queueMicrotask(function() { fn.call(self); }); return this; }
                 var r = Readable.prototype.on.call(this, ev, fn);
+                if (ev === 'data' || ev === 'readable') this._consuming = true;
                 if (st && (ev === 'data' || ev === 'readable' || ev === 'end')) {
                     deliverIncomingBody(this);
                     // A consumer (e.g. `for await`) that drained the buffer and
@@ -4858,6 +4881,7 @@ pub fn inject_require(
             };
             httpIncomingMessage.prototype.resume = function() {
                 var st = this[kIncomingBody];
+                this._consuming = true;
                 deliverIncomingBody(this);
                 Readable.prototype.resume.call(this);
                 if (st && st.waiting && st.step) st.step();
@@ -4865,6 +4889,7 @@ pub fn inject_require(
             };
             httpIncomingMessage.prototype.read = function(n) {
                 var st = this[kIncomingBody];
+                this._consuming = true;
                 deliverIncomingBody(this);
                 var r = Readable.prototype.read.call(this, n);
                 if (st && st.waiting && st.step) st.step();
@@ -4962,6 +4987,10 @@ pub fn inject_require(
                 // Set when the application removes the `Connection` header:
                 // the server must not add one back.
                 this._removedConnection = false;
+                // The `Keep-Alive` value the server advertises on responses
+                // that stay on this connection (`timeout=…[, max=…]`).
+                this._keepAliveValue = (req && req.socket && req.socket._server &&
+                    req.socket._server._keepAliveValue) || '';
             };
             util.inherits(httpServerResponse, Writable);
             // Header validation — same rules as Node's lib/_http_outgoing.js:
@@ -5124,7 +5153,7 @@ pub fn inject_require(
             // headers (Date, Connection, validation) exactly like the one-shot
             // responder; only the framing differs: chunked when the app set no
             // Content-Length.
-            httpServerResponse.prototype._sendHeadStreaming = function() {
+            httpServerResponse.prototype._sendHeadStreaming = function(firstChunk) {
                 if (this._headSent) return;
                 if (!this.headersSent) this._implicitHeader();
                 if (!this.statusMessage) this.statusMessage = HTTP_STATUS_CODES[String(this.statusCode)] || '';
@@ -5137,7 +5166,8 @@ pub fn inject_require(
                 __httpRespondStream(this._connId, this.statusCode, this.statusMessage,
                     JSON.stringify(this._headers), this.sendDate !== false,
                     !this._removedConnection, this._closeAfter === true,
-                    this._chunked ? -1 : declaredCL);
+                    this._chunked ? -1 : declaredCL, this._keepAliveValue,
+                    firstChunk || null);
             };
             httpServerResponse.prototype.write = function(chunk, encoding, callback) {
                 if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
@@ -5154,17 +5184,28 @@ pub fn inject_require(
                         // this chunk to the socket right away (chunked framing
                         // when there is no Content-Length), so the client sees
                         // it before end() — `res.write('asd')` without end()
-                        // used to send nothing at all.
-                        if (!this._headSent) this._sendHeadStreaming();
+                        // used to send nothing at all. Node writes the head and
+                        // the first chunk together; a client parsing the raw
+                        // bytes must not see a head-only write (it ends in
+                        // `\r\n\r\n` and looks like a complete empty response).
                         var sbuf = __httpChunkToBytes(chunk, encoding);
+                        var first = !this._headSent;
+                        var framed = null;
                         // An empty chunk sends the head but no body: framed
                         // as chunked it would be `0\r\n\r\n`, the terminator
                         // (Node's write_ skips it: `chunk.length !== 0`).
                         if (sbuf.length > 0) {
-                            if (this._chunked) {
-                                sbuf = Buffer.concat([Buffer.from(sbuf.length.toString(16) + '\r\n'), sbuf, Buffer.from('\r\n')]);
-                            }
-                            __httpRespondChunk(this._connId, sbuf);
+                            var willChunk = first
+                                ? this.getHeader('Content-Length') === undefined
+                                : this._chunked;
+                            framed = willChunk
+                                ? Buffer.concat([Buffer.from(sbuf.length.toString(16) + '\r\n'), sbuf, Buffer.from('\r\n')])
+                                : sbuf;
+                        }
+                        if (first) {
+                            this._sendHeadStreaming(framed);
+                        } else if (framed) {
+                            __httpRespondChunk(this._connId, framed);
                         }
                         // Backpressure for a streamed response: the bytes go to
                         // the connection task at once, so count what was written
@@ -5218,18 +5259,36 @@ pub fn inject_require(
                         var fparts = [];
                         if (fbuf && fbuf.length) fparts.push(Buffer.from(fbuf.length.toString(16) + '\r\n'), fbuf, Buffer.from('\r\n'));
                         fparts.push(Buffer.from('0\r\n\r\n'));
-                        __httpRespondEnd(this._connId, Buffer.concat(fparts));
+                        __httpRespondEnd(this._connId, Buffer.concat(fparts), this._closeAfter === true);
                     } else {
-                        __httpRespondEnd(this._connId, fbuf || new Uint8Array(0));
+                        __httpRespondEnd(this._connId, fbuf || new Uint8Array(0), this._closeAfter === true);
                     }
                 } else {
                     if (chunk !== undefined) this._chunks.push(chunk);
                     var headersJson = JSON.stringify(this._headers);
                     // Node sends the standard reason phrase when none was set.
                     if (!this.statusMessage) this.statusMessage = HTTP_STATUS_CODES[String(this.statusCode)] || '';
+                    // HTTP/1.0 framing (lib/_http_server.js): chunked only when
+                    // the client sent `TE: chunked` or the application set
+                    // `Transfer-Encoding`; Content-Length when the application
+                    // set one; otherwise the body is delimited by closing the
+                    // connection (no length header at all).
+                    var http10 = !!(this.req && this.req.httpVersionMinor === 0);
+                    var appTE = this.getHeader('Transfer-Encoding') !== undefined;
+                    var appCL = this.getHeader('Content-Length') !== undefined;
+                    var teReq = false;
+                    if (http10 && this.req && this.req.headers &&
+                        typeof this.req.headers.te === 'string') {
+                        teReq = /(?:^|,)\s*chunked\s*(?:,|$)/i.test(this.req.headers.te);
+                    }
+                    var chunked = !appCL && (appTE || (http10 && teReq));
+                    var closeAfter = this._closeAfter === true || (http10 && !appCL && !chunked);
+                    if (closeAfter) this._closeAfter = true;
+                    var framing = chunked ? 1 : ((http10 && !appCL) ? 2 : 0);
                     var isBinary = this._chunks.some(function(c) {
                         return c instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(c));
                     });
+                    var body;
                     if (isBinary) {
                         var parts = this._chunks.map(function(c) {
                             if (typeof c === 'string') return typeof Buffer !== 'undefined' ? Buffer.from(c) : new TextEncoder().encode(c);
@@ -5239,7 +5298,7 @@ pub fn inject_require(
                         var merged = new Uint8Array(total);
                         var off = 0;
                         parts.forEach(function(p) { merged.set(p, off); off += p.length; });
-                        __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, merged, this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                        body = merged;
                     } else {
                         // Route through __httpRespondBytes (JS-side TextEncoder,
                         // not the native __httpRespond(string) path) even for a
@@ -5258,12 +5317,25 @@ pub fn inject_require(
                         // conversion entirely rather than depending on finding
                         // the exact defect in it.
                         var __finalS = this._chunks.join('');
-                        if (typeof Buffer !== 'undefined') {
-                            __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, Buffer.from(__finalS, 'utf-8'), this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                        body = (typeof Buffer !== 'undefined')
+                            ? Buffer.from(__finalS, 'utf-8')
+                            : new TextEncoder().encode(__finalS);
+                    }
+                    if (chunked) {
+                        // The whole buffered body goes out as one chunk.
+                        if (body.length === 0) {
+                            body = Buffer.from('0\r\n\r\n');
                         } else {
-                            __httpRespondBytes(this._connId, this.statusCode, this.statusMessage, headersJson, new TextEncoder().encode(__finalS), this.sendDate !== false, !this._removedConnection, this._closeAfter === true);
+                            body = Buffer.concat([
+                                Buffer.from(body.length.toString(16) + '\r\n'),
+                                body,
+                                Buffer.from('\r\n0\r\n\r\n'),
+                            ]);
                         }
                     }
+                    __httpRespondBytes(this._connId, this.statusCode, this.statusMessage,
+                        headersJson, body, this.sendDate !== false,
+                        !this._removedConnection, closeAfter, this._keepAliveValue, framing);
                 }
                 // A microtask, not a 0 ms timer: it still runs after the handler
                 // returns, without a timer round-trip per response.
@@ -5400,6 +5472,11 @@ pub fn inject_require(
                 this._resps = [];
                 this._timer = null;
                 this._timeoutMs = 0;
+                // Node exposes the connection's HTTP parser on the socket;
+                // `parser.incoming` is the request being parsed (its 'end'
+                // handler can see it, then it is cleared). Tests and a few
+                // libraries read it.
+                this.parser = { incoming: null };
             };
             util.inherits(httpConnSocket, EventEmitter);
             // ponytail: like UpgradeSocket (docs/05-js-engine/07-inventario-stubs.md
@@ -5462,6 +5539,15 @@ pub fn inject_require(
             // server's keep-alive timeout, as `resetSocketTimeout` does in
             // Node (lib/_http_server.js).
             var httpConnResponseDone = function(res) {
+                // Node's `resOnFinish` (lib/_http_server.js): a request body
+                // the application never read is dumped (resumed and discarded)
+                // as soon as the response finishes, so a handler that only
+                // listens for 'end' still gets it. Doing it at body completion
+                // instead would drop a body the handler reads after an await.
+                var request = res.req;
+                if (request && request[kIncomingBody] && !request._consuming) {
+                    request.resume();
+                }
                 var sock = res.socket;
                 if (!sock || !sock._resps) return;
                 var i = sock._resps.indexOf(res);
@@ -5564,10 +5650,15 @@ pub fn inject_require(
                     }
                 };
                 var pushTimeouts = function() {
+                    // The advertised `Keep-Alive` value follows the server's
+                    // timeouts and request cap, even before listen().
+                    self._keepAliveValue = keepAliveValue();
                     if (self._id === null) return;
                     if (typeof __httpSetTimeouts === 'function') {
+                        var max = self._maxRequestsPerSocket;
                         __httpSetTimeouts(self._id, applied.headersTimeout || 0,
-                            applied.requestTimeout || 0, applied.keepAliveTimeout || 0);
+                            applied.requestTimeout || 0, applied.keepAliveTimeout || 0,
+                            (typeof max === 'number' && max > 0) ? max : 0);
                     }
                 };
                 ['headersTimeout', 'requestTimeout', 'keepAliveTimeout'].forEach(function(name) {
@@ -5585,6 +5676,36 @@ pub fn inject_require(
                 });
                 if (opts.headersTimeout !== undefined) warnLooser('headersTimeout', headersTimeout);
                 if (opts.keepAliveTimeout !== undefined) warnLooser('keepAliveTimeout', keepAliveTimeout);
+                // Node's `server.maxRequestsPerSocket`: the connection closes
+                // after that many requests (0 or null: no application cap; the
+                // firewall's own cap stays in force). Node stores it as a plain
+                // property with no validation, so it is kept as given.
+                this._maxRequestsPerSocket = 0;
+                Object.defineProperty(this, 'maxRequestsPerSocket', {
+                    get: function() { return self._maxRequestsPerSocket; },
+                    set: function(v) { self._maxRequestsPerSocket = v; pushTimeouts(); },
+                    enumerable: true,
+                    configurable: true,
+                });
+                // The value of the `Keep-Alive` header Node advertises: the
+                // effective keep-alive timeout (never above the firewall's),
+                // plus `max=` when the application set a positive cap.
+                var keepAliveValue = function() {
+                    var kat = reported.keepAliveTimeout;
+                    if (!(kat > 0)) return '';
+                    var limit = limits && limits.keepAliveTimeout;
+                    var eff = limit ? Math.min(kat, limit) : kat;
+                    var max = self._maxRequestsPerSocket;
+                    var maxEff = 0;
+                    if (typeof max === 'number' && max > 0) {
+                        maxEff = max;
+                        if (limits && limits.maxRequestsPerSocket) {
+                            maxEff = Math.min(max, limits.maxRequestsPerSocket);
+                        }
+                    }
+                    return 'timeout=' + Math.floor(eff / 1000) + (maxEff > 0 ? ', max=' + maxEff : '');
+                };
+                this._keepAliveValue = keepAliveValue();
                 this._pushTimeouts = pushTimeouts;
             };
             util.inherits(httpServer, EventEmitter);
@@ -5682,6 +5803,9 @@ __httpSetHandler(self._id, function() {
                         res._closeAfter = raw[7] === true;
                         _sock._req = req;
                         _sock._resps.push(res);
+                        // Node's parser is on this request until it ends
+                        // (see `finishIncoming`).
+                        if (_sock.parser) _sock.parser.incoming = req;
                         // Node's `resetSocketTimeout`: a new request on the
                         // connection restores the server's socket timeout.
                         _sock._timeoutMs = self.timeout || 0;
