@@ -1,5 +1,22 @@
 [advisories]
 ignore = [
+    # zstd 0.13.3: RUSTSEC-2026-0391 (data from an abandoned stream leaks into the
+    # next stream on a reused context). wasmtime-internal-cache 36.0.19 pins
+    # `zstd ^0.13.0`, and every released version up to 50.0.0 pins it too, so
+    # 0.14.3 (the fix) cannot be used yet. 3va never uses `with_context`:
+    # wasmtime-internal-cache only calls `zstd::encode_all` / `decode_all`, which
+    # create their own context. Revisit when wasmtime moves to zstd 0.14.
+    "RUSTSEC-2026-0391",
+    # zstd-safe 7.3.0: RUSTSEC-2026-0398 (`Seekable::decompress` sets a Vec length
+    # beyond its capacity). That code is only compiled with the `seekable`
+    # feature; wasmtime asks for `zstd` with `default-features = false` and does
+    # not enable it. Fixed in zstd-safe 8.2.0, which needs zstd 0.14.
+    "RUSTSEC-2026-0398",
+    # zstd-safe 7.3.0: RUSTSEC-2026-0403 (uninitialized memory when streaming
+    # decompression of a legacy frame fails). It needs the `legacy` feature (off:
+    # `default-features = false`) and `zstd::stream::write::Decoder`, neither of
+    # which 3va uses (only the bulk `decode_all`). Fixed in zstd-safe 8.2.0.
+    "RUSTSEC-2026-0403",
     # fxhash is unmaintained; pulled in as transitive dep by wasmtime — no active CVE
     "RUSTSEC-2025-0057",
     # rustls-pemfile: no longer maintained; pulled in as transitive dep by tonic.
