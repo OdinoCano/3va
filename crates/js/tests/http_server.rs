@@ -707,6 +707,64 @@ async fn request_end_fires_after_the_response_finishes() {
     );
 }
 
+/// A fully sent request reports `writableFinished` (Node's Writable state):
+/// clients read it to know an exchange is over before aborting or reusing the
+/// socket (lib/_http_client.js refuses to tear down a completed exchange).
+/// It used to stay false forever.
+#[tokio::test]
+async fn client_request_writable_finished_after_send() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('x'); }});
+        globalThis.__writableFinished = 'unset';
+        globalThis.__done = false;
+        _server.listen({port}, '127.0.0.1', function() {{
+            var agent = new http.Agent({{ keepAlive: true }});
+            var req = http.get({{ port: {port}, host: '127.0.0.1', agent: agent }},
+                function(res) {{
+                    globalThis.__writableFinished = String(req.writableFinished);
+                    res.resume();
+                    res.on('end', function() {{ globalThis.__done = true; }});
+                }});
+        }});
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    // The exchange happens in JS: drive the engine until it completes.
+    for _ in 0..100 {
+        if e.eval_to_string("String(globalThis.__done === true)")
+            .await
+            .unwrap()
+            == "true"
+        {
+            break;
+        }
+        drive_until(&mut e, tokio::time::sleep(Duration::from_millis(20))).await;
+    }
+
+    let done = e
+        .eval_to_string("String(globalThis.__done === true)")
+        .await
+        .unwrap();
+    assert_eq!(done, "true", "the response should complete");
+    let finished = e
+        .eval_to_string("globalThis.__writableFinished")
+        .await
+        .unwrap();
+    assert_eq!(
+        finished, "true",
+        "req.writableFinished should be true once the request is sent"
+    );
+}
+
 /// `server.setTimeout(ms, cb)` must arm a real socket inactivity timer: the
 /// callback runs with the socket and `socket.destroy()` closes the
 /// connection. Before, `setTimeout` only stored a listener, so the callback

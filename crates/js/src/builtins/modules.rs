@@ -6568,7 +6568,14 @@ __httpSetHandler(self._id, function() {
                 if (!this._finishEmitted) {
                     this._finishEmitted = true;
                     var self = this;
-                    queueMicrotask(function() { self.emit('finish'); });
+                    queueMicrotask(function() {
+                        // Node's Writable: `writableFinished` is true once
+                        // 'finish' is emitted, i.e. when the last byte of the
+                        // request is out. Code (and tests) read it to know an
+                        // exchange is done before aborting or reusing.
+                        self.writableFinished = true;
+                        self.emit('finish');
+                    });
                 }
             };
             ClientRequest.prototype._sendHead = function() {
