@@ -69,8 +69,8 @@ aws-lc-rs = "1.18"
 rustls-pki-types = "1"
 rustls-pemfile = "2"
 rsa = "0.9"
-p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
-p384 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
+p256 = { version = "0.14", features = ["pkcs8", "ecdsa", "getrandom"] }
+p384 = { version = "0.14", features = ["pkcs8", "ecdsa", "getrandom"] }
 md-5 = "0.10"
 notify = { version = "6", features = ["macos_fsevent"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
