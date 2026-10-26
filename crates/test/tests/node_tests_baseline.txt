@@ -488,6 +488,7 @@ test-http-client-abort-completed-keepalive.js
 test-http-client-abort-destroy.js
 test-http-client-abort-keep-alive-queued-tcp-socket.js
 test-http-client-abort-keep-alive-queued-unix-socket.js
+test-http-client-abort-unix-socket.js
 test-http-client-abort3.js
 test-http-client-aborted-event.js
 test-http-client-agent-end-close-event.js
@@ -520,6 +521,7 @@ test-http-client-timeout-option-listeners.js
 test-http-client-timeout-option-with-agent.js
 test-http-client-timeout-option.js
 test-http-client-unescaped-path.js
+test-http-client-with-create-connection.js
 test-http-connect-req-res.js
 test-http-connect.js
 test-http-content-length.js
