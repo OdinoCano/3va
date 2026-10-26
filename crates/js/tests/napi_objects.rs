@@ -16,7 +16,10 @@ mod linux {
     use vvva_js::JsEngine;
     use vvva_permissions::{Capability, PermissionState};
 
-    fn build_addon() -> Option<PathBuf> {
+    // Returns the TempDir too: the addon file must outlive the test (the engine dlopens it), and
+    // the caller keeps the guard until the end, so the directory is removed and LeakSanitizer sees
+    // no leak (the old `mem::forget` leaked its path).
+    fn build_addon() -> Option<(tempfile::TempDir, PathBuf)> {
         let dir = tempfile::TempDir::new().unwrap();
         let out = dir.path().join("napi_objects.node");
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -35,8 +38,7 @@ mod linux {
             return None;
         }
         let out = out.canonicalize().ok()?;
-        std::mem::forget(dir);
-        Some(out)
+        Some((dir, out))
     }
 
     async fn check(engine: &mut JsEngine, js: &str, expected: &str) {
@@ -46,7 +48,7 @@ mod linux {
 
     #[tokio::test]
     async fn prototype_own_property_and_remove_wrap() {
-        let Some(addon) = build_addon() else {
+        let Some((_dir, addon)) = build_addon() else {
             eprintln!("skipping prototype_own_property_and_remove_wrap: no C compiler");
             return;
         };
@@ -97,7 +99,7 @@ mod linux {
     // accessors and statics were ignored (a 2+ property class corrupted memory).
     #[tokio::test]
     async fn class_with_method_accessor_and_statics() {
-        let Some(addon) = build_addon() else {
+        let Some((_dir, addon)) = build_addon() else {
             eprintln!("skipping class_with_method_accessor_and_statics: no C compiler");
             return;
         };
@@ -134,7 +136,7 @@ mod linux {
     // together with the element length and byte offset.
     #[tokio::test]
     async fn typedarray_info_reports_the_real_type() {
-        let Some(addon) = build_addon() else {
+        let Some((_dir, addon)) = build_addon() else {
             eprintln!("skipping typedarray_info_reports_the_real_type: no C compiler");
             return;
         };
