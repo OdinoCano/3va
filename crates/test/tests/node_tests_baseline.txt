@@ -486,10 +486,8 @@ test-http-chunk-problem.js
 test-http-chunked-304.js
 test-http-client-abort-completed-keepalive.js
 test-http-client-abort-destroy.js
-test-http-client-abort-keep-alive-destroy-res.js
 test-http-client-abort-keep-alive-queued-tcp-socket.js
 test-http-client-abort-keep-alive-queued-unix-socket.js
-test-http-client-abort.js
 test-http-client-abort3.js
 test-http-client-aborted-event.js
 test-http-client-agent-end-close-event.js
