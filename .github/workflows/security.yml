@@ -127,6 +127,9 @@ jobs:
           echo "Using $sym"
           echo "ASAN_SYMBOLIZER_PATH=$sym" >> "$GITHUB_ENV"
       - name: AddressSanitizer
+        # `-C link-args=-rdynamic`: the napi tests load test addons (.node) that look
+        # up `napi_*` in the test executable; without exporting its symbols they fail
+        # with "undefined symbol: napi_..." (deep-checks.yml's napi job sets it too).
         # `--no-fail-fast`: cargo stops at the first test binary that fails, so
         # without it a failure in vvva_permissions hides every vvva_js result.
         # `--skip large_post_body_keeps_memory_bounded`: ASan inflates RSS
@@ -135,7 +138,7 @@ jobs:
         # runs in the ordinary `Tests` job, which is not instrumented.
         run: |
           LSAN_OPTIONS="suppressions=$GITHUB_WORKSPACE/.github/lsan-v8.supp" \
-          RUSTFLAGS="-Z sanitizer=address" \
+          RUSTFLAGS="-Z sanitizer=address -C link-args=-rdynamic" \
             cargo +nightly test -Zbuild-std --tests --no-fail-fast \
             --target x86_64-unknown-linux-gnu \
             -p vvva_permissions -p vvva_js \
