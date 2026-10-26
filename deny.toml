@@ -1,10 +1,5 @@
 [advisories]
 ignore = [
-    # webpki-roots 0.26.11: RUSTSEC-2026-0381 (distrusted emSign intermediates; fixed in 1.0.10).
-    # 0.26.11 is only a compatibility shim that re-exports webpki-roots 1.x, and Cargo.lock
-    # resolves it to 1.0.10, the release that removes the root, so the data 3va trusts is the
-    # fixed one. It is pulled in by ureq 2.x; drop this entry when ureq moves to webpki-roots 1.
-    "RUSTSEC-2026-0381",
     # fxhash is unmaintained; pulled in as transitive dep by wasmtime — no active CVE
     "RUSTSEC-2025-0057",
     # rustls-pemfile: no longer maintained; pulled in as transitive dep by tonic.
