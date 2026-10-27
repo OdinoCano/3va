@@ -1366,17 +1366,49 @@ pub fn inject_require(
                 assert.notDeepEqual = function(a, b, msg) { if (deepEqualInternal(a, b, false)) fail(msg, a, b, 'notDeepEqual', assert.notDeepEqual); };
                 assert.deepStrictEqual = function(a, b, msg) { if (!deepEqualInternal(a, b, true)) fail(msg, a, b, 'deepStrictEqual', assert.deepStrictEqual); };
                 assert.notDeepStrictEqual = function(a, b, msg) { if (deepEqualInternal(a, b, true)) fail(msg, a, b, 'notDeepStrictEqual', assert.notDeepStrictEqual); };
+                // Node's `expectedException` (lib/assert.js): what assert.throws/rejects check
+                // about the error. `expected` is a class (instanceof; an Error class that does
+                // not match fails), a validation function (called, must return true), a RegExp
+                // (tested against String(error)) or an object (every own key of it must
+                // deep-strictly equal the error's, a RegExp value tested when the error's is a
+                // string). It used to accept anything for an object and called instanceof on
+                // a validation function, which throws.
+                function checkExpectedError(actual, expected, msg, operator, stackFn) {
+                    if (expected === undefined) return;
+                    var bad = function(m) {
+                        throw new AssertionError({ message: msg || m, actual: actual, expected: expected, operator: operator, stackStartFn: stackFn });
+                    };
+                    if (typeof expected === 'function') {
+                        if (expected.prototype !== undefined && actual instanceof expected) return;
+                        if (expected === Error || Error.isPrototypeOf(expected)) {
+                            bad('The error is expected to be an instance of "' + expected.name + '". Received "' + (actual && actual.constructor && actual.constructor.name) + '"');
+                        }
+                        var res = expected.call({}, actual);
+                        if (res !== true) bad('The ' + (expected.name ? '"' + expected.name + '" ' : '') + 'validation function is expected to return "true". Received ' + safeInspect(res));
+                        return;
+                    }
+                    if (expected instanceof RegExp) {
+                        if (expected.test(String(actual))) return;
+                        bad('The input did not match the regular expression ' + String(expected) + '. Input: ' + safeInspect(String(actual)));
+                    }
+                    if (typeof expected === 'object' && expected !== null) {
+                        var keys = Object.keys(expected);
+                        if (expected instanceof Error) keys.push('name', 'message');
+                        for (var i = 0; i < keys.length; i++) {
+                            var k = keys[i];
+                            if (typeof actual === 'object' && actual !== null && typeof actual[k] === 'string' && expected[k] instanceof RegExp && expected[k].test(actual[k])) continue;
+                            if (actual === null || actual === undefined || !deepEqualInternal(actual[k], expected[k], true)) {
+                                bad('Expected values to be strictly deep-equal on property "' + k + '"');
+                            }
+                        }
+                    }
+                }
                 assert.throws = function(fn, errorOrMsg, msg) {
-                    var errorMatcher = typeof errorOrMsg === 'function' || errorOrMsg instanceof RegExp ? errorOrMsg : undefined;
+                    var errorMatcher = (typeof errorOrMsg === 'function' || (typeof errorOrMsg === 'object' && errorOrMsg !== null)) ? errorOrMsg : undefined;
                     if (errorMatcher === undefined && typeof errorOrMsg === 'string') msg = errorOrMsg;
                     try { fn(); }
                     catch (e) {
-                        if (typeof errorMatcher === 'function' && !(e instanceof errorMatcher)) {
-                            throw new AssertionError({ message: msg, actual: e, expected: errorMatcher, operator: 'throws', stackStartFn: assert.throws });
-                        }
-                        if (errorMatcher instanceof RegExp && !errorMatcher.test(e.message)) {
-                            throw new AssertionError({ message: msg, actual: e.message, expected: errorMatcher, operator: 'throws', stackStartFn: assert.throws });
-                        }
+                        checkExpectedError(e, errorMatcher, typeof msg === 'string' ? msg : undefined, 'throws', assert.throws);
                         return;
                     }
                     fail(msg || 'Missing expected exception', undefined, undefined, 'throws', assert.throws);
@@ -1393,15 +1425,13 @@ pub fn inject_require(
                 assert.match = function(str, regexp, msg) { if (!regexp.test(str)) fail(msg, str, regexp, 'match', assert.match); };
                 assert.doesNotMatch = function(str, regexp, msg) { if (regexp.test(str)) fail(msg, str, regexp, 'doesNotMatch', assert.doesNotMatch); };
                 assert.rejects = function(fn, errorOrMsg, msg) {
-                    var errorMatcher = typeof errorOrMsg === 'function' ? errorOrMsg : undefined;
+                    var errorMatcher = (typeof errorOrMsg === 'function' || (typeof errorOrMsg === 'object' && errorOrMsg !== null)) ? errorOrMsg : undefined;
                     if (errorMatcher === undefined && typeof errorOrMsg === 'string') msg = errorOrMsg;
                     var p = typeof fn === 'function' ? Promise.resolve().then(fn) : Promise.resolve(fn);
                     return p.then(
                         function() { fail(msg || 'Missing expected rejection', undefined, undefined, 'rejects', assert.rejects); },
                         function(e) {
-                            if (typeof errorMatcher === 'function' && !(e instanceof errorMatcher)) {
-                                throw new AssertionError({ message: msg, actual: e, expected: errorMatcher, operator: 'rejects', stackStartFn: assert.rejects });
-                            }
+                            checkExpectedError(e, errorMatcher, typeof msg === 'string' ? msg : undefined, 'rejects', assert.rejects);
                         }
                     );
                 };
