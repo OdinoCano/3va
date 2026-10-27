@@ -3016,8 +3016,13 @@ pub fn inject_http_server(
                         "Connection: keep-alive\r\n"
                     });
                     // Node only advertises `Keep-Alive` when the connection is
-                    // staying open.
-                    if !close_after && !keep_alive.is_empty() {
+                    // staying open, and not when the application set its own.
+                    if !close_after
+                        && !keep_alive.is_empty()
+                        && !extra
+                            .iter()
+                            .any(|(k, _)| k.eq_ignore_ascii_case("keep-alive"))
+                    {
                         resp.push_str(&format!("Keep-Alive: {keep_alive}\r\n"));
                     }
                 }
@@ -3154,7 +3159,12 @@ pub fn inject_http_server(
                     } else {
                         "Connection: keep-alive\r\n"
                     });
-                    if !close_after && !keep_alive.is_empty() {
+                    if !close_after
+                        && !keep_alive.is_empty()
+                        && !extra
+                            .iter()
+                            .any(|(k, _)| k.eq_ignore_ascii_case("keep-alive"))
+                    {
                         resp.push_str(&format!("Keep-Alive: {keep_alive}\r\n"));
                     }
                 }

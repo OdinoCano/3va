@@ -2592,3 +2592,54 @@ async fn headers_timeout_answers_408() {
         "HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n"
     );
 }
+
+// Node advertises its own `Keep-Alive: timeout=N` only when the application did
+// not set one: `res.writeHead(200, { 'Keep-Alive': 'timeout=50' })` goes out
+// as that single header. 3va added its own next to it ("timeout=50, timeout=5",
+// test-http-keep-alive-timeout-custom).
+#[tokio::test]
+async fn an_application_keep_alive_header_is_not_duplicated() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{
+            res.writeHead(200, {{ 'Content-Length': 2, 'Keep-Alive': 'timeout=50' }});
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let head = drive_until(&mut e, async {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 512];
+        let _ = tokio::time::timeout(Duration::from_secs(3), async {
+            while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+        })
+        .await;
+        String::from_utf8_lossy(&got).to_string()
+    })
+    .await;
+    let lines: Vec<&str> = head
+        .lines()
+        .filter(|l| l.to_ascii_lowercase().starts_with("keep-alive:"))
+        .collect();
+    assert_eq!(lines, vec!["Keep-Alive: timeout=50"], "full head: {head:?}");
+}
