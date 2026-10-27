@@ -7,6 +7,51 @@ Format: [Keep a Changelog 1.0.0](https://keepachangelog.com/en/1.0.0/) · Versio
 
 ## [Unreleased]
 
+### Security
+
+- **`crypto-bigint` 0.5.5 fuera del árbol (RUSTSEC-2026-0387).** Tenía aritmética de
+  máscaras, resta y división que no era de tiempo constante sobre secretos. Como solo
+  la línea 0.7 está corregida, ECDH y ECDSA pasan a `p256`/`p384` 0.14 y `ecdsa` 0.17
+  (las versiones nuevas ya estaban en el árbol por `russh`). El único cambio de código
+  está en la generación de claves EC (`Generate::try_generate()`, que informa de un
+  fallo del generador del sistema como error en lugar de entrar en pánico). Comprobado
+  contra Node 24 en P-256 y P-384: lo que firma 3va lo verifica Node y al revés, el
+  mensaje manipulado se rechaza en ambos, y el secreto ECDH coincide.
+- `tokio` 1.53.3 (RUSTSEC-2026-0386, `AsyncFd::new` y el resto de constructores violaban
+  la seguridad de E/S) y `ctutils` 0.4.6 (RUSTSEC-2026-0385), también en `fuzz/`.
+- Tres avisos de `zstd` sin corrección compatible (RUSTSEC-2026-0391, -0398 y -0403:
+  wasmtime fija `zstd` 0.13 y el arreglo está en 0.14) se ignoran en `deny.toml` con su
+  justificación: 3va solo llama a `encode_all`/`decode_all` y las características
+  afectadas (`seekable`, `legacy`, `arrays`) no están activas. Se revisan al subir wasmtime.
+
+### Fixed
+
+- **`assert.throws` y `assert.rejects` comprueban el error esperado como Node.** Antes un
+  objeto de validación (`{ code: 'ERR_X', name: 'TypeError' }`, la forma habitual en los
+  tests de Node) aceptaba cualquier error, y una función de validación hacía lanzar
+  `e instanceof fn`. Ahora la clase se comprueba por `instanceof`, una función se llama
+  como validador y debe devolver `true`, una expresión regular se prueba contra el error
+  y un objeto debe coincidir en cada una de sus claves. **Efecto visible:** código que
+  pasaba por esa laxitud ahora falla donde debe; en la suite de Node, 9 tests dejaron de
+  "pasar" por casualidad.
+- **`http`, servidor: keep-alive como Node.** `server.maxRequestsPerSocket` cierra la
+  conexión tras N peticiones y lo anuncia como `Keep-Alive: timeout=N, max=M`; la
+  petición ya encadenada al llegar al tope recibe un `503`; el enmarcado HTTP/1.0 sigue
+  las reglas de Node (delimitado por el cierre cuando no hay longitud); el cuerpo no
+  leído se descarta al terminar la respuesta; se saltan las líneas vacías antes de la
+  línea de petición; la cabecera `Keep-Alive` de la aplicación ya no se duplica con la
+  propia. `net.Socket` emite `'ready'` y `req.writableFinished` pasa a `true` al enviarse
+  la petición.
+
+### Changed
+
+- **CI.** El job de ASan del *Security Pipeline* vuelve a pasar: exporta los símbolos del
+  ejecutable de test (`-C link-args=-rdynamic`, que NAPI necesita), salta el test de RSS
+  (la memoria sombra de ASan lo infla) y no se detiene en el primer fallo
+  (`--no-fail-fast`). El runner de la suite de Node muestra las primeras líneas del error
+  de cada test, no solo la cola, y la línea base se corrigió: dos tests con sockets de
+  Unix (no soportados) "pasaban" solo en una máquina con un servidor web en el puerto 80.
+
 ---
 
 ## [2.13.0] — 2026-10-22
