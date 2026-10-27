@@ -34,7 +34,7 @@ url.workspace = true
 # signing/verifying trait crate (same version p256 0.13 uses).
 p256.workspace = true
 p384.workspace = true
-ecdsa = "0.16"
+ecdsa = "0.17"
 # `fips` feature only: AWS-LC FIPS module for hashing, signatures and TLS.
 aws-lc-rs = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }

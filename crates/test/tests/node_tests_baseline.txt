@@ -147,6 +147,7 @@ test-child-process-stdout-flush.js
 test-child-process-stdout-ipc.js
 test-child-process-uid-gid.js
 test-crypto-aes-wrap.js
+test-crypto-argon2-unsupported.js
 test-crypto-async-sign-verify.js
 test-crypto-authenticated-stream.js
 test-crypto-authenticated.js
@@ -210,6 +211,8 @@ test-crypto-keygen-ec-group-names.js
 test-crypto-keygen-eddsa.js
 test-crypto-keygen-empty-passphrase-no-error.js
 test-crypto-keygen-empty-passphrase-no-prompt.js
+test-crypto-keygen-invalid-parameter-encoding-dsa.js
+test-crypto-keygen-invalid-parameter-encoding-ec.js
 test-crypto-keygen-key-object-without-encoding.js
 test-crypto-keygen-key-objects.js
 test-crypto-keygen-missing-oid.js
@@ -281,6 +284,7 @@ test-fs-buffer.js
 test-fs-buffertype-writesync.js
 test-fs-chmod-mask.js
 test-fs-chmod.js
+test-fs-chown-type-check.js
 test-fs-close-errors.js
 test-fs-constants.js
 test-fs-copyfile-respect-permissions.js
@@ -293,6 +297,7 @@ test-fs-filehandle-use-after-close.js
 test-fs-fsync.js
 test-fs-internal-assertencoding.js
 test-fs-lchown.js
+test-fs-link.js
 test-fs-make-callback.js
 test-fs-makeStatsCallback.js
 test-fs-mkdir-mode-mask.js
@@ -305,7 +310,6 @@ test-fs-mkdtempDisposableSync.js
 test-fs-negative-zero.js
 test-fs-non-number-arguments-throw.js
 test-fs-null-bytes.js
-test-fs-open-numeric-flags.js
 test-fs-open.js
 test-fs-opendir.js
 test-fs-options-immutable.js
@@ -360,6 +364,7 @@ test-fs-readfile-pipe.js
 test-fs-readfile.js
 test-fs-readfilesync-pipe-large.js
 test-fs-readfilesync-utf8-sizes.js
+test-fs-readlink-type-check.js
 test-fs-readv-promises.js
 test-fs-readv-promisify.js
 test-fs-readv-sync.js
@@ -449,10 +454,10 @@ test-fs-write-stream.js
 test-fs-write-sync-optional-params.js
 test-fs-writefile-with-fd.js
 test-fs-writestream-open-write.js
+test-fs-writesync-crash.js
 test-fs-writev-promises.js
 test-fs-writev-sync.js
 test-fs-writev.js
-test-http-1.0-keep-alive.js
 test-http-1.0.js
 test-http-abort-client.js
 test-http-abort-queued.js
@@ -484,12 +489,10 @@ test-http-catch-uncaughtexception.js
 test-http-chunk-extensions-limit.js
 test-http-chunk-problem.js
 test-http-chunked-304.js
-test-http-client-abort-completed-keepalive.js
 test-http-client-abort-destroy.js
-test-http-client-abort-keep-alive-destroy-res.js
 test-http-client-abort-keep-alive-queued-tcp-socket.js
 test-http-client-abort-keep-alive-queued-unix-socket.js
-test-http-client-abort.js
+test-http-client-abort-unix-socket.js
 test-http-client-abort3.js
 test-http-client-aborted-event.js
 test-http-client-agent-end-close-event.js
@@ -522,6 +525,7 @@ test-http-client-timeout-option-listeners.js
 test-http-client-timeout-option-with-agent.js
 test-http-client-timeout-option.js
 test-http-client-unescaped-path.js
+test-http-client-with-create-connection.js
 test-http-connect-req-res.js
 test-http-connect.js
 test-http-content-length.js
@@ -564,8 +568,6 @@ test-http-invalid-urls.js
 test-http-invalidheaderfield.js
 test-http-keep-alive-close-on-header.js
 test-http-keep-alive-drop-requests.js
-test-http-keep-alive-max-requests.js
-test-http-keep-alive-pipeline-max-requests.js
 test-http-keep-alive-timeout.js
 test-http-keep-alive.js
 test-http-keepalive-client.js
@@ -663,10 +665,7 @@ test-http-server-headers-timeout-interrupted-headers.js
 test-http-server-headers-timeout-keepalive.js
 test-http-server-headers-timeout-pipelining.js
 test-http-server-invalid-headers-timeout-no-abort.js
-test-http-server-keep-alive-defaults.js
-test-http-server-keep-alive-max-requests-null.js
 test-http-server-keep-alive-timeout.js
-test-http-server-keepalive-end.js
 test-http-server-keepalive-req-gc.js
 test-http-server-multiheaders.js
 test-http-server-multiheaders2.js
@@ -876,7 +875,6 @@ test-net-socket-constructor.js
 test-net-socket-destroy-send.js
 test-net-socket-local-address.js
 test-net-socket-no-halfopen-enforcer.js
-test-net-socket-ready-without-cb.js
 test-net-socket-reset-send.js
 test-net-socket-reset-twice.js
 test-net-socket-setnodelay.js
@@ -892,6 +890,7 @@ test-net-timeout-no-handle.js
 test-net-transfer-guards.js
 test-net-unref-timer-parent-undefined.js
 test-net-write-after-close.js
+test-net-write-after-end-nt.js
 test-net-write-arguments.js
 test-net-write-cb-on-destroy-before-connect.js
 test-net-write-fully-async-buffer.js
@@ -1145,6 +1144,7 @@ test-zlib-flush-write-sync-interleaved.js
 test-zlib-from-concatenated-gzip.js
 test-zlib-from-gzip-with-trailing-garbage.js
 test-zlib-from-string.js
+test-zlib-invalid-arg-value-brotli-compress.js
 test-zlib-invalid-input-memory.js
 test-zlib-invalid-input.js
 test-zlib-kmaxlength-rangeerror.js

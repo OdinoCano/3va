@@ -1455,7 +1455,7 @@ mod tests {
         use ecdsa::signature::Signer as _;
         let spki = {
             let alg = tlv(0x30, &[oid(OID_EC_PUB), oid(OID_P256_CURVE)].concat());
-            let point = signer.verifying_key().to_encoded_point(false);
+            let point = signer.verifying_key().to_sec1_point(false);
             let bitstring = tlv(0x03, &[&[0x00], point.as_bytes()].concat());
             tlv(0x30, &[alg, bitstring].concat())
         };

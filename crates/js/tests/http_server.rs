@@ -165,6 +165,26 @@ async fn drive_until<T>(e: &mut JsEngine, client: impl std::future::Future<Outpu
     }
 }
 
+/// Read from `stream` until the peer closes, panicking if it does not close
+/// within `limit`: a server that keeps a connection open that it promised to
+/// close is exactly the bug these tests pin down.
+async fn read_to_eof(stream: &mut TcpStream, limit: Duration) -> String {
+    let mut out = Vec::new();
+    let read = async {
+        let mut buf = vec![0u8; 4096];
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+            }
+        }
+    };
+    tokio::time::timeout(limit, read)
+        .await
+        .expect("the server should close the connection");
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Send a raw HTTP/1.1 request with an explicit `Content-Length` that may differ
 /// from the actual body bytes sent.  Used to test server-side cap behaviour
 /// without actually transmitting hundreds of megabytes.
@@ -513,6 +533,235 @@ async fn idle_keep_alive_connection_closed_after_keepalive_timeout() {
     assert!(
         closed_when_idle,
         "idle keep-alive connection should be closed after keepalive_timeout_ms"
+    );
+}
+
+/// `server.maxRequestsPerSocket` is Node's per-connection cap: responses
+/// advertise it (`Keep-Alive: timeout=<s>, max=N`) and the socket is closed
+/// after N requests even though the client never asked for `Connection: close`.
+/// Before, the property was accepted and ignored: no `Keep-Alive` header and
+/// the connection stayed open.
+#[tokio::test]
+async fn max_requests_per_socket_advertises_a_cap_and_closes() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('ok'); }});
+        _server.maxRequestsPerSocket = 2;
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    // Both requests go out at once: the cap closes the socket after the
+    // second response, so a client waiting between requests would race the
+    // idle keep-alive timeout instead of the cap.
+    let raw = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n\
+                  GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        read_to_eof(&mut stream, Duration::from_secs(3)).await
+    })
+    .await;
+
+    assert_eq!(
+        raw.matches("HTTP/1.1 200").count(),
+        2,
+        "both requests should be answered:\n{raw}"
+    );
+    assert!(
+        raw.contains("Keep-Alive: timeout=5, max=2\r\n"),
+        "the cap must be advertised:\n{raw}"
+    );
+    assert!(
+        raw.contains("Connection: close\r\n"),
+        "the cap must close the connection:\n{raw}"
+    );
+}
+
+/// HTTP/1.0 with `Connection: keep-alive` but a response the application left
+/// without `Content-Length` cannot be framed: it is close-delimited, so the
+/// server must send `Connection: close` and close the socket. Before, the
+/// request's keep-alive was honoured, the response got `Content-Length: 0`
+/// and the socket stayed open, so the client hung waiting for the close.
+#[tokio::test]
+async fn http_1_0_keep_alive_without_length_closes_the_connection() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{
+            res.writeHead(200, {{ 'Connection': 'keep-alive' }});
+            res.end('OK');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let raw = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"POST / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .unwrap();
+        read_to_eof(&mut stream, Duration::from_secs(3)).await
+    })
+    .await;
+
+    assert_eq!(response_status(&raw), 200, "full response:\n{raw}");
+    assert!(
+        raw.contains("Connection: close\r\n"),
+        "a close-delimited response must announce the close:\n{raw}"
+    );
+    assert!(
+        !raw.contains("Content-Length"),
+        "a close-delimited response has no length:\n{raw}"
+    );
+    assert!(raw.ends_with("OK"), "body should be the delimiter:\n{raw}");
+}
+
+/// A request body the application never reads is dumped when the response
+/// finishes (Node's `resOnFinish` calls `req._dump()`), so a handler that only
+/// listens for `'end'` still gets it. Before, the body stayed buffered, `'end'`
+/// never fired and `parser.incoming` was never observed by the application.
+#[tokio::test]
+async fn request_end_fires_after_the_response_finishes() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{
+            res.end('ok');
+            req.on('end', function() {{
+                globalThis.__endSeen = true;
+                globalThis.__parserIncoming = String(req.socket.parser.incoming === req);
+            }});
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let raw = drive_until(&mut e, async {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            )
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf))
+            .await
+            .expect("the response should be sent")
+            .unwrap();
+        let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
+        // The dump runs in the response-finish microtask; let the engine run.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        raw
+    })
+    .await;
+
+    assert_eq!(response_status(&raw), 200, "full response:\n{raw}");
+    assert_eq!(response_body(&raw), "ok");
+    let seen = e
+        .eval_to_string("String(globalThis.__endSeen === true)")
+        .await
+        .unwrap();
+    assert_eq!(seen, "true", "'end' should fire for an unread body");
+    let incoming = e
+        .eval_to_string("globalThis.__parserIncoming")
+        .await
+        .unwrap();
+    assert_eq!(
+        incoming, "true",
+        "parser.incoming should point at the request during 'end'"
+    );
+}
+
+/// A fully sent request reports `writableFinished` (Node's Writable state):
+/// clients read it to know an exchange is over before aborting or reusing the
+/// socket (lib/_http_client.js refuses to tear down a completed exchange).
+/// It used to stay false forever.
+#[tokio::test]
+async fn client_request_writable_finished_after_send() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('x'); }});
+        globalThis.__writableFinished = 'unset';
+        globalThis.__done = false;
+        _server.listen({port}, '127.0.0.1', function() {{
+            var agent = new http.Agent({{ keepAlive: true }});
+            var req = http.get({{ port: {port}, host: '127.0.0.1', agent: agent }},
+                function(res) {{
+                    globalThis.__writableFinished = String(req.writableFinished);
+                    res.resume();
+                    res.on('end', function() {{ globalThis.__done = true; }});
+                }});
+        }});
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    // The exchange happens in JS: drive the engine until it completes.
+    for _ in 0..100 {
+        if e.eval_to_string("String(globalThis.__done === true)")
+            .await
+            .unwrap()
+            == "true"
+        {
+            break;
+        }
+        drive_until(&mut e, tokio::time::sleep(Duration::from_millis(20))).await;
+    }
+
+    let done = e
+        .eval_to_string("String(globalThis.__done === true)")
+        .await
+        .unwrap();
+    assert_eq!(done, "true", "the response should complete");
+    let finished = e
+        .eval_to_string("globalThis.__writableFinished")
+        .await
+        .unwrap();
+    assert_eq!(
+        finished, "true",
+        "req.writableFinished should be true once the request is sent"
     );
 }
 
@@ -2342,4 +2591,55 @@ async fn headers_timeout_answers_408() {
         response,
         "HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n"
     );
+}
+
+// Node advertises its own `Keep-Alive: timeout=N` only when the application did
+// not set one: `res.writeHead(200, { 'Keep-Alive': 'timeout=50' })` goes out
+// as that single header. 3va added its own next to it ("timeout=50, timeout=5",
+// test-http-keep-alive-timeout-custom).
+#[tokio::test]
+async fn an_application_keep_alive_header_is_not_duplicated() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{
+            res.writeHead(200, {{ 'Content-Length': 2, 'Keep-Alive': 'timeout=50' }});
+            res.end('ok');
+        }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    let head = drive_until(&mut e, async {
+        let mut s = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 512];
+        let _ = tokio::time::timeout(Duration::from_secs(3), async {
+            while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+        })
+        .await;
+        String::from_utf8_lossy(&got).to_string()
+    })
+    .await;
+    let lines: Vec<&str> = head
+        .lines()
+        .filter(|l| l.to_ascii_lowercase().starts_with("keep-alive:"))
+        .collect();
+    assert_eq!(lines, vec!["Keep-Alive: timeout=50"], "full head: {head:?}");
 }

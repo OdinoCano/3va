@@ -86,10 +86,11 @@ pub(super) fn do_generate_keypair_sync_inner(
                 .and_then(|v| v.as_str())
                 .unwrap_or("P-256")
                 .to_string();
-            let mut rng = OsRng;
             match curve.as_str() {
                 "P-256" | "prime256v1" | "secp256r1" => {
-                    let sk = p256::SecretKey::random(&mut rng);
+                    use p256::elliptic_curve::Generate;
+                    let sk = p256::SecretKey::try_generate()
+                        .map_err(|e| anyhow::anyhow!("EC P-256 key generation failed: {e}"))?;
                     let pk = sk.public_key();
                     let priv_der = sk
                         .to_pkcs8_der()
@@ -105,8 +106,10 @@ pub(super) fn do_generate_keypair_sync_inner(
                     )
                 }
                 "P-384" | "secp384r1" => {
+                    use p384::elliptic_curve::Generate;
                     use p384::pkcs8::{EncodePrivateKey, EncodePublicKey};
-                    let sk = p384::SecretKey::random(&mut rng);
+                    let sk = p384::SecretKey::try_generate()
+                        .map_err(|e| anyhow::anyhow!("EC P-384 key generation failed: {e}"))?;
                     let pk = sk.public_key();
                     let priv_der = sk
                         .to_pkcs8_der()

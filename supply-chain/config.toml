@@ -573,6 +573,11 @@ criteria = "safe-to-deploy"
 version = "0.7.5"
 criteria = "safe-to-deploy"
 
+[[exemptions.crypto-bigint]]
+version = "0.7.10"
+criteria = "safe-to-deploy"
+notes = "cargo update crypto-bigint 0.7.5 -> 0.7.10 (patch; picks up the RUSTSEC-2026-0387 fix); diff 64 files, +1767/-1034 lines; build.rs changed: False; unsafe lines added: 0. Reviewed 2026-10-26 (diff scan + targeted read; NOT a line-by-line audit): constant-time fixes in UintRef equality and borrowing_sub, ctutils-based primitives; no new unsafe."
+
 [[exemptions.crypto-common]]
 version = "0.1.7"
 criteria = "safe-to-deploy"
@@ -606,6 +611,11 @@ notes = "cargo update ctutils 0.4.2 -> 0.4.3 (patch); diff 9 files, +38/-42 line
 version = "0.4.5"
 criteria = "safe-to-deploy"
 notes = "cargo update ctutils 0.4.3 -> 0.4.5 for RUSTSEC-2026-0385 (non-constant-time mask generation and u128 comparisons; fixed in >= 0.4.4); diff of src/choice.rs, lib.rs, traits/ct_gt.rs, ct_lt.rs and tests, 233 changed lines; no build.rs, no new dependencies, no unsafe/asm/extern/std/fs/net in the added lines. Reviewed 2026-10-23 (diff scan; NOT a line-by-line audit of the constant-time code)."
+
+[[exemptions.ctutils]]
+version = "0.4.6"
+criteria = "safe-to-deploy"
+notes = "cargo update ctutils 0.4.5 -> 0.4.6 (patch, pulled by crypto-bigint 0.7.10); diff 8 files, +129/-15 lines; build.rs changed: False; unsafe lines added: 0. Reviewed 2026-10-26 (diff scan + targeted read; NOT a line-by-line audit): constant-time primitive fixes in src/primitives.rs; no new unsafe."
 
 [[exemptions.curve25519-dalek]]
 version = "4.1.3"
@@ -3013,3 +3023,8 @@ criteria = "safe-to-deploy"
 version = "2.1.0+zstd.1.5.7"
 criteria = "safe-to-deploy"
 notes = "cargo update zstd-sys 2.0.16+zstd.1.5.7 -> 2.1.0+zstd.1.5.7 (minor); diff 17 files, +1033/-207 lines; build.rs changed: True; unsafe lines added: 2. Reviewed 2026-10-08 (diff scan + targeted read; NOT a line-by-line audit): build.rs adds an optional cmake backend behind a feature; cmake is already in the tree via aws-lc-sys."
+
+[[exemptions.zstd-sys]]
+version = "2.1.2+zstd.1.5.7"
+criteria = "safe-to-deploy"
+notes = "cargo update zstd-sys 2.1.0+zstd.1.5.7 -> 2.1.2+zstd.1.5.7 (patch; picks up the RUSTSEC-2026-0410 fix); diff 12 files, +157/-49 lines; build.rs changed: True; unsafe lines added: 0. Reviewed 2026-10-26 (diff scan + targeted read; NOT a line-by-line audit): wasm_shim.rs checks the allocation size for overflow, returns NULL on allocation failure and makes free(NULL) a no-op; build.rs drops the ZSTDLIB_VISIBLE hidden define."

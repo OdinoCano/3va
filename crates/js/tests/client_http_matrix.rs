@@ -467,6 +467,10 @@ async fn client_request_write_reports_backpressure_and_end_callback_runs_after_f
             res.resume();
             res.on('end', function() {{ globalThis.__done = true; }});
         }});
+        // The mock server answers and closes as soon as it has the body, so a slow
+        // run (ASan) can see "Connection reset by peer" after the request is
+        // already written. This test is about write()/finish/end(cb), not the reply.
+        req.on('error', function() {{}});
         var buf = Buffer.alloc(16 * 1024, 120);
         var a = req.write(buf);
         var b = req.write(buf);

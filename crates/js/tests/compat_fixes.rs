@@ -878,3 +878,47 @@ async fn listener_count_on_abort_signal() {
         "listenerCount must count an AbortSignal's abort listeners"
     );
 }
+
+// assert.throws / assert.rejects check the error the way Node's expectedException
+// does: a class (instanceof; a different Error class fails), a validation
+// function (called, must return true), a RegExp and an object whose own keys
+// must match. Before, an object matched ANY error and a validation function made
+// `e instanceof fn` throw, so tests that expect a specific `code` passed by accident.
+#[tokio::test]
+async fn assert_throws_checks_the_expected_error_like_node() {
+    let mut e = engine().await;
+    let got = e
+        .eval_to_string(
+            r#"
+            var assert = require('assert');
+            var out = [];
+            function t(name, fn) {
+                try { fn(); out.push(name + ':ok'); }
+                catch (err) { out.push(name + ':' + err.name); }
+            }
+            t('class', function() { assert.throws(function() { throw new TypeError('x'); }, TypeError); });
+            t('validator-true', function() { assert.throws(function() { throw new Error('boom'); }, function(e) { return e.message === 'boom'; }); });
+            t('regex', function() { assert.throws(function() { throw new Error('boom 12'); }, /boom \d+/); });
+            t('object-ok', function() {
+                assert.throws(function() { var e = new TypeError('m'); e.code = 'X'; throw e; }, { code: 'X', name: 'TypeError' });
+            });
+            t('object-message-regex', function() { assert.throws(function() { throw new Error('abc 1'); }, { message: /abc \d/ }); });
+            t('class-mismatch', function() { assert.throws(function() { throw new RangeError('x'); }, TypeError); });
+            t('validator-false', function() { assert.throws(function() { throw new Error('boom'); }, function() { return false; }); });
+            t('regex-mismatch', function() { assert.throws(function() { throw new Error('zzz'); }, /boom/); });
+            t('object-code-mismatch', function() {
+                assert.throws(function() { var e = new Error('m'); e.code = 'Y'; throw e; }, { code: 'X' });
+            });
+            t('no-throw', function() { assert.throws(function() {}, TypeError); });
+            out.join(',')
+            "#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        "class:ok,validator-true:ok,regex:ok,object-ok:ok,object-message-regex:ok,\
+         class-mismatch:AssertionError,validator-false:AssertionError,regex-mismatch:AssertionError,\
+         object-code-mismatch:AssertionError,no-throw:AssertionError"
+    );
+}

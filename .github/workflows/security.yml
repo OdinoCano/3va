@@ -8,6 +8,9 @@ on:
   schedule:
     # Weekly full scan every Monday at 06:00 UTC
     - cron: '0 6 * * 1'
+  # Manual run, so the scheduled-only jobs (sanitizers, fuzzing) can be
+  # exercised without waiting for Monday.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -89,7 +92,7 @@ jobs:
   sanitizers:
     name: Sanitizers (ASan)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -124,9 +127,19 @@ jobs:
           echo "Using $sym"
           echo "ASAN_SYMBOLIZER_PATH=$sym" >> "$GITHUB_ENV"
       - name: AddressSanitizer
+        # `-C link-args=-rdynamic`: the napi tests load test addons (.node) that look
+        # up `napi_*` in the test executable; without exporting its symbols they fail
+        # with "undefined symbol: napi_..." (deep-checks.yml's napi job sets it too).
+        # `--no-fail-fast`: cargo stops at the first test binary that fails, so
+        # without it a failure in vvva_permissions hides every vvva_js result.
+        # `--skip large_post_body_keeps_memory_bounded`: ASan inflates RSS
+        # (shadow memory plus quarantine), so a resident-memory bound means
+        # nothing under the sanitizer. The test keeps its 1200 MiB guard and
+        # runs in the ordinary `Tests` job, which is not instrumented.
         run: |
           LSAN_OPTIONS="suppressions=$GITHUB_WORKSPACE/.github/lsan-v8.supp" \
-          RUSTFLAGS="-Z sanitizer=address" \
-            cargo +nightly test -Zbuild-std --tests \
+          RUSTFLAGS="-Z sanitizer=address -C link-args=-rdynamic" \
+            cargo +nightly test -Zbuild-std --tests --no-fail-fast \
             --target x86_64-unknown-linux-gnu \
-            -p vvva_permissions -p vvva_js
+            -p vvva_permissions -p vvva_js \
+            -- --skip large_post_body_keeps_memory_bounded

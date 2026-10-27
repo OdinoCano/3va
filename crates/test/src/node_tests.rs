@@ -533,19 +533,54 @@ fn run_one(
         None => "killed by signal".to_string(),
     };
     if let Some(path) = &stderr_path {
-        if let Ok(bytes) = std::fs::read(path) {
-            // Only the tail: the whole stderr of a test would fill the memory
-            // of the runner.
-            let start = bytes.len().saturating_sub(4096);
-            let text = String::from_utf8_lossy(&bytes[start..]).trim().to_string();
-            if !text.is_empty() {
-                let text: String = text.chars().take(400).collect();
-                reason.push_str(": ");
-                reason.push_str(&text);
-            }
+        if let Some(text) = stderr_summary(path) {
+            reason.push_str(": ");
+            reason.push_str(&text);
         }
     }
     (false, reason)
+}
+
+/// The head and the last line of a test's stderr, for the failure reason.
+///
+/// Reading the whole file would fill the runner's memory, so only a bounded
+/// head and tail are read. The tail alone is often just backtrace frames or
+/// progress noise; the error itself is at the beginning (an uncaught exception
+/// prints its message first, a Rust panic its `panicked at` block), so the
+/// first three non-empty lines are kept as well as the last one.
+fn stderr_summary(path: &Path) -> Option<String> {
+    const HEAD_BYTES: usize = 8192;
+    const TAIL_BYTES: usize = 4096;
+    const MAX_LINE: usize = 240;
+    let bytes = std::fs::read(path).ok()?;
+    let clip = |line: &str| line.trim().chars().take(MAX_LINE).collect::<String>();
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(HEAD_BYTES)]);
+    let mut first: Vec<String> = Vec::new();
+    for line in head.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        first.push(clip(line));
+        if first.len() == 3 {
+            break;
+        }
+    }
+    let tail = &bytes[bytes.len().saturating_sub(TAIL_BYTES)..];
+    let last = String::from_utf8_lossy(tail)
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(clip);
+    let mut out = first.join(" | ");
+    if let Some(last) = last {
+        if first.last() != Some(&last) {
+            if !out.is_empty() {
+                out.push_str(" … ");
+            }
+            out.push_str(&last);
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// Kill the process group `pgid` (the whole tree a test may have spawned).
@@ -888,6 +923,33 @@ mod tests {
     /// cannot run at the same time: one of them kills the children of the
     /// other.
     static SERIAL: Mutex<()> = Mutex::new(());
+
+    /// A failure reason must name the error even when the test printed a lot of
+    /// noise after it: the runner used to keep only the last 400 characters of
+    /// stderr, so the Deep Checks jobs reported "exit 1" plus backtrace frames
+    /// and nothing that identified the cause.
+    #[test]
+    fn the_failure_reason_keeps_the_head_of_stderr() {
+        let dir = std::env::temp_dir().join(format!("_3va_reason_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("noise.log");
+        let mut text = String::from("Error: the real cause\n    at handler (app.js:1:9)\n\n");
+        let noise = "x".repeat(200);
+        for i in 0..30 {
+            text.push_str(&format!("noise {i} {noise}\n"));
+        }
+        std::fs::write(&path, text).unwrap();
+        let reason = stderr_summary(&path).expect("a summary");
+        assert!(
+            reason.contains("the real cause"),
+            "the reason lost the error: {reason}"
+        );
+        assert!(
+            reason.contains("noise 29"),
+            "the reason lost the last line: {reason}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A test that forks a child that never ends must not leave it alive.
     ///

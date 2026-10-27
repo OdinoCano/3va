@@ -172,6 +172,11 @@ struct ServerTimeouts {
     request_ms: std::sync::atomic::AtomicU64,
     /// The application's keep-alive timeout, in milliseconds (0: not set).
     keepalive_ms: std::sync::atomic::AtomicU64,
+    /// The application's per-connection request cap
+    /// (`server.maxRequestsPerSocket`), 0: not set. Node closes the
+    /// connection after that many requests; the firewall's own cap still
+    /// applies when it is lower.
+    max_requests: std::sync::atomic::AtomicU64,
 }
 
 impl ServerTimeouts {
@@ -193,6 +198,13 @@ impl ServerTimeouts {
         match self.keepalive_ms.load(std::sync::atomic::Ordering::Relaxed) {
             0 => None,
             ms => Some(std::time::Duration::from_millis(ms)),
+        }
+    }
+
+    fn max_requests(&self) -> Option<u32> {
+        match self.max_requests.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            n => Some(n.min(u32::MAX as u64) as u32),
         }
     }
 }
@@ -560,6 +572,11 @@ struct PendingResponse {
     /// A 1xx informational response: it is written to the socket and the
     /// connection keeps waiting for the final response.
     informational: bool,
+    /// The application's response closes the connection (Node's
+    /// `res.shouldKeepAlive == false`). The request-level flag is not enough:
+    /// HTTP/1.0 with `Connection: keep-alive` but no Content-Length gets a
+    /// close-delimited response, which must close the socket.
+    close_after: bool,
 }
 
 // ── Streaming request bodies ────────────────────────────────────────────────
@@ -927,32 +944,45 @@ pub async fn parse_request_head<R>(
 where
     R: AsyncBufRead + Unpin,
 {
-    let mut request_line = String::new();
-    tokio::time::timeout(header_timeout, reader.read_line(&mut request_line))
-        .await
-        .map_err(|_| {
-            ParseError::Silent("timeout: request line not received in time (Slowloris?)".into())
-        })?
-        .map_err(|e| ParseError::Silent(e.to_string()))?;
-
-    // Count the request line against the header budget so an oversized
-    // method/target (client-controlled) can never reach V8 as a string and hit
-    // the `V8String::new(...).unwrap()` in `__httpAcceptPoll`.
-    let request_line_len = request_line.len();
-    if request_line_len > max_header_bytes {
-        return Err(ParseError::Silent(format!(
-            "request line flood: exceeded {max_header_bytes} bytes"
-        )));
-    }
+    // RFC 9112 §2.2: a server ignores empty lines received before the
+    // request line. Clients commonly leave a CRLF after a request body (the
+    // Node tests for pipelined POSTs do), and Node's parser skips them; treating
+    // one as the end of the connection reset a socket mid-keep-alive. The
+    // bytes still count against the header budget, so this cannot be used to
+    // park a connection open with a CRLF flood.
+    let mut skipped_bytes = 0usize;
+    let request_line = loop {
+        let mut line = String::new();
+        let read = tokio::time::timeout(header_timeout, reader.read_line(&mut line))
+            .await
+            .map_err(|_| {
+                ParseError::Silent("timeout: request line not received in time (Slowloris?)".into())
+            })?
+            .map_err(|e| ParseError::Silent(e.to_string()))?;
+        if read == 0 {
+            // EOF: there is no request here. Without this, an empty line
+            // parsed as a request with an empty method and reached the app as
+            // a phantom request.
+            return Err(ParseError::Silent(
+                "connection closed before request line".into(),
+            ));
+        }
+        // Count the request line against the header budget so an oversized
+        // method/target (client-controlled) can never reach V8 as a string and
+        // hit the `V8String::new(...).unwrap()` in `__httpAcceptPoll`.
+        skipped_bytes += line.len();
+        if skipped_bytes > max_header_bytes {
+            return Err(ParseError::Silent(format!(
+                "request line flood: exceeded {max_header_bytes} bytes"
+            )));
+        }
+        if line.trim_end_matches(['\r', '\n']).is_empty() {
+            continue;
+        }
+        break line;
+    };
+    let request_line_len = skipped_bytes;
     let request_line = request_line.trim_end_matches(['\r', '\n']);
-    if request_line.is_empty() {
-        // EOF (or a stray blank line at the start of a keep-alive connection):
-        // there is no request here. Without this, an empty line parsed as a
-        // request with an empty method and reached the app as a phantom request.
-        return Err(ParseError::Silent(
-            "connection closed before request line".into(),
-        ));
-    }
     let mut parts = request_line.splitn(3, ' ');
     let method = parts.next().unwrap_or("GET").to_string();
     let path = parts.next().unwrap_or("/").to_string();
@@ -1486,8 +1516,34 @@ async fn wait_final<R: AsyncBufRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
             _ = watch_peer_close(reader) => return WaitFinal::Closed,
         };
         match waited {
-            Ok(Some(r)) if r.informational => {
-                let _ = writer.write_all(&r.bytes).await;
+            Ok(Some(mut r)) if r.informational => {
+                // Coalesce what is already queued: a small response's head,
+                // body chunk and terminator are enqueued in the same JS turn,
+                // and Node writes them to the socket together (clients that
+                // parse the raw bytes rely on it; a lone head ends in
+                // `\r\n\r\n` and looked like a complete empty response).
+                let mut batch = std::mem::take(&mut r.bytes);
+                let mut close = r.close_after;
+                loop {
+                    match resp_rx.try_recv() {
+                        Ok(next) if next.informational => {
+                            close |= next.close_after;
+                            batch.extend_from_slice(&next.bytes);
+                        }
+                        Ok(mut next) => {
+                            next.close_after |= close;
+                            if writer.write_all(&batch).await.is_err() {
+                                return WaitFinal::Closed;
+                            }
+                            let _ = writer.flush().await;
+                            return WaitFinal::Response(Some(next));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if writer.write_all(&batch).await.is_err() {
+                    return WaitFinal::Closed;
+                }
                 let _ = writer.flush().await;
                 continue;
             }
@@ -1822,6 +1878,13 @@ async fn handle_connection<S>(
 
         requests_served += 1;
 
+        // The per-connection cap in force: the application's
+        // `maxRequestsPerSocket` can only tighten the firewall's own cap.
+        let max_requests = match app_timeouts.max_requests() {
+            Some(n) => n.min(max_requests_per_conn),
+            None => max_requests_per_conn,
+        };
+
         let conn_hdr = head
             .headers
             .iter()
@@ -1834,7 +1897,7 @@ async fn handle_connection<S>(
         let close_after = match conn_hdr.as_deref() {
             Some(v) => v == "close",
             None => head.http10,
-        } || requests_served >= max_requests_per_conn;
+        } || requests_served >= max_requests;
         // The response head carries the matching `Connection` header, as in
         // Node: the flag travels with the request to the JS side.
 
@@ -2022,7 +2085,18 @@ async fn handle_connection<S>(
         if writer.flush().await.is_err() {
             break;
         }
-        if close_after || !body_done || had_body_error {
+        if close_after || resp.close_after || !body_done || had_body_error {
+            // Node answers `503 Service Unavailable` (chunked, empty body) to
+            // a request that was already pipelined when the connection hit
+            // `maxRequestsPerSocket`, instead of dropping it silently
+            // (lib/_http_server.js).
+            if requests_served >= max_requests && !reader.buffer().is_empty() {
+                let mut resp = String::from("HTTP/1.1 503 Service Unavailable\r\n");
+                push_date_header(&mut resp);
+                resp.push_str("Connection: close\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+                let _ = writer.write_all(resp.as_bytes()).await;
+                let _ = writer.flush().await;
+            }
             break;
         }
     }
@@ -2823,6 +2897,7 @@ pub fn inject_http_server(
                             conn_id,
                             bytes,
                             informational: false,
+                            close_after,
                         });
                         drop(guard);
                         if ok.is_err() {
@@ -2890,6 +2965,16 @@ pub fn inject_http_server(
                 // with the request, so the response path does not have to
                 // look the connection up.
                 let close_after = args.get(7).boolean_value(scope);
+                // The `Keep-Alive` header value the server advertises
+                // (`timeout=…[, max=…]`), empty when it must not be sent.
+                let keep_alive = if args.get(8).is_string() {
+                    args.get(8).to_rust_string_lossy(scope)
+                } else {
+                    String::new()
+                };
+                // 0: `Content-Length`; 1: chunked (the body already carries the
+                // chunk framing); 2: close-delimited (no length header at all).
+                let framing = args.get(9).uint32_value(scope).unwrap_or(0);
 
                 let extra = parse_extra_headers(&headers_json);
                 // `res.sendDate = false` keeps the `Date` header out, as in
@@ -2930,8 +3015,22 @@ pub fn inject_http_server(
                     } else {
                         "Connection: keep-alive\r\n"
                     });
+                    // Node only advertises `Keep-Alive` when the connection is
+                    // staying open, and not when the application set its own.
+                    if !close_after
+                        && !keep_alive.is_empty()
+                        && !extra
+                            .iter()
+                            .any(|(k, _)| k.eq_ignore_ascii_case("keep-alive"))
+                    {
+                        resp.push_str(&format!("Keep-Alive: {keep_alive}\r\n"));
+                    }
                 }
-                resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                match framing {
+                    1 => resp.push_str("Transfer-Encoding: chunked\r\n"),
+                    2 => {}
+                    _ => resp.push_str(&format!("Content-Length: {}\r\n", body.len())),
+                }
                 resp.push_str("\r\n");
 
                 let mut bytes = resp.into_bytes();
@@ -2944,6 +3043,7 @@ pub fn inject_http_server(
                             conn_id,
                             bytes,
                             informational: false,
+                            close_after,
                         });
                         drop(guard);
                         if ok.is_err() {
@@ -3012,6 +3112,21 @@ pub fn inject_http_server(
                 // The declared body length: -1 means "no Content-Length yet"
                 // (chunked); anything else is the application's Content-Length.
                 let content_length = args.get(7).number_value(scope).unwrap_or(-1.0);
+                // The `Keep-Alive` header value the server advertises.
+                let keep_alive = if args.get(8).is_string() {
+                    args.get(8).to_rust_string_lossy(scope)
+                } else {
+                    String::new()
+                };
+                // Bytes that go out in the same write as the head (Node's
+                // first `write()` sends the head and the data together, so a
+                // client parsing raw bytes never sees a head-only chunk).
+                let first_chunk: Vec<u8> =
+                    if let Ok(arr) = v8::Local::<v8::Uint8Array>::try_from(args.get(9)) {
+                        uint8array_to_vec(scope, arr)
+                    } else {
+                        vec![]
+                    };
 
                 let extra = parse_extra_headers(&headers_json);
                 let mut resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
@@ -3044,6 +3159,14 @@ pub fn inject_http_server(
                     } else {
                         "Connection: keep-alive\r\n"
                     });
+                    if !close_after
+                        && !keep_alive.is_empty()
+                        && !extra
+                            .iter()
+                            .any(|(k, _)| k.eq_ignore_ascii_case("keep-alive"))
+                    {
+                        resp.push_str(&format!("Keep-Alive: {keep_alive}\r\n"));
+                    }
                 }
                 if content_length >= 0.0 {
                     resp.push_str(&format!("Content-Length: {}\r\n", content_length as u64));
@@ -3052,13 +3175,17 @@ pub fn inject_http_server(
                 }
                 resp.push_str("\r\n");
 
+                let mut bytes = resp.into_bytes();
+                bytes.extend_from_slice(&first_chunk);
+
                 let guard = ctx.conns.lock().unwrap();
                 match guard.get(&conn_id) {
                     Some(conn) => {
                         let ok = conn.resp_tx.try_send(PendingResponse {
                             conn_id,
-                            bytes: resp.into_bytes(),
+                            bytes,
                             informational: true,
+                            close_after,
                         });
                         drop(guard);
                         if ok.is_err() {
@@ -3112,6 +3239,7 @@ pub fn inject_http_server(
                             conn_id,
                             bytes,
                             informational: true,
+                            close_after: false,
                         });
                         drop(guard);
                         if ok.is_err() {
@@ -3158,6 +3286,7 @@ pub fn inject_http_server(
                     } else {
                         vec![]
                     };
+                let close_after = args.get(2).boolean_value(scope);
                 let guard = ctx.conns.lock().unwrap();
                 match guard.get(&conn_id) {
                     Some(conn) => {
@@ -3165,6 +3294,7 @@ pub fn inject_http_server(
                             conn_id,
                             bytes,
                             informational: false,
+                            close_after,
                         });
                         drop(guard);
                         if ok.is_err() {
@@ -3243,6 +3373,7 @@ pub fn inject_http_server(
                             conn_id,
                             bytes: resp.into_bytes(),
                             informational: true,
+                            close_after: false,
                         });
                         drop(guard);
                         if ok.is_err() {
@@ -3285,13 +3416,14 @@ pub fn inject_http_server(
                     let ptr = args.data().cast::<v8::External>().value();
                     &*(ptr as *const HttpLimitsCtx)
                 };
-                let (header, keepalive, body) = match ctx.fw.as_ref().as_ref() {
+                let (header, keepalive, body, max_requests) = match ctx.fw.as_ref().as_ref() {
                     Some(f) => (
                         f.config.header_timeout_ms,
                         f.config.keepalive_timeout_ms,
                         f.config.body_timeout_ms,
+                        f.config.max_requests_per_conn,
                     ),
-                    None => (10_000, 5_000, 30_000),
+                    None => (10_000, 5_000, 30_000, 1_000),
                 };
                 let obj = v8::Object::new(scope);
                 let set = |name: &str, value: i64| {
@@ -3303,6 +3435,7 @@ pub fn inject_http_server(
                 set("headersTimeout", header as i64);
                 set("keepAliveTimeout", keepalive as i64);
                 set("bodyTimeout", body as i64);
+                set("maxRequestsPerSocket", max_requests as i64);
                 rv.set(obj.into());
             },
         )
@@ -3346,6 +3479,11 @@ pub fn inject_http_server(
                     headers_ms: std::sync::atomic::AtomicU64::new(millis(args.get(1))),
                     request_ms: std::sync::atomic::AtomicU64::new(millis(args.get(2))),
                     keepalive_ms: std::sync::atomic::AtomicU64::new(millis(args.get(3))),
+                    // A count, not milliseconds; `millis` is just the
+                    // non-negative-number reader here.
+                    max_requests: std::sync::atomic::AtomicU64::new(
+                        args.get(4).uint32_value(scope).unwrap_or(0) as u64,
+                    ),
                 };
                 if let Some(cell) = ctx.timeouts.lock().unwrap().get(&server_id) {
                     cell.headers_ms.store(
@@ -3358,6 +3496,10 @@ pub fn inject_http_server(
                     );
                     cell.keepalive_ms.store(
                         t.keepalive_ms.load(std::sync::atomic::Ordering::Relaxed),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    cell.max_requests.store(
+                        t.max_requests.load(std::sync::atomic::Ordering::Relaxed),
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }

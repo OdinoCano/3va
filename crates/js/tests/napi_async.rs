@@ -17,7 +17,10 @@ mod linux {
     use vvva_js::JsEngine;
     use vvva_permissions::{Capability, PermissionState};
 
-    fn build_addon() -> Option<PathBuf> {
+    // Returns the TempDir too: the addon file must outlive the test (the engine dlopens it), and
+    // the caller keeps the guard until the end, so the directory is removed and LeakSanitizer sees
+    // no leak (the old `mem::forget` leaked its path).
+    fn build_addon() -> Option<(tempfile::TempDir, PathBuf)> {
         let dir = tempfile::TempDir::new().unwrap();
         let out = dir.path().join("napi_async.node");
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -36,8 +39,7 @@ mod linux {
             return None;
         }
         let out = out.canonicalize().ok()?;
-        std::mem::forget(dir);
-        Some(out)
+        Some((dir, out))
     }
 
     /// Long enough that an event loop spinning through its iteration cap gives up
@@ -46,7 +48,7 @@ mod linux {
 
     #[tokio::test]
     async fn event_loop_waits_for_slow_native_async_work() {
-        let Some(addon) = build_addon() else {
+        let Some((_dir, addon)) = build_addon() else {
             eprintln!("skipping event_loop_waits_for_slow_native_async_work: no C compiler");
             return;
         };
