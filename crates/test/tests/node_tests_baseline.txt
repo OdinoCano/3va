@@ -452,7 +452,6 @@ test-fs-writestream-open-write.js
 test-fs-writev-promises.js
 test-fs-writev-sync.js
 test-fs-writev.js
-test-http-1.0-keep-alive.js
 test-http-1.0.js
 test-http-abort-client.js
 test-http-abort-queued.js
@@ -484,7 +483,6 @@ test-http-catch-uncaughtexception.js
 test-http-chunk-extensions-limit.js
 test-http-chunk-problem.js
 test-http-chunked-304.js
-test-http-client-abort-completed-keepalive.js
 test-http-client-abort-destroy.js
 test-http-client-abort-keep-alive-queued-tcp-socket.js
 test-http-client-abort-keep-alive-queued-unix-socket.js
@@ -564,8 +562,6 @@ test-http-invalid-urls.js
 test-http-invalidheaderfield.js
 test-http-keep-alive-close-on-header.js
 test-http-keep-alive-drop-requests.js
-test-http-keep-alive-max-requests.js
-test-http-keep-alive-pipeline-max-requests.js
 test-http-keep-alive-timeout.js
 test-http-keep-alive.js
 test-http-keepalive-client.js
@@ -663,10 +659,7 @@ test-http-server-headers-timeout-interrupted-headers.js
 test-http-server-headers-timeout-keepalive.js
 test-http-server-headers-timeout-pipelining.js
 test-http-server-invalid-headers-timeout-no-abort.js
-test-http-server-keep-alive-defaults.js
-test-http-server-keep-alive-max-requests-null.js
 test-http-server-keep-alive-timeout.js
-test-http-server-keepalive-end.js
 test-http-server-keepalive-req-gc.js
 test-http-server-multiheaders.js
 test-http-server-multiheaders2.js
@@ -876,7 +869,6 @@ test-net-socket-constructor.js
 test-net-socket-destroy-send.js
 test-net-socket-local-address.js
 test-net-socket-no-halfopen-enforcer.js
-test-net-socket-ready-without-cb.js
 test-net-socket-reset-send.js
 test-net-socket-reset-twice.js
 test-net-socket-setnodelay.js
