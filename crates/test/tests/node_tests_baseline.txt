@@ -147,6 +147,7 @@ test-child-process-stdout-flush.js
 test-child-process-stdout-ipc.js
 test-child-process-uid-gid.js
 test-crypto-aes-wrap.js
+test-crypto-argon2-unsupported.js
 test-crypto-async-sign-verify.js
 test-crypto-authenticated-stream.js
 test-crypto-authenticated.js
@@ -210,6 +211,8 @@ test-crypto-keygen-ec-group-names.js
 test-crypto-keygen-eddsa.js
 test-crypto-keygen-empty-passphrase-no-error.js
 test-crypto-keygen-empty-passphrase-no-prompt.js
+test-crypto-keygen-invalid-parameter-encoding-dsa.js
+test-crypto-keygen-invalid-parameter-encoding-ec.js
 test-crypto-keygen-key-object-without-encoding.js
 test-crypto-keygen-key-objects.js
 test-crypto-keygen-missing-oid.js
@@ -281,6 +284,7 @@ test-fs-buffer.js
 test-fs-buffertype-writesync.js
 test-fs-chmod-mask.js
 test-fs-chmod.js
+test-fs-chown-type-check.js
 test-fs-close-errors.js
 test-fs-constants.js
 test-fs-copyfile-respect-permissions.js
@@ -293,6 +297,7 @@ test-fs-filehandle-use-after-close.js
 test-fs-fsync.js
 test-fs-internal-assertencoding.js
 test-fs-lchown.js
+test-fs-link.js
 test-fs-make-callback.js
 test-fs-makeStatsCallback.js
 test-fs-mkdir-mode-mask.js
@@ -305,7 +310,6 @@ test-fs-mkdtempDisposableSync.js
 test-fs-negative-zero.js
 test-fs-non-number-arguments-throw.js
 test-fs-null-bytes.js
-test-fs-open-numeric-flags.js
 test-fs-open.js
 test-fs-opendir.js
 test-fs-options-immutable.js
@@ -360,6 +364,7 @@ test-fs-readfile-pipe.js
 test-fs-readfile.js
 test-fs-readfilesync-pipe-large.js
 test-fs-readfilesync-utf8-sizes.js
+test-fs-readlink-type-check.js
 test-fs-readv-promises.js
 test-fs-readv-promisify.js
 test-fs-readv-sync.js
@@ -449,6 +454,7 @@ test-fs-write-stream.js
 test-fs-write-sync-optional-params.js
 test-fs-writefile-with-fd.js
 test-fs-writestream-open-write.js
+test-fs-writesync-crash.js
 test-fs-writev-promises.js
 test-fs-writev-sync.js
 test-fs-writev.js
@@ -884,6 +890,7 @@ test-net-timeout-no-handle.js
 test-net-transfer-guards.js
 test-net-unref-timer-parent-undefined.js
 test-net-write-after-close.js
+test-net-write-after-end-nt.js
 test-net-write-arguments.js
 test-net-write-cb-on-destroy-before-connect.js
 test-net-write-fully-async-buffer.js
@@ -1137,6 +1144,7 @@ test-zlib-flush-write-sync-interleaved.js
 test-zlib-from-concatenated-gzip.js
 test-zlib-from-gzip-with-trailing-garbage.js
 test-zlib-from-string.js
+test-zlib-invalid-arg-value-brotli-compress.js
 test-zlib-invalid-input-memory.js
 test-zlib-invalid-input.js
 test-zlib-kmaxlength-rangeerror.js
