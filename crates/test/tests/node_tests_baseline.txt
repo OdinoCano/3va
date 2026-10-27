@@ -498,7 +498,6 @@ test-http-client-aborted-event.js
 test-http-client-agent-end-close-event.js
 test-http-client-agent.js
 test-http-client-check-http-token.js
-test-http-client-error-rawbytes.js
 test-http-client-headers-array.js
 test-http-client-headers-host-array.js
 test-http-client-insecure-http-parser-error.js

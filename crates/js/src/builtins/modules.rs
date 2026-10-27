@@ -6604,6 +6604,7 @@ __httpSetHandler(self._id, function() {
             ClientRequest.prototype._useSocket = function(socket) {
                 var self = this;
                 this._socket = socket;
+                this.socket = this.connection = socket;
                 this._socketErrorHandler = function(err) { self._socketError(err); };
                 socket.on('error', this._socketErrorHandler);
                 // The agent keeps the socket it handed out, so `agent.destroy()`
@@ -6714,15 +6715,37 @@ __httpSetHandler(self._id, function() {
                     res: null,
                 };
                 self._parserState = st;
+                function fail(code, reason, bytesParsed) {
+                    var pe = new Error('Parse Error: ' + reason);
+                    pe.code = code;
+                    pe.reason = reason;
+                    pe.bytesParsed = bytesParsed;
+                    pe.rawPacket = st.headBuf;
+                    st.headersDone = true;
+                    socket.removeListener('data', onData);
+                    self._fail(pe);
+                }
                 function onData(chunk) {
                     if (self._parserState !== st) return;
                     if (!Buffer.isBuffer(chunk)) chunk = Buffer.from(chunk);
                     if (!st.headersDone) {
                         st.headBuf = Buffer.concat([st.headBuf, chunk]);
+                        // llhttp: what is not an HTTP status line is a parse error, at
+                        // once, without waiting for the end of the head.
+                        var first = st.headBuf.slice(0, 5).toString('latin1');
+                        if (first !== 'HTTP/'.slice(0, first.length)) {
+                            return fail('HPE_INVALID_CONSTANT', 'Expected HTTP/, RTSP/ or ICE/', 0);
+                        }
                         var idx = st.headBuf.indexOf('\r\n\r\n');
                         if (idx < 0) return;
                         var head = st.headBuf.slice(0, idx).toString('latin1');
                         var rest = st.headBuf.slice(idx + 4);
+                        // A response with both framings is how responses get smuggled.
+                        if (/^content-length:/im.test(head) && /^transfer-encoding:/im.test(head)) {
+                            return fail('HPE_INVALID_TRANSFER_ENCODING',
+                                "Transfer-Encoding can't be present with Content-Length",
+                                head.search(/^transfer-encoding:/im) + 1);
+                        }
                         st.headersDone = true;
                         self._onHeaders(__parseResponseHead(head), rest);
                         return;

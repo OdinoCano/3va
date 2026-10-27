@@ -2690,3 +2690,39 @@ async fn expect_header_is_answered_before_the_request_handler_like_node() {
     assert!(cont.starts_with("HTTP/1.1 100 Continue"), "got {cont:?}");
     assert_eq!(response_status(&odd), 417, "got {odd:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_reports_parse_errors_with_llhttp_codes() {
+    let mut e = engine_with_net().await;
+    e.eval_to_string(
+        r#"
+        var http = require('http'), net = require('net');
+        globalThis.__codes = [];
+        var bad = [
+            'not http at all',
+            'HTTP/1.1 200 OK\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nfoobar0\r\n',
+        ];
+        var srv = net.createServer(function(c) { c.write(bad.shift()); });
+        srv.listen(0, '127.0.0.1', function() {
+            for (var i = 0; i < 2; i++) {
+                var req = http.get({ port: srv.address().port, host: '127.0.0.1', agent: false });
+                req.on('error', function(err) {
+                    globalThis.__codes.push(err.code + ':' + (this.socket ? 'socket' : 'nosocket'));
+                });
+            }
+        });
+        'started'
+        "#,
+    )
+    .await
+    .unwrap();
+    drive_until(&mut e, tokio::time::sleep(Duration::from_millis(1500))).await;
+    let got = e
+        .eval_to_string("globalThis.__codes.sort().join(',')")
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        "HPE_INVALID_CONSTANT:socket,HPE_INVALID_TRANSFER_ENCODING:socket"
+    );
+}
