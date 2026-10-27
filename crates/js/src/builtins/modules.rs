@@ -5454,9 +5454,42 @@ pub fn inject_require(
             // one: `writeEarlyHints` (103), `writeProcessing` (102) and
             // `writeInformation` (any 1xx). They are written to the socket
             // before the response, as in Node.
+            // lib/_http_outgoing.js: validateLinkHeaderValue.
+            var __linkValue = /^(?:<[^>]*>)(?:\s*;\s*[^;"\s]+(?:=(")?[^;"\s]*\1)?)*$/;
+            var __linkHeader = function(v) {
+                var list = typeof v === 'string' ? [v] : Array.isArray(v) ? v : [];
+                for (var i = 0; i < list.length; i++) {
+                    if (typeof list[i] !== 'string' || !__linkValue.test(list[i]) || /[\x00-\x08\x0a-\x1f\x7f]/.test(list[i])) {
+                        var le = new TypeError("The argument 'hints.link' is invalid. Received " + JSON.stringify(list[i]));
+                        le.code = 'ERR_INVALID_ARG_VALUE';
+                        throw le;
+                    }
+                }
+                return list.join(', ');
+            };
             httpServerResponse.prototype.writeEarlyHints = function(hints, cb) {
                 if (typeof hints === 'function') { cb = hints; hints = {}; }
-                this._writeInformational(103, 'Early Hints', hints || {});
+                if (hints === null || typeof hints !== 'object' || Array.isArray(hints)) {
+                    var te = new TypeError('The "hints" argument must be of type object. Received ' + (hints === null ? 'null' : typeof hints));
+                    te.code = 'ERR_INVALID_ARG_TYPE';
+                    throw te;
+                }
+                if (hints.link === null || hints.link === undefined) return this;
+                var link = __linkHeader(hints.link);
+                if (link.length === 0) return this;
+                var checked = {};
+                Object.keys(hints).forEach(function(k) {
+                    __validateHeaderName(k);
+                    __validateHeaderValue(k, hints[k]);
+                    checked[k] = k === 'link' ? link : hints[k];
+                });
+                hints = checked;
+                this._writeInformational(103, 'Early Hints', hints);
+                if (typeof cb === 'function') setTimeout(cb, 0);
+                return this;
+            };
+            httpServerResponse.prototype.writeContinue = function(cb) {
+                this._writeInformational(100, 'Continue', {});
                 if (typeof cb === 'function') setTimeout(cb, 0);
                 return this;
             };
@@ -5840,6 +5873,25 @@ __httpSetHandler(self._id, function() {
                         // connection restores the server's socket timeout.
                         _sock._timeoutMs = self.timeout || 0;
                         _sock._arm(_sock._timeoutMs);
+                        // lib/_http_server.js (`resOnFinish`/`parserOnIncoming`): an
+                        // `Expect` header is answered here, not by the request handler.
+                        var expect = req.headers && req.headers.expect;
+                        if (expect !== undefined && req.httpVersionMajor === 1 && req.httpVersionMinor >= 1) {
+                            if (/^100-continue$/i.test(expect)) {
+                                if (self.listenerCount('checkContinue') > 0) {
+                                    self.emit('checkContinue', req, res);
+                                    return;
+                                }
+                                res.writeContinue();
+                            } else if (self.listenerCount('checkExpectation') > 0) {
+                                self.emit('checkExpectation', req, res);
+                                return;
+                            } else {
+                                res.writeHead(417);
+                                res.end();
+                                return;
+                            }
+                        }
                         self.emit('request', req, res);
                         // The raw body stays in this closure, never on `req`: body-parser 1.x
                         // (Express 4) uses `req._body` as its "already parsed" flag, so a
@@ -6189,6 +6241,9 @@ __httpSetHandler(self._id, function() {
                     // 'socket' and 'timeout'. The head goes out on the first
                     // write()/end()/flushHeaders(), which set `_started`.
                     if (!_selfT.destroyed && !_selfT._socket) _selfT._ensureConnected();
+                    // `Expect: 100-continue`: the head goes out now, since the
+                    // body is only sent after the server's 'continue'.
+                    if (!_selfT.destroyed && _selfT.getHeader('expect') !== undefined) _selfT.flushHeaders();
                 });
                 this._body = [];
                 this._bodyLen = 0;
@@ -6739,6 +6794,16 @@ __httpSetHandler(self._id, function() {
                 }
                 // 1xx informational (other than 101): keep reading the real head.
                 if (parsed.statusCode >= 100 && parsed.statusCode < 200) {
+                    if (parsed.statusCode === 100) self.emit('continue');
+                    else self.emit('information', {
+                        statusCode: parsed.statusCode,
+                        statusMessage: res.statusMessage,
+                        httpVersion: res.httpVersion,
+                        httpVersionMajor: res.httpVersionMajor,
+                        httpVersionMinor: res.httpVersionMinor,
+                        headers: res.headers,
+                        rawHeaders: res.rawHeaders
+                    });
                     self._parserState.headersDone = false;
                     self._parserState.headBuf = rest || Buffer.alloc(0);
                     self._parserState.onData(Buffer.alloc(0));

@@ -538,11 +538,7 @@ test-http-dont-set-default-headers.js
 test-http-double-content-length.js
 test-http-dummy-characters-smuggling.js
 test-http-dump-req-when-res-ends.js
-test-http-early-hints-invalid-argument.js
-test-http-early-hints.js
 test-http-exceptions.js
-test-http-expect-continue.js
-test-http-expect-handling.js
 test-http-full-response.js
 test-http-generic-streams.js
 test-http-head-throw-on-response-body-write.js
@@ -559,8 +555,6 @@ test-http-incoming-matchKnownFields.js
 test-http-incoming-message-connection-setter.js
 test-http-incoming-message-options.js
 test-http-incoming-pipelined-socket-destroy.js
-test-http-information-headers.js
-test-http-information-processing.js
 test-http-insecure-parser-per-stream.js
 test-http-invalid-path-chars.js
 test-http-invalid-te.js
@@ -718,7 +712,6 @@ test-http-url.parse-basic.js
 test-http-url.parse-https.request.js
 test-http-url.parse-only-support-http-https-protocol.js
 test-http-writable-true-after-close.js
-test-http-write-callbacks.js
 test-http-write-head-2.js
 test-http-write-head.js
 test-http-write-information.js
