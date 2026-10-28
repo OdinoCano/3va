@@ -2643,3 +2643,86 @@ async fn an_application_keep_alive_header_is_not_duplicated() {
         .collect();
     assert_eq!(lines, vec!["Keep-Alive: timeout=50"], "full head: {head:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expect_header_is_answered_before_the_request_handler_like_node() {
+    let port = free_port();
+    let mut e = engine_with_net().await;
+    e.eval_to_string(&format!(
+        r#"
+        var http = require('http');
+        var _server = http.createServer(function(req, res) {{ res.end('done'); }});
+        _server.listen({port}, '127.0.0.1');
+        'started'
+        "#,
+    ))
+    .await
+    .unwrap();
+    wait_for_port(port).await;
+
+    // The 100 goes out before the body is sent; an unknown expectation is a 417.
+    let (cont, odd) = drive_until(&mut e, async {
+        let mut a = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        a.write_all(
+            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(Duration::from_secs(3), a.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let cont = String::from_utf8_lossy(&buf[..n]).to_string();
+
+        let mut b = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        b.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nExpect: nonsense\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let odd = read_to_eof(&mut b, Duration::from_secs(2)).await;
+        (cont, odd)
+    })
+    .await;
+    assert!(cont.starts_with("HTTP/1.1 100 Continue"), "got {cont:?}");
+    assert_eq!(response_status(&odd), 417, "got {odd:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_reports_parse_errors_with_llhttp_codes() {
+    let mut e = engine_with_net().await;
+    e.eval_to_string(
+        r#"
+        var http = require('http'), net = require('net');
+        globalThis.__codes = [];
+        var bad = [
+            'not http at all',
+            'HTTP/1.1 200 OK\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nfoobar0\r\n',
+        ];
+        var srv = net.createServer(function(c) { c.write(bad.shift()); });
+        srv.listen(0, '127.0.0.1', function() {
+            for (var i = 0; i < 2; i++) {
+                var req = http.get({ port: srv.address().port, host: '127.0.0.1', agent: false });
+                req.on('error', function(err) {
+                    globalThis.__codes.push(err.code + ':' + (this.socket ? 'socket' : 'nosocket'));
+                });
+            }
+        });
+        'started'
+        "#,
+    )
+    .await
+    .unwrap();
+    drive_until(&mut e, tokio::time::sleep(Duration::from_millis(1500))).await;
+    let got = e
+        .eval_to_string("globalThis.__codes.sort().join(',')")
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        "HPE_INVALID_CONSTANT:socket,HPE_INVALID_TRANSFER_ENCODING:socket"
+    );
+}
